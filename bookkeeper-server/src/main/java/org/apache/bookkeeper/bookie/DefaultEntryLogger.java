@@ -41,6 +41,7 @@ import java.io.FilenameFilter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.RandomAccessFile;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousCloseException;
 import java.nio.channels.FileChannel;
@@ -48,6 +49,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -82,6 +84,35 @@ import org.apache.commons.lang3.tuple.Pair;
 @CustomLog
 public class DefaultEntryLogger implements EntryLogger {
 
+    record FreshDrainResult(boolean drained, Throwable operationFailure, Throwable flushFailure,
+                            Throwable closeFailure) { }
+
+    static Throwable mergeFreshFailure(Throwable first, Throwable next) {
+        if (first == null) {
+            return next;
+        }
+        if (next != null && next != first) {
+            for (Throwable existing : first.getSuppressed()) {
+                if (existing == next) {
+                    return first;
+                }
+            }
+            first.addSuppressed(next);
+        }
+        return first;
+    }
+
+    static void throwFreshFailure(Throwable failure) throws IOException {
+        if (failure instanceof IOException) {
+            throw (IOException) failure;
+        } else if (failure instanceof RuntimeException) {
+            throw (RuntimeException) failure;
+        } else if (failure instanceof Error) {
+            throw (Error) failure;
+        }
+        throw new IOException("Fresh entry-log operation failed", failure);
+    }
+
     @VisibleForTesting
     static final int UNINITIALIZED_LOG_ID = -0xDEAD;
 
@@ -90,6 +121,12 @@ public class DefaultEntryLogger implements EntryLogger {
         private final EntryLogMetadata entryLogMetadata;
         private final File logFile;
         private long ledgerIdAssigned = UNASSIGNED_LEDGERID;
+        private boolean freshSealStarted;
+        private boolean freshAppendingMap;
+        private boolean freshSealComplete;
+        private Throwable freshSealFailure;
+        private boolean freshCloseStageReached;
+        private boolean freshDiscarded;
 
         public BufferedLogChannel(ByteBufAllocator allocator, FileChannel fc, int writeCapacity, int readCapacity,
                 long logId, File logFile, long unpersistedBytesBound) throws IOException {
@@ -125,6 +162,59 @@ public class DefaultEntryLogger implements EntryLogger {
             entryLogMetadata.addLedgerSize(ledgerId, entrySize);
         }
 
+        @Override
+        void checkFreshWriteAdmission() throws IOException {
+            super.checkFreshWriteAdmission();
+            if (isFreshLifecycle() && freshSealStarted && !freshAppendingMap) {
+                throw new IOException("Fresh entry log has entered sealing", freshSealFailure);
+            }
+        }
+
+        synchronized Throwable freshOperationFailure() {
+            Throwable writeFailure = freshWriteFailure();
+            return writeFailure != null ? writeFailure : freshSealFailure;
+        }
+
+        synchronized boolean freshCloseStageReached() {
+            return freshCloseStageReached;
+        }
+
+        synchronized void flushAndCloseForFresh() throws IOException {
+            if (!isFreshLifecycle()) {
+                throw new IllegalStateException("Strict drain requires a fresh entry log");
+            }
+            if (!freshCloseStageReached) {
+                flushAndForceWrite(true);
+                freshCloseStageReached = true;
+            }
+            closeForFresh();
+        }
+
+        synchronized void discardUncommittedForFresh() throws IOException {
+            if (!isFreshLifecycle()) {
+                throw new IllegalStateException("Strict discard requires a fresh compaction candidate");
+            }
+            freshDiscarded = true;
+            freshCloseStageReached = true;
+            closeForFresh();
+        }
+
+        @Override
+        public void flushAndForceWrite(boolean forceMetadata) throws IOException {
+            if (!isFreshLifecycle()) {
+                super.flushAndForceWrite(forceMetadata);
+                return;
+            }
+            synchronized (this) {
+                // A periodic flush may have captured this active channel just before rotation.
+                // Observe only its already completed, metadata-forced close; do not touch a closed fd.
+                if (freshCloseStageReached && !freshDiscarded && freshNativeCloseSucceeded()) {
+                    return;
+                }
+                super.flushAndForceWrite(forceMetadata);
+            }
+        }
+
         public ConcurrentLongLongHashMap getLedgersMap() {
             return entryLogMetadata.getLedgersMap();
         }
@@ -151,7 +241,33 @@ public class DefaultEntryLogger implements EntryLogger {
          * Updates the entry log file header with the offset and size of the map.
          */
         void appendLedgersMap() throws IOException {
+            if (!isFreshLifecycle()) {
+                appendLedgersMapInternal();
+                return;
+            }
+            synchronized (this) {
+                if (freshSealFailure != null) {
+                    throwFreshFailure(freshSealFailure);
+                }
+                if (freshSealComplete) {
+                    return;
+                }
+                freshSealStarted = true;
+                freshAppendingMap = true;
+                try {
+                    appendLedgersMapInternal();
+                    freshSealComplete = true;
+                } catch (IOException | RuntimeException | Error failure) {
+                    // The multi-record seal is not replayed at a new append position after a partial failure.
+                    freshSealFailure = failure;
+                    throw failure;
+                } finally {
+                    freshAppendingMap = false;
+                }
+            }
+        }
 
+        private void appendLedgersMapInternal() throws IOException {
             long ledgerMapOffset = this.position();
 
             ConcurrentLongLongHashMap ledgersMap = this.getLedgersMap();
@@ -219,14 +335,22 @@ public class DefaultEntryLogger implements EntryLogger {
             mapInfo.putLong(ledgerMapOffset);
             mapInfo.putInt(numberOfLedgers);
             mapInfo.flip();
-            this.fileChannel.write(mapInfo, LEDGERS_MAP_OFFSET_POSITION);
+            if (isFreshLifecycle()) {
+                while (mapInfo.hasRemaining()) {
+                    if (fileChannel.write(mapInfo, LEDGERS_MAP_OFFSET_POSITION + mapInfo.position()) <= 0) {
+                        throw new IOException("Fresh ledgers-map header write made no progress");
+                    }
+                }
+            } else {
+                this.fileChannel.write(mapInfo, LEDGERS_MAP_OFFSET_POSITION);
+            }
         }
     }
 
     private final LedgerDirsManager ledgerDirsManager;
     private final boolean entryLogPerLedgerEnabled;
 
-    final RecentEntryLogsStatus recentlyCreatedEntryLogsStatus;
+    RecentEntryLogsStatus recentlyCreatedEntryLogsStatus;
 
     /**
      * locks for compaction log.
@@ -235,8 +359,24 @@ public class DefaultEntryLogger implements EntryLogger {
 
     private volatile BufferedLogChannel compactionLogChannel;
 
-    final EntryLoggerAllocator entryLoggerAllocator;
-    private final EntryLogManager entryLogManager;
+    EntryLoggerAllocator entryLoggerAllocator;
+    private EntryLogManager entryLogManager;
+    private final boolean freshLifecycle;
+    private final StatsLogger freshInitializationStats;
+    private final Object freshCloseLock;
+    private final Object freshReadGate;
+    private final ConcurrentMap<Long, FreshEntryLogReadResource> freshReadChannels;
+    private final Set<FreshEntryLogReadResource> freshPendingReads;
+    private final Set<Long> freshRetiringReads;
+    private boolean freshInitializeStarted;
+    private volatile Thread freshInitializingThread;
+    private volatile boolean freshReady;
+    private volatile boolean freshClosing;
+    private Throwable freshOperationFailure;
+    private volatile Throwable freshReadCloseFailure;
+    private final ByteBuf freshCompactionSizeBuffer;
+    private boolean freshCompactionSizeReleased;
+    private Throwable freshCompactionSizeFailure;
 
     private final CopyOnWriteArrayList<EntryLogListener> listeners = new CopyOnWriteArrayList<EntryLogListener>();
 
@@ -329,6 +469,29 @@ public class DefaultEntryLogger implements EntryLogger {
     public DefaultEntryLogger(ServerConfiguration conf,
                               LedgerDirsManager ledgerDirsManager, EntryLogListener listener, StatsLogger statsLogger,
                               ByteBufAllocator allocator) throws IOException {
+        this(conf, ledgerDirsManager, listener, statsLogger, allocator, false);
+    }
+
+    /** Pure resource owner; register it before calling initializeForFresh under the held fresh root leases. */
+    static DefaultEntryLogger forFresh(ServerConfiguration conf, LedgerDirsManager directories,
+            EntryLogListener listener, StatsLogger stats, ByteBufAllocator allocator) throws IOException {
+        if (conf.isEntryLogPerLedgerEnabled()) {
+            throw new IllegalArgumentException("Fresh entry logger requires the built-in single entry-log manager");
+        }
+        return new DefaultEntryLogger(conf, directories, listener, stats, allocator, true);
+    }
+
+    private DefaultEntryLogger(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
+            EntryLogListener listener, StatsLogger statsLogger, ByteBufAllocator allocator,
+            boolean freshLifecycle) throws IOException {
+        this.freshLifecycle = freshLifecycle;
+        freshInitializationStats = freshLifecycle ? statsLogger : null;
+        freshCloseLock = freshLifecycle ? new Object() : null;
+        freshReadGate = freshLifecycle ? new Object() : null;
+        freshReadChannels = freshLifecycle ? new ConcurrentHashMap<>() : null;
+        freshPendingReads = freshLifecycle ? Collections.newSetFromMap(new IdentityHashMap<>()) : null;
+        freshRetiringReads = freshLifecycle ? new HashSet<>() : null;
+        freshCompactionSizeBuffer = freshLifecycle ? Unpooled.buffer(4 + 8 + 8) : null;
         //We reserve 500 bytes as overhead for the protocol.  This is not 100% accurate
         // but the protocol varies so an exact value is difficult to determine
         this.maxSaneEntrySize = conf.getNettyMaxFrameSizeBytes() - 500;
@@ -339,13 +502,63 @@ public class DefaultEntryLogger implements EntryLogger {
         if (listener != null) {
             addListener(listener);
         }
+        if (!freshLifecycle) {
+            initializeEntryLogComponents(statsLogger);
+        }
+    }
 
+    void initializeForFresh() throws IOException {
+        if (!freshLifecycle) {
+            throw new IllegalStateException("Fresh initialization requires an explicit fresh entry logger");
+        }
+        synchronized (freshCloseLock) {
+            if (freshClosing || freshInitializeStarted) {
+                throw new IllegalStateException("Fresh entry-log initialization is one-use and cannot follow close");
+            }
+            freshInitializeStarted = true;
+            freshInitializingThread = Thread.currentThread();
+            try {
+                initializeEntryLogComponents(freshInitializationStats);
+                checkFreshInitializationContinues();
+                freshReady = true;
+            } catch (IOException | RuntimeException | Error failure) {
+                freshOperationFailure = mergeFreshFailure(freshOperationFailure, failure);
+                throw failure;
+            } finally {
+                freshInitializingThread = null;
+            }
+        }
+    }
+
+    private void checkFreshInitializationContinues() throws IOException {
+        if (freshLifecycle && freshClosing) {
+            throw new IOException("Fresh entry logger closed during initialization");
+        }
+    }
+
+    private void checkFreshServiceReady() throws IOException {
+        if (freshLifecycle && (!freshReady || freshClosing)) {
+            throw new IOException("Fresh entry logger is not running");
+        }
+        if (freshLifecycle && freshReadCloseFailure != null) {
+            throw new IOException("Fresh entry logger has an unresolved read-channel close", freshReadCloseFailure);
+        }
+    }
+
+    private void initializeEntryLogComponents(StatsLogger statsLogger) throws IOException {
         // Find the largest logId
         long logId = INVALID_LID;
         for (File dir : ledgerDirsManager.getAllLedgerDirs()) {
             if (!dir.exists()) {
                 throw new FileNotFoundException(
                         "Entry log directory '" + dir + "' does not exist");
+            }
+            if (freshLifecycle) {
+                String[] members = dir.list();
+                if (members == null || members.length != 0) {
+                    throw new IOException("Fresh entry-log current directory must be existing and empty: " + dir);
+                }
+                continue;
             }
             long lastLogId;
             long lastLogFileFromFile = getLastLogIdFromFile(dir);
@@ -365,9 +578,16 @@ public class DefaultEntryLogger implements EntryLogger {
             }
         }
         this.recentlyCreatedEntryLogsStatus = new RecentEntryLogsStatus(logId + 1);
-        this.entryLoggerAllocator = new EntryLoggerAllocator(conf, ledgerDirsManager, recentlyCreatedEntryLogsStatus,
-                logId, allocator);
-        if (entryLogPerLedgerEnabled) {
+        checkFreshInitializationContinues();
+        this.entryLoggerAllocator = freshLifecycle
+                ? EntryLoggerAllocator.forFresh(conf, ledgerDirsManager,
+                        recentlyCreatedEntryLogsStatus, logId, allocator)
+                : new EntryLoggerAllocator(conf, ledgerDirsManager, recentlyCreatedEntryLogsStatus, logId, allocator);
+        checkFreshInitializationContinues();
+        if (freshLifecycle) {
+            this.entryLogManager = EntryLogManagerForSingleEntryLog.forFresh(conf, ledgerDirsManager,
+                    entryLoggerAllocator, listeners, recentlyCreatedEntryLogsStatus);
+        } else if (entryLogPerLedgerEnabled) {
             this.entryLogManager = new EntryLogManagerForEntryLogPerLedger(conf, ledgerDirsManager,
                     entryLoggerAllocator, listeners, recentlyCreatedEntryLogsStatus, statsLogger);
         } else {
@@ -442,6 +662,11 @@ public class DefaultEntryLogger implements EntryLogger {
      * @param bc
      */
     public BufferedReadChannel putInReadChannels(long logId, BufferedReadChannel bc) {
+        if (freshLifecycle && (!(bc instanceof FreshEntryLogReadResource.Reader)
+                || freshReadChannels.get(logId) != ((FreshEntryLogReadResource.Reader) bc).resource)) {
+            throw new IllegalArgumentException(
+                    "Fresh read aliases must belong to their registered native resource");
+        }
         Map<Long, BufferedReadChannel> threadMap = logid2Channel.get();
         return threadMap.put(logId, bc);
     }
@@ -451,6 +676,20 @@ public class DefaultEntryLogger implements EntryLogger {
      * @param logId
      */
     public void removeFromChannelsAndClose(long logId) {
+        if (freshLifecycle) {
+            try {
+                closeFreshReadChannels(logId);
+                synchronized (freshReadGate) {
+                    freshRetiringReads.remove(logId);
+                }
+            } catch (IOException failure) {
+                throw new UncheckedIOException(failure);
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new UncheckedIOException(new IOException("Fresh read close interrupted", failure));
+            }
+            return;
+        }
         FileChannel fileChannel = logid2FileChannel.remove(logId);
         if (null != fileChannel) {
             try {
@@ -462,7 +701,15 @@ public class DefaultEntryLogger implements EntryLogger {
     }
 
     public BufferedReadChannel getFromChannels(long logId) {
-        return logid2Channel.get().get(logId);
+        BufferedReadChannel reader = logid2Channel.get().get(logId);
+        if (freshLifecycle && reader != null) {
+            try {
+                ((FreshEntryLogReadResource.Reader) reader).resource.checkReadable();
+            } catch (IOException failure) {
+                throw new UncheckedIOException(failure);
+            }
+        }
+        return reader;
     }
 
     @VisibleForTesting
@@ -534,6 +781,32 @@ public class DefaultEntryLogger implements EntryLogger {
      */
     @Override
     public boolean removeEntryLog(long entryLogId) {
+        if (freshLifecycle) {
+            try {
+                closeFreshReadChannels(entryLogId);
+                File file;
+                try {
+                    file = findFile(entryLogId);
+                } catch (FileNotFoundException absent) {
+                    synchronized (freshReadGate) {
+                        freshRetiringReads.remove(entryLogId);
+                    }
+                    return true;
+                }
+                boolean deleted = file.delete();
+                if (deleted) {
+                    synchronized (freshReadGate) {
+                        freshRetiringReads.remove(entryLogId);
+                    }
+                }
+                return deleted;
+            } catch (IOException failure) {
+                throw new UncheckedIOException(failure);
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new UncheckedIOException(new IOException("Fresh entry-log removal interrupted", failure));
+            }
+        }
         removeFromChannelsAndClose(entryLogId);
         File entryLogFile;
         try {
@@ -616,19 +889,23 @@ public class DefaultEntryLogger implements EntryLogger {
 
     @Override
     public void flush() throws IOException {
+        checkFreshServiceReady();
         entryLogManager.flush();
     }
 
     long addEntry(long ledger, ByteBuffer entry) throws IOException {
+        checkFreshServiceReady();
         return entryLogManager.addEntry(ledger, Unpooled.wrappedBuffer(entry), true);
     }
 
     long addEntry(long ledger, ByteBuf entry, boolean rollLog) throws IOException {
+        checkFreshServiceReady();
         return entryLogManager.addEntry(ledger, entry, rollLog);
     }
 
     @Override
     public long addEntry(long ledger, ByteBuf entry) throws IOException {
+        checkFreshServiceReady();
         return entryLogManager.addEntry(ledger, entry, true);
     }
 
@@ -641,13 +918,14 @@ public class DefaultEntryLogger implements EntryLogger {
     };
 
     private long addEntryForCompaction(long ledgerId, ByteBuf entry) throws IOException {
+        checkFreshServiceReady();
         synchronized (compactionLogLock) {
             int entrySize = entry.readableBytes() + 4;
             if (compactionLogChannel == null) {
                 createNewCompactionLog();
             }
 
-            ByteBuf sizeBuffer = this.sizeBuffer.get();
+            ByteBuf sizeBuffer = freshLifecycle ? freshCompactionSizeBuffer : this.sizeBuffer.get();
             sizeBuffer.clear();
             sizeBuffer.writeInt(entry.readableBytes());
             compactionLogChannel.write(sizeBuffer);
@@ -663,6 +941,10 @@ public class DefaultEntryLogger implements EntryLogger {
         synchronized (compactionLogLock) {
             if (compactionLogChannel != null) {
                 compactionLogChannel.appendLedgersMap();
+                if (freshLifecycle) {
+                    compactionLogChannel.flushAndCloseForFresh();
+                    return;
+                }
                 compactionLogChannel.flushAndForceWrite(false);
                 log.info()
                         .attr("logFile", compactionLogChannel.getLogFile())
@@ -679,6 +961,7 @@ public class DefaultEntryLogger implements EntryLogger {
     }
 
     private void createNewCompactionLog() throws IOException {
+        checkFreshServiceReady();
         synchronized (compactionLogLock) {
             if (compactionLogChannel == null) {
                 compactionLogChannel = entryLogManager.createNewLogForCompaction();
@@ -693,6 +976,21 @@ public class DefaultEntryLogger implements EntryLogger {
     private void removeCurCompactionLog() {
         synchronized (compactionLogLock) {
             if (compactionLogChannel != null) {
+                if (freshLifecycle) {
+                    try {
+                        // Abort/markCompacted already owns the existing compaction discard decision.
+                        // Native close must succeed before unlinking or forgetting this candidate.
+                        compactionLogChannel.discardUncommittedForFresh();
+                    } catch (IOException failure) {
+                        throw new UncheckedIOException(failure);
+                    }
+                    if (compactionLogChannel.getLogFile().exists()
+                            && !compactionLogChannel.getLogFile().delete()) {
+                        throw new UncheckedIOException(new IOException("Could not remove fresh compaction candidate"));
+                    }
+                    compactionLogChannel = null;
+                    return;
+                }
                 if (compactionLogChannel.getLogFile().exists() && !compactionLogChannel.getLogFile().delete()) {
                     log.warn()
                             .attr("logFile", compactionLogChannel.getLogFile())
@@ -922,6 +1220,9 @@ public class DefaultEntryLogger implements EntryLogger {
 
     @VisibleForTesting
     BufferedReadChannel getChannelForLogId(long entryLogId) throws IOException {
+        if (freshLifecycle) {
+            return getFreshReadChannel(entryLogId);
+        }
         BufferedReadChannel fc = getFromChannels(entryLogId);
         if (fc != null) {
             return fc;
@@ -944,6 +1245,132 @@ public class DefaultEntryLogger implements EntryLogger {
         }
         putInReadChannels(entryLogId, fc);
         return fc;
+    }
+
+    private BufferedReadChannel getFreshReadChannel(long logId) throws IOException {
+        checkFreshServiceReady();
+        Map<Long, BufferedReadChannel> cached = logid2Channel.get();
+        BufferedReadChannel previous = cached.get(logId);
+        if (previous != null) {
+            FreshEntryLogReadResource old = ((FreshEntryLogReadResource.Reader) previous).resource;
+            if (old.closedSuccessfully() && freshReadChannels.get(logId) != old) {
+                cached.remove(logId);
+            } else {
+                old.checkReadable();
+                return previous;
+            }
+        }
+        FreshEntryLogReadResource winner;
+        synchronized (freshReadGate) {
+            checkFreshReadAdmission(logId);
+            winner = freshReadChannels.get(logId);
+        }
+        if (winner == null) {
+            FreshEntryLogReadResource candidate = new FreshEntryLogReadResource(logId);
+            boolean registered = false;
+            boolean published = false;
+            Throwable failure = null;
+            try {
+                synchronized (freshReadGate) {
+                    checkFreshReadAdmission(logId);
+                    freshPendingReads.add(candidate);
+                    registered = true;
+                }
+                candidate.open(findFile(logId));
+                synchronized (freshReadGate) {
+                    checkFreshReadAdmission(logId);
+                    winner = freshReadChannels.putIfAbsent(logId, candidate);
+                    if (winner == null) {
+                        published = true;
+                        winner = candidate;
+                        freshPendingReads.remove(candidate);
+                    }
+                }
+            } catch (IOException | RuntimeException | Error problem) {
+                failure = problem;
+            } finally {
+                candidate.completeOpen();
+            }
+            if (registered && !published) {
+                try {
+                    candidate.close();
+                    synchronized (freshReadGate) {
+                        freshPendingReads.remove(candidate);
+                    }
+                } catch (IOException | RuntimeException | Error cleanupFailure) {
+                    failure = mergeFreshFailure(failure, cleanupFailure);
+                    recordFreshReadCloseFailure(cleanupFailure);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    failure = mergeFreshFailure(failure, new IOException("Fresh read candidate close interrupted",
+                            interrupted));
+                }
+            }
+            if (failure != null) {
+                throwFreshFailure(failure);
+            }
+        }
+        FreshEntryLogReadResource.Reader reader = winner.newReader(conf.getReadBufferBytes(),
+                entryLoggerAllocator.isSealed(logId));
+        try {
+            cached.put(logId, reader);
+            return reader;
+        } catch (RuntimeException | Error failure) {
+            try {
+                winner.discardReader(reader);
+            } catch (IOException | RuntimeException | Error cleanupFailure) {
+                mergeFreshFailure(failure, cleanupFailure);
+            }
+            throw failure;
+        }
+    }
+
+    private void checkFreshReadAdmission(long logId) throws IOException {
+        checkFreshServiceReady();
+        if (freshRetiringReads.contains(logId)) {
+            throw new IOException("Fresh entry-log read resource is retiring: " + logId);
+        }
+    }
+
+    private void closeFreshReadChannels(long logId) throws IOException, InterruptedException {
+        Set<FreshEntryLogReadResource> resources = Collections.newSetFromMap(new IdentityHashMap<>());
+        synchronized (freshReadGate) {
+            freshRetiringReads.add(logId);
+            FreshEntryLogReadResource current = freshReadChannels.get(logId);
+            if (current != null) {
+                resources.add(current);
+            }
+            for (FreshEntryLogReadResource candidate : freshPendingReads) {
+                if (candidate.logId() == logId) {
+                    resources.add(candidate);
+                }
+            }
+            for (FreshEntryLogReadResource resource : resources) {
+                resource.beginClosing();
+            }
+        }
+        Throwable failure = null;
+        for (FreshEntryLogReadResource resource : resources) {
+            try {
+                resource.close();
+                synchronized (freshReadGate) {
+                    freshReadChannels.remove(logId, resource);
+                    freshPendingReads.remove(resource);
+                }
+            } catch (IOException | RuntimeException | Error problem) {
+                failure = mergeFreshFailure(failure, problem);
+                recordFreshReadCloseFailure(problem);
+            }
+        }
+        if (failure != null) {
+            throwFreshFailure(failure);
+        }
+    }
+
+    private void recordFreshReadCloseFailure(Throwable failure) {
+        synchronized (freshReadGate) {
+            freshReadCloseFailure = mergeFreshFailure(freshReadCloseFailure, failure);
+        }
     }
 
     /**
@@ -1223,6 +1650,9 @@ public class DefaultEntryLogger implements EntryLogger {
      */
     @Override
     public void close() {
+        if (freshLifecycle) {
+            throw new IllegalStateException("Fresh entry logger requires closeForFresh and its actual result");
+        }
         // since logChannel is buffered channel, do flush when shutting down
         log.info("Stopping EntryLogger");
         try {
@@ -1256,6 +1686,94 @@ public class DefaultEntryLogger implements EntryLogger {
         }
         // shutdown the pre-allocation thread
         entryLoggerAllocator.stop();
+    }
+
+    /** The enclosing owner must first drain every request, GC and SyncThread, including their callbacks. */
+    FreshDrainResult closeForFresh() throws InterruptedException {
+        if (!freshLifecycle || Thread.currentThread() == freshInitializingThread
+                || (entryLoggerAllocator != null && entryLoggerAllocator.isCurrentExecutorThread())) {
+            throw new IllegalStateException("Fresh entry-log close requires an external close worker");
+        }
+        freshClosing = true;
+        synchronized (freshReadGate) {
+            for (FreshEntryLogReadResource resource : freshReadChannels.values()) {
+                resource.beginClosing();
+            }
+            for (FreshEntryLogReadResource resource : freshPendingReads) {
+                resource.beginClosing();
+            }
+        }
+        synchronized (freshCloseLock) {
+            EntryLoggerAllocator.FreshDrainResult allocation = entryLoggerAllocator == null ? null
+                    : entryLoggerAllocator.stopForFresh();
+            Throwable flushFailure = null;
+            Throwable closeFailure = mergeFreshFailure(freshCompactionSizeFailure,
+                    allocation == null ? null : allocation.closeFailure());
+            if (allocation != null) {
+                freshOperationFailure = mergeFreshFailure(freshOperationFailure, allocation.allocationFailure());
+            }
+            FreshDrainResult manager = entryLogManager == null ? null
+                    : ((EntryLogManagerForSingleEntryLog) entryLogManager).closeForFresh();
+            if (manager != null) {
+                freshOperationFailure = mergeFreshFailure(freshOperationFailure, manager.operationFailure());
+                flushFailure = mergeFreshFailure(flushFailure, manager.flushFailure());
+                closeFailure = mergeFreshFailure(closeFailure, manager.closeFailure());
+            }
+            synchronized (compactionLogLock) {
+                if (compactionLogChannel != null) {
+                    BufferedLogChannel channel = compactionLogChannel;
+                    freshOperationFailure = mergeFreshFailure(freshOperationFailure, channel.freshOperationFailure());
+                    try {
+                        channel.flushAndCloseForFresh();
+                        compactionLogChannel = null;
+                    } catch (IOException | RuntimeException | Error failure) {
+                        if (channel.freshCloseStageReached()) {
+                            closeFailure = mergeFreshFailure(closeFailure, failure);
+                        } else {
+                            flushFailure = mergeFreshFailure(flushFailure, failure);
+                        }
+                    }
+                }
+            }
+            Set<FreshEntryLogReadResource> readers = Collections.newSetFromMap(new IdentityHashMap<>());
+            synchronized (freshReadGate) {
+                readers.addAll(freshReadChannels.values());
+                readers.addAll(freshPendingReads);
+                for (FreshEntryLogReadResource resource : readers) {
+                    resource.beginClosing();
+                }
+            }
+            for (FreshEntryLogReadResource resource : readers) {
+                try {
+                    resource.close();
+                    synchronized (freshReadGate) {
+                        freshReadChannels.remove(resource.logId(), resource);
+                        freshPendingReads.remove(resource);
+                    }
+                } catch (IOException | RuntimeException | Error failure) {
+                    closeFailure = mergeFreshFailure(closeFailure, failure);
+                    recordFreshReadCloseFailure(failure);
+                }
+            }
+            if (!freshCompactionSizeReleased) {
+                freshCompactionSizeReleased = true;
+                try {
+                    freshCompactionSizeBuffer.release();
+                } catch (RuntimeException | Error failure) {
+                    freshCompactionSizeFailure = failure;
+                    closeFailure = mergeFreshFailure(closeFailure, failure);
+                }
+            }
+            synchronized (freshReadGate) {
+                boolean drained = (allocation == null || allocation.drained()) && (manager == null || manager.drained())
+                        && compactionLogChannel == null && freshReadChannels.isEmpty() && freshPendingReads.isEmpty()
+                        && freshCompactionSizeFailure == null;
+                if (drained) {
+                    freshRetiringReads.clear();
+                }
+                return new FreshDrainResult(drained, freshOperationFailure, flushFailure, closeFailure);
+            }
+        }
     }
 
     protected LedgerDirsManager getLedgerDirsManager() {

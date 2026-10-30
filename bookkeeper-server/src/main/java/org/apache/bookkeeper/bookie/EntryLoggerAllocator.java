@@ -476,6 +476,9 @@ class EntryLoggerAllocator {
                     closeStarted = true;
                     try {
                         if (channel != null) {
+                            if (!channel.isOpen()) {
+                                throw new IOException("Fresh partial channel closed without a recorded native result");
+                            }
                             channel.close();
                         }
                     } catch (IOException | RuntimeException | Error failure) {

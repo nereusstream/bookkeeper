@@ -417,3 +417,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [fresh 预分配资源与固定坐标 flush](local-storage/README.md#fresh-预分配资源与固定坐标-flush)：2026-10-31父41aba209ca上，fresh buffer保留native close的sticky结果与单次自有引用释放，部分flush使用冻结范围/固定坐标重试；allocator登记open/构造/header/lastId及未交付候选，停止新提交后等真实任务/线程退出再清理，结果分别保留allocation failure与close failure。七类81项与style通过，原磁盘满夹具错误及17项阶段回执由canonical拥有；夹具改为真实本地Interleaved，未放宽Null启动。DefaultEntryLogger完整图、Journal/cache、根解锁严格结果和稳定owner/facade仍待接线，不授予许可或全Bookie排空证明；完整目标active，相关Gate OPEN。
+
+
+[fresh entry logger 的实际资源图关闭](local-storage/README.md#fresh-entry-logger-的实际资源图关闭)：2026-10-31父babf7cc4e2上，包内DefaultEntryLogger先登记owner再初始化，实际active/candidate/rotation/compaction及读fd的winner/loser/partial均保留关闭结果；弱heap alias不强留，活引用各释放一次，命中CLOSING拒绝，未知首次close仍sticky。结果区分资源drained、operation/flush/close失败，framing buffer按owner回收，独立caller ByteBuf保持。八类95项通过，原阶段/格式失败及交付输入由canonical拥有；不是全Bookie、根解锁或ACK验收。下一项继续Interleaved/index cache、Journal、根释放进度及完整owner/facade，目标active，相关Gate OPEN。

@@ -436,16 +436,22 @@ public class FreshClassicEntryLogDrainTest {
     }
 
     /** A real FileChannel with controlled failures inside JDK final close and positional write. */
-    private static final class ControlledFileChannel extends FileChannel {
-        private final FileChannel delegate;
-        private final AtomicInteger closeAttempts = new AtomicInteger();
-        private final AtomicBoolean failPartialWrite = new AtomicBoolean();
-        private final IOException writeFailure = new IOException("failed after three bytes were written");
-        private IOException closeFailure;
-        private Runnable beforeClose;
+    static final class ControlledFileChannel extends FileChannel {
+        final FileChannel delegate;
+        final AtomicInteger closeAttempts = new AtomicInteger();
+        final AtomicBoolean failPartialWrite = new AtomicBoolean();
+        final IOException writeFailure = new IOException("failed after three bytes were written");
+        IOException closeFailure;
+        Runnable beforeClose;
+        Long failAtPosition;
+        IOException forceFailure;
 
-        private ControlledFileChannel(File file) throws IOException {
+        ControlledFileChannel(File file) throws IOException {
             delegate = FileChannel.open(file.toPath(), StandardOpenOption.READ, StandardOpenOption.WRITE);
+        }
+
+        ControlledFileChannel(FileChannel delegate) {
+            this.delegate = delegate;
         }
 
         @Override
@@ -462,7 +468,8 @@ public class FreshClassicEntryLogDrainTest {
 
         @Override
         public int write(ByteBuffer src, long position) throws IOException {
-            if (failPartialWrite.compareAndSet(true, false)) {
+            if ((failAtPosition == null || failAtPosition == position)
+                    && failPartialWrite.compareAndSet(true, false)) {
                 int limit = src.limit();
                 src.limit(src.position() + Math.min(3, src.remaining()));
                 try {
@@ -524,6 +531,11 @@ public class FreshClassicEntryLogDrainTest {
 
         @Override
         public void force(boolean metadata) throws IOException {
+            if (forceFailure != null) {
+                IOException failure = forceFailure;
+                forceFailure = null;
+                throw failure;
+            }
             delegate.force(metadata);
         }
 

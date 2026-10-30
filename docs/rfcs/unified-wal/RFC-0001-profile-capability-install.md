@@ -518,6 +518,8 @@ Null的例外需另行显式NO_CLUSTER_AUTHORITY上下文：完整实际root集�
 
 fresh底层文件close失败须保留原cause，不以isOpen=false或后续no-op重试提升成功；buffer自身引用释放与fd结果分开记账。分配失败和实际资源排空分别报告，已交付channel仍由接收方负责；只有所有资源实际终结后才进入根锁逐句柄释放，部分失败不能虚报仍全部持锁或已全部释放。fresh固定坐标flush和allocator登记/排空子入口已实现，完整owner/entry logger/Journal/cache接线仍OPEN，见[fresh预分配实现边界](implementation/local-storage/README.md#fresh-预分配资源与固定坐标-flush)。
 
+DefaultEntryLogger的fresh子图现已接线：先返回可登记owner再初始化；active/rotation/compaction和读fd的winner/loser/partial共享实际关闭进度，已逻辑closed但没有首次native成功结果仍为sticky未知。纯heap读wrapper只弱追踪，活别名显式释放，不以GC资格宣称物理回收或额度归零。子图资源终态及operation/flush/close结果分别保留，完整owner/Journal/index cache及根解锁仍待实现，见[fresh entry logger边界](implementation/local-storage/README.md#fresh-entry-logger-的实际资源图关闭)。
+
 ### 7.2 幂等与冲突
 
 | 已有状态 | 请求 | 结果 |

@@ -87,7 +87,7 @@ paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie'
              ('BookieImplTest.java', 'TestBookieImpl.java', 'FreshClassicRootsTest.java', 'SyncThreadTest.java',
               'FreshClassicExecutorDrainTest.java', 'FreshClassicGcDrainTest.java', 'GarbageCollectorThreadTest.java',
               'MockLedgerStorage.java', 'FreshClassicEntryLogDrainTest.java', 'BufferedChannelTest.java',
-              'DefaultEntryLogTest.java', 'CreateNewLogTest.java'))
+              'DefaultEntryLogTest.java', 'CreateNewLogTest.java', 'FreshDefaultEntryLoggerTest.java'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / name for name in
              ('bookie/Cookie.java', 'bookie/LegacyCookieValidation.java', 'util/PortManager.java',
               'bookie/FreshClassicRoots.java', 'bookie/LedgerDirsMonitor.java', 'bookie/GarbageCollectorThread.java',
@@ -98,7 +98,8 @@ paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / nam
               'bookie/EntryLogManagerBase.java', 'bookie/EntryLogManagerForSingleEntryLog.java',
               'bookie/EntryLogManagerForEntryLogPerLedger.java', 'bookie/LedgerCacheImpl.java',
               'bookie/BufferedChannel.java', 'bookie/BufferedReadChannel.java', 'bookie/EntryLogMetadata.java',
-              'bookie/storage/EntryLogger.java', 'bookie/stats/GarbageCollectorStats.java'))
+              'bookie/storage/EntryLogger.java', 'bookie/stats/GarbageCollectorStats.java',
+              'bookie/FreshEntryLogReadResource.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/EntryLogTestUtils.java'))
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper') / name for name in
              ('conf/TestBKConfiguration.java', 'test/BookKeeperClusterTestCase.java'))

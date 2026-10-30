@@ -79,6 +79,7 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
     private Throwable freshCloseFailure;
     private ByteBuffer freshPendingFlush;
     private long freshPendingFlushStart;
+    private Throwable freshWriteFailure;
 
     // make constructor to be public for unit test
     public BufferedChannel(ByteBufAllocator allocator, FileChannel fc, int capacity) throws IOException {
@@ -154,6 +155,9 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
         if (!freshCloseStarted) {
             freshCloseStarted = true;
             try {
+                if (!fileChannel.isOpen()) {
+                    throw new IOException("Fresh channel closed outside its recorded close; native result is unknown");
+                }
                 fileChannel.close();
             } catch (IOException | RuntimeException | Error failure) {
                 freshCloseFailure = failure;
@@ -196,6 +200,18 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
         }
     }
 
+    final boolean isFreshLifecycle() {
+        return freshLifecycle;
+    }
+
+    final synchronized Throwable freshWriteFailure() {
+        return freshWriteFailure;
+    }
+
+    final synchronized boolean freshNativeCloseSucceeded() {
+        return freshCloseReturned && freshCloseFailure == null;
+    }
+
     /**
      * Write all the data in src to the {@link FileChannel}. Note that this function can
      * buffer or re-order writes based on the implementation. These writes will be flushed
@@ -207,8 +223,16 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
     public void write(ByteBuf src) throws IOException {
         boolean shouldForceWrite = false;
         synchronized (this) {
-            int copied = copyIntoWriteBuffer(src);
-            shouldForceWrite = updatePositionAndFlushIfNeeded(copied);
+            checkFreshWriteAdmission();
+            try {
+                int copied = copyIntoWriteBuffer(src);
+                shouldForceWrite = updatePositionAndFlushIfNeeded(copied);
+            } catch (IOException | RuntimeException | Error failure) {
+                if (freshLifecycle && freshWriteFailure == null) {
+                    freshWriteFailure = failure;
+                }
+                throw failure;
+            }
         }
         if (shouldForceWrite) {
             forceWrite(false);
@@ -227,20 +251,34 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
     public void write(ByteBuf src1, ByteBuf src2) throws IOException {
         boolean shouldForceWrite = false;
         synchronized (this) {
-            int copied = copyIntoWriteBuffer(src1);
-            copied += copyIntoWriteBuffer(src2);
-            shouldForceWrite = updatePositionAndFlushIfNeeded(copied);
+            checkFreshWriteAdmission();
+            try {
+                int copied = copyIntoWriteBuffer(src1);
+                copied += copyIntoWriteBuffer(src2);
+                shouldForceWrite = updatePositionAndFlushIfNeeded(copied);
+            } catch (IOException | RuntimeException | Error failure) {
+                if (freshLifecycle && freshWriteFailure == null) {
+                    freshWriteFailure = failure;
+                }
+                throw failure;
+            }
         }
         if (shouldForceWrite) {
             forceWrite(false);
         }
     }
 
-    // must be called while holding the lock on this instance
-    private int copyIntoWriteBuffer(ByteBuf src) throws IOException {
+    void checkFreshWriteAdmission() throws IOException {
+        if (freshLifecycle && freshWriteFailure != null) {
+            throw new IOException("An earlier fresh write did not complete", freshWriteFailure);
+        }
         if (freshLifecycle && (freshCloseStarted || freshPendingFlush != null)) {
             throw new IOException("Fresh channel is closing or requires the pending flush to finish first");
         }
+    }
+
+    // must be called while holding the lock on this instance
+    private int copyIntoWriteBuffer(ByteBuf src) throws IOException {
         int copied = 0;
         int len = src.readableBytes();
         while (copied < len) {
@@ -402,6 +440,9 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
 
     @Override
     public synchronized int read(ByteBuf dest, long pos, int length) throws IOException {
+        if (freshLifecycle && freshCloseStarted) {
+            throw new IOException("Fresh buffered channel is closing");
+        }
         if (dest.writableBytes() < length) {
             throw new IllegalArgumentException("dest buffer remaining capacity is not enough"
                     + "(must be at least as \"length\"=" + length + ")");

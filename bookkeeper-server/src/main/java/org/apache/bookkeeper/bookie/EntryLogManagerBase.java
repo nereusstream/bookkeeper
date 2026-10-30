@@ -62,6 +62,10 @@ abstract class EntryLogManagerBase implements EntryLogManager {
         }
     };
 
+    ByteBuf sizeBufferForAdd() {
+        return sizeBufferForAdd.get();
+    }
+
     /*
      * This method should be guarded by a lock, so callers of this method
      * should be in the right scope of the lock.
@@ -70,7 +74,7 @@ abstract class EntryLogManagerBase implements EntryLogManager {
     public long addEntry(long ledger, ByteBuf entry, boolean rollLog) throws IOException {
         int entrySize = entry.readableBytes() + 4; // Adding 4 bytes to prepend the size
         BufferedLogChannel logChannel = getCurrentLogForLedgerForAddEntry(ledger, entrySize, rollLog);
-        ByteBuf sizeBuffer = sizeBufferForAdd.get();
+        ByteBuf sizeBuffer = sizeBufferForAdd();
         sizeBuffer.clear();
         sizeBuffer.writeInt(entry.readableBytes());
         logChannel.write(sizeBuffer);

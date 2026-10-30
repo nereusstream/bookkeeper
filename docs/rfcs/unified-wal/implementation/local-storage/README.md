@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-31 当前增量为[fresh 预分配资源与固定坐标 flush](#fresh-预分配资源与固定坐标-flush)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
+2026-10-31 当前增量为[fresh entry logger 的实际资源图关闭](#fresh-entry-logger-的实际资源图关闭)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -2118,3 +2118,26 @@ fresh allocator在每次文件open前先登记heap-only槽，之后持续登记�
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-entrylog-evidence-41aba209`保留三阶段回执及46个相关class，最终native输入1229项。Spotless/Checkstyle exit0。完整owner/窄facade、初始化登记、Journal、entry logger/rotation/read cache、ledger/index cache的严格结果以及根锁释放失败的逐句柄状态仍OPEN；下一项沿实际调用图完成这些接线，不能用本子组件drained替代全Bookie终态。共同owner/Main/G1/full-bytes及完整16步目标仍OPEN/active，默认OFF/SYSTEM/PARK和disabled保持，Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。
 
 实际RAT exit1，431个未批准路径及字节与父源码相同、无新增，保护PDF在读取前排除。三个已终态native临时目录的25个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节6,138,318；归档硬链接保留数据，常规文件数据块回收0。未清理默认目录或其他任务资源。
+
+
+## fresh entry logger 的实际资源图关闭
+
+2026-10-31在父源码`babf7cc4e2c6d88216d505a781ce28488c853813`上，将已有fresh buffer/allocator子入口接到DefaultEntryLogger的实际子图。包内forFresh先返回纯资源owner，调用方登记后再initializeForFresh；初始化只接受现存空current目录及内置单entry-log manager，逐项保留已创建的allocator/manager，失败不重新初始化。普通Classic构造仍执行原初始化路径。该子工厂不发行NO_CLUSTER_AUTHORITY上下文、registration或Bookie服务许可；完整公开owner仍须先冻结配置并持有全部fresh根租约。
+
+单entry-log manager记录active、已接收但尚未完成切换的candidate、rotated及in-flight rotated列表；只有实际force/close成功后才移除。GC和SyncThread的fresh rotated flush共用串行关闭进度，错误后保留原列表，不依赖失败task的栈或吞错forceClose。fresh ledgers-map seal成功可重复观察，部分seal失败保存原cause并拒绝再次追加；一次entry write中途失败的channel不接受后续健康append。已冻结范围的flush/最终force仍可安全续接，资源已排空与原operation失败分开报告，不制造写成功。fresh barrier与关闭在同一channel锁内序列化；周期flush若此前捕获已退休active，仅可观察其原先确实完成的metadata force及成功关闭结果，不访问已关闭fd或以逻辑closed推断成功。
+
+读缓存继续采用原线程局部weak-values结构，按实际打开的fd登记FreshEntryLogReadResource。open前已有私有记录；winner、putIfAbsent loser及partial-open都持续有owner。wrapper注册与CLOSING共用记录同步边界，注册失败清理尚未发布的heap buffer。CLOSING先拒绝缓存命中，包括sealed size及readBuffer命中；等待活wrapper读锁时不持记录锁，确认实际读方法返回后才关闭底层fd，并在各自读锁内释放仍活着的自有buffer一次。按log退休读资源与删除文件协调，旧pending open不能在删除后重新发布旧fd；任何close失败保留原记录，不能从map移除后重新打开来绕过失败。
+
+弱追踪使用WeakHashMap，value仅为Boolean，不反向持有key。已不可达的wrapper只有Unpooled heap buffer，可以交给JVM GC；这不证明物理回收、refCnt归零、额度全归还或full-bytes PASS。活别名须显式释放，native fd义务不依赖wrapper是否仍存活。若未来改为pooled/direct buffer、归还额度或增加关闭回调，必须重新检查此边界。fresh Add/compaction的长度头临时buffer则在已有manager/compaction锁下按owner各复用一份并在关闭时释放，避免留在长期存活的外部调用线程中；普通Classic的线程局部缓存保持。
+
+首次记录关闭前若channel已逻辑closed、却没有可核验的native close结果，包括JDK中断自动关闭的路径，按sticky未知关闭失败处理，不用后续no-op补发成功。whole-entry-logger的包内结果分别返回资源drained、永久保留的operation failure、待安全重试的flush failure及sticky close failure；独立资源可以继续清理，任何未关闭句柄或未解析close失败都不能提升为drained。该结果不包含外层请求/output callback、GC、SyncThread、ledger/index cache、Journal或根锁；最终调用者仍须先等待所有实际使用者终结，根解锁还需完整owner的最后阶段。
+
+compaction flush/markCompacted/makeAvailable/abort沿原文件与hard-link流程运行，fresh路径明确观察close结果，close成功前不unlink或遗忘候选。未提交副本的原abort决定不被当作已持久写入；失败的丢弃保留文件和native close cause。读取返回的独立ByteBuf仍由调用方持有，关闭只释放组件自有引用，不强制释放这些合法结果。
+
+新增14项实际文件/受控失败场景覆盖：先返回owner/部分初始化；真实rotation、点读、活alias与独立caller结果；成功关闭的读缓存重新打开及旧alias拒绝；短命读线程的弱结构/受控弱通知与不消失的fd义务；JDK实际中断自动close；部分seal和部分entry write失败；并发open loser的close错误；读锁/关闭锁序；构造后尚未注册alias的清理；compaction完整文件流程及失败丢弃；最终force重试；捕获已退休channel的周期flush。弱测试不依赖单次System.gc，不宣称物理heap已回收；失败只在测试源码对真实FileChannel/ByteBuf施加，不新增生产provider或公开raw getter。
+
+最终八类95项同源码通过，0 failure/error/skipped：fresh DefaultEntryLogger14、原fresh entry-log10、BufferedChannel9、DefaultEntryLog30、CreateNewLog14、fresh GC4、BookieImpl3、原根/Classic组合11。此前26项、32项、格式调整前后95项分别保留原输入/源码/XML/日志，最终交付轮另绑owner framing引用释放断言，不移绑旧PASS；早期style的行长/导入顺序失败保留原源码及输出。没有重跑完整SDK、stock、TLC、Rust JNI或性能/掉电矩阵。
+
+最终Spotless/Checkstyle实际exit0；独立RAT实际exit1，431个未批准路径及字节与父源码相同、无新增，保护PDF在读取前排除。五个已终态native临时目录的45个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节9,486,424；归档硬链接保留数据，常规文件数据块回收0。未清理默认目录或其他任务资源。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-entrylogger-graph-evidence-babf7cc4`保留五阶段原始Java回执，最终native输入1231项及49个交付相关class，早期47个class另行保留。entry logger子图已接线，Interleaved/ledger-index cache严格结果、Journal、根锁释放失败的逐句柄进度、完整稳定owner/facade及初始化总图仍OPEN；不发行fresh permit，不以本结果解锁根或证明全Bookie/ACK终态。共同owner/Main/G1/full-bytes及16步总验收继续OPEN/active，默认OFF/SYSTEM/PARK和disabled保持，Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。

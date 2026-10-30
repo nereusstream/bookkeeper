@@ -25,12 +25,15 @@ import static org.apache.bookkeeper.bookie.DefaultEntryLogger.INVALID_LID;
 import static org.apache.bookkeeper.bookie.DefaultEntryLogger.UNASSIGNED_LEDGERID;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import java.io.File;
 import java.io.IOException;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.CustomLog;
 import org.apache.bookkeeper.bookie.DefaultEntryLogger.BufferedLogChannel;
@@ -45,11 +48,34 @@ class EntryLogManagerForSingleEntryLog extends EntryLogManagerBase {
     private long logIdBeforeFlush = INVALID_LID;
     private final AtomicBoolean shouldCreateNewEntryLog = new AtomicBoolean(false);
     private final DefaultEntryLogger.RecentEntryLogsStatus recentlyCreatedEntryLogsStatus;
+    private final boolean freshLifecycle;
+    private volatile boolean freshClosing;
+    private BufferedLogChannel freshPendingCandidate;
+    private Throwable freshOperationFailure;
+    private final Object freshFlushLock = new Object();
+    private List<BufferedLogChannel> freshInFlightRotated;
+    private final ByteBuf freshSizeBuffer;
+    private boolean freshSizeReleased;
+    private Throwable freshSizeFailure;
 
     EntryLogManagerForSingleEntryLog(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
             EntryLoggerAllocator entryLoggerAllocator, List<DefaultEntryLogger.EntryLogListener> listeners,
             DefaultEntryLogger.RecentEntryLogsStatus recentlyCreatedEntryLogsStatus) {
+        this(conf, ledgerDirsManager, entryLoggerAllocator, listeners, recentlyCreatedEntryLogsStatus, false);
+    }
+
+    static EntryLogManagerForSingleEntryLog forFresh(ServerConfiguration conf, LedgerDirsManager directories,
+            EntryLoggerAllocator allocator, List<DefaultEntryLogger.EntryLogListener> listeners,
+            DefaultEntryLogger.RecentEntryLogsStatus status) {
+        return new EntryLogManagerForSingleEntryLog(conf, directories, allocator, listeners, status, true);
+    }
+
+    private EntryLogManagerForSingleEntryLog(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
+            EntryLoggerAllocator entryLoggerAllocator, List<DefaultEntryLogger.EntryLogListener> listeners,
+            DefaultEntryLogger.RecentEntryLogsStatus recentlyCreatedEntryLogsStatus, boolean freshLifecycle) {
         super(conf, ledgerDirsManager, entryLoggerAllocator, listeners);
+        this.freshLifecycle = freshLifecycle;
+        this.freshSizeBuffer = freshLifecycle ? Unpooled.buffer(Integer.BYTES) : null;
         this.rotatedLogChannels = new LinkedList<BufferedLogChannel>();
         this.recentlyCreatedEntryLogsStatus = recentlyCreatedEntryLogsStatus;
         // Register listener for disk full notifications.
@@ -84,7 +110,19 @@ class EntryLogManagerForSingleEntryLog extends EntryLogManagerBase {
 
     @Override
     public synchronized long addEntry(long ledger, ByteBuf entry, boolean rollLog) throws IOException {
+        checkFreshAdmission();
         return super.addEntry(ledger, entry, rollLog);
+    }
+
+    @Override
+    ByteBuf sizeBufferForAdd() {
+        return freshLifecycle ? freshSizeBuffer : super.sizeBufferForAdd();
+    }
+
+    private void checkFreshAdmission() throws IOException {
+        if (freshLifecycle && freshClosing) {
+            throw new IOException("Fresh entry-log manager is closing");
+        }
     }
 
     @Override
@@ -116,12 +154,35 @@ class EntryLogManagerForSingleEntryLog extends EntryLogManagerBase {
 
     @Override
     synchronized void createNewLog(long ledgerId) throws IOException {
+        checkFreshAdmission();
         super.createNewLog(ledgerId);
+    }
+
+    @Override
+    void createNewLog(long ledgerId, String reason) throws IOException {
+        if (freshLifecycle) {
+            synchronized (this) {
+                checkFreshAdmission();
+                super.createNewLog(ledgerId, reason);
+            }
+        } else {
+            super.createNewLog(ledgerId, reason);
+        }
     }
 
     @Override
     public synchronized void setCurrentLogForLedgerAndAddToRotate(long ledgerId, BufferedLogChannel logChannel) {
         BufferedLogChannel hasToRotateLogChannel = activeLogChannel;
+        if (freshLifecycle) {
+            // The allocator has transferred this candidate. Retain it before any list allocation can fail.
+            freshPendingCandidate = logChannel;
+            if (hasToRotateLogChannel != null) {
+                rotatedLogChannels.add(hasToRotateLogChannel);
+            }
+            activeLogChannel = logChannel;
+            freshPendingCandidate = null;
+            return;
+        }
         activeLogChannel = logChannel;
         if (hasToRotateLogChannel != null) {
             rotatedLogChannels.add(hasToRotateLogChannel);
@@ -164,6 +225,7 @@ class EntryLogManagerForSingleEntryLog extends EntryLogManagerBase {
 
     @Override
     public void flushCurrentLogs() throws IOException {
+        checkFreshAdmission();
         BufferedLogChannel currentActiveLogChannel = activeLogChannel;
         if (currentActiveLogChannel != null) {
             /**
@@ -176,6 +238,11 @@ class EntryLogManagerForSingleEntryLog extends EntryLogManagerBase {
 
     @Override
     void flushRotatedLogs() throws IOException {
+        if (freshLifecycle) {
+            checkFreshAdmission();
+            flushRotatedLogsForFresh();
+            return;
+        }
         List<BufferedLogChannel> channels = null;
         synchronized (this) {
             channels = rotatedLogChannels;
@@ -211,8 +278,107 @@ class EntryLogManagerForSingleEntryLog extends EntryLogManagerBase {
         }
     }
 
+    private void flushRotatedLogsForFresh() throws IOException {
+        synchronized (freshFlushLock) {
+            checkFreshAdmission();
+            // A failed flush keeps its exact remaining list in the manager, rather than only on
+            // the failed task's stack. GC and SyncThread may both request a flush.
+            if (freshInFlightRotated != null) {
+                drainFreshRotatedBatch();
+            }
+            synchronized (this) {
+                List<BufferedLogChannel> replacement = new LinkedList<>();
+                freshInFlightRotated = rotatedLogChannels;
+                rotatedLogChannels = replacement;
+            }
+            drainFreshRotatedBatch();
+        }
+    }
+
+    private void drainFreshRotatedBatch() throws IOException {
+        for (Iterator<BufferedLogChannel> iterator = freshInFlightRotated.iterator(); iterator.hasNext();) {
+            BufferedLogChannel channel = iterator.next();
+            channel.flushAndCloseForFresh();
+            recentlyCreatedEntryLogsStatus.flushRotatedEntryLog(channel.getLogId());
+            iterator.remove();
+        }
+        freshInFlightRotated = null;
+    }
+
+    /** Requires the enclosing owner to have drained request, GC and sync tasks first. */
+    DefaultEntryLogger.FreshDrainResult closeForFresh() {
+        if (!freshLifecycle) {
+            throw new IllegalStateException("Strict close requires a fresh entry-log manager");
+        }
+        freshClosing = true;
+        synchronized (freshFlushLock) {
+            return closeFreshChannels();
+        }
+    }
+
+    private DefaultEntryLogger.FreshDrainResult closeFreshChannels() {
+        Set<BufferedLogChannel> channels = Collections.newSetFromMap(new IdentityHashMap<>());
+        synchronized (this) {
+            if (activeLogChannel != null) {
+                channels.add(activeLogChannel);
+            }
+            if (freshPendingCandidate != null) {
+                channels.add(freshPendingCandidate);
+            }
+            channels.addAll(rotatedLogChannels);
+            if (freshInFlightRotated != null) {
+                channels.addAll(freshInFlightRotated);
+            }
+        }
+        Throwable flushFailure = null;
+        Throwable closeFailure = freshSizeFailure;
+        for (BufferedLogChannel channel : channels) {
+            freshOperationFailure = DefaultEntryLogger.mergeFreshFailure(
+                    freshOperationFailure, channel.freshOperationFailure());
+            try {
+                channel.flushAndCloseForFresh();
+                synchronized (this) {
+                    if (activeLogChannel == channel) {
+                        activeLogChannel = null;
+                    }
+                    if (freshPendingCandidate == channel) {
+                        freshPendingCandidate = null;
+                    }
+                    rotatedLogChannels.removeIf(candidate -> candidate == channel);
+                    if (freshInFlightRotated != null) {
+                        freshInFlightRotated.removeIf(candidate -> candidate == channel);
+                    }
+                }
+            } catch (IOException | RuntimeException | Error failure) {
+                if (channel.freshCloseStageReached()) {
+                    closeFailure = DefaultEntryLogger.mergeFreshFailure(closeFailure, failure);
+                } else {
+                    flushFailure = DefaultEntryLogger.mergeFreshFailure(flushFailure, failure);
+                }
+            }
+        }
+        if (!freshSizeReleased) {
+            freshSizeReleased = true;
+            try {
+                freshSizeBuffer.release();
+            } catch (RuntimeException | Error failure) {
+                freshSizeFailure = failure;
+                closeFailure = DefaultEntryLogger.mergeFreshFailure(closeFailure, failure);
+            }
+        }
+        synchronized (this) {
+            return new DefaultEntryLogger.FreshDrainResult(activeLogChannel == null && freshPendingCandidate == null
+                    && rotatedLogChannels.isEmpty()
+                    && (freshInFlightRotated == null || freshInFlightRotated.isEmpty()) && freshSizeFailure == null,
+                    freshOperationFailure, flushFailure, closeFailure);
+        }
+    }
+
     @Override
     public void close() throws IOException {
+        if (freshLifecycle) {
+            throw new IllegalStateException("Fresh manager requires closeForFresh and its complete result");
+        }
         if (activeLogChannel != null) {
             activeLogChannel.close();
         }
@@ -220,6 +386,9 @@ class EntryLogManagerForSingleEntryLog extends EntryLogManagerBase {
 
     @Override
     public void forceClose() {
+        if (freshLifecycle) {
+            throw new IllegalStateException("Fresh manager cannot discard its actual close result");
+        }
         IOUtils.close(log, activeLogChannel);
     }
 
