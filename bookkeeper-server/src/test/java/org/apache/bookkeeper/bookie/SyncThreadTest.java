@@ -22,6 +22,7 @@ package org.apache.bookkeeper.bookie;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -37,6 +38,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.bookie.CheckpointSource.Checkpoint;
 import org.apache.bookkeeper.bookie.LedgerDirsManager.LedgerDirsListener;
 import org.apache.bookkeeper.bookie.LedgerDirsManager.NoWritableLedgerDirException;
@@ -253,6 +255,136 @@ public class SyncThreadTest {
         t.startCheckpoint(Checkpoint.MAX);
         assertTrue("Should have disk full error", diskFullLatch.await(10, TimeUnit.SECONDS));
         t.shutdown();
+    }
+
+    @Test
+    public void freshInterruptedDrainKeepsTheOriginalFlushUntilItsActualReturn() throws Exception {
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var flushes = new AtomicInteger();
+        var checkpoints = new AtomicInteger();
+        var interrupted = new AtomicBoolean();
+        var unexpected = new AtomicReference<Throwable>();
+        var storage = new DummyLedgerStorage() {
+            @Override
+            public void flush() throws IOException {
+                flushes.incrementAndGet();
+                entered.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Actual flush was interrupted", failure);
+                }
+            }
+        };
+        var source = new DummyCheckpointSource() {
+            @Override
+            public void checkpointComplete(Checkpoint checkpoint, boolean compact) {
+                assertFalse(compact);
+                checkpoints.incrementAndGet();
+            }
+        };
+        var sync = SyncThread.forFresh(TestBKConfiguration.newServerConfiguration(),
+                new LedgerDirsListener() { }, storage, source, NullStatsLogger.INSTANCE);
+        var stopper = new Thread(() -> {
+            try {
+                sync.shutdownForFresh();
+            } catch (InterruptedException expected) {
+                interrupted.set(Thread.currentThread().isInterrupted());
+            } catch (Throwable failure) {
+                unexpected.set(failure);
+            }
+        });
+        try {
+            stopper.start();
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            stopper.interrupt();
+            stopper.join(5000);
+            assertFalse(stopper.isAlive());
+            assertTrue(interrupted.get());
+            assertEquals(null, unexpected.get());
+            assertTrue(sync.executor.isShutdown());
+            assertFalse(sync.executor.isTerminated());
+            assertEquals(1, flushes.get());
+            assertEquals(0, checkpoints.get());
+            release.countDown();
+            sync.shutdownForFresh();
+            sync.shutdownForFresh();
+            assertTrue(sync.executor.isTerminated());
+            assertEquals(1, flushes.get());
+            assertEquals(1, checkpoints.get());
+        } finally {
+            release.countDown();
+            stopper.join(5000);
+            sync.shutdownForFresh();
+        }
+    }
+
+    @Test
+    public void freshFlushAndCheckpointFailuresAreReportedAndRetryAfterExecutorTermination() throws Exception {
+        for (boolean failCheckpoint : new boolean[]{false, true}) {
+            var flushes = new AtomicInteger();
+            var checkpoints = new AtomicInteger();
+            var storage = new DummyLedgerStorage() {
+                @Override
+                public void flush() throws IOException {
+                    if (flushes.incrementAndGet() == 1 && !failCheckpoint) {
+                        throw new IOException("held storage failure");
+                    }
+                }
+            };
+            var source = new DummyCheckpointSource() {
+                @Override
+                public void checkpointComplete(Checkpoint checkpoint, boolean compact) throws IOException {
+                    assertFalse(compact);
+                    if (checkpoints.incrementAndGet() == 1 && failCheckpoint) {
+                        throw new IOException("held checkpoint failure");
+                    }
+                }
+            };
+            var sync = SyncThread.forFresh(TestBKConfiguration.newServerConfiguration(),
+                    new LedgerDirsListener() { }, storage, source, NullStatsLogger.INSTANCE);
+            try {
+                var failure = assertThrows(IOException.class, sync::shutdownForFresh);
+                assertTrue(failure.getMessage().contains(failCheckpoint ? "checkpoint" : "storage"));
+                assertTrue(sync.executor.isTerminated());
+                sync.shutdownForFresh();
+                sync.shutdownForFresh();
+                assertEquals(2, flushes.get());
+                assertEquals(failCheckpoint ? 2 : 1, checkpoints.get());
+            } finally {
+                sync.shutdownForFresh();
+            }
+        }
+    }
+
+    @Test
+    public void freshDrainRejectsItsOwnActualExecutorThreadEvenAfterRename() throws Exception {
+        var sync = SyncThread.forFresh(TestBKConfiguration.newServerConfiguration(),
+                new LedgerDirsListener() { }, new DummyLedgerStorage(), new DummyCheckpointSource(),
+                NullStatsLogger.INSTANCE);
+        try {
+            sync.executor.submit(() -> {
+                Thread.currentThread().setName("renamed-fresh-sync");
+                assertThrows(IllegalStateException.class, sync::shutdownForFresh);
+            }).get(5, TimeUnit.SECONDS);
+            assertFalse(sync.executor.isShutdown());
+        } finally {
+            sync.shutdownForFresh();
+        }
+    }
+
+    @Test
+    public void ordinarySyncResourceCannotUseTheFreshDrainEntry() throws Exception {
+        var sync = new SyncThread(TestBKConfiguration.newServerConfiguration(), new LedgerDirsListener() { },
+                new DummyLedgerStorage(), new DummyCheckpointSource(), NullStatsLogger.INSTANCE);
+        try {
+            assertThrows(IllegalStateException.class, sync::shutdownForFresh);
+            assertFalse(sync.executor.isShutdown());
+        } finally {
+            sync.shutdown();
+        }
     }
 
     private static class DummyCheckpointSource implements CheckpointSource {

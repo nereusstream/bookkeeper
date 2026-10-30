@@ -84,10 +84,11 @@ paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / nam
               'bookie/ReadOnlyBookie.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/server/TestEmbeddedServer.java'))
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie') / name for name in
-             ('BookieImplTest.java', 'TestBookieImpl.java', 'FreshClassicRootsTest.java'))
+             ('BookieImplTest.java', 'TestBookieImpl.java', 'FreshClassicRootsTest.java', 'SyncThreadTest.java',
+              'FreshClassicExecutorDrainTest.java'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / name for name in
              ('bookie/Cookie.java', 'bookie/LegacyCookieValidation.java', 'util/PortManager.java',
-              'bookie/FreshClassicRoots.java'))
+              'bookie/FreshClassicRoots.java', 'bookie/LedgerDirsMonitor.java'))
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper') / name for name in
              ('conf/TestBKConfiguration.java', 'test/BookKeeperClusterTestCase.java'))
 paths.update(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common/component') / name for name in

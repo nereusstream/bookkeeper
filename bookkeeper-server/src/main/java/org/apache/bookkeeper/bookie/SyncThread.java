@@ -24,6 +24,7 @@ package org.apache.bookkeeper.bookie;
 import com.google.common.annotations.VisibleForTesting;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.io.IOException;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
@@ -71,17 +72,45 @@ class SyncThread implements Checkpointer {
     private boolean disableCheckpoint = false;
     private final Counter syncExecutorTime;
     private static String executorName = "SyncThread";
+    private final boolean freshLifecycle;
+    private volatile Thread freshExecutorThread;
+    private Future<?> freshFinalFlush;
+    private boolean freshFlushObserved;
+    private boolean freshFlushComplete;
 
     public SyncThread(ServerConfiguration conf,
                       LedgerDirsListener dirsListener,
                       LedgerStorage ledgerStorage,
                       CheckpointSource checkpointSource,
                       StatsLogger statsLogger) {
+        this(conf, dirsListener, ledgerStorage, checkpointSource, statsLogger, false);
+    }
+
+    private SyncThread(ServerConfiguration conf, LedgerDirsListener dirsListener, LedgerStorage ledgerStorage,
+            CheckpointSource checkpointSource, StatsLogger statsLogger, boolean freshLifecycle) {
         this.dirsListener = dirsListener;
         this.ledgerStorage = ledgerStorage;
         this.checkpointSource = checkpointSource;
-        this.executor = newExecutor();
+        this.freshLifecycle = freshLifecycle;
+        this.executor = freshLifecycle ? newFreshExecutor() : newExecutor();
         this.syncExecutorTime = statsLogger.getThreadScopedCounter("sync-thread-time");
+    }
+
+    /** Resource construction only; the fresh owner registers this child before starting any work. */
+    static SyncThread forFresh(ServerConfiguration conf, LedgerDirsListener dirsListener, LedgerStorage storage,
+            CheckpointSource checkpoints, StatsLogger stats) {
+        return new SyncThread(conf, dirsListener, storage, checkpoints, stats, true);
+    }
+
+    private ScheduledExecutorService newFreshExecutor() {
+        return Executors.newSingleThreadScheduledExecutor(new DefaultThreadFactory(executorName) {
+            @Override
+            protected Thread newThread(Runnable runnable, String name) {
+                Thread thread = super.newThread(ThreadRegistry.registerThread(runnable, executorName), name);
+                freshExecutorThread = thread;
+                return thread;
+            }
+        });
     }
 
     @VisibleForTesting
@@ -232,6 +261,67 @@ class SyncThread implements Checkpointer {
             long now = System.currentTimeMillis();
             log.info().attr("elapsedMs", now - start)
                 .log("SyncThread taking a long time to shutdown");
+        }
+    }
+
+    /**
+     * Fresh owner's external close worker only, after producers stop submitting checkpoints.
+     * Interruption retains the original flush and executor; a failed final flush is reported and can be
+     * retried directly only after that executor has actually terminated. No closed-executor resubmission.
+     */
+    void shutdownForFresh() throws IOException, InterruptedException {
+        if (!freshLifecycle || Thread.currentThread() == freshExecutorThread) {
+            throw new IllegalStateException("Fresh SyncThread drain requires its external lifecycle owner");
+        }
+        try {
+            synchronized (this) {
+                if (freshFlushComplete) {
+                    return;
+                }
+                if (freshFinalFlush == null) {
+                    freshFinalFlush = executor.submit(() -> {
+                        flushForFresh();
+                        return null;
+                    });
+                    executor.shutdown();
+                }
+                while (!executor.awaitTermination(5, TimeUnit.MINUTES)) {
+                    log.info("Fresh SyncThread is still draining its original executor");
+                }
+                if (!freshFlushObserved) {
+                    freshFlushObserved = true;
+                    try {
+                        freshFinalFlush.get();
+                    } catch (ExecutionException failed) {
+                        Throwable cause = failed.getCause();
+                        if (cause instanceof IOException failure) {
+                            throw failure;
+                        }
+                        if (cause instanceof RuntimeException failure) {
+                            throw failure;
+                        }
+                        if (cause instanceof Error failure) {
+                            throw failure;
+                        }
+                        throw new IOException("Fresh final flush failed", cause);
+                    }
+                } else {
+                    // The original attempt failed, and no executor task can still access this storage.
+                    flushForFresh();
+                }
+                freshFlushComplete = true;
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        }
+    }
+
+    private void flushForFresh() throws IOException {
+        Checkpoint checkpoint = checkpointSource.newCheckpoint();
+        ledgerStorage.flush();
+        if (!disableCheckpoint) {
+            checkpointSource.checkpointComplete(checkpoint, false);
         }
     }
 }

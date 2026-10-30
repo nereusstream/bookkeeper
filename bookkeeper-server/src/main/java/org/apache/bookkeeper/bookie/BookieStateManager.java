@@ -69,8 +69,8 @@ public class BookieStateManager implements StateManager {
     private final List<File> statusDirs;
 
     // use an executor to execute the state changes task
-    final ScheduledExecutorService stateService = Executors.newScheduledThreadPool(1,
-            new ThreadFactoryBuilder().setNameFormat("BookieStateManagerService-%d").build());
+    private volatile Thread stateServiceThread;
+    final ScheduledExecutorService stateService = newStateService();
 
     // Running flag
     private volatile boolean running = false;
@@ -266,6 +266,35 @@ public class BookieStateManager implements StateManager {
     public void close() {
         this.running = false;
         stateService.shutdown();
+    }
+
+    /** Fresh owner only: shutdown request and actual task termination are separate lifecycle facts. */
+    void closeForFresh() throws InterruptedException {
+        if (Thread.currentThread() == stateServiceThread) {
+            throw new IllegalStateException("State manager cannot wait for its own executor");
+        }
+        close();
+        try {
+            while (!stateService.awaitTermination(5, TimeUnit.MINUTES)) {
+                log.info("Fresh state manager is still draining its original executor");
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        }
+    }
+
+    boolean isCurrentExecutorThread() {
+        return Thread.currentThread() == stateServiceThread;
+    }
+
+    private ScheduledExecutorService newStateService() {
+        var factory = new ThreadFactoryBuilder().setNameFormat("BookieStateManagerService-%d").build();
+        return Executors.newScheduledThreadPool(1, runnable -> {
+            Thread thread = factory.newThread(runnable);
+            stateServiceThread = thread;
+            return thread;
+        });
     }
 
     @Override

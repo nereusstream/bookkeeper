@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-31 当前增量为[fresh Classic 根租约与重用拒绝](#fresh-classic-根租约与重用拒绝)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
+2026-10-31 当前增量为[fresh 执行器的实际终结与严格 flush](#fresh-执行器的实际终结与严格-flush)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -2064,3 +2064,20 @@ Classic preflight/原上下文consume及独立Profile启动在各自实际根上
 其后核对到本轮采用的既有BookieImplTest同样使用全局默认根，将两处配置替换为已有BookKeeperClusterTestCase的临时根工厂，原写入/资源释放断言不变；最终隔离配置下五类29项和Spotless/Checkstyle再次通过。前一轮29项保留原输入，不移绑到这次测试夹具修改；实际生产Java未随这次夹具隔离改变。
 
 同轮还将本已mock Bookie/BookieServer的EmbeddedServer四个装配单测配置到各自TemporaryFolder，并显式mock其存储后端，避免创建无人接管的真实DB/默认目录；原组件顺序及ownership断言保持。该夹具修改后五项单测和style独立通过，生产Java及此前60个相关class逐字节不变，29项整轮与5项补验分别保留原输入/桥接，不把装配mock当真实存储或fresh drain证明。
+
+
+## fresh 执行器的实际终结与严格 flush
+
+2026-10-31在父源码`03835ed598f3e36c1d197beff299e181cbb3586a`上，补显式fresh关闭所需的三个执行器子组件终态。SyncThread的包内fresh工厂仍创建原单个同步执行器，额外记录实际线程身份；其shutdownForFresh保留同一次最终flush与shutdown进度，先等待原执行器实际终结再观察flush结果。调用方中断保留原任务及中断标志，重试不再向已关闭的执行器提交flush；flush或checkpoint IO异常直接返回，后续只在原执行器已终结时由外层关闭worker直接重试严格flush。成功后重复关闭不重做flush。原普通SyncThread的shutdown/requestFlush及吞错兼容行为保留，不把新严格方法接入普通模式。
+
+磁盘监视器及BookieStateManager新增包内严格停止/等待入口和实际自身线程识别。调用原停止请求后等待原执行器真正termination，取消的checkTask或isRunning=false均不能当作排空；中断恢复标志，后续等待同一执行器。自身执行器线程即使被改名也拒绝同步等待。普通停止入口保留原行为和线程命名/调度方式，没有增加线程池或逐entry工作；记录线程身份只为未来fresh owner的自等待检查及实际关闭。
+
+四项新增SyncThread场景覆盖真实执行器内挂起flush、中断后原任务仍在运行且只flush一次，独立storage/checkpoint失败后的显式错误与终结后重试、自线程改名拒绝以及普通实例不能使用fresh入口。四项新增executor场景覆盖状态任务未返回时中断关闭、状态线程自等待、真实周期disk check收到cancel中断但继续挂起时不能宣称drained、monitor自等待及未start关闭；disk check先明确观察到取消，再检查关闭仍等待，避免调度时序充当证据。上述测试检验执行器/结果传播，不用DummyLedgerStorage或Null manager代替真实持久化证明。
+
+8项SyncThread定向、22项Sync/实际Classic组合、12项executor组合各保留原输入；最终四类26项同源码通过，0 failure/error/skipped：SyncThread8、fresh executor4、BookieImpl3、原根/Classic组合11。真实Classic写入及只读重启仍走实际ZK/存储/Journal路径。没有重跑完整SDK、stock矩阵或新TLC，也不把父回执移绑。本轮不发行fresh许可，尚未接稳定外层owner、FreshClassicHandle、初始化逐资源登记、Journal/GC/预分配/文件cache的严格结果和完整实际drain，不能因三个执行器已终结就解锁根或标记整个Bookie终结。
+
+指定规划会话同时冻结首版公开面：FreshClassicHandle为final窄facade，不返回或实现Bookie，不暴露raw storage/state/Journal/allocator/config、watch或惰性iterator。写接口使用原callback及ByteBuf单引用移交，Add不暴露早ACK参数，内部固定false；仅fence返回观察future，取消不撤销实际fence。首版配置要求journalWriteData/journalSyncData为true，gcEntryLogMetadataCacheEnabled为false，cache path未设置或空字符串，busyWaitEnabled为false，并保留默认内存缓存、正常GC及预分配；非法值在任何标记/资源前拒绝，不覆盖调用者配置。外层owner同时至多一个实际关闭worker，caller timeout/interrupt只停止等待，先等初始化真实返回、排空实际请求/全部资源，最后释放根锁，DRAINED还须确认worker退出。以上公开面及配置校验仍未实现，普通权威Classic配置不因此收缩。
+
+三个执行器是完整fresh生命周期的必要依赖，不是完整fresh或生产启动验收。共同owner/Classic导入/replay/flush/异步claim、Main issuer、G1/full-bytes和16步总验收继续OPEN，目标active，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-drain-evidence-03835ed5`保留四阶段输入/源码/日志/XML及32个相关class，最终native输入1202项，外层1229源码加9文档。Spotless/Checkstyle exit0；实际RAT exit1，431个父源码既有未批准路径/字节无变化、无新增，保护PDF预先排除且未读取。四个终态native临时目录的22个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节2,109,462，归档硬链接保留全部数据块，常规数据回收0。未清理其他任务或默认目录。

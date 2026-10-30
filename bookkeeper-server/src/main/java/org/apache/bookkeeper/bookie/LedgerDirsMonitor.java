@@ -53,6 +53,7 @@ class LedgerDirsMonitor {
     private final List<LedgerDirsManager> dirsManagers;
     private final long minUsableSizeForHighPriorityWrites;
     private ScheduledExecutorService executor;
+    private volatile Thread executorThread;
     private ScheduledFuture<?> checkTask;
     private boolean isFirstLoopOfCheckTask = true;
 
@@ -235,11 +236,15 @@ class LedgerDirsMonitor {
 
     // start the daemon for disk monitoring
     public void start() {
-        this.executor = Executors.newSingleThreadScheduledExecutor(
-            new ThreadFactoryBuilder()
+        var factory = new ThreadFactoryBuilder()
                 .setNameFormat("LedgerDirsMonitorThread")
                 .setDaemon(true)
-                .build());
+                .build();
+        this.executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+            Thread thread = factory.newThread(runnable);
+            executorThread = thread;
+            return thread;
+        });
         this.checkTask = this.executor.scheduleAtFixedRate(this::check, interval, interval, TimeUnit.MILLISECONDS);
     }
 
@@ -254,6 +259,28 @@ class LedgerDirsMonitor {
         if (null != executor) {
             executor.shutdown();
         }
+    }
+
+    /** Fresh owner's external worker must observe actual termination, not checkTask cancellation. */
+    void shutdownForFresh() throws InterruptedException {
+        if (Thread.currentThread() == executorThread) {
+            throw new IllegalStateException("Disk monitor cannot wait for its own executor");
+        }
+        shutdown();
+        if (executor != null) {
+            try {
+                while (!executor.awaitTermination(5, TimeUnit.MINUTES)) {
+                    log.info("Fresh disk monitor is still draining its original executor");
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            }
+        }
+    }
+
+    boolean isCurrentExecutorThread() {
+        return Thread.currentThread() == executorThread;
     }
 
     private void checkDirs() throws NoWritableLedgerDirException, DiskErrorException {

@@ -407,3 +407,8 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [fresh Classic 根租约与重用拒绝](local-storage/README.md#fresh-classic-根租约与重用拒绝)：2026-10-31父a9a06410d5上，包内根资源子组件持完整空根集的私有CREATE_NEW标记/FileLock、目录同步及物理身份复核；部分获取保留原owner、候选永不重发，Classic/Profile拒绝该标记与native ABSENT的冲突。最终相关五类29项与style通过，早期夹具错误及默认目录原inode恢复记录由canonical拥有。尚无公开fresh入口/permit或Bookie实际drain；下一步按既定Interleaved限定、稳定外层owner/逐资源登记/可重试实际终态继续，不增加EmbeddedServer fresh。共同owner、Main、G1/full-bytes与完整16步仍OPEN，目标active。
+
+
+2026-10-31指定规划会话进一步冻结fresh公开面和配置（尚未实现）：bookie()返回final FreshClassicHandle，不返回/实现Bookie；只给add/recoveryAdd/force、read/readLAC、explicitLAC、fence与不可变status，不给raw getter/unwrap、watch/惰性iterator或start/shutdown。写沿原callback与ByteBuf单引用移交，Add固定ackBeforeSync=false，仅fence返回观察future；同步拒绝不再回调，异步接纳回调一次，callback异常不泄漏admission。首版journalWriteData/journalSyncData=true、persistent GC map=false、GC cache path未设置或空串（空白也拒绝）、busyWait=false，另保持既定精确Interleaved/单entry-log/default provider与预置现存空根限制，全部在任何Root标记/资源前验证同一冻结配置，不静默覆盖。保留默认GC、内存缓存和预分配。每owner同时至多一个实际关闭worker，初始化真实返回前不并发清理，caller timeout/interrupt不取消worker；旧worker实际退出后才重试，根锁最后释放，DRAINED还需worker已退出，自身/初始化/被等待组件线程不能阻塞等待。普通权威Classic配置不改变。
+
+[fresh 执行器的实际终结与严格 flush](local-storage/README.md#fresh-执行器的实际终结与严格-flush)：2026-10-31父03835ed598上，原SyncThread新增严格fresh关闭/终结后flush重试，磁盘monitor/state manager等待实际termination并拒绝自身线程等待；四类26项及阶段输入由canonical拥有。外层owner/facade、逐资源构造登记、Journal/GC/allocator/文件cache实际关闭及完整fresh仍未接线，不提前解锁或发行NoCluster许可；共同owner/Main/G1/full-bytes和完整目标继续OPEN，目标active。

@@ -1019,3 +1019,6 @@ Segment production candidate 的最低 Gate：
 
 
 [fresh Classic 根租约与重用拒绝](rfcs/unified-wal/implementation/local-storage/README.md#fresh-classic-根租约与重用拒绝)：2026-10-31父a9a06410d5上，完整空根的真实独占租约、持久一次使用标记与物理身份复核已接线到根资源子组件，Classic/Profile冷启动不绕过标记；五类29项及style通过，原失败/默认目录恢复及有限证据由canonical拥有。稳定fresh外层owner/permit/逐资源初始化与实际drain仍未实现，不增加EmbeddedServer fresh。共同owner/Main/G1/full-bytes及完整16步保持OPEN，目标active，OFF/SYSTEM/PARK和disabled保持。
+
+
+[fresh 执行器的实际终结与严格 flush](rfcs/unified-wal/implementation/local-storage/README.md#fresh-执行器的实际终结与严格-flush)：2026-10-31父03835ed598上，Sync严格flush/终结后重试、monitor及state manager的真实executor termination与自等待拒绝已实现；四类26项通过，阶段源码/回执与有限边界由canonical拥有。fresh外层owner/窄facade、逐资源登记及Journal/GC/预分配/文件关闭仍未实现，不发行许可或提前解锁；共同owner/Main/G1/full-bytes及完整目标保持OPEN，目标active，OFF/SYSTEM/PARK与disabled保持。
