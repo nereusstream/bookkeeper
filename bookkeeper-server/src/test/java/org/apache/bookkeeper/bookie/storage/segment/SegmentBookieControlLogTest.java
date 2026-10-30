@@ -6903,7 +6903,7 @@ public class SegmentBookieControlLogTest {
                     assertEquals(1, held.bytes().refCnt());
                     server.eventLoop().submit(() -> server.pipeline().remove(SegmentProfileAddHandler.class)).sync();
                     assertTrue(socket.inactive.await(5, TimeUnit.SECONDS));
-                    assertEquals(0, socket.budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(1, socket.budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
                     assertTrue("Held response must remain charged",
                             socket.budget.used(ProfileReceiveBudget.Lane.DATA) > 0);
                     assertEquals(1, held.bytes().refCnt());
@@ -7104,21 +7104,27 @@ public class SegmentBookieControlLogTest {
         try (IsolatedSegmentStorage storage = storage(config(), 1, 6, 8, 16, 3)) {
             storage.startNew();
             installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
-            ProfileReceiveBudget budget = new ProfileReceiveBudget(409600, 131072, 262144, 1, 2, 1);
+            int baseBytes = SegmentProfileAddHandler.connectionBaseBytes(64, config().maxPendingEntries());
+            int frameBytes = SegmentProfileAddHandler.frameMetadataBytes(SegmentControlCapacity.Layout.hotSpot());
+            // Keep the original 16 KiB payload allowance while paying both connections' known metadata.
+            long dataBytes = 16384L + 2L * (baseBytes - 64 + frameBytes);
+            ProfileReceiveBudget budget = new ProfileReceiveBudget(
+                    131072 + 262144 + dataBytes, 131072, 262144, 1, 2, 1);
             try (ProfileSocket socket = new ProfileSocket(storage, budget)) {
                 byte[] full = ProfileFrameCodec.encode(ProfileFrame.request(ProfileOperation.ADD_NORMAL, 2,
                         profileAddBody(context(), 1, (byte) 5, entry(context(), 1, -1, 1024, (byte) 0, 1024))));
                 socket.client.writeAndFlush(Unpooled.wrappedBuffer(Arrays.copyOf(full, 37))).sync();
                 socket.accepted.get().eventLoop().submit(() -> { }).sync();
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                while (budget.used(ProfileReceiveBudget.Lane.DATA) < full.length + 64) {
+                while (budget.used(ProfileReceiveBudget.Lane.DATA) < baseBytes + frameBytes + full.length) {
                     assertTrue(System.nanoTime() < deadline);
                     LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
                 }
                 Channel dataServer = socket.accepted.get();
                 // Include actual TLS buffers, then hold backing capacity so the second full body cannot fit.
                 ByteBuf pressure = dataServer.eventLoop().submit(() -> dataServer.alloc().heapBuffer(
-                        Math.toIntExact(16384 - budget.used(ProfileReceiveBudget.Lane.DATA) - 64 - full.length + 1)))
+                        Math.toIntExact(dataBytes - budget.used(ProfileReceiveBudget.Lane.DATA)
+                                - baseBytes - frameBytes - full.length + 1)))
                         .sync().getNow();
                 try {
                     Channel refusedData = socket.peer(true);
@@ -7216,7 +7222,7 @@ public class SegmentBookieControlLogTest {
                 assertEquals(0, io.forces);
                 assertNull(socket.responses.poll(100, TimeUnit.MILLISECONDS));
                 socket.disconnect();
-                assertEquals(0, socket.budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
+                assertEquals(1, socket.budget.usedConnections(ProfileReceiveBudget.Lane.CONTROL));
                 assertTrue("Submitted control copies must remain charged", socket.budget.used(
                         ProfileReceiveBudget.Lane.CONTROL) > 64);
                 assertFalse(storage.close(Duration.ofMillis(5)));
@@ -7342,8 +7348,8 @@ public class SegmentBookieControlLogTest {
             try (SegmentEntryInputs.Input restored = inputs.acquire(context(), 36, channel.alloc())) {
                 assertNotNull(restored);
                 channel.finishAndReleaseAll();
-                assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
-                assertEquals(36, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                assertEquals(1, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+                assertEquals(100, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
                 assertNull(inputs.acquire(context(), 36, channel.alloc()));
                 assertEquals(36, inputs.usedBytes());
             }
@@ -7352,6 +7358,7 @@ public class SegmentBookieControlLogTest {
         }
         assertEquals(0, inputs.usedBytes());
         assertEquals(0, budget.used(ProfileReceiveBudget.Lane.UNCLASSIFIED));
+        assertEquals(0, budget.usedConnections(ProfileReceiveBudget.Lane.UNCLASSIFIED));
     }
 
     @Test
@@ -7410,12 +7417,16 @@ public class SegmentBookieControlLogTest {
                             ? ((SegmentBookieControlLog.Admission) admissionField.get(command)).context()
                             : ((SegmentBookieControlLog.RecoveryAdmission) admissionField.get(command)).context();
                     int workspace = operation == ProfileOperation.ADD_NORMAL ? 144 : 244;
-                    assertEquals(64 + 36 + body.length + workspace + 1060,
+                    int baseBytes = SegmentProfileAddHandler.connectionBaseBytes(64, config.maxPendingEntries());
+                    var layout = SegmentControlCapacity.Layout.hotSpot();
+                    assertEquals(baseBytes + 36 + body.length + workspace + 1060
+                            + SegmentProfileAddHandler.frameMetadataBytes(layout)
+                            + SegmentProfileAddHandler.pendingMetadataBytes(layout),
                             socket.budget.used(ProfileReceiveBudget.Lane.DATA));
                     assertEquals(0, io.writes);
                     socket.disconnect();
-                    assertEquals(0, socket.budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
-                    assertEquals(1060, socket.budget.used(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(1, socket.budget.usedConnections(ProfileReceiveBudget.Lane.DATA));
+                    assertEquals(baseBytes + 1060, socket.budget.used(ProfileReceiveBudget.Lane.DATA));
                     assertEquals(1060, execution.inputs().usedBytes());
                     releaseOwner.countDown();
                     assertTrue(forcing.await(5, TimeUnit.SECONDS));

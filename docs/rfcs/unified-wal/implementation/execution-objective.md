@@ -2,13 +2,15 @@
 
 SDK 入口决策：用户2026-10-25已选择显式 Profile create/open，先接 CLOSED 只读 open 与实际排空；不再为同一入口选择重复提问。normal writer create 必须有本次原子 fresh origin，不能从已有 READY/OPEN 重建 P=-1 writer。
 
-Main 首版部署决策：用户2026-10-27已选择先限已有旧服务的受控部署；要求已有 commissioned requirements、真实旧服务 episode 及明确外部信任输入。现有 properties 中的 DRAINED/FORMAT_READY 或 mTLS 成功不自行构成 old-service/Unix access/key/policy authority；具体 issuer 与受保护输入装载仍须实现并真实验证，不伪造从未存在的旧 scope。该选择冻结首版范围，不代表 Main 已交付。
+Main 首版部署决策：用户2026-10-27已选择先限已有旧服务的受控部署；要求已有 commissioned requirements、真实旧服务 episode 及明确外部信任输入。现有 properties 中的 DRAINED/FORMAT_READY 或 mTLS 成功不自行构成 old-service/Unix access/key/policy authority；具体 issuer 与受保护输入装载仍须实现并真实验证，不伪造从未存在的旧 scope。该选择冻结首版范围，不代表 Main 已交付。 规划会话2026-10-30已裁定固定受控launcher持有真实旧进程/控制通道/registration episode，实际关闭与进程终结后发行DRAINED，由固定受保护文件loader沿原owned-resource生命周期接入Main；commissioned requirements、输入信任根、AES key和exact-scope policy均来自外部部署，不从properties或测试nonce生成。旧Classic scope须有真实commissioning绑定，root集合按实际引擎/设备表达；实现与真实Main进程验收仍OPEN。
 
-多Arena首版决策：用户2026-10-28已选择固定Arena/device清单及显式shard→Arena映射，写入受保护manifest；同一storage incarnation内不增删Arena、不重新分配shard，变更走新incarnation bootstrap。Bookie级route/fence/tombstone保持唯一持久owner，不从可读设备子集重算映射，不启用跨Arena搬迁。当前代码仍为单Arena；按此边界继续步骤10，不能把决策冻结当实现或验收完成。
+多Arena首版决策：用户2026-10-28已选择固定Arena/device清单及显式shard→Arena映射，写入受保护manifest；同一storage incarnation内不增删Arena、不重新分配shard，变更走新incarnation bootstrap。Bookie级route/fence/tombstone保持唯一持久owner，不从可读设备子集重算映射，不启用跨Arena搬迁。当前可写服务图仍为单Arena；按此边界继续步骤10，不能把决策冻结当实现或验收完成。 规划会话2026-10-30已冻结显式v2身份页绑定完整manifest及文件所属scope；Bookie控制根独立声明，每Arena保持自己的control/index。v1字节/单Arena语义保持，不占保留尾部隐式升级；v1进入多Arena走新incarnation bootstrap。初建先保存commissioned完整manifest，正常restart缺任一required成员则整Bookie不可写；固定清单、必要DATA/索引恢复、维护和全局预算仍须接线验收。
+
+共同route claim裁决：规划会话2026-10-30确认RFC-0001 §7.1完整有效。复用唯一Bookie控制日志的持久/顺序apply/checkpoint恢复，Classic首创建先durable claim，Profile claim与INSTALL原子绑定；全部legacy handle/cache/replay/read/LAC/fence/force入口在Classic副作用前检查。PROFILE/TOMBSTONED的legacy请求沿已有EUA拒绝；纯Classic默认保持，启用标记不能被OFF绕过，首创建之外不增加逐entry fsync/MetadataStore。独立cohort不变，不新增常驻legacy listener或双引擎配置；实际共同owner及入口、真实故障/重启/旧wire和成本验收仍OPEN。
 
 规划裁决方式：用户2026-10-28明确授权，后续规划判断和取舍交由「Unified WAL 总体规划与实施检查」会话（01a0c84a-11d9-7951-80a4-8f2a6933c139）直接完成，不再要求用户人为确认。该会话保持只读规划/检查，主实施会话负责接线、验证、同步文档和本地提交；已冻结的选择不重复提问，不把此授权扩展为push、发布或生产部署。
 
-运行方式：按用户2026-10-25最新授权，本会话作为唯一实施主会话，可以使用多 agent 处理职责边界明确的子任务，由主会话统一变更集、验证和本地提交。模型与推理档按用户2026-10-25最新指定，主会话及后续agent统一使用 `gpt-6.1-sol` / `xhigh`（极高）；新agent显式指定该配置，不恢复旧模型agent继续执行。下文历史迁移记录中的旧型号及禁止子agent安排保留为历史。子agent应明确文件或只读职责边界，保护彼此改动；不通过另一CLI启动第二个编码agent，不另开独立实施会话。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 继续负责总体规划与只读检查。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
+运行方式：按当前持续目标的执行约束，本会话是唯一实施入口，使用 `gpt-6.1-sol` / `xhigh`（极高）；不启动子agent、explorer/worker、第二编码CLI或另一实施会话，不恢复旧实施会话编码。2026-10-25的多agent授权保留为历史，当前执行按本条收束。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 仅做总体规划与只读检查，其用户已另行指定 `gpt-6-astra` / `xhigh`；规划裁决不构成第二实施入口。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
 
 SDK接入方式：按用户2026-10-25答复，首版采用显式 Profile create/open，先接CLOSED只读open与实际排空。默认Classic行为和缺少可信Profile环境时的拒绝保持；这不授予same-ledger writer takeover。继续实现public create时，必须持有自身取得的原子fresh reservation/lifecycle birth，不把control的matching READY续接当作新writer发行。
 
@@ -385,3 +387,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 [启动前沿用既有磁盘阈值](startup-readiness/README.md#启动前沿用既有磁盘阈值)：2026-10-28父9cfe97c910上，显式Profile工厂冻结原DiskChecker hard/warn配置，可信root核对后、storage打开前检查已存在目录；hard拒绝、warn仅告警。只读入口避免恢复时创建缺失目录，Classic checkDir顺序保持；两条真实RED及最终9项定向通过，阶段源码/输入由canonical拥有。持续filesystem/维护预算、B17/B11、多Arena、Main issuer与完整16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。
+
+
+[固定 Arena manifest 与显式 v2 身份基础](local-storage/README.md#固定-arena-manifest-与显式-v2-身份基础)：2026-10-30父5a965e38d5上交付步骤10的有界完整拓扑输入与v2文件角色/共同identity，保留v1字节及新incarnation转换边界，实际service仍拒绝部分v2图。格式51、四类596原5失败及父版本复现、13补验、最终8项FIFO拒绝、独立parser/class和style/RAT433由canonical记录，不能改称最终整轮全绿。继续接唯一Bookie owner的严格成员检查、每Arena files/control/index与全局预算、实际写读/恢复/维护，再按已裁定Main launcher/loader和共同route入口实施；不重复询问设计选择。完整目标active，生产Gate及其余16步未提升，OFF/SYSTEM/PARK和disabled保持。

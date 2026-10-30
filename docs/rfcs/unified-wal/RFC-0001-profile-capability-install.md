@@ -1,3 +1,21 @@
+<!--
+Licensed to the Apache Software Foundation (ASF) under one
+or more contributor license agreements.  See the NOTICE file
+distributed with this work for additional information
+regarding copyright ownership.  The ASF licenses this file
+to you under the Apache License, Version 2.0 (the
+"License"); you may not use this file except in compliance
+with the License.  You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+
 # RFC-0001：Profile、Capability 与显式安装协议
 
 > 状态：**Proposed / P0 Prerequisite**<br>
@@ -483,6 +501,8 @@ profile install:
 ```
 
 normal Add 与 legacy `RECOVERY_ADD` 变体都必须经过相同 routing gate。restart 必须在注册 writable 前恢复 authoritative route。legacy 抢先 claim 成功时，后续 Profile install 只能冲突失败，不能升级或混用。
+
+2026-10-30规划裁决：共同slot由现有Bookie control持久owner统一拥有并独立于Segment DATA装配；首创建以外只查本地已应用状态。HandleFactory缓存命中、只读入口、Journal replay及read/LAC/fence/force同样不得绕过，已有Classic数据须在独占启动期依据完整存储/journal纳入，authority缺失或冲突阻止writable。PROFILE/TOMBSTONED上的legacy请求使用已有EUA，Profile仍保留具体状态；纯Classic默认保持，持久启用标记不能被OFF绕过。首版继续独立cohort，不以此新增常驻legacy listener或生产双引擎模式。实际入口接线、共同竞争/UNKNOWN/重启及成本验收尚OPEN，详见[当前接线缺口](implementation/profile-wire/README.md#classic-与-profile-的共同-route-claim-接线缺口)。
 
 ### 7.2 幂等与冲突
 

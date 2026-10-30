@@ -2716,7 +2716,11 @@ Corretto21.0.10下，最终run `/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T
 
 当前[EmbeddedServer显式Profile分支](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/server/EmbeddedServer.java)在Classic资源构造前选择独立Profile lifecycle，并拒绝混入Classic资源；该模式没有Classic Bookie/ledger storage服务栈。原[BookieImpl](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/BookieImpl.java)的normal/recovery Add共同进入getLedgerForEntry，再调用原HandleFactory；[HandleFactoryImpl](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/HandleFactoryImpl.java)仍按原Classic ledger storage创建/缓存descriptor、校验master key，未连接Profile本地控制owner。Profile侧[SegmentBookieControlLog](../../../../../bookkeeper-server/src/main/java/org/apache/bookkeeper/bookie/storage/segment/SegmentBookieControlLog.java)持有自己的ledger与tombstone持久状态，但这不是与上述Classic入口共享的原子claim。默认Classic行为保持。
 
-这是完整合同的接线缺口，不是已经复现的“当前独立Profile服务接受旧Classic写入”故障。给独立TLS端口发送旧wire，或者证明Profile分支没有Classic对象，都不能替代同一slot的竞争、restart恢复及语义拒绝验收；也不能为补一个错误码而私自新增legacy listener或同进程双引擎模式。首版是否继续保持独立cohort，或在本阶段接共同route/legacy入口，涉及公共服务和部署语义，已依AGENTS.md §1询问；答复前不新增该接口。无论首版选择如何，共同claim的完整合同都不能从16步/G1清单中自动删除。
+这是完整合同的接线缺口，不是已经复现的“当前独立Profile服务接受旧Classic写入”故障。给独立TLS端口发送旧wire，或者证明Profile分支没有Classic对象，都不能替代同一slot的竞争、restart恢复及语义拒绝验收。
+
+2026-10-30指定规划会话已裁定：继续独立cohort，在完整16步内实际接共同Bookie持久owner；不新增常驻legacy listener或生产双引擎模式。共同owner必须可独立于Segment DATA装配，复用原Bookie control的durability、顺序apply、checkpoint和恢复，不建两份异步同步的权威map。Classic首次创建先durable/apply CLASSIC claim，Profile claim与INSTALL原子绑定，UNKNOWN不释放slot；后续Add查本地已应用状态。HandleFactory的可写/只读及缓存命中、Journal replay和全部read/LAC/fence/force入口都须在descriptor/master-key/payload副作用前检查。PROFILE/TOMBSTONED的legacy访问使用已有EUA，Profile保留完整状态；纯Classic默认路径保持，已有持久启用标记不能被配置OFF绕过。claim需有界且不能阻塞Netty event loop或自身owner。已有Classic数据的首次纳入须在独占启动阶段从完整存储/journal事实建立claims；不完整或与PROFILE/TOMBSTONED冲突则阻止writable。
+
+这些裁决尚未接线。后续必须用真实BookieImpl与Profile control共享owner验证双向竞争、同批/UNKNOWN/重启、全部legacy入口和旧wire返回、实际排空及首创建/稳定Add成本；既有独立端口拒绝证据仍保持原范围，共同claim不从16步/G1清单删除。
 
 本次只有源码与合同复核，没有执行新的网络测试、RAT或模型，也没有修改生产代码。既有实验wire值、旧PASS及其source/run绑定保持，完整G1仍为BLOCKED_UNVERIFIED；Main issuer/受保护装载、full-bytes/B11、其余16步及生产Gate继续OPEN，目标active，OFF/SYSTEM/PARK与disabled边界保持。
 

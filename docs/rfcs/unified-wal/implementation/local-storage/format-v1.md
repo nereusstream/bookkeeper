@@ -26,6 +26,25 @@
 
 DATA fileId 从0递增；superblock A/B 为 -1/-2，Bookie/Arena control 为 -3/-4；Arena checkpoint A/B为-5/-6，Bookie checkpoint A/B为-7/-8。身份页的generation仍为初始值，动态checkpoint引用位于独立发布页，不auto-restamp身份页，也不把完整身份块解释为startup ready。
 
+## 多 Arena 的显式 v2 身份基础
+
+2026-10-30按指定规划会话裁决新增`SegmentArenaManifest`和v2身份页编码/校验；原三参数`SegmentFileHeader`仍产生上述逐字节不变的v1。当前仅完成固定拓扑的文件输入与身份基础，实际storage/service仍拒绝v2图，不能据此启动部分Arena或发布readiness。多Arena运行、唯一Bookie控制owner、全部成员恢复、索引/coverage及维护接线仍OPEN。
+
+manifest采用big-endian的`UWAMAN01`、schema u32=1、incarnation[16]、BookieId、Arena数量、独立Bookie control root、全局shard数量、按UUID字符串升序的全部Arena及逐shard的Arena索引。文本为u32长度加严格UTF-8；BookieId最多255 bytes，root最多4096 bytes，Arena和shard各1～64，单个输入最多1 MiB。每Arena记录UUID、绝对规范root、DATA文件数及每文件容量，root之间及与control root不得嵌套/重叠，全部容量用checked arithmetic。映射明确保留每个全局shard，不依赖worker或当前可读设备。manifest identity为`SHA-256(ASCII("BookKeeper/SegmentArenaManifest/v1\0") || 完整编码)`，不含可调worker/CPU/NUMA/准入额度或运行期checkpoint，也不含反向引用该digest的身份页。
+
+`writeNew`在已存在的canonical control root内以CREATE_NEW/NOFOLLOW、0600创建`arena-manifest`，处理完整短写、file force及目录同步；失败保留候选，不覆盖/截断采用。`read`先核对路径无symlink、文件private权限和有界长度，再与外部commissioned identity核对digest，最后严格解析及重编码比对、核对存放位置。此reader不发行commissioning、UID/旧服务/根访问或durability证明，不代替Main loader；完整初建还须持久创建control root、绑定同一操作进度、创建并验证全部required成员。正常restart不得把缺失成员补成空Arena。
+
+v2仍为4096 bytes，offset 8显式version=2，offset112的mandatory feature为3（shared-block及共同拓扑）。原Bookie/incarnation/fileId/generation/alignment字段沿用；Arena文件保留自身UUID和持久DATA几何。Bookie scope使用全零Arena UUID、DATA文件数/容量为0，由manifest明确的control root绑定整体，不借用某个Arena表示Bookie。superblock A/B可分别属于Bookie或Arena；fileId -3/-7/-8只属于Bookie，DATA及-4/-5/-6只属于Arena。BookieId后到384仍为零，新增区如下：
+
+| Offset | v2字段 |
+| --- | --- |
+| 384 / 392 | `UWTOP001` u64 / manifest generation u64=1 |
+| 400 | manifest identity[32] |
+| 432 / 436 / 440 | Arena数量u32 / role u32（1 Bookie、2 Arena）/ Arena index i32（Bookie为-1） |
+| 444～4092 / 4092 | zero reserved / CRC32C `[0,4092)` |
+
+v2校验同时检查完整manifest、所属root/config、文件角色及成员身份；修改mapping、布局、root或成员会改变共同身份，重算页CRC不使其匹配旧manifest。v1/v2互拒，v2不混入v1成员；不提供same-incarnation转换或header重盖章入口。需要搬运数据仍走新scope verified export/rebuild。此格式基础不提供stock Classic binary fence，现有目录/credential隔离合同保持。
+
 ## DATA batch
 
 受控物理路径固定 `logicalShard = ledgerId % logicalShards`、`fileIndex = logicalShard % dataFiles`；逻辑 streamId 等于 shard。受控normal准入和物理热候选在DATA预留前核对每条record的路由；点读与重启扫描也拒绝错shard记录。底层framing writer和显式原始文件写入仍可构造格式正确但路由错误的实验字节，它们不授予服务权限。每批128字节 header、1～256个 record、zero padding、32字节 footer，总长4096对齐，最多2 MiB，不能跨文件容量。默认新写 payload 上限 N=1 MiB；它是配置、普通请求、恢复请求、读取预算和 segment record 上限的最小值。普通/恢复 wire payload 上限分别为5,242,712/5,242,668，历史44字节差集全部拒绝。读取预算预留128字节 envelope；步骤11必须证明真实 adapter 的 envelope 能放入预算后才能启用。收紧新写配置不收紧已有 v1 文件的1 MiB读取能力。

@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-25 当前增量为[Bookie checkpoint 的 typed 按需编码与 100k 驻留](#bookie-checkpoint-的-typed-按需编码与-100k-驻留)。下文早期步骤记录及各阶段回执保留原范围；当前仍采用健康 CLOSED 管理会话恢复，同 incarnation 未关闭会话的恢复、多 Arena 与完整 full-bytes 尚未完成。
+2026-10-30 当前增量为[固定 Arena manifest 与显式 v2 身份基础](#固定-arena-manifest-与显式-v2-身份基础)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -1952,3 +1952,24 @@ JDK21压缩指针、JDK21宽指针、JDK21的256-byte对象对齐及JDK17压缩�
 
 
 [启动前沿用既有磁盘阈值](../startup-readiness/README.md#启动前沿用既有磁盘阈值)：2026-10-28父9cfe97c910上，显式Profile工厂冻结原DiskChecker hard/warn配置，可信root核对后、storage打开前检查已存在目录；hard拒绝、warn仅告警。只读入口避免恢复时创建缺失目录，Classic checkDir顺序保持；两条真实RED及最终9项定向通过，阶段源码/输入由canonical拥有。持续filesystem/维护预算、B17/B11、多Arena、Main issuer与完整16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。
+
+
+## 固定 Arena manifest 与显式 v2 身份基础
+
+2026-10-30在父源码`5a965e38d5272cd5b89b672fee3f53564512eb2d`上，按指定规划会话的固定拓扑与v2裁决新增包内`SegmentArenaManifest`及`SegmentFileHeader`的显式v2编码/校验。manifest完整保存Bookie/incarnation、独立control root、全部Arena UUID/root/持久DATA几何与非平凡全局shard映射；确定性编码、域分隔SHA-256、有限数量/文本/文件长度、checked容量及严格UTF-8，详见[原格式文档的v2小节](format-v1.md#多-arena-的显式-v2-身份基础)。CPU/worker/NUMA、准入额度和运行期checkpoint不进入持久拓扑。
+
+本地manifest文件CREATE_NEW/NOFOLLOW、0600、完整write/force/目录同步，失败保留候选且不自动覆盖。读取不创建目录，先检查canonical路径、private文件和大小，再核对外部commissioned digest及完整重编码/位置。该输入层不生产commissioning、旧服务/UID隔离、Main key/policy或readiness authority；完整初建的根创建、同操作进度及全部required成员尚待接线。不能把digest自报、当前可读子集或只有一个身份页当作完整scope。
+
+v2页同时绑定共同manifest与文件角色。Bookie控制根独立，身份页Arena UUID/DATA几何为零；Arena文件保留自身UUID/几何及成员索引。superblock角色、Bookie/Arena control/checkpoint和DATA fileId显式核对，错root/config、成员、映射、角色和generation均拒绝，重算CRC不获得接受。v1构造器/原字节和单Arena语义保留，双方版本互拒。startupDeviceManifestIdentity在v2输入下返回共同manifest identity，不取先读到的一个Arena；实际IsolatedSegmentStorage仍在构造期拒绝manifest-bound图，未连接多Arena，不打开部分图或发布注册。
+
+验证复用原Maven/native harness：`bash scripts/unified-wal/run-local-storage-tests.sh SegmentArenaManifestTest,IsolatedSegmentConfigTest,SegmentBatchFormatTest`的三类51项全部通过；随后四类596项整轮exit1，Arena control43、initial/install23、真实SDK246全部通过，Bookie control284中279通过、5项旧预算断言失败。原整轮失败保留。独立编译父5a965e38的原Header/Storage、使用原测试和原budget/handler，五方法逐一复现同位置和数值的失败；不是v2新增回归。
+
+只调整这五方法：保留已拥有backing/workspace时的实际slot/base，原source allocator的64+36费用保持到真实Input归还；socket source计入已有连接/frame/pending元数据；半frame压力夹具只加付两连接已知元数据，保留原16 KiB payload余量。未改生产quota、drain或durability。移除五方法后，原测试文件其他字节完全相同。8项manifest/v2及上述5方法共13项定向补验全部通过，含matching-digest恶意计数/UTF-8/容量溢出、force失败候选不覆盖、原source复制/拒绝/断连及保留输出/控制force窗口。最后在打开文件前增加普通文件检查，避免FIFO阻塞；同一manifest类8项再次通过，含真实FIFO拒绝与有界测试超时。阶段合计647个不同方法有通过证据，**没有把原失败整轮改称最终全量通过**。
+
+额外两个独立Java probe阶段均实际exit0：父v1 parser仅重命名类型后编译，接受当前v1全部相同字节、拒绝v2，当前parser反向拒绝并核对成员，实际partial graph构造拒绝且无Arena根；最终加载class路径及66个相关class已归档。独立Python struct和逐位CRC32C解析完整manifest、两个Arena和Bookie页，核对SHA域、[1,0,1,0]映射、role及零填充。固定v1 DATA身份页SHA-256为`538994a190bf5e4956eb3130bbea2166bc474317dcd10d974297d43a3195f533`；格式回归与最终Header在同JDK去除debug属性后class完全相同，Storage源码全同，单列的新manifest错误解析与五测试修正各有最终验证。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/arena-manifest-evidence-5a965e38`保留初期和最终各自源码/输入/命令、原日志/XML、父反例、独立parser/probe和class；native清单1181项，外层声明1208项，不把额外声明混称native自身清单。Spotless/Checkstyle exit0；实际RAT exit1，当前修改的RFC-0001补齐ASF声明后433个父源码既有路径/字节仍未批准，无新增，不称CI全绿。原模型没有修改或重跑；v2拓扑尚无完整模型或多Arena运行证据。
+
+五个本轮native临时运行根在终态后，经原始26文件的SHA/uid/gid/mode、相同inode硬链接归档和两次无reader检查后移除，逻辑路径数据7,264,618 bytes；证据硬链接继续持有数据块，常规文件数据回收0 bytes。原失败、输入、日志/XML、源码/class及独立probe均保留，未清理其他任务或受保护PDF。
+
+下一步仍须接唯一Bookie control的严格manifest成员scope、每Arena files/control/index与全局shard owner/预算，再做真实双Arena写读、fence/tombstone、重启/索引丢失重建、回收、缺设备/互换/初建中断验收；初建与restart不得互相补造缺项。Main受控issuer/loader及共同Classic/Profile route claim已裁定但尚未实现。本项是步骤10的必要格式依赖，不是多Arena完成；全16步目标active，B11/B17、完整G1和生产Gate继续OPEN，OFF/SYSTEM/PARK及disabled保持，Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED。

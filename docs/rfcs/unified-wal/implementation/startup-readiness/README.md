@@ -599,3 +599,14 @@ DiskChecker新增只读checkExistingDir，先检查目录/读写访问再检查�
 用户2026-10-28已同时冻结后续多Arena的固定清单/显式shard→Arena映射及新incarnation变更边界，已同步RFC-0003 §4、实施清单步骤10与execution-objective；当前代码仍只允许单Arena，该决策未作为多Arena运行时验收。
 
 独立RAT实际exit1，仍为父9cfe97c910既有434个未批准路径，路径集合及bytes全同、无新增，不称CI全绿。最终1203项非本轮修改的声明输入与父Git blob相同，两个语义RED的方法/测试字节及原Classic权限判断与创建顺序均已核对；60份相关编译class留档。六个终结run的25个文件经逐SHA/uid/gid/mode、同inode硬链接及两次无reader核对后移除原临时根，逻辑路径7403401 bytes；失败诊断、输入、日志与XML全部保留，常规文件数据块回收0 bytes。
+
+
+## Main 的受控发行者与受保护装载裁决
+
+2026-10-30，指定规划会话在`5a965e38d5272cd5b89b672fee3f53564512eb2d`只读核对后裁定：首版采用固定受控旧服务launcher发行证明、固定受保护文件loader装载，沿既有withOwnedResources → experimentalProfileService → lifecycle接入Main。此处记录实施边界，尚无新的Main实现或PASS。
+
+launcher持有旧服务运行时建立的进程、控制通道及registration episode，只有停止准入、实际关闭、原进程终结、原registration退出且自动重启受控后才发行DRAINED；不发行DECOMMISSIONED。证明绑定旧Bookie、真实UID、commissioned旧存储scope、根和registration birth/session，并绑定目标Bookie/incarnation、commission generation、全部device/Arena/shard映射及policy/key身份。Classic没有Profile incarnation，不能把随机启动nonce替代持久scope，也不把备用ARENA guard根包装成旧Classic存储。
+
+issuer UID、受保护输入目录及metadata信任根由外部部署指定，不能从待验文件自报。manifest、AES key、exact-scope policy有界装载并检查权限、父目录、链接/替换与完整内容绑定；properties只提供引用和运行参数。真实commissioned requirements及assignment只读验证，不在Main启动中补造。首次采用及重试绑定同一操作，健康重启验证原绑定；失败沿原owner等待实际drain，未终结保留handle，不自动恢复旧writer。
+
+最低真实验收须由旧Classic进程完成SDK写读及真实关闭/终结后，启动真实Main进程装载受保护输入，完成Profile注册、SDK写读和健康重启，并覆盖仍存活/异常退出、换target/root、旧身份可修改、错AES key、缺commissioned输入、路径替换及未终结startup/registration关闭。多Arena及按实际引擎表达root集合仍需接入；现有typed fallback输入、访问探针JSON或单Arenafixture成功不能代替该producer/loader。Main可部署性、完整startup与生产Gate仍OPEN。

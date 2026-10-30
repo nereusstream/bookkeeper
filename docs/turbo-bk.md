@@ -1004,3 +1004,6 @@ Segment production candidate 的最低 Gate：
 
 
 [启动前沿用既有磁盘阈值](rfcs/unified-wal/implementation/startup-readiness/README.md#启动前沿用既有磁盘阈值)：2026-10-28父9cfe97c910上，显式Profile工厂冻结原DiskChecker hard/warn配置，可信root核对后、storage打开前检查已存在目录；hard拒绝、warn仅告警。只读入口避免恢复时创建缺失目录，Classic checkDir顺序保持；两条真实RED及最终9项定向通过，阶段源码/输入由canonical拥有。持续filesystem/维护预算、B17/B11、多Arena、Main issuer与完整16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。
+
+
+[固定 Arena manifest 与显式 v2 身份基础](rfcs/unified-wal/implementation/local-storage/README.md#固定-arena-manifest-与显式-v2-身份基础)：2026-10-30按指定规划裁决接完整固定拓扑、独立Bookie控制根及v2角色/共同identity，v1字节保持；实际多Arena运行/恢复/维护尚未接线，单Arena服务显式拒绝v2部分图。源码、原失败/父反例、定向补验和独立parser证据由canonical拥有，style通过、RAT433既有路径无新增，不称CI全绿。Main受控issuer/loader和共同Classic/Profile route claim已裁定待实现，完整16步目标active，生产Gate OPEN，OFF/SYSTEM/PARK及disabled保持。

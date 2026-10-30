@@ -280,6 +280,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         this.recoveryBudget = recoveryBudget;
         this.config = Objects.requireNonNull(config, "config");
         this.identity = Objects.requireNonNull(identity, "identity");
+        if (identity.manifest() != null) {
+            throw new IllegalArgumentException("Manifest-bound storage needs the complete multi-Arena graph");
+        }
         this.key = Objects.requireNonNull(key, "key");
         this.validator = Objects.requireNonNull(validator, "validator");
         this.executionSettings = Objects.requireNonNull(executionSettings, "executionSettings");
@@ -723,6 +726,11 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     /** Expected full single-Arena manifest identity, independent of a readable filesystem subset. */
     static ManifestIdentity startupDeviceManifestIdentity(
             IsolatedSegmentConfig config, SegmentFileHeader identity) {
+        if (identity.manifest() != null) {
+            // This identity declares every member and shard, never a digest of whichever device opened first.
+            identity.encode(config, identity.arenaId().equals(new UUID(0, 0)) ? -3 : -1);
+            return identity.manifest().identity();
+        }
         try {
             var hash = java.security.MessageDigest.getInstance("SHA-256");
             hash.update("BookKeeper/IsolatedStartupDevice/v1\0".getBytes(StandardCharsets.US_ASCII));
