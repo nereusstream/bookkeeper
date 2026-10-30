@@ -55,6 +55,25 @@ public interface RegistrationManager extends AutoCloseable {
      */
     String getClusterInstanceId() throws BookieException;
 
+    /** Cold authoritative query at this backend's fixed Bookie binding location, including when Segment is OFF. */
+    default BookieRouteBinding.ReadResult readBookieRouteBinding(BookieId bookieId) {
+        return BookieRouteBinding.ReadResult.status(BookieRouteBinding.ReadStatus.UNSUPPORTED,
+                "Registration backend does not implement common route binding reads");
+    }
+
+    /** Controlled create-only commissioning; it never changes the original Cookie or an existing binding. */
+    default BookieRouteBinding.WriteResult prepareBookieRouteBinding(BookieRouteBinding binding) {
+        return BookieRouteBinding.WriteResult.status(BookieRouteBinding.WriteStatus.UNSUPPORTED,
+                "Registration backend does not implement common route commissioning");
+    }
+
+    /** Conditional completion after the actual Classic import/replay/flush and retained durable control seal. */
+    default BookieRouteBinding.WriteResult completeBookieRouteBinding(BookieRouteBinding.Observation expected,
+            BookieRouteBinding.BootstrapSeal seal) {
+        return BookieRouteBinding.WriteResult.status(BookieRouteBinding.WriteStatus.UNSUPPORTED,
+                "Registration backend does not implement common route completion");
+    }
+
     /**
      * Registering the bookie server as <i>bookieId</i>.
      *

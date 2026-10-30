@@ -29,6 +29,7 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.Lists;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -47,6 +48,7 @@ import org.apache.bookkeeper.client.BKException.BKInterruptedException;
 import org.apache.bookkeeper.client.BKException.MetaStoreException;
 import org.apache.bookkeeper.common.concurrent.FutureUtils;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.profile.ZKBookieRouteBindingStore;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManagerFactory;
 import org.apache.bookkeeper.meta.LayoutManager;
 import org.apache.bookkeeper.meta.LedgerManagerFactory;
@@ -108,6 +110,7 @@ public class ZKRegistrationManager implements RegistrationManager {
     protected final String bookieReadonlyRegistrationPath;
     // session timeout in milliseconds
     private final int zkTimeoutMs;
+    private final ZKBookieRouteBindingStore routeBindings;
     private final List<RegistrationListener> listeners = new ArrayList<>();
 
     public ZKRegistrationManager(ServerConfiguration conf,
@@ -126,6 +129,8 @@ public class ZKRegistrationManager implements RegistrationManager {
         this.bookieRegistrationPath = ledgersRootPath + "/" + AVAILABLE_NODE;
         this.bookieReadonlyRegistrationPath = this.bookieRegistrationPath + "/" + READONLY;
         this.zkTimeoutMs = conf.getZkTimeout();
+        this.routeBindings = new ZKBookieRouteBindingStore(zk, ledgersRootPath, zkAcls,
+                Duration.ofMillis(Math.min(60000, zkTimeoutMs)));
 
         this.layoutManager = new ZkLayoutManager(
             zk,
@@ -158,6 +163,22 @@ public class ZKRegistrationManager implements RegistrationManager {
      */
     public String getCookiePath(BookieId bookieId) {
         return this.cookiePath + "/" + bookieId;
+    }
+
+    @Override
+    public BookieRouteBinding.ReadResult readBookieRouteBinding(BookieId bookieId) {
+        return routeBindings.read(bookieId);
+    }
+
+    @Override
+    public BookieRouteBinding.WriteResult prepareBookieRouteBinding(BookieRouteBinding binding) {
+        return routeBindings.prepare(binding);
+    }
+
+    @Override
+    public BookieRouteBinding.WriteResult completeBookieRouteBinding(BookieRouteBinding.Observation expected,
+            BookieRouteBinding.BootstrapSeal seal) {
+        return routeBindings.complete(expected, seal);
     }
 
     //

@@ -48,11 +48,11 @@ import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileService;
 import org.apache.bookkeeper.common.allocator.ByteBufAllocatorWithOomHandler;
 import org.apache.bookkeeper.common.component.LifecycleComponentStack;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.BookieRouteBinding;
 import org.apache.bookkeeper.discover.RegistrationManager;
 import org.apache.bookkeeper.meta.LedgerManagerFactory;
 import org.apache.bookkeeper.meta.NullMetadataBookieDriver;
 import org.apache.bookkeeper.meta.NullMetadataBookieDriver.NullLedgerManagerFactory;
-import org.apache.bookkeeper.meta.NullMetadataBookieDriver.NullRegistrationManager;
 import org.apache.bookkeeper.net.BookieSocketAddress;
 import org.apache.bookkeeper.proto.BookieServer;
 import org.apache.bookkeeper.server.component.ServerLifecycleComponent;
@@ -71,6 +71,24 @@ import org.mockito.junit.MockitoJUnitRunner;
  */
 @RunWith(MockitoJUnitRunner.class)
 public class TestEmbeddedServer {
+
+    // These assembly tests stub the storage/Cookie/Bookie graph. Express native absence explicitly;
+    // a Null backend must never acquire that fact in production.
+    private static RegistrationManager unboundRegistrationManager() {
+        var manager = mock(RegistrationManager.class);
+        when(manager.readBookieRouteBinding(any())).thenReturn(
+                BookieRouteBinding.ReadResult.status(BookieRouteBinding.ReadStatus.ABSENT, "unit fixture"));
+        return manager;
+    }
+
+    private static NullMetadataBookieDriver unboundMetadataDriver() {
+        return new NullMetadataBookieDriver() {
+            @Override
+            public RegistrationManager createRegistrationManager() {
+                return unboundRegistrationManager();
+            }
+        };
+    }
 
     @Test
     public void isolatedConfigurationRequiresExplicitOwnerBeforeClassicConstruction() throws Exception {
@@ -119,7 +137,7 @@ public class TestEmbeddedServer {
         MockedStatic<BookieResources> bookieResourcesMockedStatic = mockStatic(BookieResources.class,
                 CALLS_REAL_METHODS);
         bookieResourcesMockedStatic.when(() ->
-                BookieResources.createMetadataDriver(any(), any())).thenReturn(new NullMetadataBookieDriver());
+                BookieResources.createMetadataDriver(any(), any())).thenReturn(unboundMetadataDriver());
         bookieResourcesMockedStatic.when(() ->
                 BookieResources.createAllocator(any())).thenReturn(mock(ByteBufAllocatorWithOomHandler.class));
 
@@ -139,7 +157,7 @@ public class TestEmbeddedServer {
         @Cleanup
         MockedStatic<BookieImpl> bookieMockedStatic = mockStatic(BookieImpl.class, CALLS_REAL_METHODS);
         bookieMockedStatic.when(() -> BookieImpl.newBookieImpl(any(), any(), any(), any(), any(), any(), any(),
-                any(), any())).thenReturn(mock(BookieImpl.class));
+                any(), any(), any())).thenReturn(mock(BookieImpl.class));
 
         BookieServer mockServer = mock(BookieServer.class);
 
@@ -177,7 +195,7 @@ public class TestEmbeddedServer {
 
         StatsProvider statsProvider = new NullStatsProvider();
         StatsLogger rootStatsLogger = statsProvider.getStatsLogger("");
-        RegistrationManager registrationManager = new NullRegistrationManager();
+        RegistrationManager registrationManager = unboundRegistrationManager();
         LedgerManagerFactory ledgerManagerFactory = new NullLedgerManagerFactory();
 
         DiskChecker diskChecker = BookieResources.createDiskChecker(serverConf);
@@ -196,7 +214,7 @@ public class TestEmbeddedServer {
         @Cleanup
         MockedStatic<BookieResources> bookieResourcesMockedStatic = mockStatic(BookieResources.class);
         bookieResourcesMockedStatic.when(() ->
-                BookieResources.createMetadataDriver(any(), any())).thenReturn(new NullMetadataBookieDriver());
+                BookieResources.createMetadataDriver(any(), any())).thenReturn(unboundMetadataDriver());
         bookieResourcesMockedStatic.when(() ->
                 BookieResources.createAllocator(any())).thenReturn(byteBufFromResources);
 
@@ -209,7 +227,7 @@ public class TestEmbeddedServer {
         @Cleanup
         MockedStatic<BookieImpl> bookieMockedStatic = mockStatic(BookieImpl.class, CALLS_REAL_METHODS);
         bookieMockedStatic.when(() -> BookieImpl.newBookieImpl(any(), any(), any(), any(), any(), any(), any(), any(),
-                any())).thenReturn(mock(BookieImpl.class));
+                any(), any())).thenReturn(mock(BookieImpl.class));
 
         BookieServer mockServer = mock(BookieServer.class);
 
@@ -258,7 +276,7 @@ public class TestEmbeddedServer {
         MockedStatic<BookieResources> bookieResourcesMockedStatic = mockStatic(BookieResources.class,
                 CALLS_REAL_METHODS);
         bookieResourcesMockedStatic.when(() ->
-                BookieResources.createMetadataDriver(any(), any())).thenReturn(new NullMetadataBookieDriver());
+                BookieResources.createMetadataDriver(any(), any())).thenReturn(unboundMetadataDriver());
 
         ServerConfiguration serverConf = new ServerConfiguration()
             .setAllowLoopback(true)
@@ -277,7 +295,7 @@ public class TestEmbeddedServer {
         @Cleanup
         MockedStatic<BookieImpl> bookieMockedStatic = mockStatic(BookieImpl.class, CALLS_REAL_METHODS);
         bookieMockedStatic.when(() -> BookieImpl.newBookieImpl(any(), any(), any(), any(), any(), any(), any(), any(),
-                any())).thenReturn(mock(BookieImpl.class));
+                any(), any())).thenReturn(mock(BookieImpl.class));
 
         BookieServer mockServer = mock(BookieServer.class);
 
@@ -307,7 +325,7 @@ public class TestEmbeddedServer {
         MockedStatic<BookieResources> bookieResourcesMockedStatic = mockStatic(BookieResources.class,
                 CALLS_REAL_METHODS);
         bookieResourcesMockedStatic.when(() ->
-                BookieResources.createMetadataDriver(any(), any())).thenReturn(new NullMetadataBookieDriver());
+                BookieResources.createMetadataDriver(any(), any())).thenReturn(unboundMetadataDriver());
 
         ServerConfiguration serverConf = new ServerConfiguration()
             .setAllowLoopback(true)
@@ -326,7 +344,7 @@ public class TestEmbeddedServer {
         @Cleanup
         MockedStatic<BookieImpl> bookieMockedStatic = mockStatic(BookieImpl.class, CALLS_REAL_METHODS);
         bookieMockedStatic.when(() -> BookieImpl.newBookieImpl(any(), any(), any(), any(), any(), any(), any(), any(),
-                any())).thenReturn(mock(BookieImpl.class));
+                any(), any())).thenReturn(mock(BookieImpl.class));
 
         BookieServer mockServer = mock(BookieServer.class);
 

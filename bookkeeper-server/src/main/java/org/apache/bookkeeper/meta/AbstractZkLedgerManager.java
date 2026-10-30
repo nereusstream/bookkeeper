@@ -20,6 +20,7 @@ package org.apache.bookkeeper.meta;
 import com.google.common.annotations.VisibleForTesting;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import java.io.IOException;
+import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
 import java.util.NavigableSet;
@@ -39,7 +40,10 @@ import org.apache.bookkeeper.client.LedgerMetadataBuilder;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.common.concurrent.FutureUtils;
 import org.apache.bookkeeper.conf.AbstractConfiguration;
+import org.apache.bookkeeper.discover.BookieRouteBinding;
+import org.apache.bookkeeper.discover.profile.ZKBookieRouteBindingStore;
 import org.apache.bookkeeper.meta.zk.ZKMetadataDriverBase;
+import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.GenericCallback;
 import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.LedgerMetadataListener;
 import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.MultiCallback;
@@ -202,6 +206,11 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
      * @return ledger node path
      */
     public abstract String getLedgerPath(long ledgerId);
+
+    /** Read only this Bookie's fixed native binding using the actual standard metadata client and namespace. */
+    public BookieRouteBinding.ReadResult readBookieRouteBinding(BookieId bookie, Duration timeout) {
+        return new ZKBookieRouteBindingStore(zk, ledgerRootPath, ZkUtils.getACLs(conf), timeout).read(bookie);
+    }
 
     /**
      * Get ledger id from its znode ledger path.

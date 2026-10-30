@@ -2,11 +2,11 @@
 
 状态：EXPERIMENTAL / NON_PROMOTABLE / NO_AUTHORITY / DISCARDABLE。
 
-施工清单仍由[上层 README](../README.md)拥有，本目录只记录步骤1开始的本地存储实现与验证。源码在现有 `bookkeeper-server` 模块的 `org.apache.bookkeeper.bookie.storage.segment` 包，不接入生产 Bookie、LedgerStorage、Journal、Add 或 ACK。
+施工清单仍由[上层 README](../README.md)拥有，本目录只记录步骤1开始的本地存储实现与验证。源码在现有 `bookkeeper-server` 模块的 `org.apache.bookkeeper.bookie.storage.segment` 包。实验存储读写不接管Classic的LedgerStorage、Journal、Add或ACK；共同绑定的启动前冷读拒绝已接入BookieImpl/EmbeddedServer，详见最新启动增量。
 
 ## 当前实现
 
-2026-10-30 当前增量为[独立 Bookie owner 与严格 Arena 成员接线](#独立-bookie-owner-与严格-arena-成员接线)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
+2026-10-30 当前增量为[共同启用的 native 绑定、根标记与启动拒绝](#共同启用的-native-绑定根标记与启动拒绝)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -2019,3 +2019,27 @@ CONTROL typed envelope显式列入Command/RouteChange/RouteBinding、UUID/digest
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/route-owner-evidence-8269cd03`保留各阶段真实终态、源码/输入/日志/XML及最终相关90个class；native输入1181项，外层源码声明1208项。没有运行新模型、stock矩阵、完整SDK246、掉电或性能测量；这些旧PASS不重新绑定本项。
 
 下一项必须继续真实Classic根/commissioned scope/native sidecar与marker的OFF preflight、独占PREPARED导入/Journal replay/flush封口，再接BookieImpl异步首次claim及原HandleFactory/processor/force/replay gate和全部请求实际排空/字节预算。当前native RouteBinding及seal不是这些外部事实的替代，也没有新增常驻legacy listener、双引擎生产模式或开放service v2。共同claim完整G1、Main、full-bytes/B11、多Arena完整服务图与16步总验收继续OPEN，目标active；默认OFF/SYSTEM/PARK及disabled能力保持。
+
+
+## 共同启用的 native 绑定、根标记与启动拒绝
+
+2026-10-30在父源码`4c02a7378bf667168d6f8c37d89869883f4ca850`上，补齐共同启动所需的真实ZK绑定及独立根标记子组件，并把冷读拒绝接入当前Classic/Profile启动路径。该增量仍不装配完整共同服务图：发现绑定就拒绝原独立图，不把PREPARED或ENABLED直接当作已完成Classic枚举、Journal replay、flush、旧服务排空或外部commissioning的证明。
+
+RegistrationManager的窄read/prepare/complete默认均UNSUPPORTED；真实ZK实现借用既有连接和实际ledgers root，固定在`bookie-route-bindings/<Base64Url(BookieId)>`保存持久PREPARED及一次ENABLED条件完成。记录绑定实际cluster出生、Bookie、共同StorageIncarnation、enable UUID、完整manifest、control根及原Cookie的出生/版本/SHA，另有同事务创建的native birth marker；原Cookie格式及removeCookie不改动，删Cookie不会删除绑定，也不会返回ABSENT。查询先sync并有界读，权限、超时、损坏、未知版本、出生或来源变化均不降级。丢回复可由原操作查询解析；同字节/版本的物理重建不能沿用旧观察，包括CAS与确认读取之间的出生变化。
+
+SegmentArenaManifest按实际文件身份合并configured journal/ledger/有效index角色，index未显式配置时使用ledger根；不创建目录，不接受丢成员、错角色或声明自身alias。SegmentClassicRootBindings只在显式PREPARED、实际同一ZK/manifest/Bookie/Cookie来源及所持独占根锁下创建0600的`current/route-claim-binding`和control根标记；字节包含成员/角色、native birth、原PREPARED记录与CRC。完整未知候选可在同一scope重新force，残缺、换根、公共权限、缺失旧锁或已有control历史后的缺标记都不覆盖。ENABLED重开只核验现存文件；接收新ENABLED观察还要求所持Bookie owner的实际seal完全一致。关闭和正在执行的文件同步串行，子锁失败由原owner保留并可重试；这不是完整Classic服务排空或旧二进制隔离authority。
+
+EmbeddedServer取得RegistrationManager后、目录管理器/Cookie/storage之前执行Classic preflight；旧BookieImpl和ReadOnlyBookie构造签名保留，内部执行同一检查，新装配消耗绑定manager/Bookie/完整配置根及单次episode的上下文。普通ZK权威ABSENT且无保留marker时继续原Classic/Cookie路径，OFF也不能绕过FOUND。UNSUPPORTED/custom、Java null、不可用或损坏均拒绝。测试ResourceBuilder也在目录/storage前取得同一上下文，装配单测中的mock显式声明ABSENT，不让Null backend伪造这一事实。
+
+独立Profile路径在commissioned requirements及实际目标核验后、storage构造/目录/发布前执行同一native拒绝；ProfileLedgerMetadataStore通过实际AbstractZkLedgerManager自己的ZK和ledger root查询，manager-only构造可以冷读但仍没有mutation权限，非ZK返回UNSUPPORTED。直接、借用和owned装配均覆盖。只查看实际Arena/control/index根的保留位置，不访问未使用的Classic默认目录；RocksDB的正常CURRENT文件不能在大小写不敏感文件系统上被误作Classic current目录。权威ABSENT只是本启动episode中的观察，不提供与并发commissioning的额外互斥证明。
+
+显式NO_CLUSTER_AUTHORITY fresh-disposable上下文尚未实现，Null仍拒绝；后续只允许完整空根、持有独占所有权、canonical物理身份再次核对且不注册的一次本地用途，不自动授予旧入口、restart或Profile资格。完整共同owner装配、实际Classic枚举/replay/flush/seal、异步首次claim与全部legacy入口、Main issuer/受保护装载、多Arena服务图及full-bytes仍OPEN；不增加常驻legacy listener或生产双引擎模式，默认OFF/SYSTEM/PARK及disabled保持，全16步目标active。
+
+
+本轮新增验证覆盖物理alias与有效index fallback、不建缺失根；真实ZK的create/CAS丢回复、并发winner、原Cookie变化/删除、native出生ABA、权限/超时/坏schema，以及manager-only从标准ledger root冷读且无mutation能力；实际marker独立解析/CRC/0600、部分候选与held force、已有control历史后缺标记、成员互换/来源变化及同scope恢复。Classic OFF、直接BookieImpl/ReadOnlyBookie和Embedded装配遇到PREPARED/ENABLED均在自身存储副作用前拒绝，正常未绑定ZK Classic真实写入后健康关闭、只读重启读回且Cookie不变；Profile直接、借用Embedded、owned三装配均拒绝真实绑定，native ABSENT与实际Arena/control/index marker冲突也拒绝，unknown/null均不放行。
+
+最终相关十二类**695项通过，0 failure/error/skipped**，包括完整Profile SDK类248项、Bookie control294、Arena43、格式41、配置2、manifest12、CONTROL capacity3、install23、根标记/Classic组合11、native binding10、BookieImpl3及Embedded5。此前37项中两项错误是新检查在macOS上把RocksDB的CURRENT当作current目录，保留原错误与修正后45项结果；native物理重建发生在complete的检查与CAS之间时，旧实现以同字节/版本错误确认APPLIED，独立故障测试先RED再在最终整轮GREEN。两处import Checkstyle错误也留存；最终Spotless/Checkstyle exit0。旧接口编译的真实NullRegistrationManager与新接口实际装载后，三新增默认方法均UNSUPPORTED，独立证明二进制可装载，不授予运行时启动权。
+
+整轮归档native输入1192项；随后仅补齐测试脚本的ASF声明及五项既有Classic依赖声明，全部最终Java输入及153个相关class逐字节不变，最终harness的1197输入另有原根/native两类21项通过。两份源码锁与桥接记录分别保留，不把前一轮harness字节改绑为后一轮。源码外层声明1224项，另有9份既有文档绑定；证据目录`/Users/liusinan/.codex/artifacts/unified-wal/common-startup-evidence-4c02a737`拥有各阶段源码/命令/日志/XML、错误与最终class。实际RAT exit1，剩余431个父源码既有路径/字节未批准，无新增；本次已触碰的测试脚本补齐ASF声明消除其中1项，受保护PDF预先排除且未读取。不称CI全绿。未运行新模型、stock矩阵、掉电、性能或full-bytes测量，不提升完整G1、Main或生产Gate。
+
+本轮10个native临时根在确认终态、67个原始文件的SHA/权限/owner与归档同inode硬链接匹配，以及两次无reader检查后移除；移除路径的逻辑字节12,465,042，归档保留同一数据块，常规文件数据回收0。历史失败、全部回执和源码/class保留，未清理其他任务或受保护PDF。

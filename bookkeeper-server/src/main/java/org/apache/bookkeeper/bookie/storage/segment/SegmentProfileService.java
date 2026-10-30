@@ -355,6 +355,8 @@ public final class SegmentProfileService implements AutoCloseable {
             }
             var observed = source.observation().orElseThrow();
             var policy = IsolatedSegmentStorage.startupPolicy(observed, startup.requested(), config, identity);
+            ClassicRouteStartup.requireUnboundProfile(
+                    startup.metadata(), identity.bookieId(), startup.timeout(), config);
             requireStorageRoots(policy.newScopeFallback());
             try {
                 diskChecker.checkExistingDir((existing ? config.directory() : config.directory().getParent()).toFile());

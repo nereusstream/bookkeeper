@@ -119,6 +119,8 @@ import org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.discover.BookieRouteBinding;
+import org.apache.bookkeeper.discover.ZKRegistrationManager;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileDeletePhysicalReceipt;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
@@ -3492,6 +3494,119 @@ public class SegmentProfileInitialSocketClientTest {
                         assertEquals(0, episode.budget.used(lane));
                         assertEquals(0, episode.budget.usedConnections(lane));
                     }
+                }
+            }
+        }
+    }
+
+    @Test
+    public void everyProfileServiceAssemblyRejectsNativeCommonBindingBeforeStorageOpen() throws Exception {
+        for (var phase : BookieRouteBinding.Phase.values()) {
+            try (Fixture fixture = new Fixture(false, false, true)) {
+                for (int assembly = 0; assembly < 3; assembly++) {
+                    var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("unopened"),
+                            1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16,
+                            "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+                    var identity = fixture.identities.get(assembly);
+                    var requested = servicePolicy(config, identity, 1);
+                    try (var episode = new ServiceEpisode(fixture, assembly, config, requested,
+                            requested.compatibility(), new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup,
+                            false, assembly == 2)) {
+                        // Real native metadata, separate from the experimental requirements namespace.
+                        // This fixture tests refusal, not the future Classic replay/bootstrap issuer.
+                        String root = "/socket-ledgers";
+                        if (fixture.zk.exists(root + "/INSTANCEID", false) == null) {
+                            fixture.zk.create(root + "/INSTANCEID", "startup-native-cluster".getBytes(
+                                    StandardCharsets.UTF_8), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                        }
+                        String clusterId = new String(fixture.zk.getData(root + "/INSTANCEID", false, null),
+                                StandardCharsets.UTF_8);
+                        var source = new ServerConfiguration().setBookieId(identity.bookieId().toString())
+                                .setJournalDirName("/disposable-old-journal")
+                                .setLedgerDirNames(new String[]{"/disposable-old-ledger"});
+                        var manager = new ZKRegistrationManager(source, fixture.zk, root);
+                        var cookie = org.apache.bookkeeper.bookie.Cookie.generateCookie(source)
+                                .setInstanceId(clusterId).build();
+                        cookie.writeToRegistrationManager(manager, source,
+                                org.apache.bookkeeper.versioning.Version.NEW);
+                        var cookieStat = fixture.zk.exists(root + "/cookies/" + identity.bookieId(), false);
+                        var binding = new BookieRouteBinding(clusterId,
+                                fixture.zk.exists(root + "/INSTANCEID", false).getCzxid(), identity.bookieId(),
+                                identity.incarnation(), UUID.randomUUID(),
+                                requested.compatibility().deviceManifestIdentity(), config.directory().toString(),
+                                new BookieRouteBinding.SourceCookie(cookieStat.getCzxid(), cookieStat.getVersion(),
+                                        java.security.MessageDigest.getInstance("SHA-256").digest(
+                                                cookie.toString().getBytes(StandardCharsets.UTF_8))),
+                                BookieRouteBinding.Phase.PREPARED, java.util.Optional.empty());
+                        var prepared = manager.prepareBookieRouteBinding(binding).observation().orElseThrow();
+                        if (phase == BookieRouteBinding.Phase.ENABLED) {
+                            assertEquals(BookieRouteBinding.WriteStatus.APPLIED,
+                                    manager.completeBookieRouteBinding(prepared,
+                                            new BookieRouteBinding.BootstrapSeal(UUID.randomUUID(), 0, -1)).status());
+                        }
+                        assertEquals(phase, manager.readBookieRouteBinding(identity.bookieId()).observation()
+                                .orElseThrow().binding().phase());
+                        assertNull(fixture.zk.exists("/socket-service-required-" + assembly + "-"
+                                + Integer.toUnsignedString(config.directory().hashCode())
+                                + "/bookie-route-bindings", false));
+                        Exception failure;
+                        if (assembly == 1) {
+                            episode.embedded = episode.assembleEmbedded();
+                            failure = assertThrows(Exception.class,
+                                    () -> episode.embedded.getLifecycleComponentStack().start());
+                        } else {
+                            failure = assertThrows(IOException.class, () -> episode.service.start(false));
+                        }
+                        Throwable cause = failure;
+                        while (cause.getCause() != null) {
+                            cause = cause.getCause();
+                        }
+                        assertTrue(cause.toString(), cause.getMessage().contains(
+                                "Independent Profile startup requires authoritative native absence: FOUND"));
+                        assertFalse(Files.exists(config.directory()));
+                        assertNull(episode.storage());
+                        assertTrue(episode.persistent.read(identity.bookieId().toString())
+                                .versionedRecord().isEmpty());
+                        assertTrue(episode.service.close(Duration.ofSeconds(5)));
+                        if (assembly == 2) {
+                            episode.assertOwnedResourcesTerminal(true);
+                        }
+                        for (var lane : ProfileReceiveBudget.Lane.values()) {
+                            assertEquals(0, episode.budget.used(lane));
+                            assertEquals(0, episode.budget.usedConnections(lane));
+                        }
+                    }
+                }
+                assertFalse(fixture.worker.isShuttingDown());
+                assertFalse(fixture.cold.isShutdown());
+            }
+        }
+    }
+
+    @Test
+    public void nativeAbsenceCannotEraseCommonMarkersInActualProfileRoots() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true)) {
+            for (int placement = 0; placement < 3; placement++) {
+                var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("retained-marker"),
+                        1, 1, 1, 4L * 1024 * 1024, 4096, 1024, 16,
+                        "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+                var requested = servicePolicy(config, fixture.identities.get(0), 1);
+                Path markerRoot = placement == 0 ? config.directory() : placement == 1
+                        ? config.directory().resolve("current") : SegmentDerivedIndex.directory(config);
+                Files.createDirectories(markerRoot);
+                Path marker = markerRoot.resolve(SegmentClassicRootBindings.FILE_NAME);
+                byte[] candidate = new byte[]{1, 2, 3};
+                Files.write(marker, candidate);
+                try (var episode = new ServiceEpisode(fixture, 0, config, requested, requested.compatibility(),
+                        new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup)) {
+                    var failure = assertThrows(IOException.class, () -> episode.service.start(false));
+                    assertTrue(failure.getMessage().contains("retains a common binding"));
+                    assertNull(episode.storage());
+                    assertArrayEquals(candidate, Files.readAllBytes(marker));
+                    try (var members = Files.list(config.directory())) {
+                        assertEquals(1, members.count());
+                    }
+                    assertTrue(episode.persistent.read("socket0:3181").versionedRecord().isEmpty());
                 }
             }
         }

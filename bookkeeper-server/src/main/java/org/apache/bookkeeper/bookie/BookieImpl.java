@@ -62,6 +62,7 @@ import org.apache.bookkeeper.bookie.LedgerDirsManager.LedgerDirsListener;
 import org.apache.bookkeeper.bookie.LedgerDirsManager.NoWritableLedgerDirException;
 import org.apache.bookkeeper.bookie.stats.BookieStats;
 import org.apache.bookkeeper.bookie.storage.ldb.DbLedgerStorage;
+import org.apache.bookkeeper.bookie.storage.segment.ClassicRouteStartup;
 import org.apache.bookkeeper.common.util.MathUtils;
 import org.apache.bookkeeper.common.util.Watcher;
 import org.apache.bookkeeper.conf.ServerConfiguration;
@@ -402,6 +403,18 @@ public class BookieImpl implements Bookie {
                       ByteBufAllocator allocator,
                       Supplier<BookieServiceInfo> bookieServiceInfoProvider)
             throws IOException, InterruptedException, BookieException {
+        this(conf, registrationManager, storage, diskChecker, ledgerDirsManager, indexDirsManager, statsLogger,
+                allocator, bookieServiceInfoProvider, ClassicRouteStartup.preflight(conf, registrationManager));
+    }
+
+    public BookieImpl(ServerConfiguration conf, RegistrationManager registrationManager, LedgerStorage storage,
+            DiskChecker diskChecker, LedgerDirsManager ledgerDirsManager, LedgerDirsManager indexDirsManager,
+            StatsLogger statsLogger, ByteBufAllocator allocator, Supplier<BookieServiceInfo> bookieServiceInfoProvider,
+            ClassicRouteStartup.Context startup) throws IOException, InterruptedException, BookieException {
+        if (startup == null) {
+            throw new IOException("A verified Classic startup context is required");
+        }
+        startup.consume(conf, registrationManager);
         this.bookieServiceInfoProvider = bookieServiceInfoProvider;
         this.statsLogger = statsLogger;
         this.conf = conf;
@@ -520,6 +533,15 @@ public class BookieImpl implements Bookie {
             throws IOException, InterruptedException, BookieException {
         return new BookieImpl(conf, registrationManager, storage, diskChecker,
                 ledgerDirsManager, indexDirsManager, statsLogger, allocator, bookieServiceInfoProvider);
+    }
+
+    public static BookieImpl newBookieImpl(ServerConfiguration conf, RegistrationManager registrationManager,
+            LedgerStorage storage, DiskChecker diskChecker, LedgerDirsManager ledgerDirsManager,
+            LedgerDirsManager indexDirsManager, StatsLogger statsLogger, ByteBufAllocator allocator,
+            Supplier<BookieServiceInfo> bookieServiceInfoProvider, ClassicRouteStartup.Context startup)
+            throws IOException, InterruptedException, BookieException {
+        return new BookieImpl(conf, registrationManager, storage, diskChecker, ledgerDirsManager, indexDirsManager,
+                statsLogger, allocator, bookieServiceInfoProvider, startup);
     }
 
     StateManager initializeStateManager() throws IOException {

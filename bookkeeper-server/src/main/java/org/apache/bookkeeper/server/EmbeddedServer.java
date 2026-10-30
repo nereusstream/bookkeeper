@@ -62,6 +62,7 @@ import org.apache.bookkeeper.bookie.datainteg.DataIntegrityCookieValidation;
 import org.apache.bookkeeper.bookie.datainteg.DataIntegrityService;
 import org.apache.bookkeeper.bookie.datainteg.EntryCopier;
 import org.apache.bookkeeper.bookie.datainteg.EntryCopierImpl;
+import org.apache.bookkeeper.bookie.storage.segment.ClassicRouteStartup;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileService;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.BookKeeperAdmin;
@@ -344,6 +345,23 @@ public class EmbeddedServer {
                         new AutoCloseableLifecycleComponent("registrationManager", registrationManager));
             }
 
+            ClassicRouteStartup.Context routeStartup;
+            try {
+                routeStartup = ClassicRouteStartup.preflight(conf.getServerConf(), registrationManager);
+            } catch (Exception | Error failure) {
+                boolean interrupted = Thread.interrupted();
+                try {
+                    serverBuilder.build().close();
+                } catch (Exception | Error cleanup) {
+                    failure.addSuppressed(cleanup);
+                } finally {
+                    if (interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                throw failure;
+            }
+
             // 3. Build ledger manager
             if (ledgerManagerFactory == null) {
                 ledgerManagerFactory = metadataDriver.getLedgerManagerFactory();
@@ -450,13 +468,13 @@ public class EmbeddedServer {
                         diskChecker,
                         ledgerDirsManager, indexDirsManager,
                         bookieStats, allocator,
-                        bookieServiceInfoProvider);
+                        bookieServiceInfoProvider, routeStartup);
             } else {
                 bookie = newBookieImpl(conf.getServerConf(), registrationManager, storage,
                         diskChecker,
                         ledgerDirsManager, indexDirsManager,
                         bookieStats, allocator,
-                        bookieServiceInfoProvider);
+                        bookieServiceInfoProvider, routeStartup);
             }
 
             // 5. build bookie server

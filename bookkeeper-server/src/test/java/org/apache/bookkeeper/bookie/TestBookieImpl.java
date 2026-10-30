@@ -21,6 +21,7 @@
 package org.apache.bookkeeper.bookie;
 
 import io.netty.buffer.UnpooledByteBufAllocator;
+import org.apache.bookkeeper.bookie.storage.segment.ClassicRouteStartup;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.RegistrationManager;
 import org.apache.bookkeeper.meta.LedgerManager;
@@ -55,7 +56,7 @@ public class TestBookieImpl extends BookieImpl {
                 resources.indexDirsManager,
                 statsLogger,
                 UnpooledByteBufAllocator.DEFAULT,
-                new SimpleBookieServiceInfoProvider(resources.conf));
+                new SimpleBookieServiceInfoProvider(resources.conf), resources.routeStartup);
         this.resources = resources;
     }
 
@@ -68,7 +69,7 @@ public class TestBookieImpl extends BookieImpl {
                 resources.indexDirsManager,
                 NullStatsLogger.INSTANCE,
                 UnpooledByteBufAllocator.DEFAULT,
-                new SimpleBookieServiceInfoProvider(resources.conf));
+                new SimpleBookieServiceInfoProvider(resources.conf), resources.routeStartup);
         this.resources = resources;
     }
 
@@ -81,7 +82,7 @@ public class TestBookieImpl extends BookieImpl {
                 resources.indexDirsManager,
                 NullStatsLogger.INSTANCE,
                 UnpooledByteBufAllocator.DEFAULT,
-                new SimpleBookieServiceInfoProvider(resources.conf));
+                new SimpleBookieServiceInfoProvider(resources.conf), resources.routeStartup);
     }
 
     public static ReadOnlyBookie buildReadOnly(ServerConfiguration conf) throws Exception {
@@ -108,6 +109,7 @@ public class TestBookieImpl extends BookieImpl {
         private final DiskChecker diskChecker;
         private final LedgerDirsManager ledgerDirsManager;
         private final LedgerDirsManager indexDirsManager;
+        private final ClassicRouteStartup.Context routeStartup;
 
         Resources(ServerConfiguration conf,
                   MetadataBookieDriver metadataDriver,
@@ -117,7 +119,8 @@ public class TestBookieImpl extends BookieImpl {
                   LedgerStorage storage,
                   DiskChecker diskChecker,
                   LedgerDirsManager ledgerDirsManager,
-                  LedgerDirsManager indexDirsManager) {
+                  LedgerDirsManager indexDirsManager,
+                  ClassicRouteStartup.Context routeStartup) {
             this.conf = conf;
             this.metadataDriver = metadataDriver;
             this.registrationManager = registrationManager;
@@ -127,6 +130,7 @@ public class TestBookieImpl extends BookieImpl {
             this.diskChecker = diskChecker;
             this.ledgerDirsManager = ledgerDirsManager;
             this.indexDirsManager = indexDirsManager;
+            this.routeStartup = routeStartup;
         }
 
         void cleanup() {
@@ -186,6 +190,7 @@ public class TestBookieImpl extends BookieImpl {
             if (registrationManager == null) {
                 registrationManager = metadataBookieDriver.createRegistrationManager();
             }
+            var routeStartup = ClassicRouteStartup.preflight(conf, registrationManager);
             LedgerManagerFactory ledgerManagerFactory = metadataBookieDriver.getLedgerManagerFactory();
             LedgerManager ledgerManager = ledgerManagerFactory.newLedgerManager();
 
@@ -207,7 +212,8 @@ public class TestBookieImpl extends BookieImpl {
                                  storage,
                                  diskChecker,
                                  ledgerDirsManager,
-                                 indexDirsManager);
+                                 indexDirsManager,
+                                 routeStartup);
         }
     }
 }

@@ -959,3 +959,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [共同 ROUTE 的持久命令与恢复](local-storage/README.md#共同-route-的持久命令与恢复)：2026-10-30父8269cd0328上新增native真实ROUTE/64-byte body、schema2完整Classic根角色及同owner混合batch、operation index/checkpoint/rotation恢复；最终八类420项同源码通过，style exit0、RAT432父路径无新增，有限浅大小与所有早期诊断由canonical拥有。BookieImpl异步入口、markers/native commissioning binding与独占导入尚未接线；完整G1/Main/full-bytes与16步总验收仍OPEN，目标active，默认OFF/SYSTEM/PARK和disabled保持。
+
+
+[共同启用的 native 绑定、根标记与启动拒绝](local-storage/README.md#共同启用的-native-绑定根标记与启动拒绝)：2026-10-30父4c02a7378b上，真实ZK固定namespace的PREPARED/ENABLED、原Cookie/native出生条件及实际根marker子组件已实现，Classic/Profile启动前冷读拒绝不允许OFF/unknown/null绕过；普通未绑定ZK Classic保留原路径。Profile manager-only冷读不获得mutation能力，旧driver二进制可装载与unsupported运行时拒绝分开说明。实际验证与source/receipt由canonical拥有。完整共同owner装配、Classic导入/replay/flush/异步claim、fresh-disposable Null上下文、Main/G1/full-bytes和16步总验收继续OPEN，目标active，默认OFF/SYSTEM/PARK及disabled保持。

@@ -25,6 +25,7 @@ import io.netty.buffer.ByteBufAllocator;
 import java.io.IOException;
 import java.util.function.Supplier;
 import lombok.CustomLog;
+import org.apache.bookkeeper.bookie.storage.segment.ClassicRouteStartup;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.BookieServiceInfo;
 import org.apache.bookkeeper.discover.RegistrationManager;
@@ -50,8 +51,17 @@ public class ReadOnlyBookie extends BookieImpl {
                           StatsLogger statsLogger,
                           ByteBufAllocator allocator, Supplier<BookieServiceInfo> bookieServiceInfoProvider)
             throws IOException, KeeperException, InterruptedException, BookieException {
+        this(conf, registrationManager, storage, diskChecker, ledgerDirsManager, indexDirsManager, statsLogger,
+                allocator, bookieServiceInfoProvider, ClassicRouteStartup.preflight(conf, registrationManager));
+    }
+
+    public ReadOnlyBookie(ServerConfiguration conf, RegistrationManager registrationManager, LedgerStorage storage,
+            DiskChecker diskChecker, LedgerDirsManager ledgerDirsManager, LedgerDirsManager indexDirsManager,
+            StatsLogger statsLogger, ByteBufAllocator allocator, Supplier<BookieServiceInfo> bookieServiceInfoProvider,
+            ClassicRouteStartup.Context startup)
+            throws IOException, KeeperException, InterruptedException, BookieException {
         super(conf, registrationManager, storage, diskChecker,
-              ledgerDirsManager, indexDirsManager, statsLogger, allocator, bookieServiceInfoProvider);
+              ledgerDirsManager, indexDirsManager, statsLogger, allocator, bookieServiceInfoProvider, startup);
         if (conf.isReadOnlyModeEnabled()) {
             stateManager.forceToReadOnly();
         } else {

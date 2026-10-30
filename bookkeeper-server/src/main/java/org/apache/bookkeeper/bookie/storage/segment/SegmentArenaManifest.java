@@ -17,6 +17,7 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -33,12 +34,15 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
+import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.net.BookieId;
 
 /** Fixed complete topology. Its digest must come from commissioned requirements, never a discovered device subset. */
@@ -172,6 +176,59 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
 
     int arenaForShard(int shard) {
         return shardArenas.get(shard);
+    }
+
+    /** Existing common-domain roots only: no directory, Cookie, engine or marker is created here. */
+    void requireClassicRoots(ServerConfiguration configuration) throws IOException {
+        if (classicRoots.isEmpty()) {
+            throw new IOException("A common route manifest with complete Classic roots is required");
+        }
+        var actual = new LinkedHashMap<Path, EnumSet<ClassicRole>>();
+        for (ClassicRoot member : classicRoots) {
+            Path physical = member.directory().toRealPath();
+            if (!physical.equals(member.directory()) || !Files.isDirectory(physical)) {
+                throw new IOException("Declared Classic root must be an existing canonical directory");
+            }
+            for (Path prior : actual.keySet()) {
+                if (Files.isSameFile(prior, physical)) {
+                    throw new IOException("Common manifest repeats one physical Classic root");
+                }
+            }
+            actual.put(physical, EnumSet.noneOf(ClassicRole.class));
+        }
+        addClassicRoots(actual, configuration.getJournalDirs(), ClassicRole.JOURNAL);
+        addClassicRoots(actual, configuration.getLedgerDirs(), ClassicRole.LEDGER);
+        File[] index = configuration.getIndexDirs();
+        addClassicRoots(actual, index == null ? configuration.getLedgerDirs() : index, ClassicRole.INDEX);
+        for (ClassicRoot member : classicRoots) {
+            if (!member.roles().equals(actual.get(member.directory()))) {
+                throw new IOException("Configured Classic roles differ from the complete common manifest");
+            }
+        }
+    }
+
+    private static void addClassicRoots(LinkedHashMap<Path, EnumSet<ClassicRole>> roots,
+            File[] configured, ClassicRole role) throws IOException {
+        if (configured == null || configured.length == 0) {
+            throw new IOException("Common route requires every Classic storage role");
+        }
+        for (File root : configured) {
+            Path physical = root.toPath().toRealPath();
+            if (!Files.isDirectory(physical)) {
+                throw new IOException("Classic storage root must be an existing directory");
+            }
+            EnumSet<ClassicRole> roles = null;
+            for (var member : roots.entrySet()) {
+                if (Files.isSameFile(member.getKey(), physical)) {
+                    roles = member.getValue();
+                    break;
+                }
+            }
+            if (roles == null) {
+                throw new IOException("Configured Classic root is outside the complete common manifest");
+            }
+            roles.add(role);
+        }
     }
 
     Path path() {

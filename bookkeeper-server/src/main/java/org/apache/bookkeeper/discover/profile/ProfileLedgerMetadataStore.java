@@ -32,6 +32,7 @@ import org.apache.bookkeeper.client.LedgerMetadataUtils;
 import org.apache.bookkeeper.client.api.DigestType;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus;
+import org.apache.bookkeeper.discover.BookieRouteBinding;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.meta.LedgerMetadataSerDe;
@@ -109,6 +110,15 @@ public final class ProfileLedgerMetadataStore {
         mutationReads = null;
         markerAcls = List.of();
         mutationTimeoutNanos = 0;
+    }
+
+    /** This native cold read does not grant mutation capability to a manager-only environment. */
+    public BookieRouteBinding.ReadResult readBookieRouteBinding(BookieId bookie, Duration timeout) {
+        if (manager instanceof AbstractZkLedgerManager nativeManager) {
+            return nativeManager.readBookieRouteBinding(bookie, timeout);
+        }
+        return BookieRouteBinding.ReadResult.status(BookieRouteBinding.ReadStatus.UNSUPPORTED,
+                "Profile startup requires a real standard ZooKeeper metadata manager");
     }
 
     /** Enable bounded cold ZK membership mutation using the same client/namespace as this manager. */

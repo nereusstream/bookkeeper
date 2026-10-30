@@ -34,6 +34,7 @@ import java.util.Set;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
+import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.net.BookieId;
 import org.junit.Rule;
 import org.junit.Test;
@@ -145,6 +146,68 @@ public class SegmentArenaManifestTest {
         }
         assertThrows(IllegalArgumentException.class,
                 () -> new SegmentArenaManifest.ClassicRoot(parent.resolve("empty"), Set.of()));
+    }
+
+    @Test
+    public void actualClassicRootsMergePhysicalAliasesAndUseEffectiveIndexFallbackWithoutCreatingPaths()
+            throws Exception {
+        var original = manifest();
+        Path parent = original.controlDirectory().getParent();
+        Path journal = Files.createDirectory(parent.resolve("classic-journal"));
+        Path ledger = Files.createDirectory(parent.resolve("classic-ledger"));
+        var common = new SegmentArenaManifest(original.incarnation(), original.bookieId(), original.arenas(),
+                original.controlDirectory(), original.shardArenas(), List.of(
+                        new SegmentArenaManifest.ClassicRoot(journal, Set.of(SegmentArenaManifest.ClassicRole.JOURNAL)),
+                        new SegmentArenaManifest.ClassicRoot(ledger, Set.of(SegmentArenaManifest.ClassicRole.LEDGER,
+                                SegmentArenaManifest.ClassicRole.INDEX))));
+        var classic = new ServerConfiguration().setJournalDirsName(new String[]{journal.toString()})
+                .setLedgerDirNames(new String[]{ledger.toString()});
+        common.requireClassicRoots(classic);
+        Path alias = parent.resolve("classic-index-alias");
+        Files.createSymbolicLink(alias, ledger);
+        classic.setIndexDirName(new String[]{alias.toString()});
+        common.requireClassicRoots(classic);
+        var aliasedManifest = new SegmentArenaManifest(original.incarnation(), original.bookieId(), original.arenas(),
+                original.controlDirectory(), original.shardArenas(), List.of(
+                        new SegmentArenaManifest.ClassicRoot(alias, Set.of(SegmentArenaManifest.ClassicRole.LEDGER,
+                                SegmentArenaManifest.ClassicRole.INDEX)),
+                        new SegmentArenaManifest.ClassicRoot(
+                                journal, Set.of(SegmentArenaManifest.ClassicRole.JOURNAL))));
+        assertThrows(IOException.class, () -> aliasedManifest.requireClassicRoots(classic));
+        assertFalse(Files.exists(common.controlDirectory()));
+        assertFalse(Files.exists(journal.resolve("current")));
+        assertFalse(Files.exists(ledger.resolve("current")));
+        assertThrows(IOException.class, () -> original.requireClassicRoots(classic));
+    }
+
+    @Test
+    public void actualClassicRootsRejectMissingOrDifferentMembersAndRolesWithoutCreatingStorage() throws Exception {
+        var original = manifest();
+        Path parent = original.controlDirectory().getParent();
+        Path journal = Files.createDirectory(parent.resolve("classic-0-journal"));
+        Path ledger = Files.createDirectory(parent.resolve("classic-1-ledger"));
+        Path index = Files.createDirectory(parent.resolve("classic-2-index"));
+        var common = new SegmentArenaManifest(original.incarnation(), original.bookieId(), original.arenas(),
+                original.controlDirectory(), original.shardArenas(), List.of(
+                        new SegmentArenaManifest.ClassicRoot(journal, Set.of(SegmentArenaManifest.ClassicRole.JOURNAL)),
+                        new SegmentArenaManifest.ClassicRoot(ledger, Set.of(SegmentArenaManifest.ClassicRole.LEDGER)),
+                        new SegmentArenaManifest.ClassicRoot(index, Set.of(SegmentArenaManifest.ClassicRole.INDEX))));
+        var classic = new ServerConfiguration().setJournalDirsName(new String[]{journal.toString()})
+                .setLedgerDirNames(new String[]{ledger.toString()});
+        assertThrows(IOException.class, () -> common.requireClassicRoots(classic));
+        classic.setIndexDirName(new String[]{index.toString()});
+        common.requireClassicRoots(classic);
+        Path missing = parent.resolve("missing-classic-index");
+        classic.setIndexDirName(new String[]{missing.toString()});
+        assertThrows(IOException.class, () -> common.requireClassicRoots(classic));
+        assertFalse(Files.exists(missing));
+        Path file = parent.resolve("not-a-classic-root");
+        Files.write(file, new byte[]{1});
+        classic.setIndexDirName(new String[]{file.toString()});
+        assertThrows(IOException.class, () -> common.requireClassicRoots(classic));
+        assertFalse(Files.exists(common.controlDirectory()));
+        assertFalse(Files.exists(journal.resolve("current")));
+        assertFalse(Files.exists(ledger.resolve("current")));
     }
 
     @Test

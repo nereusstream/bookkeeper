@@ -58,6 +58,7 @@ import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.discover.BookieRouteBinding;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteHandoff;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
@@ -1020,6 +1021,26 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     synchronized boolean bootstrapComplete() {
         return !closed && !failed && routeBinding != null && bootstrapComplete != null;
+    }
+
+    synchronized Optional<BookieRouteBinding.BootstrapSeal> bootstrapSeal() {
+        if (!bootstrapComplete()) {
+            return Optional.empty();
+        }
+        AppliedOperation operation = operations.get(bootstrapComplete.operationId());
+        return Optional.of(new BookieRouteBinding.BootstrapSeal(bootstrapComplete.operationId(),
+                operation.sequence(), bootstrapComplete.value()));
+    }
+
+    synchronized void requireCommonBinding(UUID bindingId, ManifestIdentity manifest) throws IOException {
+        requireWritable();
+        if (routeBinding == null || !routeBinding.id().equals(bindingId) || !routeBinding.manifest().equals(manifest)) {
+            throw new IOException("Bookie owner does not match the native common binding");
+        }
+    }
+
+    synchronized boolean emptyForCommonMarkers() {
+        return routeBinding != null && quiescentForRotation() && durableThrough == -1 && appliedThrough == -1;
     }
 
     /** The caller must have cold-read the live RepairIntent and exact committed grant authority. */
