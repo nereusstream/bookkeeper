@@ -137,6 +137,7 @@ final class FreshClassicRoots implements AutoCloseable {
     private final List<Alias> aliases = new ArrayList<>();
     private final List<CloseRecord<?>> auxiliary = new ArrayList<>();
     private boolean attempted;
+    private boolean prepareAttempted;
     private boolean ready;
     private boolean closing;
     private Thread acquiringThread;
@@ -215,6 +216,30 @@ final class FreshClassicRoots implements AutoCloseable {
         }
         verifyAliases();
         ready = true;
+    }
+
+    /** Create the fresh layout only after the entire original top-level root set is exclusively held. */
+    synchronized void prepareCurrentDirectories() throws IOException {
+        if (!ready || closing || prepareAttempted) {
+            throw new IOException("Fresh current directories require one held root acquisition episode");
+        }
+        prepareAttempted = true;
+        acquiringThread = Thread.currentThread();
+        try {
+            verifyAliases();
+            for (Root root : roots) {
+                verifyHeld(root);
+                Files.createDirectory(root.directory.resolve("current"));
+                syncDirectory(root);
+            }
+            verifyAliases();
+        } catch (IOException | RuntimeException | Error failure) {
+            acquisitionFailure = failure;
+            ready = false;
+            throw failure;
+        } finally {
+            acquiringThread = null;
+        }
     }
 
     /** Recheck before use; same paths and bytes cannot substitute a physically replaced directory or marker. */

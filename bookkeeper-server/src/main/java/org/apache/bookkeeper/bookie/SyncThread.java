@@ -288,6 +288,9 @@ class SyncThread implements Checkpointer {
                 while (!executor.awaitTermination(5, TimeUnit.MINUTES)) {
                     log.info("Fresh SyncThread is still draining its original executor");
                 }
+                if (freshExecutorThread != null) {
+                    freshExecutorThread.join();
+                }
                 if (!freshFlushObserved) {
                     freshFlushObserved = true;
                     try {
@@ -323,5 +326,9 @@ class SyncThread implements Checkpointer {
         if (!disableCheckpoint) {
             checkpointSource.checkpointComplete(checkpoint, false);
         }
+    }
+
+    boolean isCurrentExecutorThread() {
+        return Thread.currentThread() == freshExecutorThread;
     }
 }

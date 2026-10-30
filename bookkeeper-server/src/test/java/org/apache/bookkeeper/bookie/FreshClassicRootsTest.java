@@ -91,7 +91,7 @@ public class FreshClassicRootsTest {
         }
     }
 
-    private static void probe(Path marker, String expected) throws Exception {
+    static void probe(Path marker, String expected) throws Exception {
         var process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-cp", System.getProperty("java.class.path"), LockProbe.class.getName(), marker.toString())
                 .redirectErrorStream(true).start();
@@ -576,6 +576,60 @@ public class FreshClassicRootsTest {
 
     private static Object root(FreshClassicRoots roots, int index) throws Exception {
         return ((List<?>) field(roots, "roots")).get(index);
+    }
+
+    @Test(timeout = 30000)
+    public void currentDirectoriesAreCreatedOnceUnderTheCompleteOriginalRootLease() throws Exception {
+        var conf = configuration();
+        try (var roots = new FreshClassicRoots(conf)) {
+            assertThrows(IOException.class, roots::prepareCurrentDirectories);
+            roots.acquire();
+            for (String directory : List.of(conf.getJournalDirNames()[0], conf.getLedgerDirNames()[0])) {
+                assertFalse(Files.exists(ownedRoot(directory).resolve("current")));
+                probe(marker(directory), "HELD");
+            }
+            roots.prepareCurrentDirectories();
+            roots.verify(conf);
+            for (String directory : List.of(conf.getJournalDirNames()[0], conf.getLedgerDirNames()[0])) {
+                assertTrue(Files.isDirectory(ownedRoot(directory).resolve("current")));
+                assertEquals(0, ownedRoot(directory).resolve("current").toFile().list().length);
+                probe(marker(directory), "HELD");
+            }
+            assertThrows(IOException.class, roots::prepareCurrentDirectories);
+        }
+        assertTrue(Files.isDirectory(ownedRoot(conf.getJournalDirNames()[0]).resolve("current")));
+        assertTrue(Files.exists(marker(conf.getJournalDirNames()[0])));
+    }
+
+    @Test(timeout = 30000)
+    public void partialCurrentPreparationRetainsBothRootLocksAndItsDirectorySyncOwner() throws Exception {
+        var conf = configuration();
+        var roots = new FreshClassicRoots(conf);
+        roots.acquire();
+        var controlled = new AtomicReference<ControlledFileChannel>();
+        IOException failure = new IOException("new current parent directory force failed");
+        try (var open = mockStatic(FileChannel.class, CALLS_REAL_METHODS)) {
+            open.when(() -> FileChannel.open(any(Path.class), eq(StandardOpenOption.READ)))
+                    .thenAnswer(invocation -> {
+                        var wrapper = new ControlledFileChannel((FileChannel) invocation.callRealMethod());
+                        wrapper.forceFailure = failure;
+                        controlled.set(wrapper);
+                        return wrapper;
+                    });
+            assertSame(failure, assertThrows(IOException.class, roots::prepareCurrentDirectories));
+        }
+        assertFalse(controlled.get().delegate.isOpen());
+        assertEquals(1, controlled.get().closeAttempts.get());
+        assertTrue(Files.isDirectory(ownedRoot(conf.getJournalDirNames()[0]).resolve("current")));
+        assertFalse(Files.exists(ownedRoot(conf.getLedgerDirNames()[0]).resolve("current")));
+        for (String directory : List.of(conf.getJournalDirNames()[0], conf.getLedgerDirNames()[0])) {
+            probe(marker(directory), "HELD");
+        }
+        assertThrows(IOException.class, () -> roots.verify(conf));
+        var result = roots.closeForFresh();
+        assertTrue(result.drained());
+        assertSame(failure, result.acquisitionFailure());
+        assertThrows(IOException.class, roots::prepareCurrentDirectories);
     }
 
     private static Object field(Object owner, String name) throws Exception {

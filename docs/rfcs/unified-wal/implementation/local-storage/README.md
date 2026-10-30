@@ -2203,3 +2203,32 @@ acquire和close继续串行，外部关闭等待实际初始化返回；实际�
 两条真实RED均在父实现上按预期失败：首次marker native close异常后的第二次close错误返回成功，以及JDK实际中断自动关闭后owner错误返回成功。最终两类26项同源码通过，0 failure/error/skipped：fresh根租约15项及原Classic/Profile根绑定11项；阶段25项保留原源码/class，不移绑到新增多根错误汇总后的实现。新增验证沿原第二JVM探针观察真实锁，覆盖release失败/channel成功的分离、独立根清理、挂起release时锁仍持有/返回后释放、自等待拒绝、目录force失败但资源可排空、目录close失败保留、枚举操作/close同时失败及多根错误汇总去重。注入仅包装测试中的真实FileLock/FileChannel/DirectoryStream，不以mock成功替代native结果；保留RED和GREEN各自输入、源码和XML。
 
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-root-release-evidence-a6f49858`保留三阶段原始inputs、源码和XML，以及阶段GREEN与最终交付的class；最终native输入1262项、外层1289源码加9文档及15份交付class。最终Spotless/Checkstyle实际exit0；独立RAT实际exit1，431个未批准路径及字节与父源码一致，无新增，保护PDF在读取前排除。三个已终态native临时目录的14个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节1,419,892；归档硬链接保留全部数据，常规文件数据块回收0。未清理默认目录或其他任务资源。未复跑已封存Journal185项或完整SDK、stock、TLC、Rust JNI、性能/掉电矩阵。本切片只补齐根资源结果，下一块继续稳定outer owner/facade、逐资源装配及一次性permit，尚无完整fresh、全Bookie/output ACK、共同owner/Main/G1/full-bytes或16步总验收结论；目标active，生产Gate OPEN，默认OFF/SYSTEM/PARK与disabled保持，Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。
+
+
+## 显式本地 fresh owner 与实际排空
+
+2026-10-31在父源码`062c14dfaf4fb873332730048652a1218539afba`上，将前述根租约、Journal、Interleaved及执行器接入`public final FreshClassicOwner`与`FreshClassicHandle`。调用顺序为`create(configuration)`、一次`start()`、`bookie()`取得同一窄facade，以及`requestClose()`或`closeAndAwait(Duration)`观察关闭。create先解析配置插值并冻结标量/集合、关闭后续插值及分隔符重解析，捕获派生BookieId；后续调用方配置或系统属性变化不能扩大本次权限。create不取得文件资源，失败的start保留原owner和初始化异常，并进入同一关闭进度。
+
+首版只接受内置Interleaved、单entry-log manager、DefaultFileChannelProvider、Journal V6/FileInfo V1、writeData/syncData=true、非busy-wait、不使用persistent GC map；显式非空journal/ledger/index路径按原配置语义验证。sanityCheckMetricsEnabled及persistBookieStatusEnabled必须为false，在任何marker之前拒绝不支持的值，不静默改写。完整预置空顶层根先取得全部租约，再逐物理根CREATE_NEW current并同步目录；同一角色的物理别名重复拒绝，跨角色共享根按原租约去重。目录管理器只检查现存目录，不补建缺失根/current。
+
+Bookie先纯构造并登记，逐项登记state/monitor、Journal及storage后才初始化。Journal空目录检查先于storage创建文件；storage初始化成功后才登记Sync，接入真实checkpoint source/checkpointer/listener/HandleFactory。实际Journal就绪、必要的启动flush/检查及后台启动成功后，才在与关闭共用的门内开放RUNNING。初始化与关闭竞争时，关闭先赢即不继续后续阶段、不交付handle。一次性包内permit绑定原owner、具体Bookie、冻结配置与BookieId、实际根和episode；无metadata driver、ledger manager factory或远程registration，NO_CLUSTER_AUTHORITY不等于native ABSENT。普通Classic构造及默认测试build的authority检查保持，只有显式buildFresh返回该owner，不增加EmbeddedServer fresh入口。
+
+facade不实现Bookie，不暴露raw getter、unwrap、watch、惰性iterator或子组件生命周期。操作限定Add/recovery Add/force、点读/LAC/explicit LAC、fence及不可变status。移交写ByteBuf的一份引用即使同步拒绝也由本次操作释放；发布前抛错不回调，发布后沿原callback完成一次，ackBeforeSync固定false。explicit LAC以readable范围的无retain视图移交原引用。每项操作分别等待同步调用体和实际callback返回，callback先到不能掩盖仍在执行的finally；统计/观察异常单独保留，不将已发布结果变成第二次同步失败。释放失败保留实际引用与首次结果，不以计数归零代替排空。fence只返回独立观察future，取消不取消实际操作；成功读取交付的ByteBuf继续由调用方持有。
+
+关闭由至多一个实际具名BookieThread推进：退役admission并等待初始化返回；state只读/停止monitor，保持Journal推进并等待同步调用体；Journal append quiesce及callback全部返回；停止GC/compaction等checkpoint生产者；执行最终Sync flush/checkpoint并等待真实executor和Thread退出；最终关闭storage、Journal和state。只有完整子图物理终态成功，才释放根资源，关闭worker实际退出后才报告DRAINED。超时/调用方中断不取消worker或实际I/O；初始化、worker或被等待的资源/callback线程阻塞等待自身立即拒绝。fatal/internal shutdown也汇入同一owner。Sync安全重试所需storage/Journal继续保留；sticky或未知native close及引用释放失败禁止解锁/排空。初始化/操作错误与资源终态分别报告，不因资源最终关闭而抹掉原失败，不重新发行fresh资格，永久marker保留。
+
+本次必要共享修复限于fence引用交接及普通Journal发布前回滚：fence原临时引用在提交finally释放一次，分配/提交失败终结已登记future；setFenced之前记录本对象尚未完成的尝试，失败分配不能冒用恢复态null快捷成功。真正恢复态仍保留原快捷路径，并发fence共享进行中结果。普通Journal分别回滚已取得的retain、quota、QueueEntry及计数，queue.put正常返回即移交、不再读取可被消费者回收的ticket；内存等待中断不扣未取得额度。独立清理继续执行，统计回退异常以suppressed保留，不覆盖原中断。移除fence callback非必要debug，未扩大重构普通callback或新增pipeline/队列。
+
+必要验证覆盖真实本地Add/read/LAC/fence/recovery/force、所有装配阶段失败、调用体/callback任意先后、取消观察、异常统计/回调、初始化关闭竞争、挂起force/关闭与等待中断、单worker、GC rotation与最后Sync、部分index写失败安全续接、多Journal及独立index、根锁第二JVM探针和marker重用拒绝。sticky失败夹具的外部清理只释放测试自己的真实资源，不将原owner重新判为DRAINED。未证明native池物理回收或full-bytes，完整共同owner/Classic导入、Main、网络服务图、G1及16步总验收仍OPEN；目标active，生产Gate OPEN，OFF/SYSTEM/PARK和disabled保持，Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED。
+
+最终十六类146项同源码通过，0 failure/error/skipped：fresh owner16、fence10、roots17、fresh index22、executor4、Sync8、fresh Journal16、BookieImpl3、Journal force6/page-cache3/max-memory1/no-sync1/bypass1、原Classic/Profile根绑定11、LedgerCache13和Interleaved14。可复现命令：
+
+```bash
+scripts/unified-wal/run-local-storage-tests.sh 'FreshClassicOwnerTest,LedgerDescriptorImplTest,FreshClassicRootsTest,FreshClassicIndexDrainTest,FreshClassicExecutorDrainTest,SyncThreadTest,FreshClassicJournalDrainTest,BookieImplTest,BookieJournalForceTest,BookieJournalPageCacheFlushTest,BookieJournalMaxMemoryTest,SegmentClassicRootBindingsTest,LedgerCacheTest,InterleavedLedgerStorageTest,BookieJournalNoSyncTest,BookieJournalBypassTest'
+```
+
+fence回归还保留父SHA的单文件投影RED：仅将LedgerDescriptorImpl替换为上述父源码，其余实现和必要新夹具保留该阶段版本，8项中7项按预期失败、原凭证测试通过；这不是整份父源码验收。修复后阶段24项、最后fence10项及交付146项分别绑定原输入。前置脚本路径错误、原型编译错误、投影夹具构造签名编译错误和内存等待夹具JVM exit5均保留原诊断，不改写为产品RED或PASS。内存等待夹具最初忽略MemoryLimitController允许一条请求越过阈值，导致第三条实际发布而未等待；纠正已占用32字节时的阈值为16后，真实等待/中断、quota不误扣、rollback统计异常不覆盖原中断和原两项实际完成均通过。未弱化断言或改写controller合同。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-owner-evidence-062c14df`保存各阶段源码/输入/原XML与日志、最终1288份native输入、1315份外层源码加9份文档及147份交付相关class。早期源码不移绑为最终PASS，所有未改输入回查父Git blob。最终Spotless/Checkstyle实际exit0，首次22项格式诊断及原源码保留；独立RAT实际exit1，431个未批准路径与字节和父源码完全一致、无新增，保护PDF在读取前排除。本次未复跑完整SDK、stock/TLC、Rust JNI或性能矩阵；局部真实文件与第二进程锁证据不替代完整网络、掉电、full-bytes或生产验收。
+
+十三个已终态native临时目录的72个原文件，经同inode/dev/hash/mode/uid/gid及两次无reader检查后移除，逻辑路径字节102,768,815；归档硬链接保留全部数据，常规文件数据块回收0。前置脚本失败产生的另一个空目录此前已检查后移除，不计入上述原文件数。未清理默认目录或其他任务资源。

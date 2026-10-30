@@ -138,6 +138,8 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
                             Throwable gcFailure, DefaultEntryLogger.FreshDrainResult entryLogger,
                             FileInfoBackingCache.FreshDrainResult index) { }
 
+    record FreshMaintenanceResult(boolean quiesced, Throwable failure) { }
+
     public InterleavedLedgerStorage() {
         this(false);
     }
@@ -406,12 +408,7 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
     /** Requests and SyncThread must already have actually stopped. GC may still be finishing its own work. */
     FreshDrainResult closeForFresh() throws InterruptedException {
         synchronized (freshLifecycleLock) {
-            if (!freshLifecycle || Thread.currentThread() == freshInitializingThread
-                    || gcThread != null && gcThread.isCurrentExecutorThread()
-                    || ledgerCache != null && ((LedgerCacheImpl) ledgerCache).getIndexPersistenceManager()
-                            .isCurrentResourceActivityForFresh()
-                    || entryLogger != null && entryLogger.getEntryLoggerAllocator() != null
-                            && entryLogger.getEntryLoggerAllocator().isCurrentExecutorThread()) {
+            if (!freshLifecycle || isCurrentResourceActivityForFresh()) {
                 throw new IllegalStateException("Fresh storage close requires its external owner worker");
             }
             freshClosing = true;
@@ -420,18 +417,11 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
             }
         }
         synchronized (freshCloseLock) {
-            Throwable gcFailure = null;
-            if (gcThread != null) {
-                try {
-                    gcThread.shutdownForFresh();
-                } catch (IOException | RuntimeException failure) {
-                    gcFailure = failure;
-                    rememberFreshOperationFailure(failure);
-                }
-                if (!gcThread.freshUsersTerminated()) {
-                    return new FreshDrainResult(false, freshInitializationFailure, freshOperationFailure,
-                            freshFinalFlushFailure, gcFailure, null, null);
-                }
+            FreshMaintenanceResult maintenance = quiesceMaintenanceForFresh();
+            Throwable gcFailure = maintenance.failure();
+            if (!maintenance.quiesced()) {
+                return new FreshDrainResult(false, freshInitializationFailure, freshOperationFailure,
+                        freshFinalFlushFailure, gcFailure, null, null);
             }
             if (freshInitialized && !freshFinalFlushComplete) {
                 try {
@@ -453,6 +443,41 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
             return new FreshDrainResult(drained, freshInitializationFailure,
                     freshOperationFailure, freshFinalFlushFailure,
                     gcFailure, entries, index);
+        }
+    }
+
+    /** Stop checkpoint producers before Sync's final flush, keeping storage I/O available to that flush. */
+    FreshMaintenanceResult quiesceMaintenanceForFresh() throws InterruptedException {
+        synchronized (freshLifecycleLock) {
+            if (!freshLifecycle || isCurrentResourceActivityForFresh()) {
+                throw new IllegalStateException("Fresh maintenance quiesce requires its external owner worker");
+            }
+            while (freshInitializing) {
+                freshLifecycleLock.wait();
+            }
+        }
+        synchronized (freshCloseLock) {
+            Throwable failure = null;
+            if (gcThread != null) {
+                try {
+                    gcThread.shutdownForFresh();
+                } catch (IOException | RuntimeException gcFailure) {
+                    failure = gcFailure;
+                    rememberFreshOperationFailure(gcFailure);
+                }
+            }
+            return new FreshMaintenanceResult(gcThread == null || gcThread.freshUsersTerminated(), failure);
+        }
+    }
+
+    boolean isCurrentResourceActivityForFresh() {
+        synchronized (freshLifecycleLock) {
+            return Thread.currentThread() == freshInitializingThread
+                    || gcThread != null && gcThread.isCurrentExecutorThread()
+                    || ledgerCache != null && ((LedgerCacheImpl) ledgerCache).getIndexPersistenceManager()
+                            .isCurrentResourceActivityForFresh()
+                    || entryLogger != null && entryLogger.getEntryLoggerAllocator() != null
+                            && entryLogger.getEntryLoggerAllocator().isCurrentExecutorThread();
         }
     }
 

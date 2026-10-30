@@ -278,6 +278,9 @@ public class BookieStateManager implements StateManager {
             while (!stateService.awaitTermination(5, TimeUnit.MINUTES)) {
                 log.info("Fresh state manager is still draining its original executor");
             }
+            if (stateServiceThread != null) {
+                stateServiceThread.join();
+            }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw interrupted;

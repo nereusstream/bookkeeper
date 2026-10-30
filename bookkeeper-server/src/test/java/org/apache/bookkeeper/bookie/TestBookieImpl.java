@@ -179,6 +179,18 @@ public class TestBookieImpl extends BookieImpl {
             return build(NullStatsLogger.INSTANCE);
         }
 
+        /** Explicit local fresh lifecycle; the ordinary build method retains its authority checks. */
+        public FreshClassicOwner buildFresh() throws java.io.IOException {
+            return buildFresh(NullStatsLogger.INSTANCE);
+        }
+
+        public FreshClassicOwner buildFresh(StatsLogger stats) throws java.io.IOException {
+            if (metadataBookieDriver != null || registrationManager != null) {
+                throw new IllegalStateException("A local fresh owner cannot adopt remote metadata resources");
+            }
+            return FreshClassicOwner.create(conf, stats);
+        }
+
         public Resources build(StatsLogger statsLogger) throws Exception {
             if (metadataBookieDriver == null) {
                 if (conf.getMetadataServiceUri() == null) {

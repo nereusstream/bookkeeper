@@ -103,6 +103,7 @@ public class Journal implements CheckpointSource {
         boolean started;
         boolean closing;
         boolean writerDone;
+        boolean writerReady;
         boolean checkpointClosing;
         boolean providerClosed;
         int producers;
@@ -962,6 +963,13 @@ public class Journal implements CheckpointSource {
     static Journal forFresh(int journalIndex, File directory, ServerConfiguration configuration,
             LedgerDirsManager directories, StatsLogger stats, ByteBufAllocator allocator,
             JournalAliveListener listener) {
+        validateFreshConfiguration(configuration);
+        Journal journal = new Journal(journalIndex, directory, configuration, directories, stats, allocator, true);
+        journal.journalAliveListener = listener;
+        return journal;
+    }
+
+    static void validateFreshConfiguration(ServerConfiguration configuration) {
         Object provider = configuration.getProperty("journalChannelProvider");
         if (configuration.isBusyWaitEnabled() || !configuration.getJournalSyncData()
                 || !configuration.getJournalWriteData() || configuration.getJournalFormatVersionToWrite() != 6
@@ -997,9 +1005,6 @@ public class Journal implements CheckpointSource {
                         < JournalChannel.HEADER_SIZE + (long) configuration.getJournalAlignmentSize()) {
             throw new IllegalArgumentException("Fresh Journal requires finite positive queues, buffers and memory");
         }
-        Journal journal = new Journal(journalIndex, directory, configuration, directories, stats, allocator, true);
-        journal.journalAliveListener = listener;
-        return journal;
     }
 
     private Journal(int journalIndex, File journalDirectory, ServerConfiguration conf,
@@ -1439,17 +1444,62 @@ public class Journal implements CheckpointSource {
             enqueueFresh(ledgerId, entryId, entry, cb, ctx, journalStats.getJournalAddEntryStats(), true);
             return;
         }
-        // Retain entry until it gets written to journal
+        // Retain until publication, then transfer the reference and reservation to the queue entry.
+        long bytes = entry.readableBytes();
         entry.retain();
+        boolean counted = false;
+        boolean reserved = false;
+        boolean published = false;
+        QueueEntry ticket = null;
+        Throwable submissionFailure = null;
+        try {
+            journalStats.getJournalQueueSize().inc();
+            counted = true;
+            memoryLimitController.reserveMemory(bytes);
+            reserved = true;
+            ticket = QueueEntry.create(entry, ackBeforeSync, ledgerId, entryId, cb, ctx, MathUtils.nowInNano(),
+                    journalStats.getJournalAddEntryStats(), callbackTime);
+            queue.put(ticket);
+            published = true;
+        } catch (Throwable failure) {
+            submissionFailure = failure;
+            throw failure;
+        } finally {
+            if (!published) {
+                if (ticket != null) {
+                    try {
+                        ticket.recycle();
+                    } catch (Throwable failure) {
+                        suppressSubmissionCleanup(submissionFailure, failure);
+                    }
+                }
+                if (reserved) {
+                    try {
+                        memoryLimitController.releaseMemory(bytes);
+                    } catch (Throwable failure) {
+                        suppressSubmissionCleanup(submissionFailure, failure);
+                    }
+                }
+                try {
+                    entry.release();
+                } catch (Throwable failure) {
+                    suppressSubmissionCleanup(submissionFailure, failure);
+                }
+                if (counted) {
+                    try {
+                        journalStats.getJournalQueueSize().dec();
+                    } catch (Throwable failure) {
+                        suppressSubmissionCleanup(submissionFailure, failure);
+                    }
+                }
+            }
+        }
+    }
 
-        journalStats.getJournalQueueSize().inc();
-
-        memoryLimitController.reserveMemory(entry.readableBytes());
-
-        queue.put(QueueEntry.create(
-                entry, ackBeforeSync, ledgerId, entryId, cb, ctx, MathUtils.nowInNano(),
-                journalStats.getJournalAddEntryStats(),
-                callbackTime));
+    private static void suppressSubmissionCleanup(Throwable original, Throwable cleanup) {
+        if (original != cleanup) {
+            original.addSuppressed(cleanup);
+        }
     }
 
     void forceLedger(long ledgerId, WriteCallback cb, Object ctx) {
@@ -1870,6 +1920,12 @@ public class Journal implements CheckpointSource {
                     bc = logFile.getBufferedChannel();
 
                     lastFlushPosition = bc.position();
+                    if (fresh != null) {
+                        synchronized (fresh.gate) {
+                            fresh.writerReady = true;
+                            fresh.gate.notifyAll();
+                        }
+                    }
                 }
 
                 if (qe == null) {
@@ -2177,6 +2233,20 @@ public class Journal implements CheckpointSource {
         }
         if (thread != null) {
             thread.join();
+        }
+    }
+
+    void awaitStartedForFresh() throws IOException, InterruptedException {
+        if (fresh == null || isCurrentResourceActivityForFresh()) {
+            throw new IllegalStateException("Fresh Journal startup must be observed by its external owner");
+        }
+        synchronized (fresh.gate) {
+            while (!fresh.writerReady && !fresh.writerDone && fresh.operationFailure == null) {
+                fresh.gate.wait();
+            }
+            if (!fresh.writerReady || fresh.operationFailure != null) {
+                throw new IOException("Fresh Journal did not complete its initial channel", fresh.operationFailure);
+            }
         }
     }
 

@@ -92,12 +92,12 @@ public class BookieImpl implements Bookie {
     final List<File> journalDirectories;
     final ServerConfiguration conf;
 
-    final SyncThread syncThread;
-    final LedgerStorage ledgerStorage;
+    SyncThread syncThread;
+    LedgerStorage ledgerStorage;
     final RegistrationManager registrationManager;
     final List<Journal> journals;
 
-    final HandleFactory handles;
+    HandleFactory handles;
     final boolean entryLogPerLedgerEnabled;
 
     public static final long METAENTRY_ID_LEDGER_KEY = -0x1000;
@@ -105,10 +105,12 @@ public class BookieImpl implements Bookie {
     public static final long METAENTRY_ID_FORCE_LEDGER  = -0x4000;
     static final long METAENTRY_ID_LEDGER_EXPLICITLAC  = -0x8000;
 
-    private final LedgerDirsManager ledgerDirsManager;
+    private LedgerDirsManager ledgerDirsManager;
     protected final Supplier<BookieServiceInfo> bookieServiceInfoProvider;
-    private final LedgerDirsManager indexDirsManager;
+    private LedgerDirsManager indexDirsManager;
     LedgerDirsMonitor dirsMonitor;
+
+    private FreshState fresh;
 
     private int exitCode = ExitCode.OK;
 
@@ -121,9 +123,9 @@ public class BookieImpl implements Bookie {
 
     // Expose Stats
     final StatsLogger statsLogger;
-    private final BookieStats bookieStats;
+    private BookieStats bookieStats;
 
-    private final ByteBufAllocator allocator;
+    private ByteBufAllocator allocator;
 
     private final boolean writeDataToJournal;
 
@@ -695,6 +697,9 @@ public class BookieImpl implements Bookie {
 
     @Override
     public synchronized void start() {
+        if (fresh != null) {
+            throw new IllegalStateException("Use the explicit fresh owner lifecycle");
+        }
         bookieThread = new BookieCriticalThread(() -> run(), "Bookie-" + conf.getBookiePort());
         bookieThread.setDaemon(true);
 
@@ -883,6 +888,9 @@ public class BookieImpl implements Bookie {
     }
 
     public void run() {
+        if (fresh != null) {
+            throw new IllegalStateException("Fresh journals are started by their registered local owner");
+        }
         // start journals
         for (Journal journal: journals) {
             journal.start();
@@ -894,6 +902,11 @@ public class BookieImpl implements Bookie {
     // interrupted by shutdown call.
     AtomicBoolean shutdownTriggered = new AtomicBoolean(false);
     void triggerBookieShutdown(final int exitCode) {
+        if (fresh != null) {
+            this.exitCode = exitCode;
+            fresh.owner.requestClose();
+            return;
+        }
         if (!shutdownTriggered.compareAndSet(false, true)) {
             return;
         }
@@ -919,6 +932,11 @@ public class BookieImpl implements Bookie {
     // when encountering exception
     ReentrantLock lock = new ReentrantLock(true);
     int shutdown(int exitCode) {
+        if (fresh != null) {
+            this.exitCode = exitCode;
+            fresh.owner.requestClose();
+            return exitCode;
+        }
         lock.lock();
         try {
             if (isRunning()) {
@@ -1005,7 +1023,7 @@ public class BookieImpl implements Bookie {
         long ledgerId = handle.getLedgerId();
         long entryId = handle.addEntry(entry);
 
-        bookieStats.getWriteBytes().addCount(entry.readableBytes());
+        recordWriteBytes(entry.readableBytes());
 
         // journal `addEntry` should happen after the entry is added to ledger storage.
         // otherwise the journal entry can potentially be rolled before the ledger is created in ledger storage.
@@ -1014,11 +1032,12 @@ public class BookieImpl implements Bookie {
             byte[] oldValue = masterKeyCache.putIfAbsent(ledgerId, masterKey);
             if (oldValue == null) {
                 ByteBuf masterKeyEntry = createMasterKeyEntry(ledgerId, masterKey);
+                trackFreshRecord(ctx, masterKeyEntry);
                 try {
                     getJournal(ledgerId).logAddEntry(
                             masterKeyEntry, false /* ackBeforeSync */, new NopWriteCallback(), null);
                 } finally {
-                    ReferenceCountUtil.release(masterKeyEntry);
+                    releaseInput(masterKeyEntry, ctx);
                 }
             }
         }
@@ -1043,7 +1062,7 @@ public class BookieImpl implements Bookie {
      * so that they exist on a quorum of bookies. The corresponding client side call for this
      * is not exposed to users.
      */
-    public void recoveryAddEntry(ByteBuf entry, WriteCallback cb, Object ctx, byte[] masterKey)
+    private void recoveryAddEntryUnadmitted(ByteBuf entry, WriteCallback cb, Object ctx, byte[] masterKey)
             throws IOException, BookieException, InterruptedException {
         long requestNanos = MathUtils.nowInNano();
         boolean success = false;
@@ -1059,16 +1078,8 @@ public class BookieImpl implements Bookie {
             stateManager.transitionToReadOnlyMode();
             throw new IOException(e);
         } finally {
-            long elapsedNanos = MathUtils.elapsedNanos(requestNanos);
-            if (success) {
-                bookieStats.getRecoveryAddEntryStats().registerSuccessfulEvent(elapsedNanos, TimeUnit.NANOSECONDS);
-                bookieStats.getAddBytesStats().registerSuccessfulValue(entrySize);
-            } else {
-                bookieStats.getRecoveryAddEntryStats().registerFailedEvent(elapsedNanos, TimeUnit.NANOSECONDS);
-                bookieStats.getAddBytesStats().registerFailedValue(entrySize);
-            }
-
-            ReferenceCountUtil.release(entry);
+            recordAddStats(true, success, entrySize, requestNanos);
+            releaseInput(entry, ctx);
         }
     }
 
@@ -1082,7 +1093,7 @@ public class BookieImpl implements Bookie {
         return bb;
     }
 
-    public void setExplicitLac(ByteBuf entry, WriteCallback writeCallback, Object ctx, byte[] masterKey)
+    private void setExplicitLacUnadmitted(ByteBuf entry, WriteCallback writeCallback, Object ctx, byte[] masterKey)
             throws IOException, InterruptedException, BookieException {
         ByteBuf explicitLACEntry = null;
         try {
@@ -1093,20 +1104,25 @@ public class BookieImpl implements Bookie {
                 handle.setExplicitLac(entry);
                 entry.resetReaderIndex();
                 explicitLACEntry = createExplicitLACEntry(ledgerId, entry);
+                trackFreshRecord(ctx, explicitLACEntry);
                 getJournal(ledgerId).logAddEntry(explicitLACEntry, false /* ackBeforeSync */, writeCallback, ctx);
             }
         } catch (NoWritableLedgerDirException e) {
             stateManager.transitionToReadOnlyMode();
             throw new IOException(e);
         } finally {
-            ReferenceCountUtil.release(entry);
-            if (explicitLACEntry != null) {
-                ReferenceCountUtil.release(explicitLACEntry);
+            try {
+                releaseInput(entry, ctx);
+            } finally {
+                if (explicitLACEntry != null) {
+                    releaseInput(explicitLACEntry, ctx);
+                }
             }
         }
     }
 
-    public ByteBuf getExplicitLac(long ledgerId) throws IOException, Bookie.NoLedgerException, BookieException {
+    private ByteBuf getExplicitLacUnadmitted(long ledgerId)
+            throws IOException, Bookie.NoLedgerException, BookieException {
         ByteBuf lac;
         LedgerDescriptor handle = handles.getReadOnlyHandle(ledgerId);
         synchronized (handle) {
@@ -1120,18 +1136,19 @@ public class BookieImpl implements Bookie {
      * It works like a regular addEntry with ackBeforeSync=false.
      * This is useful for ledgers with DEFERRED_SYNC write flag.
      */
-    public void forceLedger(long ledgerId, WriteCallback cb,
+    private void forceLedgerUnadmitted(long ledgerId, WriteCallback cb,
                             Object ctx) {
         log.trace().attr("ledgerId", ledgerId).log("Forcing ledger");
         Journal journal = getJournal(ledgerId);
         journal.forceLedger(ledgerId, cb, ctx);
-        bookieStats.getForceLedgerOps().inc();
+        recordForceStats();
     }
 
     /**
      * Add entry to a ledger.
      */
-    public void addEntry(ByteBuf entry, boolean ackBeforeSync, WriteCallback cb, Object ctx, byte[] masterKey)
+    private void addEntryUnadmitted(ByteBuf entry, boolean ackBeforeSync, WriteCallback cb,
+                                   Object ctx, byte[] masterKey)
             throws IOException, BookieException, InterruptedException {
         long requestNanos = MathUtils.nowInNano();
         boolean success = false;
@@ -1151,16 +1168,8 @@ public class BookieImpl implements Bookie {
             stateManager.transitionToReadOnlyMode();
             throw new IOException(e);
         } finally {
-            long elapsedNanos = MathUtils.elapsedNanos(requestNanos);
-            if (success) {
-                bookieStats.getAddEntryStats().registerSuccessfulEvent(elapsedNanos, TimeUnit.NANOSECONDS);
-                bookieStats.getAddBytesStats().registerSuccessfulValue(entrySize);
-            } else {
-                bookieStats.getAddEntryStats().registerFailedEvent(elapsedNanos, TimeUnit.NANOSECONDS);
-                bookieStats.getAddBytesStats().registerFailedValue(entrySize);
-            }
-
-            ReferenceCountUtil.release(entry);
+            recordAddStats(false, success, entrySize, requestNanos);
+            releaseInput(entry, ctx);
         }
     }
 
@@ -1172,13 +1181,13 @@ public class BookieImpl implements Bookie {
      * never be unfenced. Fencing a fenced ledger has no effect.
      * @return
      */
-    public CompletableFuture<Boolean> fenceLedger(long ledgerId, byte[] masterKey)
+    private CompletableFuture<Boolean> fenceLedgerUnadmitted(long ledgerId, byte[] masterKey)
             throws IOException, BookieException {
         LedgerDescriptor handle = handles.getHandle(ledgerId, masterKey, false);
         return handle.fenceAndLogInJournal(getJournal(ledgerId));
     }
 
-    public ByteBuf readEntry(long ledgerId, long entryId)
+    private ByteBuf readEntryUnadmitted(long ledgerId, long entryId)
             throws IOException, NoLedgerException, BookieException {
         long requestNanos = MathUtils.nowInNano();
         boolean success = false;
@@ -1191,22 +1200,15 @@ public class BookieImpl implements Bookie {
                     .log("Reading entry");
             ByteBuf entry = handle.readEntry(entryId);
             entrySize = entry.readableBytes();
-            bookieStats.getReadBytes().addCount(entrySize);
+            recordReadBytes(entrySize);
             success = true;
             return entry;
         } finally {
-            long elapsedNanos = MathUtils.elapsedNanos(requestNanos);
-            if (success) {
-                bookieStats.getReadEntryStats().registerSuccessfulEvent(elapsedNanos, TimeUnit.NANOSECONDS);
-                bookieStats.getReadBytesStats().registerSuccessfulValue(entrySize);
-            } else {
-                bookieStats.getReadEntryStats().registerFailedEvent(elapsedNanos, TimeUnit.NANOSECONDS);
-                bookieStats.getReadBytesStats().registerFailedValue(entrySize);
-            }
+            recordReadStats(success, entrySize, requestNanos);
         }
     }
 
-    public long readLastAddConfirmed(long ledgerId) throws IOException, BookieException {
+    private long readLastAddConfirmedUnadmitted(long ledgerId) throws IOException, BookieException {
         LedgerDescriptor handle = handles.getReadOnlyHandle(ledgerId);
         return handle.getLastAddConfirmed();
     }
@@ -1362,5 +1364,662 @@ public class BookieImpl implements Bookie {
     @VisibleForTesting
     public List<Journal> getJournals() {
         return this.journals;
+    }
+
+    private static final class FreshState {
+        final FreshClassicOwner owner;
+        final Object gate = new Object();
+        final Object closeLock = new Object();
+        final Map<Thread, Integer> calls = new HashMap<>();
+        final java.util.Set<FreshCall> operations =
+                java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        ByteBuf rejectedInput;
+        volatile int activeCalls;
+        volatile int pendingOperations;
+        volatile Throwable observationFailure;
+        volatile Throwable operationFailure;
+        volatile Throwable releaseFailure;
+        boolean initialized;
+        volatile boolean drained;
+        boolean running;
+        boolean closing;
+
+        FreshState(FreshClassicOwner owner) {
+            this.owner = owner;
+        }
+    }
+
+    private final class FreshCall implements WriteCallback {
+        WriteCallback callback;
+        Object context;
+        ByteBuf input;
+        ByteBuf journalRecord;
+        final Thread caller = Thread.currentThread();
+        boolean bodyReturned;
+        boolean callbackStarted;
+        boolean callbackReturned;
+        boolean retired;
+
+        FreshCall(boolean asynchronous, WriteCallback callback, Object context) {
+            this.callback = callback;
+            this.context = context;
+            callbackReturned = !asynchronous;
+        }
+
+        @Override
+        public void writeComplete(int rc, long ledgerId, long entryId, BookieId address, Object ignored) {
+            synchronized (fresh.gate) {
+                if (callbackStarted) {
+                    rememberObservationFailure(new IllegalStateException("Duplicate fresh completion"));
+                    return;
+                }
+                callbackStarted = true;
+            }
+            try {
+                callback.writeComplete(rc, ledgerId, entryId, address, context);
+            } catch (Throwable failure) {
+                rememberObservationFailure(failure);
+            } finally {
+                synchronized (fresh.gate) {
+                    callbackReturned = true;
+                    retire();
+                }
+            }
+        }
+
+        void retire() {
+            if (!retired && bodyReturned && callbackReturned) {
+                retired = true;
+                callback = null;
+                context = null;
+                if (input == null && journalRecord == null) {
+                    fresh.operations.remove(this);
+                } else if (fresh.releaseFailure == null) {
+                    fresh.releaseFailure = new IllegalStateException("Fresh input reference has no release result");
+                }
+                fresh.pendingOperations--;
+                fresh.gate.notifyAll();
+            }
+        }
+    }
+
+    record FreshDrainResult(boolean drained, Throwable closeFailure) { }
+
+    private BookieImpl(ServerConfiguration conf, StatsLogger stats, FreshClassicOwner owner) {
+        this.conf = conf;
+        this.statsLogger = stats;
+        registrationManager = null;
+        bookieServiceInfoProvider = BookieServiceInfo.NO_INFO;
+        entryLogPerLedgerEnabled = false;
+        writeDataToJournal = true;
+        journalDirectories = new ArrayList<>();
+        for (File directory : conf.getJournalDirs()) {
+            journalDirectories.add(getCurrentDirectory(directory));
+        }
+        journals = new ArrayList<>();
+        fresh = new FreshState(owner);
+    }
+
+    static BookieImpl forFresh(ServerConfiguration conf, StatsLogger stats, FreshClassicOwner owner) {
+        return new BookieImpl(conf, stats, owner);
+    }
+
+    void initializeForFresh(FreshClassicOwner.Permit permit) throws IOException, InterruptedException, BookieException {
+        permit.consume(this);
+        fresh.owner.checkStarting();
+        DiskChecker checker = BookieResources.createDiskChecker(conf);
+        ledgerDirsManager = LedgerDirsManager.forFresh(conf, conf.getLedgerDirs(), checker,
+                statsLogger.scope(LD_LEDGER_SCOPE));
+        indexDirsManager = conf.getIndexDirs() == null ? ledgerDirsManager
+                : LedgerDirsManager.forFresh(conf, conf.getIndexDirs(), checker, statsLogger.scope(LD_INDEX_SCOPE));
+        List<File> allLedgerDirectories = new ArrayList<>(ledgerDirsManager.getAllLedgerDirs());
+        if (indexDirsManager != ledgerDirsManager) {
+            allLedgerDirectories.addAll(indexDirsManager.getAllLedgerDirs());
+        }
+        checkIfDirsOnSameDiskPartition(allLedgerDirectories);
+        checkIfDirsOnSameDiskPartition(journalDirectories);
+        fresh.owner.checkStarting();
+        stateManager = initializeStateManager();
+        fresh.owner.checkStarting();
+        stateManager.setShutdownHandler(this::triggerBookieShutdown);
+        List<LedgerDirsManager> managers = new ArrayList<>();
+        managers.add(ledgerDirsManager);
+        if (indexDirsManager != ledgerDirsManager) {
+            managers.add(indexDirsManager);
+        }
+        dirsMonitor = new LedgerDirsMonitor(conf, checker, managers);
+        fresh.owner.checkStarting();
+        dirsMonitor.init();
+        fresh.owner.checkStarting();
+        allocator = BookieResources.createAllocator(conf);
+        if (allocator instanceof org.apache.bookkeeper.common.allocator.ByteBufAllocatorWithOomHandler handled) {
+            handled.setOomHandler(failure -> fresh.owner.requestClose());
+        }
+        for (int i = 0; i < journalDirectories.size(); i++) {
+            fresh.owner.checkStarting();
+            Journal journal = Journal.forFresh(i, journalDirectories.get(i), conf, ledgerDirsManager,
+                    statsLogger.scope(JOURNAL_SCOPE), allocator,
+                    () -> triggerBookieShutdown(ExitCode.BOOKIE_EXCEPTION));
+            synchronized (fresh.gate) {
+                journals.add(journal);
+            }
+            fresh.owner.checkStarting();
+            journal.initializeForFresh();
+        }
+        fresh.owner.checkStarting();
+        var checkpoints = new CheckpointSourceList(journals);
+        ledgerStorage = InterleavedLedgerStorage.forFresh();
+        ledgerStorage.setCheckpointSource(checkpoints);
+        ledgerStorage.setCheckpointer(Checkpointer.NULL);
+        fresh.owner.checkStarting();
+        ((InterleavedLedgerStorage) ledgerStorage).initializeForFresh(conf, ledgerDirsManager, indexDirsManager,
+                statsLogger, allocator);
+        fresh.owner.checkStarting();
+        syncThread = SyncThread.forFresh(conf, getLedgerDirsListener(), ledgerStorage, checkpoints, statsLogger);
+        fresh.owner.checkStarting();
+        ledgerStorage.setStateManager(stateManager);
+        ledgerStorage.setCheckpointer(syncThread);
+        ledgerStorage.registerLedgerDeletionListener(ledgerId -> masterKeyCache.remove(ledgerId));
+        handles = new HandleFactoryImpl(ledgerStorage);
+        bookieStats = new BookieStats(statsLogger, journalDirectories.size(), conf.getJournalQueueSize());
+        ledgerDirsManager.addLedgerDirsListener(getLedgerDirsListener());
+        if (indexDirsManager != ledgerDirsManager) {
+            indexDirsManager.addLedgerDirsListener(getLedgerDirsListener());
+        }
+        fresh.owner.checkStarting();
+        fresh.initialized = true;
+    }
+
+    void startForFresh() throws IOException, InterruptedException, BookieException {
+        if (fresh == null || !fresh.initialized) {
+            throw new IllegalStateException("Fresh Bookie has not completed initialization");
+        }
+        for (Journal journal : journals) {
+            fresh.owner.checkStarting();
+            journal.start();
+        }
+        for (Journal journal : journals) {
+            journal.awaitStartedForFresh();
+        }
+        fresh.owner.checkStarting();
+        try {
+            syncThread.requestFlush().get();
+        } catch (ExecutionException failed) {
+            throw new IOException("Fresh initial storage flush failed", failed.getCause());
+        }
+        if (conf.isLocalConsistencyCheckOnStartup()) {
+            var errors = ledgerStorage.localConsistencyCheck(Optional.empty());
+            if (errors != null && !errors.isEmpty()) {
+                throw new IOException("Fresh local consistency check failed", errors.get(0).getException());
+            }
+        }
+        fresh.owner.checkStarting();
+        ledgerStorage.start();
+        fresh.owner.checkStarting();
+        dirsMonitor.start();
+        fresh.owner.checkStarting();
+        stateManager.initState();
+        if (conf.isForceReadOnlyBookie()) {
+            stateManager.forceToReadOnly();
+        }
+    }
+
+    void openAdmissionForFresh() {
+        synchronized (fresh.gate) {
+            if (!fresh.initialized || fresh.closing || fresh.owner.isClosing()) {
+                throw new IllegalStateException("Fresh admission cannot open after close");
+            }
+            fresh.running = true;
+        }
+    }
+
+    private FreshCall beginFreshCall(boolean asynchronous, WriteCallback callback, Object context) {
+        return beginFreshCall(asynchronous, callback, context, null);
+    }
+
+    private FreshCall beginFreshCall(boolean asynchronous, WriteCallback callback, Object context, ByteBuf input) {
+        synchronized (fresh.gate) {
+            if (!fresh.running || fresh.closing || fresh.owner.isClosing()) {
+                throw new java.util.concurrent.RejectedExecutionException("Fresh Bookie admission is closed");
+            }
+            FreshCall call = new FreshCall(asynchronous, callback, context);
+            call.input = input;
+            Integer prior = fresh.calls.get(call.caller);
+            try {
+                fresh.operations.add(call);
+                fresh.calls.put(call.caller, prior == null ? 1 : prior + 1);
+            } catch (RuntimeException | Error failure) {
+                fresh.operations.remove(call);
+                if (prior == null) {
+                    fresh.calls.remove(call.caller);
+                } else {
+                    fresh.calls.put(call.caller, prior);
+                }
+                throw failure;
+            }
+            fresh.activeCalls++;
+            fresh.pendingOperations++;
+            return call;
+        }
+    }
+
+    private void finishFreshCall(FreshCall call, boolean success) {
+        if (call == null) {
+            return;
+        }
+        synchronized (fresh.gate) {
+            call.bodyReturned = true;
+            if (!success && !call.callbackStarted) {
+                call.callbackReturned = true;
+            }
+            int depth = fresh.calls.get(call.caller);
+            if (depth == 1) {
+                fresh.calls.remove(call.caller);
+            } else {
+                fresh.calls.put(call.caller, depth - 1);
+            }
+            fresh.activeCalls--;
+            call.retire();
+            fresh.gate.notifyAll();
+        }
+    }
+
+    private void freshWrite(ByteBuf entry, WriteCallback callback, Object context, byte[] key, int operation)
+            throws IOException, InterruptedException, BookieException {
+        FreshCall call = null;
+        boolean delegated = false;
+        boolean success = false;
+        try {
+            java.util.Objects.requireNonNull(callback, "callback");
+            call = beginFreshCall(true, callback, context, entry);
+            byte[] masterKey = key.clone();
+            if (operation == 0 && stateManager.isReadOnly()) {
+                throw new IOException("Fresh Bookie is read-only");
+            }
+            if (operation == 1 && !stateManager.isAvailableForHighPriorityWrites()) {
+                throw new IOException("Fresh high-priority writes are unavailable");
+            }
+            delegated = true;
+            if (operation == 0) {
+                addEntryUnadmitted(entry, false, call, call, masterKey);
+            } else if (operation == 1) {
+                recoveryAddEntryUnadmitted(entry, call, call, masterKey);
+            } else {
+                setExplicitLacUnadmitted(entry, call, call, masterKey);
+            }
+            success = true;
+        } finally {
+            try {
+                if (!delegated) {
+                    releaseInput(entry, call);
+                }
+            } finally {
+                finishFreshCall(call, success);
+            }
+        }
+    }
+
+    @Override
+    public void addEntry(ByteBuf entry, boolean ackBeforeSync, WriteCallback callback, Object context, byte[] key)
+            throws IOException, InterruptedException, BookieException {
+        if (fresh == null) {
+            addEntryUnadmitted(entry, ackBeforeSync, callback, context, key);
+        } else {
+            freshWrite(entry, callback, context, key, 0);
+        }
+    }
+
+    @Override
+    public void recoveryAddEntry(ByteBuf entry, WriteCallback callback, Object context, byte[] key)
+            throws IOException, InterruptedException, BookieException {
+        if (fresh == null) {
+            recoveryAddEntryUnadmitted(entry, callback, context, key);
+        } else {
+            freshWrite(entry, callback, context, key, 1);
+        }
+    }
+
+    @Override
+    public void setExplicitLac(ByteBuf entry, WriteCallback callback, Object context, byte[] key)
+            throws IOException, InterruptedException, BookieException {
+        if (fresh == null) {
+            setExplicitLacUnadmitted(entry, callback, context, key);
+        } else {
+            freshWrite(entry, callback, context, key, 2);
+        }
+    }
+
+    @Override
+    public void forceLedger(long ledgerId, WriteCallback callback, Object context) {
+        if (fresh == null) {
+            forceLedgerUnadmitted(ledgerId, callback, context);
+            return;
+        }
+        java.util.Objects.requireNonNull(callback, "callback");
+        FreshCall call = beginFreshCall(true, callback, context);
+        boolean success = false;
+        try {
+            forceLedgerUnadmitted(ledgerId, call, call);
+            success = true;
+        } finally {
+            finishFreshCall(call, success);
+        }
+    }
+
+    @Override
+    public ByteBuf readEntry(long ledgerId, long entryId) throws IOException, BookieException {
+        FreshCall call = fresh == null ? null : beginFreshCall(false, null, null);
+        try {
+            return readEntryUnadmitted(ledgerId, entryId);
+        } finally {
+            finishFreshCall(call, true);
+        }
+    }
+
+    @Override
+    public long readLastAddConfirmed(long ledgerId) throws IOException, BookieException {
+        FreshCall call = fresh == null ? null : beginFreshCall(false, null, null);
+        try {
+            return readLastAddConfirmedUnadmitted(ledgerId);
+        } finally {
+            finishFreshCall(call, true);
+        }
+    }
+
+    @Override
+    public ByteBuf getExplicitLac(long ledgerId) throws IOException, BookieException {
+        FreshCall call = fresh == null ? null : beginFreshCall(false, null, null);
+        try {
+            return getExplicitLacUnadmitted(ledgerId);
+        } finally {
+            finishFreshCall(call, true);
+        }
+    }
+
+    @Override
+    public CompletableFuture<Boolean> fenceLedger(long ledgerId, byte[] masterKey) throws IOException, BookieException {
+        if (fresh == null) {
+            return fenceLedgerUnadmitted(ledgerId, masterKey);
+        }
+        FreshCall call = beginFreshCall(true, null, null);
+        boolean success = false;
+        try {
+            var observation = new CompletableFuture<Boolean>();
+            fenceLedgerUnadmitted(ledgerId, masterKey.clone()).whenComplete((value, failure) -> {
+                synchronized (fresh.gate) {
+                    call.callbackStarted = true;
+                }
+                try {
+                    if (failure == null) {
+                        observation.complete(value);
+                    } else {
+                        observation.completeExceptionally(failure);
+                    }
+                } finally {
+                    synchronized (fresh.gate) {
+                        call.callbackReturned = true;
+                        call.retire();
+                    }
+                }
+            });
+            success = true;
+            return observation;
+        } finally {
+            finishFreshCall(call, success);
+        }
+    }
+
+    private void rememberObservationFailure(Throwable failure) {
+        if (fresh == null) {
+            if (failure instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw (Error) failure;
+        }
+        synchronized (fresh.gate) {
+            if (fresh.observationFailure == null) {
+                fresh.observationFailure = failure;
+            }
+        }
+    }
+
+    private void trackFreshRecord(Object context, ByteBuf record) {
+        if (fresh != null) {
+            ((FreshCall) context).journalRecord = record;
+        }
+    }
+
+    private void releaseInput(ByteBuf entry, Object context) {
+        if (fresh == null) {
+            ReferenceCountUtil.release(entry);
+            return;
+        }
+        FreshCall call = context instanceof FreshCall owned ? owned : null;
+        try {
+            ReferenceCountUtil.release(entry);
+            if (call != null) {
+                if (call.input == entry) {
+                    call.input = null;
+                }
+                if (call.journalRecord == entry) {
+                    call.journalRecord = null;
+                }
+            }
+        } catch (Throwable failure) {
+            synchronized (fresh.gate) {
+                if (fresh.releaseFailure == null) {
+                    fresh.releaseFailure = failure;
+                }
+                if (call == null && fresh.rejectedInput == null) {
+                    fresh.rejectedInput = entry;
+                }
+                fresh.closing = true;
+            }
+            fresh.owner.requestClose();
+        }
+    }
+
+    private void recordWriteBytes(int bytes) {
+        try {
+            bookieStats.getWriteBytes().addCount(bytes);
+        } catch (RuntimeException | Error failure) {
+            rememberObservationFailure(failure);
+        }
+    }
+
+    private void recordReadBytes(int bytes) {
+        try {
+            bookieStats.getReadBytes().addCount(bytes);
+        } catch (RuntimeException | Error failure) {
+            rememberObservationFailure(failure);
+        }
+    }
+
+    private void recordForceStats() {
+        try {
+            bookieStats.getForceLedgerOps().inc();
+        } catch (RuntimeException | Error failure) {
+            rememberObservationFailure(failure);
+        }
+    }
+
+    private void recordAddStats(boolean recovery, boolean success, int size, long start) {
+        try {
+            var stats = recovery ? bookieStats.getRecoveryAddEntryStats() : bookieStats.getAddEntryStats();
+            if (success) {
+                stats.registerSuccessfulEvent(MathUtils.elapsedNanos(start), TimeUnit.NANOSECONDS);
+                bookieStats.getAddBytesStats().registerSuccessfulValue(size);
+            } else {
+                stats.registerFailedEvent(MathUtils.elapsedNanos(start), TimeUnit.NANOSECONDS);
+                bookieStats.getAddBytesStats().registerFailedValue(size);
+            }
+        } catch (RuntimeException | Error failure) {
+            rememberObservationFailure(failure);
+        }
+    }
+
+    private void recordReadStats(boolean success, int size, long start) {
+        try {
+            if (success) {
+                bookieStats.getReadEntryStats().registerSuccessfulEvent(MathUtils.elapsedNanos(start),
+                        TimeUnit.NANOSECONDS);
+                bookieStats.getReadBytesStats().registerSuccessfulValue(size);
+            } else {
+                bookieStats.getReadEntryStats().registerFailedEvent(MathUtils.elapsedNanos(start),
+                        TimeUnit.NANOSECONDS);
+                bookieStats.getReadBytesStats().registerFailedValue(size);
+            }
+        } catch (RuntimeException | Error failure) {
+            rememberObservationFailure(failure);
+        }
+    }
+
+    boolean isCurrentResourceActivityForFresh() {
+        if (fresh == null) {
+            return false;
+        }
+        synchronized (fresh.gate) {
+            if (fresh.calls.containsKey(Thread.currentThread())) {
+                return true;
+            }
+        }
+        List<Journal> registered;
+        synchronized (fresh.gate) {
+            registered = List.copyOf(journals);
+        }
+        return dirsMonitor != null && dirsMonitor.isCurrentExecutorThread()
+                || stateManager != null && ((BookieStateManager) stateManager).isCurrentExecutorThread()
+                || syncThread != null && syncThread.isCurrentExecutorThread()
+                || ledgerStorage != null && ((InterleavedLedgerStorage) ledgerStorage)
+                        .isCurrentResourceActivityForFresh()
+                || registered.stream().anyMatch(Journal::isCurrentResourceActivityForFresh);
+    }
+
+    int activeCallsForFresh() {
+        return fresh.activeCalls;
+    }
+
+    int pendingOperationsForFresh() {
+        return fresh.pendingOperations;
+    }
+
+    Throwable operationFailureForFresh() {
+        return fresh.operationFailure;
+    }
+
+    Throwable observationFailureForFresh() {
+        return fresh.observationFailure;
+    }
+
+    private void rememberFreshOperationFailure(Throwable failure) {
+        if (failure != null && fresh.operationFailure == null) {
+            fresh.operationFailure = failure;
+        }
+    }
+
+    FreshDrainResult closeForFresh() throws IOException, InterruptedException {
+        if (fresh == null || isCurrentResourceActivityForFresh()) {
+            throw new IllegalStateException("Fresh Bookie drain requires its external owner worker");
+        }
+        synchronized (fresh.closeLock) {
+            if (fresh.drained) {
+                return new FreshDrainResult(true, null);
+            }
+            boolean dataDrained = false;
+            synchronized (fresh.gate) {
+                fresh.closing = true;
+                fresh.running = false;
+            }
+            try {
+                if (stateManager != null) {
+                    stateManager.forceToShuttingDown();
+                    stateManager.forceToReadOnly();
+                }
+                if (dirsMonitor != null) {
+                    dirsMonitor.shutdownForFresh();
+                }
+                synchronized (fresh.gate) {
+                    while (fresh.activeCalls != 0) {
+                        fresh.gate.wait();
+                    }
+                }
+                boolean quiesced = true;
+                Throwable closeFailure = fresh.releaseFailure;
+                for (Journal journal : journals) {
+                    var result = journal.quiesceForFresh();
+                    quiesced &= result.quiesced();
+                    rememberFreshOperationFailure(result.operationFailure());
+                    if (result.callbackFailure() != null) {
+                        rememberObservationFailure(result.callbackFailure());
+                    }
+                    if (closeFailure == null) {
+                        closeFailure = result.releaseFailure();
+                    }
+                }
+                synchronized (fresh.gate) {
+                    while (fresh.pendingOperations != 0) {
+                        fresh.gate.wait();
+                    }
+                }
+                if (ledgerStorage != null) {
+                    var maintenance = ((InterleavedLedgerStorage) ledgerStorage).quiesceMaintenanceForFresh();
+                    rememberFreshOperationFailure(maintenance.failure());
+                    if (!maintenance.quiesced()) {
+                        return new FreshDrainResult(false, maintenance.failure());
+                    }
+                }
+                if (syncThread != null) {
+                    syncThread.shutdownForFresh();
+                }
+                if (ledgerStorage != null) {
+                    var storage = ((InterleavedLedgerStorage) ledgerStorage).closeForFresh();
+                    rememberFreshOperationFailure(storage.initializationFailure());
+                    rememberFreshOperationFailure(storage.operationFailure());
+                    if (!storage.drained()) {
+                        Throwable failure = storage.finalFlushFailure() != null ? storage.finalFlushFailure()
+                                : storage.gcFailure() != null ? storage.gcFailure()
+                                : storage.index() != null && storage.index().closeFailure() != null
+                                        ? storage.index().closeFailure()
+                                : storage.entryLogger() != null ? storage.entryLogger().closeFailure() : null;
+                        return new FreshDrainResult(false, failure);
+                    }
+                }
+                for (Journal journal : journals) {
+                    var result = journal.closeForFresh();
+                    quiesced &= result.drained();
+                    rememberFreshOperationFailure(result.initializationFailure());
+                    rememberFreshOperationFailure(result.operationFailure());
+                    if (result.callbackFailure() != null) {
+                        rememberObservationFailure(result.callbackFailure());
+                    }
+                    if (closeFailure == null) {
+                        closeFailure = result.closeFailure() != null ? result.closeFailure() : result.flushFailure();
+                    }
+                }
+                dataDrained = quiesced && closeFailure == null && fresh.releaseFailure == null
+                        && fresh.operations.isEmpty();
+                return new FreshDrainResult(dataDrained, closeFailure);
+            } catch (IOException | RuntimeException | Error failure) {
+                rememberFreshOperationFailure(failure);
+                throw failure;
+            } finally {
+                if (stateManager != null) {
+                    ((BookieStateManager) stateManager).closeForFresh();
+                }
+                if (dataDrained) {
+                    synchronized (fresh.gate) {
+                        journals.clear();
+                        ledgerStorage = null;
+                        syncThread = null;
+                        dirsMonitor = null;
+                        stateManager = null;
+                        handles = null;
+                        allocator = null;
+                        masterKeyCache.clear();
+                        fresh.drained = true;
+                    }
+                }
+            }
+        }
     }
 }

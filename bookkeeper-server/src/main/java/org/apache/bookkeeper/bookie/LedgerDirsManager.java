@@ -64,9 +64,26 @@ public class LedgerDirsManager {
 
     public LedgerDirsManager(ServerConfiguration conf, File[] dirs, DiskChecker diskChecker, StatsLogger statsLogger)
             throws IOException {
+        this(conf, dirs, diskChecker, statsLogger, false);
+    }
+
+    static LedgerDirsManager forFresh(ServerConfiguration conf, File[] dirs, DiskChecker checker, StatsLogger stats)
+            throws IOException {
+        return new LedgerDirsManager(conf, dirs, checker, stats, true);
+    }
+
+    private LedgerDirsManager(ServerConfiguration conf, File[] dirs, DiskChecker diskChecker, StatsLogger statsLogger,
+            boolean requireExisting) throws IOException {
         this.ledgerDirectories = Arrays.asList(BookieImpl.getCurrentDirectories(dirs));
         for (File f : this.ledgerDirectories) {
-            BookieImpl.checkDirectoryStructure(f);
+            if (requireExisting) {
+                if (!java.nio.file.Files.readAttributes(f.toPath(), java.nio.file.attribute.BasicFileAttributes.class,
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS).isDirectory()) {
+                    throw new IOException("Fresh current directory must already exist: " + f);
+                }
+            } else {
+                BookieImpl.checkDirectoryStructure(f);
+            }
         }
         this.writableLedgerDirectories = new ArrayList<File>(ledgerDirectories);
         this.filledDirs = new ArrayList<File>();

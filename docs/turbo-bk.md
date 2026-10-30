@@ -1039,3 +1039,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-31接续[fresh 根租约的逐句柄释放结果](rfcs/unified-wal/implementation/local-storage/README.md#fresh-根租约的逐句柄释放结果)：marker锁/channel及目录同步/枚举句柄分别保留首次native释放结果，原操作失败与资源drained分离，sticky或未知关闭不因no-op升级成功；永久marker保留。两类26项及RED/GREEN原绑定由该节拥有。下一项继续稳定outer owner/facade、逐资源登记与一次性permit；当前不构成完整fresh或根释放前提证明，Main/G1/full-bytes及16步总验收仍OPEN，目标active。
+
+
+2026-10-31接续[显式本地 fresh owner 与实际排空](rfcs/unified-wal/implementation/local-storage/README.md#显式本地-fresh-owner-与实际排空)：FreshClassicOwner/窄facade、冻结配置、完整初始化登记与一次性包内permit已接线，按实际调用体/callback、Journal、GC、Sync、storage及根资源依赖排空；共享fence与普通Journal仅补必要引用交接/未发布回滚。配置限制、验证与原阶段回执由该节拥有。本地fresh不发行集群authority，不接EmbeddedServer；共同owner/Classic导入、Main、网络服务图、G1/full-bytes及完整16步仍OPEN，目标active，默认OFF/SYSTEM/PARK与disabled保持。

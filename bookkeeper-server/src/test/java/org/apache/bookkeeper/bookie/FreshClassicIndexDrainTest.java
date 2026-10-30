@@ -691,6 +691,42 @@ public class FreshClassicIndexDrainTest {
     }
 
     @Test(timeout = 30000)
+    public void maintenanceQuiescenceLeavesRealStorageAvailableForSyncFinalFlush() throws Exception {
+        try (var fixture = new Fixture()) {
+            var storage = InterleavedLedgerStorage.forFresh();
+            storage.initializeForFresh(fixture.conf, fixture.directories, null,
+                    NullStatsLogger.INSTANCE, UnpooledByteBufAllocator.DEFAULT);
+            var sync = SyncThread.forFresh(fixture.conf, new LedgerDirsManager.LedgerDirsListener() { },
+                    storage, CheckpointSource.DEFAULT, NullStatsLogger.INSTANCE);
+            try {
+                storage.setCheckpointer(sync);
+                storage.setMasterKey(7, new byte[0]);
+                ByteBuf entry = Unpooled.buffer(32).writeLong(7).writeLong(0).writeLong(0).writeLong(123);
+                try {
+                    assertEquals(0, storage.addEntry(entry));
+                } finally {
+                    entry.release();
+                }
+                storage.start();
+                assertTrue(storage.quiesceMaintenanceForFresh().quiesced());
+                assertTrue(storage.gcThread.freshUsersTerminated());
+                sync.shutdownForFresh();
+                ByteBuf actual = storage.getEntry(7, 0);
+                try {
+                    assertEquals(123, actual.getLong(24));
+                } finally {
+                    actual.release();
+                }
+                assertTrue(storage.closeForFresh().drained());
+            } finally {
+                storage.quiesceMaintenanceForFresh();
+                sync.shutdownForFresh();
+                storage.closeForFresh();
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
     public void interleavedFinalFlushResumesTheOwnedPageRangeAndPreservesItsOldFailure() throws Exception {
         try (var fixture = new Fixture()) {
             var storage = InterleavedLedgerStorage.forFresh();
@@ -742,7 +778,7 @@ public class FreshClassicIndexDrainTest {
     }
 
     // Replace only this test's already registered handle; the wrapper delegates to its actual native file.
-    private static ControlledFileChannel control(FileInfo file) throws Exception {
+    static ControlledFileChannel control(FileInfo file) throws Exception {
         FileChannel real = channel(file);
         var wrapped = new ControlledFileChannel(real);
         var field = FileInfo.class.getDeclaredField("fc");

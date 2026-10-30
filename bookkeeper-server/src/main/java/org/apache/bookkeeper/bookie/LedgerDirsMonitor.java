@@ -272,6 +272,9 @@ class LedgerDirsMonitor {
                 while (!executor.awaitTermination(5, TimeUnit.MINUTES)) {
                     log.info("Fresh disk monitor is still draining its original executor");
                 }
+                if (executorThread != null) {
+                    executorThread.join();
+                }
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 throw interrupted;

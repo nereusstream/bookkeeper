@@ -28,7 +28,6 @@ import java.util.PrimitiveIterator.OfLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.CustomLog;
-import org.apache.bookkeeper.client.api.BKException;
 import org.apache.bookkeeper.common.concurrent.FutureUtils;
 import org.apache.bookkeeper.common.util.Watcher;
 
@@ -44,6 +43,7 @@ public class LedgerDescriptorImpl extends LedgerDescriptor {
 
     private final AtomicBoolean fenceEntryPersisted = new AtomicBoolean();
     private CompletableFuture<Boolean> logFenceResult = null;
+    private boolean fenceLogRequired;
 
     LedgerDescriptorImpl(byte[] masterKey,
                          long ledgerId,
@@ -89,6 +89,8 @@ public class LedgerDescriptorImpl extends LedgerDescriptor {
 
     @Override
     synchronized CompletableFuture<Boolean> fenceAndLogInJournal(Journal journal) throws IOException {
+        boolean previouslyRequired = fenceLogRequired;
+        fenceLogRequired = true;
         boolean success = this.setFenced();
         if (success) {
             // fenced for first time, we should add the key to journal ensure we can rebuild.
@@ -98,13 +100,16 @@ public class LedgerDescriptorImpl extends LedgerDescriptor {
             // However, writing the fence log entry to the journal might still be in progress. This can happen
             // when a bookie receives two fence requests almost at the same time. The subsequent logic is used
             // to check the fencing progress.
-            if (logFenceResult == null || fenceEntryPersisted.get()){
+            if (logFenceResult == null && !previouslyRequired || fenceEntryPersisted.get()) {
+                if (logFenceResult == null) {
+                    fenceLogRequired = false;
+                }
                 // Either ledger's fenced state is recovered from Journal
                 // Or Log fence entry in Journal succeed
                 CompletableFuture<Boolean> result = FutureUtils.createFuture();
                 result.complete(true);
                 return result;
-            } else if (logFenceResult.isDone()) {
+            } else if (logFenceResult == null || logFenceResult.isDone()) {
                 // We failed to log fence entry in Journal, try again.
                 return logFenceEntryInJournal(journal);
             }
@@ -123,13 +128,10 @@ public class LedgerDescriptorImpl extends LedgerDescriptor {
         synchronized (this) {
             result = logFenceResult = FutureUtils.createFuture();
         }
-        ByteBuf entry = createLedgerFenceEntry(ledgerId);
+        ByteBuf entry = null;
         try {
+            entry = createLedgerFenceEntry(ledgerId);
             journal.logAddEntry(entry, false /* ackBeforeSync */, (rc, ledgerId, entryId, addr, ctx) -> {
-                log.debug()
-                        .attr("ledgerId", ledgerId)
-                        .attr("rc", () -> BKException.codeLogger(rc))
-                    .log("Record fenced state for ledger in journal");
                 if (rc == 0) {
                     fenceEntryPersisted.compareAndSet(false, true);
                     result.complete(true);
@@ -140,6 +142,13 @@ public class LedgerDescriptorImpl extends LedgerDescriptor {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             result.completeExceptionally(e);
+        } catch (RuntimeException | Error failure) {
+            result.completeExceptionally(failure);
+            throw failure;
+        } finally {
+            if (entry != null) {
+                entry.release();
+            }
         }
         return result;
     }
