@@ -30,6 +30,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
@@ -54,7 +55,9 @@ public class SegmentArenaManifestTest {
 
     private static ManifestIdentity identity(byte[] bytes) throws Exception {
         var hash = java.security.MessageDigest.getInstance("SHA-256");
-        hash.update("BookKeeper/SegmentArenaManifest/v1\0".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+        hash.update((ByteBuffer.wrap(bytes).getInt(8) == 2
+                ? "BookKeeper/SegmentArenaManifest/v2\0" : "BookKeeper/SegmentArenaManifest/v1\0")
+                .getBytes(java.nio.charset.StandardCharsets.US_ASCII));
         return new ManifestIdentity(hash.digest(bytes));
     }
 
@@ -71,6 +74,77 @@ public class SegmentArenaManifestTest {
         var crc = new java.util.zip.CRC32C();
         crc.update(bytes.slice(0, 4092));
         bytes.putInt(4092, (int) crc.getValue());
+    }
+
+    @Test
+    public void commonManifestBindsCompleteClassicRootsAndPreservesOriginalSchemaBytes() throws Exception {
+        var original = manifest();
+        Path parent = original.controlDirectory().getParent();
+        var roots = List.of(new SegmentArenaManifest.ClassicRoot(parent.resolve("classic-journal"),
+                        Set.of(SegmentArenaManifest.ClassicRole.JOURNAL)),
+                new SegmentArenaManifest.ClassicRoot(parent.resolve("classic-ledger-index"),
+                        Set.of(SegmentArenaManifest.ClassicRole.LEDGER, SegmentArenaManifest.ClassicRole.INDEX)));
+        var common = new SegmentArenaManifest(original.incarnation(), original.bookieId(), original.arenas(),
+                original.controlDirectory(), original.shardArenas(), roots);
+        Files.createDirectory(common.controlDirectory());
+        original.writeNew(new SegmentFileIo());
+        byte[] v1 = Files.readAllBytes(original.path());
+        assertEquals(1, ByteBuffer.wrap(v1).getInt(8));
+        assertEquals(identity(v1), original.identity());
+        assertEquals(original, SegmentArenaManifest.read(original.path(), original.identity()));
+        Files.delete(original.path());
+        common.writeNew(new SegmentFileIo());
+        byte[] v2 = Files.readAllBytes(common.path());
+        assertEquals(2, ByteBuffer.wrap(v2).getInt(8));
+        assertEquals(identity(v2), common.identity());
+        assertEquals(common, SegmentArenaManifest.read(common.path(), common.identity()));
+        byte[] prefix = java.util.Arrays.copyOf(v2, v1.length);
+        ByteBuffer.wrap(prefix).putInt(8, 1);
+        org.junit.Assert.assertArrayEquals(v1, prefix);
+        ByteBuffer suffix = ByteBuffer.wrap(v2, v1.length, v2.length - v1.length).slice();
+        assertEquals(2, suffix.getInt());
+        for (int i = 0; i < roots.size(); i++) {
+            byte[] path = roots.get(i).directory().toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            assertEquals(path.length, suffix.getInt());
+            byte[] actual = new byte[path.length];
+            suffix.get(actual);
+            org.junit.Assert.assertArrayEquals(path, actual);
+            assertEquals(i == 0 ? 1 : 6, suffix.getInt());
+            assertFalse(Files.exists(roots.get(i).directory()));
+        }
+        assertFalse(suffix.hasRemaining());
+        assertNotEquals(original.identity(), common.identity());
+        assertThrows(IOException.class, () -> SegmentArenaManifest.read(common.path(), original.identity()));
+        assertThrows(IOException.class, () -> common.writeNew(new SegmentFileIo()));
+        for (int offset : new int[] {v1.length, v2.length - 4}) {
+            byte[] malformed = v2.clone();
+            ByteBuffer.wrap(malformed).putInt(offset, Integer.MAX_VALUE);
+            Files.write(common.path(), malformed);
+            var expected = identity(malformed);
+            assertThrows(IOException.class, () -> SegmentArenaManifest.read(common.path(), expected));
+        }
+    }
+
+    @Test
+    public void classicRootRolesMustBeCompleteCanonicalAndDisjointFromSegmentMembers() throws Exception {
+        var original = manifest();
+        Path parent = original.controlDirectory().getParent();
+        var all = Set.of(SegmentArenaManifest.ClassicRole.values());
+        for (var roots : List.of(
+                List.of(new SegmentArenaManifest.ClassicRoot(parent.resolve("classic"),
+                        Set.of(SegmentArenaManifest.ClassicRole.JOURNAL))),
+                List.of(new SegmentArenaManifest.ClassicRoot(original.controlDirectory(), all)),
+                List.of(new SegmentArenaManifest.ClassicRoot(original.arenas().get(0).directory(), all)),
+                List.of(new SegmentArenaManifest.ClassicRoot(parent.resolve("classic"), all),
+                        new SegmentArenaManifest.ClassicRoot(parent.resolve("classic/sub"), all)),
+                List.of(new SegmentArenaManifest.ClassicRoot(parent.resolve("z"), all),
+                        new SegmentArenaManifest.ClassicRoot(parent.resolve("y"), all)))) {
+            assertThrows(IllegalArgumentException.class, () -> new SegmentArenaManifest(original.incarnation(),
+                    original.bookieId(), original.arenas(), original.controlDirectory(),
+                    original.shardArenas(), roots));
+        }
+        assertThrows(IllegalArgumentException.class,
+                () -> new SegmentArenaManifest.ClassicRoot(parent.resolve("empty"), Set.of()));
     }
 
     @Test

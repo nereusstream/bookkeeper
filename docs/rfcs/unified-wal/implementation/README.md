@@ -937,7 +937,7 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 [公开 create 的第三目标 HELLO 拒绝](profile-wire/README.md#公开-create-的第三目标-hello-拒绝)：2026-10-28父7f0ffdc6f3上，原真实SDK fixture的第三目标分别返回错误BookieId或缺UIC1控制capability，即使另两个目标满足AQ，公开create仍在fresh claim前拒绝，持久状态不变且pool实际排空；解除故障后同一请求完成三目标create/Add/close/只读。五项定向测试通过，生产Java未改，范围与原诊断由canonical拥有。完整G1、Main issuer/受保护装载、B11及其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
 
 
-[Classic 与 Profile 的共同 route claim 接线缺口](profile-wire/README.md#classic-与-profile-的共同-route-claim-接线缺口)：2026-10-28父628fae199b的源码复核确认，显式Profile模式与Classic栈分离，原Classic handle入口没有接Profile本地控制owner；独立TLS连接拒绝不证明RFC-0001 §7.1共同持久claim。首版公共服务边界待答复，未增加legacy listener或双引擎模式；这项完整合同继续OPEN。本轮仅文档同步、未执行新运行时测试，完整G1/B11/Main issuer与生产Gate仍OPEN，目标active、OFF/SYSTEM/PARK及disabled保持。
+[Classic 与 Profile 的共同 route claim 接线缺口](profile-wire/README.md#classic-与-profile-的共同-route-claim-接线缺口)：2026-10-28父628fae199b的源码复核确认，显式Profile模式与Classic栈分离，原Classic handle入口没有接Profile本地控制owner；独立TLS连接拒绝不证明RFC-0001 §7.1共同持久claim。首版边界已由指定规划会话冻结，实际Classic入口接线仍待完成；未增加legacy listener或双引擎模式；这项完整合同继续OPEN。本轮仅文档同步、未执行新运行时测试，完整G1/B11/Main issuer与生产Gate仍OPEN，目标active、OFF/SYSTEM/PARK及disabled保持。
 
 
 [接收连接 base 与名额的实际终态](local-storage/README.md#接收连接-base-与名额的实际终态)：2026-10-28父8a5c302b57上，原receive预算的base与slot延后到最后实际frame/backing/workspace归还；真实retained-view RED/GREEN、三类43项及未修改SDK整类241项通过，原backing模型1正向/8指定反例符合预期。初次失败、源码/receipt与完整边界由canonical拥有。完整连接价格、full-bytes/B11、Main issuer、共同route claim/完整G1及其余16步仍OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
@@ -956,3 +956,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 [独立 Bookie owner 与严格 Arena 成员接线](local-storage/README.md#独立-bookie-owner-与严格-arena-成员接线)：2026-10-30父f59731767a上，v2独立控制根先保存commissioned完整manifest，Bookie scope/cut和AAD绑定整体，每Arena文件/allocator/index/driver验证固定成员与shard。真实双Arena normal DATA、健康重开、index互换拒绝/全丢失重建、fence/tombstone/独立FREE及错误候选验证已接；最终七类409项同源码通过，早期fixture/编译诊断保留。style及RAT实际状态由canonical拥有，service v2图仍拒绝，不能据控制owner或局部组合发布writable。共同route入口、Main、全局预算与完整16步/Gate仍OPEN，目标active，OFF/SYSTEM/PARK与disabled保持。
+
+
+[共同 ROUTE 的持久命令与恢复](local-storage/README.md#共同-route-的持久命令与恢复)：2026-10-30父8269cd0328上新增native真实ROUTE/64-byte body、schema2完整Classic根角色及同owner混合batch、operation index/checkpoint/rotation恢复；最终八类420项同源码通过，style exit0、RAT432父路径无新增，有限浅大小与所有早期诊断由canonical拥有。BookieImpl异步入口、markers/native commissioning binding与独占导入尚未接线；完整G1/Main/full-bytes与16步总验收仍OPEN，目标active，默认OFF/SYSTEM/PARK和disabled保持。

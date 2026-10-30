@@ -94,6 +94,12 @@ final class SegmentBookieControlDriver {
         return submitDurableBatch(() -> log.appendDurably(batch), completion);
     }
 
+    boolean submitChanges(List<? extends SegmentBookieControlLog.Change> commands, BatchCompletion completion) {
+        log.requireBatchSize(commands.size());
+        List<SegmentBookieControlLog.Change> batch = List.copyOf(commands);
+        return submitDurableBatch(() -> log.appendChangesDurably(batch), completion);
+    }
+
     boolean submitRecoveryGrant(SegmentBookieControlLog.RecoveryGrant grant, BatchCompletion completion) {
         Objects.requireNonNull(grant, "grant");
         return submitDurableBatch(() -> log.appendRecoveryGrantDurably(grant), completion);

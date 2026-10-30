@@ -747,6 +747,338 @@ public class SegmentBookieControlLogTest {
         return status.get();
     }
 
+    private SegmentArenaManifest commonRouteManifest(String name) throws IOException {
+        var base = multiArenaManifest(name);
+        Path parent = base.controlDirectory().getParent();
+        return new SegmentArenaManifest(base.incarnation(), base.bookieId(), base.arenas(), base.controlDirectory(),
+                base.shardArenas(), List.of(
+                        new SegmentArenaManifest.ClassicRoot(parent.resolve(name + "-classic-0-journal"),
+                                Set.of(SegmentArenaManifest.ClassicRole.JOURNAL)),
+                        new SegmentArenaManifest.ClassicRoot(parent.resolve(name + "-classic-1-ledger-index"),
+                                Set.of(SegmentArenaManifest.ClassicRole.LEDGER,
+                                        SegmentArenaManifest.ClassicRole.INDEX))));
+    }
+
+    private static SegmentBookieControlLog.RouteChange routeChange(SegmentBookieControlLog.RouteBinding binding,
+            SegmentBookieControlLog.RouteAction action, long value, long operation) {
+        return new SegmentBookieControlLog.RouteChange(action, value, binding, new UUID(0, operation));
+    }
+
+    /** Independent framing oracle: no production encoder, parser or checksum helper. */
+    private static byte[] routeVector(SegmentBookieControlLog.RouteChange route, long sequence) {
+        ByteBuffer bytes = ByteBuffer.allocate(208);
+        bytes.putLong(0x555743544c303031L).putInt(1).putInt(1).putInt(1).putInt(208).putLong(sequence)
+                .putLong(route.operationId().getMostSignificantBits())
+                .putLong(route.operationId().getLeastSignificantBits())
+                .putLong(1).putLong(0).putInt(64).putInt(128).putLong(1);
+        bytes.position(128).putInt(1)
+                .putInt(route.action() == SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC ? 1 : 2)
+                .putLong(route.value()).putLong(route.binding().id().getMostSignificantBits())
+                .putLong(route.binding().id().getLeastSignificantBits()).put(route.binding().manifest().value());
+        bytes.putInt(0x43544c45).putInt(0).putLong(sequence);
+        routeChecksums(bytes);
+        return bytes.array();
+    }
+
+    private static void routeChecksums(ByteBuffer bytes) {
+        var header = new java.util.zip.CRC32C();
+        header.update(bytes.slice(0, 124));
+        bytes.putInt(124, (int) header.getValue());
+        var body = new java.util.zip.CRC32C();
+        body.update(bytes.slice(128, 64));
+        bytes.putInt(196, (int) body.getValue());
+    }
+
+    @Test
+    public void commonRoutesShareOrderedApplyAndKeepBothWinnersAcrossCheckpointRotation() throws Exception {
+        var manifest = commonRouteManifest("route-order");
+        var config = manifest.bookieConfig(config());
+        var identity = SegmentFileHeader.forBookie(manifest);
+        var binding = new SegmentBookieControlLog.RouteBinding(new UUID(0, 90), manifest.identity());
+        var zero = routeChange(binding, SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC, 0, 300);
+        var seal = routeChange(binding, SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, 0, 301);
+        var first = routeChange(binding, SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC, 44, 302);
+        var second = routeChange(binding, SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC, 45, 303);
+        var terminal = routeChange(binding, SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC, 46, 304);
+        try (var log = SegmentBookieControlLog.createManifestControl(config, manifest, manifest.identity(),
+                32768, key((byte) 8), VALIDATOR, new SegmentFileIo(), binding)) {
+            assertFalse(log.bootstrapComplete());
+            assertEquals(SegmentBookieControlLog.RouteState.UNAVAILABLE, log.routeState(0));
+            assertTrue(log.rollbackSafetyFacts().routeOrInstall());
+            assertTrue(log.rollbackSafetyFacts().refusesOldBinarySameScopeRollback());
+            var bootstrap = log.appendChangesDurably(List.of(zero, seal));
+            assertFalse(log.bootstrapComplete());
+            assertEquals(SegmentBookieControlLog.RouteState.UNAVAILABLE, log.routeState(0));
+            assertEquals(List.of(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                            SegmentBookieControlLog.Status.APPLIED_DURABLE),
+                    log.applyDurable(bootstrap).stream().map(SegmentBookieControlLog.Result::status).toList());
+            byte[] bytes = Files.readAllBytes(config.directory().resolve("bookie-control"));
+            assertArrayEquals(routeVector(zero, 0), Arrays.copyOfRange(bytes, 4096, 4304));
+            assertArrayEquals(routeVector(seal, 1), Arrays.copyOfRange(bytes, 4304, 4512));
+            assertTrue(log.bootstrapComplete());
+            assertEquals(SegmentBookieControlLog.RouteState.CLASSIC, log.routeState(0));
+            var batch = log.appendChangesDurably(List.of(first,
+                    new SegmentBookieControlLog.ProfileChange(install(44, 1, (byte) 6)),
+                    new SegmentBookieControlLog.ProfileChange(install(45, 2, (byte) 6)), second,
+                    new SegmentBookieControlLog.ProfileChange(tombstone(46, 3)), terminal));
+            assertEquals(SegmentBookieControlLog.RouteState.UNAVAILABLE, log.routeState(44));
+            assertEquals(List.of(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                            SegmentBookieControlLog.Status.CONDITION_FAILED,
+                            SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                            SegmentBookieControlLog.Status.CONDITION_FAILED,
+                            SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                            SegmentBookieControlLog.Status.CONDITION_FAILED),
+                    log.applyDurable(batch).stream().map(SegmentBookieControlLog.Result::status).toList());
+            var conflict = routeChange(binding, SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC, 47, 302);
+            assertEquals(SegmentBookieControlLog.Status.INCOMPATIBLE,
+                    log.applyDurable(log.appendChangesDurably(List.of(conflict))).get(0).status());
+            assertEquals(SegmentBookieControlLog.RouteState.ABSENT, log.routeState(47));
+            assertEquals(SegmentBookieControlLog.RouteState.CLASSIC, log.routeState(44));
+            assertEquals(SegmentBookieControlLog.RouteState.PROFILE, log.routeState(45));
+            assertEquals(SegmentBookieControlLog.RouteState.TOMBSTONED, log.routeState(46));
+            assertTrue(log.rollbackSafetyFacts().routeOrInstall());
+            log.rotate();
+        }
+        for (int restart = 0; restart < 2; restart++) {
+            try (var log = SegmentBookieControlLog.open(config, identity, 32768, key((byte) 8), VALIDATOR,
+                    new SegmentFileIo(), binding)) {
+                assertTrue(log.bootstrapComplete());
+                assertEquals(SegmentBookieControlLog.RouteState.CLASSIC, log.routeState(0));
+                assertEquals(SegmentBookieControlLog.RouteState.CLASSIC, log.routeState(44));
+                assertEquals(SegmentBookieControlLog.RouteState.PROFILE, log.routeState(45));
+                assertEquals(SegmentBookieControlLog.RouteState.TOMBSTONED, log.routeState(46));
+                assertEquals(SegmentBookieControlLog.RouteState.ABSENT, log.routeState(47));
+                assertEquals(List.of(SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                                SegmentBookieControlLog.Status.ALREADY_DURABLE,
+                                SegmentBookieControlLog.Status.CONDITION_FAILED,
+                                SegmentBookieControlLog.Status.CONDITION_FAILED),
+                        log.applyDurable(log.appendChangesDurably(List.of(first, seal, second,
+                                new SegmentBookieControlLog.ProfileChange(install(44, 1, (byte) 6)))))
+                                .stream().map(SegmentBookieControlLog.Result::status).toList());
+                log.rotate();
+            }
+        }
+    }
+
+    @Test
+    public void routeBootstrapRequiresExactPrecedingCutAndReplaysDurableUnappliedClaims() throws Exception {
+        var manifest = commonRouteManifest("route-bootstrap");
+        var config = manifest.bookieConfig(config());
+        var binding = new SegmentBookieControlLog.RouteBinding(new UUID(0, 90), manifest.identity());
+        try (var log = SegmentBookieControlLog.createManifestControl(config, manifest, manifest.identity(),
+                32768, key((byte) 8), VALIDATOR, new SegmentFileIo(), binding)) {
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitBatch(List.of(install(1, (byte) 6))).get(0).status());
+            var wrong = routeChange(binding, SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, -1, 300);
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.applyDurable(log.appendChangesDurably(List.of(wrong))).get(0).status());
+            assertFalse(log.bootstrapComplete());
+            var claim = routeChange(binding, SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC, 44, 301);
+            var seal = routeChange(binding, SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, 2, 302);
+            log.appendChangesDurably(List.of(claim, seal));
+            assertFalse(log.bootstrapComplete());
+        }
+        try (var log = SegmentBookieControlLog.open(config, SegmentFileHeader.forBookie(manifest), 32768,
+                key((byte) 8), VALIDATOR, new SegmentFileIo(), binding)) {
+            assertTrue(log.bootstrapComplete());
+            assertEquals(SegmentBookieControlLog.RouteState.CLASSIC, log.routeState(44));
+            assertEquals(SegmentBookieControlLog.RouteState.ABSENT, log.routeState(0));
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.submitBatch(List.of(install(45, 4, (byte) 6))).get(0).status());
+            var otherCut = routeChange(binding, SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, 4, 303);
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.applyDurable(log.appendChangesDurably(List.of(otherCut))).get(0).status());
+        }
+        var empty = commonRouteManifest("route-empty");
+        var emptyBinding = new SegmentBookieControlLog.RouteBinding(new UUID(0, 91), empty.identity());
+        try (var log = SegmentBookieControlLog.createManifestControl(empty.bookieConfig(config), empty,
+                empty.identity(), 32768, key((byte) 8), VALIDATOR, new SegmentFileIo(), emptyBinding)) {
+            var seal = routeChange(emptyBinding, SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, -1, 300);
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.applyDurable(log.appendChangesDurably(List.of(seal))).get(0).status());
+            assertTrue(log.bootstrapComplete());
+            assertEquals(SegmentBookieControlLog.RouteState.ABSENT, log.routeState(0));
+        }
+    }
+
+    @Test
+    public void uncertainRouteForceNeverReopensAbsentAndRecoveryKeepsItsWinner() throws Exception {
+        var manifest = commonRouteManifest("route-unknown");
+        var config = manifest.bookieConfig(config());
+        var identity = SegmentFileHeader.forBookie(manifest);
+        var binding = new SegmentBookieControlLog.RouteBinding(new UUID(0, 90), manifest.identity());
+        try (var log = SegmentBookieControlLog.createManifestControl(config, manifest, manifest.identity(),
+                32768, key((byte) 8), VALIDATOR, new SegmentFileIo(), binding)) {
+            log.applyDurable(log.appendChangesDurably(List.of(routeChange(binding,
+                    SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, -1, 300))));
+        }
+        var io = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+        try (var log = SegmentBookieControlLog.open(config, identity, 32768, key((byte) 8), VALIDATOR, io, binding)) {
+            assertEquals(0, io.forces);
+            assertThrows(IOException.class, () -> log.appendChangesDurably(List.of(routeChange(binding,
+                    SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC, 44, 301))));
+            assertEquals(SegmentBookieControlLog.RouteState.UNAVAILABLE, log.routeState(44));
+            assertThrows(IOException.class, () -> log.submitBatch(List.of(install(1, (byte) 6))));
+        }
+        try (var log = SegmentBookieControlLog.open(config, identity, 32768, key((byte) 8), VALIDATOR,
+                new SegmentFileIo(), binding)) {
+            assertEquals(SegmentBookieControlLog.RouteState.CLASSIC, log.routeState(44));
+            assertEquals(SegmentBookieControlLog.Status.CONDITION_FAILED,
+                    log.submitBatch(List.of(install(1, (byte) 6))).get(0).status());
+        }
+    }
+
+    @Test
+    public void routeBindingAndSemanticCorruptionCannotFallBackToProfileOnlyRecovery() throws Exception {
+        var manifest = commonRouteManifest("route-binding");
+        var config = manifest.bookieConfig(config());
+        var identity = SegmentFileHeader.forBookie(manifest);
+        var binding = new SegmentBookieControlLog.RouteBinding(new UUID(0, 90), manifest.identity());
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.createManifestControl(config, manifest,
+                manifest.identity(), 32768, key((byte) 8), VALIDATOR, new SegmentFileIo()));
+        assertFalse(Files.exists(config.directory()));
+        try (var log = SegmentBookieControlLog.createManifestControl(config, manifest, manifest.identity(),
+                32768, key((byte) 8), VALIDATOR, new SegmentFileIo(), binding)) {
+            log.applyDurable(log.appendChangesDurably(List.of(routeChange(binding,
+                    SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, -1, 300))));
+        }
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity, 32768,
+                key((byte) 8), VALIDATOR));
+        var other = new SegmentBookieControlLog.RouteBinding(new UUID(0, 91), manifest.identity());
+        assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity, 32768,
+                key((byte) 8), VALIDATOR, new SegmentFileIo(), other));
+        Path file = config.directory().resolve("bookie-control");
+        byte[] original = Files.readAllBytes(file);
+        for (int offset : new int[] {48, 56, 128, 132, 144, 160}) {
+            byte[] changed = original.clone();
+            ByteBuffer record = ByteBuffer.wrap(changed, 4096, 208).slice();
+            record.putInt(offset, record.getInt(offset) ^ 0x40000000);
+            routeChecksums(record);
+            Files.write(file, changed);
+            assertThrows(IOException.class, () -> SegmentBookieControlLog.open(config, identity, 32768,
+                    key((byte) 8), VALIDATOR, new SegmentFileIo(), binding));
+        }
+        Files.write(file, original);
+        try (var log = SegmentBookieControlLog.open(config, identity, 32768, key((byte) 8), VALIDATOR,
+                new SegmentFileIo(), binding)) {
+            assertTrue(log.bootstrapComplete());
+        }
+    }
+
+    @Test
+    public void commonRouteDriverKeepsOwnerResponsiveAndDrainsTheActualHeldForce() throws Exception {
+        var manifest = commonRouteManifest("route-driver");
+        var config = manifest.bookieConfig(config());
+        var binding = new SegmentBookieControlLog.RouteBinding(new UUID(0, 90), manifest.identity());
+        CountDownLatch forceEntered = new CountDownLatch(1);
+        CountDownLatch releaseForce = new CountDownLatch(1);
+        AtomicBoolean armed = new AtomicBoolean();
+        var controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (armed.get()) {
+                forceEntered.countDown();
+                try {
+                    if (!releaseForce.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Common ROUTE force was not released");
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(interrupted);
+                }
+            }
+        });
+        try (var log = SegmentBookieControlLog.createManifestControl(config, manifest, manifest.identity(),
+                32768, key((byte) 8), VALIDATOR, controlIo, binding)) {
+            log.applyDurable(log.appendChangesDurably(List.of(routeChange(binding,
+                    SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, -1, 300))));
+            var owner = new SegmentOwnerLoop(4, 1, 0, 2, 2);
+            var io = new SegmentIoExecutor(1, 1, 1, 1);
+            var driver = new SegmentBookieControlDriver(owner, io, log);
+            AtomicInteger callbacks = new AtomicInteger();
+            AtomicReference<List<SegmentBookieControlLog.Result>> result = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            var claim = routeChange(binding, SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC, 44, 301);
+            try {
+                assertThrows(IllegalArgumentException.class, () -> driver.submitChanges(
+                        java.util.Collections.nCopies(config.maxPendingEntries() + 1, claim), (r, f) -> fail()));
+                armed.set(true);
+                assertTrue(driver.submitChanges(List.of(claim,
+                        new SegmentBookieControlLog.ProfileChange(install(1, (byte) 6))), (results, cause) -> {
+                            owner.requireOwner();
+                            callbacks.incrementAndGet();
+                            result.set(results);
+                            failure.set(cause);
+                        }));
+                owner.start();
+                assertTrue(forceEntered.await(5, TimeUnit.SECONDS));
+                assertEquals(SegmentBookieControlLog.RouteState.UNAVAILABLE, log.routeState(44));
+                CountDownLatch progressed = new CountDownLatch(1);
+                assertTrue(owner.control(progressed::countDown));
+                assertTrue(progressed.await(5, TimeUnit.SECONDS));
+                assertFalse(driver.submitBatch(List.of(install(45, 2, (byte) 6)), (r, f) -> fail()));
+                owner.stopAdmission();
+                io.shutdown();
+                assertFalse(io.awaitTermination(Duration.ofMillis(1)));
+                assertFalse(owner.awaitTermination(Duration.ofMillis(1)));
+                assertThrows(IOException.class, log::close);
+                assertEquals(0, callbacks.get());
+                releaseForce.countDown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+                assertNull(failure.get());
+                assertNull(owner.failure());
+                assertEquals(1, callbacks.get());
+                assertEquals(List.of(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                                SegmentBookieControlLog.Status.CONDITION_FAILED),
+                        result.get().stream().map(SegmentBookieControlLog.Result::status).toList());
+                assertEquals(SegmentBookieControlLog.RouteState.CLASSIC, log.routeState(44));
+            } finally {
+                releaseForce.countDown();
+                io.shutdown();
+                assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+                owner.stopAdmission();
+                assertTrue(owner.awaitTermination(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
+    @Test
+    public void routeCapacityRefusalRetainsEveryClassicClaimThroughRotationAndRestart() throws Exception {
+        var manifest = commonRouteManifest("route-capacity");
+        var config = manifest.bookieConfig(config());
+        var binding = new SegmentBookieControlLog.RouteBinding(new UUID(0, 90), manifest.identity());
+        List<Long> claimed = new ArrayList<>();
+        try (var log = SegmentBookieControlLog.createManifestControl(config, manifest, manifest.identity(),
+                16384, key((byte) 8), VALIDATOR, new SegmentFileIo(), binding)) {
+            log.applyDurable(log.appendChangesDurably(List.of(routeChange(binding,
+                    SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, -1, 300))));
+            boolean refused = false;
+            for (long ledgerId = 0; ledgerId < 100; ledgerId++) {
+                var claim = routeChange(binding, SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC,
+                        ledgerId, 1000 + ledgerId);
+                try {
+                    assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                            log.applyDurable(log.appendChangesDurably(List.of(claim))).get(0).status());
+                    claimed.add(ledgerId);
+                } catch (SegmentControlCapacityException expected) {
+                    refused = true;
+                    assertEquals(SegmentBookieControlLog.RouteState.ABSENT, log.routeState(ledgerId));
+                    break;
+                }
+            }
+            assertTrue(refused);
+            assertFalse(claimed.isEmpty());
+            log.rotate();
+        }
+        try (var log = SegmentBookieControlLog.open(config, SegmentFileHeader.forBookie(manifest), 16384,
+                key((byte) 8), VALIDATOR, new SegmentFileIo(), binding)) {
+            assertTrue(log.bootstrapComplete());
+            for (long ledgerId : claimed) {
+                assertEquals(SegmentBookieControlLog.RouteState.CLASSIC, log.routeState(ledgerId));
+            }
+            assertEquals(SegmentBookieControlLog.RouteState.ABSENT, log.routeState(claimed.size()));
+        }
+    }
+
     private SegmentArenaManifest multiArenaManifest(String name) throws IOException {
         Path parent = temporary.getRoot().toPath().toRealPath();
         return new SegmentArenaManifest(identity().incarnation(), identity().bookieId(),

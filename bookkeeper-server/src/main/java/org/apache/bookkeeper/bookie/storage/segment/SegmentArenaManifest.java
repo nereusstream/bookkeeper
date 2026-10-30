@@ -35,6 +35,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
@@ -42,7 +43,7 @@ import org.apache.bookkeeper.net.BookieId;
 
 /** Fixed complete topology. Its digest must come from commissioned requirements, never a discovered device subset. */
 record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
-        List<Arena> arenas, Path controlDirectory, List<Integer> shardArenas) {
+        List<Arena> arenas, Path controlDirectory, List<Integer> shardArenas, List<ClassicRoot> classicRoots) {
     static final String FILE_NAME = "arena-manifest";
     static final int MAX_BYTES = 1024 * 1024;
     private static final long MAGIC = 0x5557414d414e3031L; // UWAMAN01
@@ -50,6 +51,39 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
     private static final UUID ZERO = new UUID(0, 0);
     private static final byte[] HASH_DOMAIN = "BookKeeper/SegmentArenaManifest/v1\0"
             .getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] COMMON_HASH_DOMAIN = "BookKeeper/SegmentArenaManifest/v2\0"
+            .getBytes(StandardCharsets.US_ASCII);
+
+    enum ClassicRole {
+        JOURNAL(1), LEDGER(2), INDEX(4);
+
+        final int bit;
+
+        ClassicRole(int bit) {
+            this.bit = bit;
+        }
+    }
+
+    /** Physically shared ledger/index roots appear once, with their complete role set. */
+    record ClassicRoot(Path directory, Set<ClassicRole> roles) {
+        ClassicRoot {
+            requireRoot(directory);
+            roles = Set.copyOf(roles);
+            if (roles.isEmpty()) {
+                throw new IllegalArgumentException("Classic root requires its storage roles");
+            }
+        }
+
+        private int roleBits() {
+            return roles.stream().mapToInt(role -> role.bit).reduce(0, (a, b) -> a | b);
+        }
+    }
+
+    /** Original schema remains byte-for-byte unchanged, including its hash domain. */
+    SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
+            List<Arena> arenas, Path controlDirectory, List<Integer> shardArenas) {
+        this(incarnation, bookieId, arenas, controlDirectory, shardArenas, List.of());
+    }
 
     /** DATA geometry belongs to the incarnation; execution workers and admission limits do not. */
     record Arena(UUID id, Path directory, int dataFiles, long bytesPerFile) {
@@ -70,6 +104,7 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
         requireRoot(controlDirectory);
         arenas = List.copyOf(arenas);
         shardArenas = List.copyOf(shardArenas);
+        classicRoots = List.copyOf(classicRoots);
         byte[] bookie = bookieId.toString().getBytes(StandardCharsets.UTF_8);
         if (bookie.length < 1 || bookie.length > 255 || bookieId.toString().indexOf(0) >= 0
                 || !StandardCharsets.UTF_8.newEncoder().canEncode(bookieId.toString())
@@ -102,6 +137,32 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
             if (arena < 0 || arena >= arenas.size()) {
                 throw new IllegalArgumentException("Each logical shard needs one declared Arena");
             }
+        }
+        if (classicRoots.size() > 192) {
+            throw new IllegalArgumentException("Classic root set exceeds its bounded manifest capacity");
+        }
+        int roles = 0;
+        previous = null;
+        for (int i = 0; i < classicRoots.size(); i++) {
+            ClassicRoot root = classicRoots.get(i);
+            String path = root.directory().toString();
+            if (previous != null && previous.compareTo(path) >= 0) {
+                throw new IllegalArgumentException("Classic roots must be unique and canonically ordered");
+            }
+            previous = path;
+            roles |= root.roleBits();
+            if (overlap(root.directory(), controlDirectory)
+                    || arenas.stream().anyMatch(arena -> overlap(root.directory(), arena.directory()))) {
+                throw new IllegalArgumentException("Classic roots cannot overlap Segment roots");
+            }
+            for (int j = 0; j < i; j++) {
+                if (overlap(root.directory(), classicRoots.get(j).directory())) {
+                    throw new IllegalArgumentException("Classic roots must be physically distinct members");
+                }
+            }
+        }
+        if (!classicRoots.isEmpty() && roles != 7) {
+            throw new IllegalArgumentException("Common route manifest requires all Classic storage roles");
         }
     }
 
@@ -179,7 +240,9 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
             throw new IOException("Arena manifest differs from commissioned complete topology");
         }
         try {
-            if (bytes.getLong() != MAGIC || bytes.getInt() != 1) {
+            long magic = bytes.getLong();
+            int schema = bytes.getInt();
+            if (magic != MAGIC || schema != 1 && schema != 2) {
                 throw new IOException("Unsupported Arena manifest format");
             }
             byte[] storage = new byte[16];
@@ -201,7 +264,29 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
             for (int i = 0; i < shards; i++) {
                 mapping.add(bytes.getInt());
             }
-            var result = new SegmentArenaManifest(new StorageIncarnation(storage), bookie, arenas, control, mapping);
+            List<ClassicRoot> classic = new ArrayList<>();
+            if (schema == 2) {
+                int roots = bytes.getInt();
+                if (roots < 1 || roots > 192) {
+                    throw new IOException("Invalid common route Classic root count");
+                }
+                for (int i = 0; i < roots; i++) {
+                    Path root = Path.of(text(bytes, MAX_ROOT_BYTES));
+                    int bits = bytes.getInt();
+                    if (bits < 1 || bits > 7) {
+                        throw new IOException("Invalid Classic root storage roles");
+                    }
+                    var roles = java.util.EnumSet.noneOf(ClassicRole.class);
+                    for (ClassicRole role : ClassicRole.values()) {
+                        if ((bits & role.bit) != 0) {
+                            roles.add(role);
+                        }
+                    }
+                    classic.add(new ClassicRoot(root, roles));
+                }
+            }
+            var result = new SegmentArenaManifest(new StorageIncarnation(storage), bookie, arenas, control, mapping,
+                    classic);
             if (bytes.hasRemaining() || !Arrays.equals(bytes.array(), result.encode().array())
                     || !file.toAbsolutePath().normalize().equals(result.path())) {
                 throw new IOException("Noncanonical or misplaced Arena manifest");
@@ -220,8 +305,19 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
             length = Math.addExact(length, 16 + 4
                     + arena.directory().toString().getBytes(StandardCharsets.UTF_8).length + 4 + 8);
         }
+        if (!classicRoots.isEmpty()) {
+            length = Math.addExact(length, 4);
+            for (ClassicRoot root : classicRoots) {
+                length = Math.addExact(length, 8
+                        + root.directory().toString().getBytes(StandardCharsets.UTF_8).length);
+            }
+        }
+        if (length > MAX_BYTES) {
+            throw new IllegalArgumentException("Complete manifest exceeds its bounded file capacity");
+        }
         ByteBuffer bytes = ByteBuffer.allocate(length);
-        bytes.putLong(MAGIC).putInt(1).put(incarnation.value()).putInt(bookie.length).put(bookie)
+        bytes.putLong(MAGIC).putInt(classicRoots.isEmpty() ? 1 : 2)
+                .put(incarnation.value()).putInt(bookie.length).put(bookie)
                 .putInt(arenas.size()).putInt(control.length).put(control).putInt(shardArenas.size());
         for (Arena arena : arenas) {
             byte[] root = arena.directory().toString().getBytes(StandardCharsets.UTF_8);
@@ -229,7 +325,18 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
                     .putInt(root.length).put(root).putInt(arena.dataFiles()).putLong(arena.bytesPerFile());
         }
         shardArenas.forEach(bytes::putInt);
+        if (!classicRoots.isEmpty()) {
+            bytes.putInt(classicRoots.size());
+            for (ClassicRoot root : classicRoots) {
+                byte[] path = root.directory().toString().getBytes(StandardCharsets.UTF_8);
+                bytes.putInt(path.length).put(path).putInt(root.roleBits());
+            }
+        }
         return bytes.flip();
+    }
+
+    private static boolean overlap(Path first, Path second) {
+        return first.startsWith(second) || second.startsWith(first);
     }
 
     private static void requireRoot(Path root) {
@@ -244,7 +351,7 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
     private static byte[] digest(byte[] encoded) {
         try {
             var hash = MessageDigest.getInstance("SHA-256");
-            hash.update(HASH_DOMAIN);
+            hash.update(ByteBuffer.wrap(encoded).getInt(8) == 2 ? COMMON_HASH_DOMAIN : HASH_DOMAIN);
             return hash.digest(encoded);
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException(impossible);

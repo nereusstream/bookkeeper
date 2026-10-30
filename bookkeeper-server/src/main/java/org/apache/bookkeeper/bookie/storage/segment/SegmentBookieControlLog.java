@@ -54,6 +54,7 @@ import org.apache.bookkeeper.common.profile.control.ProfileExactRange;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileStateStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
@@ -80,6 +81,51 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     record Result(Status status, UUID operationId, long sequence, long localGeneration,
                   long localInstallGeneration) { }
+
+    enum RouteState {
+        ABSENT, CLASSIC, PROFILE, TOMBSTONED, UNAVAILABLE
+    }
+
+    enum RouteAction {
+        CLAIM_CLASSIC(1), BOOTSTRAP_COMPLETE(2);
+
+        final int code;
+
+        RouteAction(int code) {
+            this.code = code;
+        }
+    }
+
+    /** Explicit native input; commissioning and the complete root preflight belong to the startup caller. */
+    record RouteBinding(UUID id, ManifestIdentity manifest) {
+        RouteBinding {
+            Objects.requireNonNull(id, "binding id");
+            Objects.requireNonNull(manifest, "common manifest");
+            if (id.equals(new UUID(0, 0))) {
+                throw new IllegalArgumentException("Route binding requires a nonzero enable operation");
+            }
+        }
+    }
+
+    sealed interface Change permits ProfileChange, RouteChange { }
+
+    record ProfileChange(ProtectedProfileStateStore.Transition transition) implements Change {
+        ProfileChange {
+            Objects.requireNonNull(transition, "transition");
+        }
+    }
+
+    /** Real ROUTE variant: no Profile descriptor, credential or ledger context is synthesized. */
+    record RouteChange(RouteAction action, long value, RouteBinding binding, UUID operationId) implements Change {
+        RouteChange {
+            Objects.requireNonNull(action, "action");
+            Objects.requireNonNull(binding, "binding");
+            Objects.requireNonNull(operationId, "operation id");
+            if (operationId.equals(new UUID(0, 0)) || value < (action == RouteAction.CLAIM_CLASSIC ? 0 : -1)) {
+                throw new IllegalArgumentException("Invalid Classic ledger or bootstrap applied cut");
+            }
+        }
+    }
 
     record ExplicitLac(long lac, byte[] body) {
         ExplicitLac {
@@ -406,10 +452,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
         private final UUID closedGrantId;
         private final ProfileControlRequest.TerminalBinding terminal;
         private final ProfileControlRequest.DeleteBinding deletion;
+        private final RouteChange route;
 
         private Command(SegmentControlFormat.Type type, StoredScope scope, byte[] descriptor,
                         ProtectedProfileCredential credential,
                         ProtectedProfileCredential.SealedStorageValue sealed) {
+            this.route = null;
             this.deletion = null;
             this.terminal = null;
             this.type = type;
@@ -422,6 +470,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
 
         private Command(StoredScope scope, GrantBinding grant) {
+            this.route = null;
             this.deletion = null;
             this.terminal = null;
             this.type = SegmentControlFormat.Type.RECOVERY_GRANT;
@@ -438,6 +487,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
 
         private Command(StoredScope scope, GrantBinding grant, UUID closedGrantId, boolean terminal) {
+            this.route = null;
             this.deletion = null;
             this.terminal = null;
             this.type = terminal ? SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE
@@ -451,6 +501,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
 
         private Command(StoredScope scope, ProfileControlRequest.TerminalBinding terminal) {
+            this.route = null;
             this.type = SegmentControlFormat.Type.RECOVERY_TERMINAL_BOUNDARY;
             this.scope = scope;
             this.deletion = null;
@@ -463,6 +514,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
 
         private Command(StoredScope scope, ProfileControlRequest.DeleteBinding deletion) {
+            this.route = null;
             this.type = SegmentControlFormat.Type.DELETE_DELIVERY_APPLY;
             this.scope = scope;
             this.deletion = deletion;
@@ -475,6 +527,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
 
         private Command(Command original, StoredScope scope) {
+            this.route = original.route;
             this.type = original.type;
             this.scope = scope;
             this.descriptor = original.descriptor;
@@ -486,16 +539,36 @@ final class SegmentBookieControlLog implements AutoCloseable {
             this.deletion = original.deletion;
         }
 
+        private Command(RouteChange route) {
+            this.type = SegmentControlFormat.Type.ROUTE;
+            this.route = route;
+            this.scope = null;
+            this.descriptor = null;
+            this.credential = null;
+            this.sealed = null;
+            this.grant = null;
+            this.closedGrantId = null;
+            this.terminal = null;
+            this.deletion = null;
+        }
+
         private Command canonicalize(ProfileLedgerContext context, UUID operationId) {
             StoredScope canonical = scope.canonicalize(context, operationId);
             return canonical == scope ? this : new Command(this, canonical);
         }
 
         private UUID operationId() {
-            return scope.operationId;
+            return route == null ? scope.operationId : route.operationId();
+        }
+
+        private long operationGeneration() {
+            return route == null ? scope.authorityGeneration : 1;
         }
 
         private boolean sameMeaning(Command other) {
+            if (route != null || other.route != null) {
+                return Objects.equals(route, other.route);
+            }
             return type == other.type && scope.sameMeaning(other.scope)
                     && Arrays.equals(descriptor, other.descriptor)
                     && (credential == null ? other.credential == null : credential.matches(other.credential))
@@ -563,6 +636,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private final SegmentFileIo io;
     private final SecretKey key;
     private final ProfileDescriptorValidator descriptorValidator;
+    private final RouteBinding routeBinding;
     private FileChannel channel;
     private final FileChannel originalChannel;
     private final SegmentDataFileLock writerLock;
@@ -571,6 +645,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private Generation physicalGeneration = LOG_GENERATION;
     private Map<Long, LedgerState> ledgers = new HashMap<>();
     private Map<Long, ProfileLedgerContext> tombstones = new HashMap<>();
+    private Map<Long, RouteChange> classicRoutes = new HashMap<>();
+    private RouteChange bootstrapComplete;
     private ProfileControlRequest.DeleteBinding deleteApplied;
     private ProfileDeleteHandoff.Plan deleteHandoff;
     private ProfileDeleteHandoff.Effective deleteEffective;
@@ -646,7 +722,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private SegmentBookieControlLog(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                     long maxLogBytes, SegmentFileIo io, SecretKey key,
                                     ProfileDescriptorValidator descriptorValidator,
-                                    FileChannel channel, SegmentDataFileLock writerLock) {
+                                    FileChannel channel, SegmentDataFileLock writerLock, RouteBinding routeBinding) {
         this.config = config;
         this.identity = identity;
         this.maxLogBytes = maxLogBytes;
@@ -656,6 +732,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         this.channel = channel;
         this.originalChannel = channel;
         this.writerLock = writerLock;
+        this.routeBinding = routeBinding;
     }
 
     /** Typed history/index and temporary-state envelope, independently of the retained wire byte count. */
@@ -677,7 +754,13 @@ final class SegmentBookieControlLog implements AutoCloseable {
         long terminal = SegmentControlCapacity.sum(layout.object(ProfileControlRequest.TerminalBinding.class),
                 layout.bytes(32), SegmentControlCapacity.times(2, layout.object(Long.class)));
         long common = SegmentControlCapacity.sum(scope, history);
+        long route = SegmentControlCapacity.sum(layout.object(Command.class), layout.object(RouteChange.class),
+                layout.object(RouteBinding.class), SegmentControlCapacity.times(2, layout.object(UUID.class)),
+                layout.object(ManifestIdentity.class), layout.bytes(32));
+        long routeIndex = SegmentControlCapacity.sum(layout.object(Long.class), layout.hashEntry());
         long perWire = SegmentControlCapacity.slope(common, 272); // ACTIVATE and ordinary TOMBSTONE.
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(
+                SegmentControlCapacity.sum(route, history, routeIndex), 208));
         perWire = Math.max(perWire, SegmentControlCapacity.slope(
                 SegmentControlCapacity.sum(common, install, ledger), 448));
         // The cleanup cut may build HashSet/SetN storage from every tombstone, in addition to its live index.
@@ -733,14 +816,18 @@ final class SegmentBookieControlLog implements AutoCloseable {
                         SegmentControlCapacity.times(2, layout.buffer()), layout.bytes(0))),
                 layout.snapshot(rawCount, 0));
         long fixed = SegmentControlCapacity.sum(layout.object(SegmentBookieControlLog.class),
-                SegmentControlCapacity.times(10, layout.hashMap()), layout.hashSet(),
+                SegmentControlCapacity.times(11, layout.hashMap()), layout.hashSet(),
+                layout.object(RouteBinding.class), layout.object(UUID.class),
+                layout.object(ManifestIdentity.class), layout.bytes(32),
                 SegmentControlCapacity.times(8, layout.reference()),
                 SegmentControlCapacity.times(2, layout.object(SegmentControlRotation.Root.class)),
                 SegmentControlCapacity.times(4, layout.list()));
         // appendDurably projects the whole batch before requireCapacity; it is not bounded by remaining L.
         long pending = SegmentControlCapacity.sum(SegmentControlCapacity.times(pendingEntries,
-                SegmentControlCapacity.sum(scope, Math.max(install, SegmentControlCapacity.sum(grant, terminal,
-                        deletion, layout.object(UUID.class))), layout.object(Result.class), 8 * 8)),
+                SegmentControlCapacity.sum(Math.max(route, SegmentControlCapacity.sum(scope,
+                        Math.max(install, SegmentControlCapacity.sum(grant, terminal, deletion,
+                                layout.object(UUID.class))))), layout.object(Result.class),
+                        Math.max(layout.object(ProfileChange.class), layout.object(RouteChange.class)), 8 * 8)),
                 SegmentControlCapacity.times(4, layout.list()));
         return SegmentControlCapacity.sum(fixed,
                 SegmentControlCapacity.times(perWire, SegmentControlCapacity.wireBytes(logBytes)),
@@ -758,6 +845,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
                                         long maxLogBytes, SecretKey key,
                                         ProfileDescriptorValidator descriptorValidator, SegmentFileIo io)
             throws IOException {
+        return open(config, identity, maxLogBytes, key, descriptorValidator, io, null);
+    }
+
+    static SegmentBookieControlLog open(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SecretKey key, ProfileDescriptorValidator descriptorValidator, SegmentFileIo io,
+            RouteBinding routeBinding) throws IOException {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(key, "key");
@@ -766,23 +859,31 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (identity.manifest() != null && !identity.bookieScope()) {
             throw new IOException("Bookie control requires its manifest's independent Bookie scope");
         }
+        requireRouteBinding(identity, routeBinding);
         identity.requireStoredManifest(config, -3);
         if (maxLogBytes < FIRST_RECORD + 2048) {
             throw new IllegalArgumentException("Bookie control capacity cannot hold an install");
         }
         SegmentDataFileLock writerLock = SegmentDataFileLock.openControl(
                 config.directory().resolve("bookie-control.lock"));
-        return openWhileLocked(config, identity, maxLogBytes, key, descriptorValidator, io, writerLock);
+        return openWhileLocked(config, identity, maxLogBytes, key, descriptorValidator, io, writerLock, routeBinding);
     }
 
     /** Fresh controlled initialization of the independent Bookie owner; no Arena or DATA engine is constructed. */
     static SegmentBookieControlLog createManifestControl(IsolatedSegmentConfig config, SegmentArenaManifest manifest,
             org.apache.bookkeeper.common.profile.startup.ManifestIdentity commissioned, long maxLogBytes,
             SecretKey key, ProfileDescriptorValidator validator, SegmentFileIo io) throws IOException {
+        return createManifestControl(config, manifest, commissioned, maxLogBytes, key, validator, io, null);
+    }
+
+    static SegmentBookieControlLog createManifestControl(IsolatedSegmentConfig config, SegmentArenaManifest manifest,
+            ManifestIdentity commissioned, long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator,
+            SegmentFileIo io, RouteBinding routeBinding) throws IOException {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(validator, "validator");
         Objects.requireNonNull(io, "io");
         SegmentFileHeader identity = SegmentFileHeader.forBookie(manifest);
+        requireRouteBinding(identity, routeBinding);
         if (!manifest.identity().equals(commissioned) || !identity.matchesManifestScope(config)
                 || maxLogBytes < FIRST_RECORD + 2048) {
             throw new IOException("Commissioned manifest and independent Bookie control scope required");
@@ -812,19 +913,27 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
             throw failure;
         }
-        return openWhileLocked(config, identity, maxLogBytes, key, validator, io, writerLock);
+        return openWhileLocked(config, identity, maxLogBytes, key, validator, io, writerLock, routeBinding);
+    }
+
+    private static void requireRouteBinding(SegmentFileHeader identity, RouteBinding binding) throws IOException {
+        boolean common = identity.manifest() != null && !identity.manifest().classicRoots().isEmpty();
+        if (common != (binding != null)
+                || binding != null && !binding.manifest().equals(identity.manifest().identity())) {
+            throw new IOException("Common route owner requires the exact explicit persistent enable binding");
+        }
     }
 
     private static SegmentBookieControlLog openWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
             long maxLogBytes, SecretKey key, ProfileDescriptorValidator descriptorValidator, SegmentFileIo io,
-            SegmentDataFileLock writerLock) throws IOException {
+            SegmentDataFileLock writerLock, RouteBinding routeBinding) throws IOException {
         FileChannel original = null;
         SegmentBookieControlLog result = null;
         try {
             original = FileChannel.open(config.directory().resolve("bookie-control"),
                     StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
             result = new SegmentBookieControlLog(config, identity, maxLogBytes, io, key, descriptorValidator,
-                    original, writerLock);
+                    original, writerLock, routeBinding);
             result.validateStorageFiles();
             result.recover();
             return result;
@@ -863,6 +972,54 @@ final class SegmentBookieControlLog implements AutoCloseable {
             commands.add(command(transition));
         }
         return appendCommands(commands);
+    }
+
+    /** Both engines compete in the same durable batch and ordered apply, with one operation-id namespace. */
+    DurableBatch appendChangesDurably(List<? extends Change> changes) throws IOException {
+        requireBatchSize(changes.size());
+        List<? extends Change> input = List.copyOf(changes);
+        requireBatchSize(input.size());
+        List<Command> commands = new ArrayList<>(input.size());
+        for (Change change : input) {
+            if (change instanceof ProfileChange profile) {
+                commands.add(command(profile.transition()));
+            } else if (change instanceof RouteChange route) {
+                if (!route.binding().equals(routeBinding)) {
+                    throw new IllegalArgumentException("Route command differs from the owner's enable binding");
+                }
+                commands.add(new Command(route));
+            } else {
+                throw new IllegalArgumentException("Unknown common control command");
+            }
+        }
+        return appendCommands(commands);
+    }
+
+    void requireBatchSize(int size) {
+        if (size < 1 || size > config.maxPendingEntries()) {
+            throw new IllegalArgumentException("Invalid common control batch size");
+        }
+    }
+
+    synchronized RouteState routeState(long ledgerId) {
+        if (closed || failed || routeBinding != null && bootstrapComplete == null) {
+            return RouteState.UNAVAILABLE;
+        }
+        if (classicRoutes.containsKey(ledgerId)) {
+            return RouteState.CLASSIC;
+        }
+        if (tombstones.containsKey(ledgerId)) {
+            return RouteState.TOMBSTONED;
+        }
+        if (ledgers.containsKey(ledgerId)) {
+            return RouteState.PROFILE;
+        }
+        // No absent permission while a possibly claiming command has unresolved I/O or apply.
+        return writing || pending != null ? RouteState.UNAVAILABLE : RouteState.ABSENT;
+    }
+
+    synchronized boolean bootstrapComplete() {
+        return !closed && !failed && routeBinding != null && bootstrapComplete != null;
     }
 
     /** The caller must have cold-read the live RepairIntent and exact committed grant authority. */
@@ -1027,7 +1184,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 if (command.terminal != null) {
                     throw new IllegalArgumentException("Terminal boundary requires its pre-cut close path");
                 }
-                LedgerState state = ledgers.get(command.scope.ledgerId());
+                LedgerState state = command.scope == null ? null : ledgers.get(command.scope.ledgerId());
                 if (command.type == SegmentControlFormat.Type.ACTIVATE
                         && state != null && state.pendingFence != null) {
                     throw new IllegalArgumentException("Bookie activation is after the pending fence cut");
@@ -1039,7 +1196,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             // Validate the complete immutable batch before I/O without retaining its serialized payload.
             for (Command command : commands) {
                 bytes = Math.addExact(bytes, SegmentControlFormat.encodedLength(command.type, LOG_GENERATION,
-                        sequence++, command.operationId(), new Generation(command.scope.authorityGeneration),
+                        sequence++, command.operationId(), new Generation(command.operationGeneration()),
                         0, body(command)));
             }
             requireCapacity(bytes);
@@ -1097,9 +1254,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 Status status = apply(command, sequence);
                 ByteBuffer record = encode(command, sequence);
                 appliedOffset += record.remaining();
-                LedgerState state = ledgers.get(command.scope.ledgerId());
+                LedgerState state = command.scope == null ? null : ledgers.get(command.scope.ledgerId());
                 results.add(new Result(status, command.operationId(), sequence,
-                        command.deletion != null
+                        command.route != null
+                                ? status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE ? 1 : 0
+                                : command.deletion != null
                                 && (status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE)
                                 ? command.deletion.sequence() : state == null ? 0 : state.localGeneration,
                         state == null ? 0 : state.localInstallGeneration));
@@ -1413,7 +1572,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private static ByteBuffer encode(Command command, long sequence) {
         return SegmentControlFormat.encode(command.type, LOG_GENERATION, sequence, command.operationId(),
-                new Generation(command.scope.authorityGeneration), 0, body(command));
+                new Generation(command.operationGeneration()), 0, body(command));
     }
 
     private void retain(long sequence, UUID operationId, Status status, ByteBuffer record) {
@@ -2214,7 +2373,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private Status apply(Command command, long sequence) {
         UUID operationId = command.operationId();
-        LedgerState state = ledgers.get(command.scope.ledgerId());
+        LedgerState state = command.scope == null ? null : ledgers.get(command.scope.ledgerId());
         if (isTombstone(command.type) && state != null
                 && state.context.equals(command.scope.context)) {
             state.pendingTombstone = false;
@@ -2230,11 +2389,19 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         // A same-batch command may have been built before INSTALL applied. Share only an exact context,
         // and preserve frozen commands by copying rather than changing their retained fields.
-        command = command.canonicalize(state != null && state.context.equals(command.scope.context)
-                ? state.context : command.scope.context, prior == null ? operationId : prior.command().operationId());
+        if (command.route == null) {
+            command = command.canonicalize(state != null && state.context.equals(command.scope.context)
+                    ? state.context : command.scope.context,
+                    prior == null ? operationId : prior.command().operationId());
+        }
         operationId = command.operationId();
         Status status;
-        if (command.type == SegmentControlFormat.Type.INSTALL) {
+        if (command.route != null) {
+            status = applyRoute(command.route, sequence);
+        } else if (routeBinding != null && bootstrapComplete == null
+                || classicRoutes.containsKey(command.scope.ledgerId())) {
+            status = Status.CONDITION_FAILED;
+        } else if (command.type == SegmentControlFormat.Type.INSTALL) {
             if (tombstones.containsKey(command.scope.ledgerId())) {
                 status = Status.CONDITION_FAILED;
             } else if (state == null) {
@@ -2351,6 +2518,27 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return status;
     }
 
+    private Status applyRoute(RouteChange route, long sequence) {
+        if (!route.binding().equals(routeBinding)) {
+            throw new IllegalStateException("Route command has no matching owner binding");
+        }
+        if (route.action() == RouteAction.CLAIM_CLASSIC) {
+            if (ledgers.containsKey(route.value()) || tombstones.containsKey(route.value())) {
+                return Status.CONDITION_FAILED;
+            }
+            return classicRoutes.putIfAbsent(route.value(), route) == null
+                    ? Status.APPLIED_DURABLE : Status.ALREADY_DURABLE;
+        }
+        if (bootstrapComplete != null) {
+            return bootstrapComplete.value() == route.value() ? Status.ALREADY_DURABLE : Status.CONDITION_FAILED;
+        }
+        if (route.value() != sequence - 1) {
+            return Status.CONDITION_FAILED;
+        }
+        bootstrapComplete = route;
+        return Status.APPLIED_DURABLE;
+    }
+
     private static boolean isTombstone(SegmentControlFormat.Type type) {
         return type == SegmentControlFormat.Type.TOMBSTONE || type == SegmentControlFormat.Type.DELETE_DELIVERY_APPLY;
     }
@@ -2361,7 +2549,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             return closedRollbackSafetyFacts;
         }
         return new RollbackSafetyFacts(
-                false, !ledgers.isEmpty() || !handoffOperations.isEmpty(),
+                false, routeBinding != null || !ledgers.isEmpty() || !handoffOperations.isEmpty(),
                 ledgers.values().stream().anyMatch(state -> state.activationGeneration != 0),
                 !fenceOperations.isEmpty() || ledgers.values().stream().anyMatch(state -> state.fenced
                         || !state.recoveryGrants.isEmpty()), !tombstones.isEmpty(), false, failed);
@@ -2916,6 +3104,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private void resetRecoveredState() {
         ledgers.clear();
         tombstones.clear();
+        classicRoutes.clear();
+        bootstrapComplete = null;
         deleteApplied = null;
         deleteHandoff = null;
         deleteEffective = null;
@@ -3069,6 +3259,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     private Command decode(SegmentControlParser.Command parsed) throws IOException {
+        if (parsed.type() == SegmentControlFormat.Type.ROUTE) {
+            return decodeRoute(parsed);
+        }
         if (parsed.type() != SegmentControlFormat.Type.INSTALL
                 && parsed.type() != SegmentControlFormat.Type.ACTIVATE
                 && !isTombstone(parsed.type())
@@ -3185,6 +3378,13 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     private static ByteBuffer body(Command command) {
+        if (command.route != null) {
+            RouteChange route = command.route;
+            return ByteBuffer.allocate(64).putInt(1).putInt(route.action().code).putLong(route.value())
+                    .putLong(route.binding().id().getMostSignificantBits())
+                    .putLong(route.binding().id().getLeastSignificantBits())
+                    .put(route.binding().manifest().value()).flip();
+        }
         ByteBuffer scope = encodeScope(command.scope);
         if (command.deletion != null) {
             return ByteBuffer.allocate(scope.remaining() + ProfileControlRequest.DeleteBinding.BYTES)
@@ -3212,6 +3412,32 @@ final class SegmentBookieControlLog implements AutoCloseable {
                         + ProtectedProfileCredential.SealedStorageValue.LENGTH)
                 .put(scope).putShort((short) command.descriptor.length).put(command.descriptor)
                 .put(command.sealed.toBytes()).flip();
+    }
+
+    private Command decodeRoute(SegmentControlParser.Command parsed) throws IOException {
+        ByteBuffer body = parsed.body();
+        if (parsed.operationGeneration().value() != 1 || parsed.expectedGeneration() != 0
+                || body.remaining() != 64 || body.getInt() != 1) {
+            throw new IOException("Invalid durable common ROUTE framing or schema");
+        }
+        RouteAction action = switch (body.getInt()) {
+            case 1 -> RouteAction.CLAIM_CLASSIC;
+            case 2 -> RouteAction.BOOTSTRAP_COMPLETE;
+            default -> throw new IOException("Unsupported common ROUTE action");
+        };
+        long value = body.getLong();
+        UUID bindingId = new UUID(body.getLong(), body.getLong());
+        byte[] manifest = new byte[32];
+        body.get(manifest);
+        try {
+            RouteBinding binding = new RouteBinding(bindingId, new ManifestIdentity(manifest));
+            if (!binding.equals(routeBinding)) {
+                throw new IOException("Durable ROUTE differs from the explicit common enable binding");
+            }
+            return new Command(new RouteChange(action, value, binding, parsed.operationId()));
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Invalid durable common ROUTE meaning", invalid);
+        }
     }
 
     private static ByteBuffer encodeScope(StoredScope scope) {
@@ -3444,6 +3670,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         // Keep bounded diagnostics, but release history and container backing from a retained closed service.
         ledgers = new HashMap<>();
         tombstones = new HashMap<>();
+        classicRoutes = new HashMap<>();
+        bootstrapComplete = null;
         handoffOperations = new HashMap<>();
         effectiveOperations = new HashMap<>();
         operations = new HashMap<>();

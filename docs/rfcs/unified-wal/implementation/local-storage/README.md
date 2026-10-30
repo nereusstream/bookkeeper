@@ -1997,3 +1997,25 @@ per-Arena create/open消费已存完整manifest，只创建本Arena的DATA、sup
 七个本轮native临时根在终态后，经原始35文件的SHA/uid/gid/mode、同inode硬链接归档及两次无reader检查后移除，逻辑路径数据3,046,133 bytes；原证据数据块由硬链接保留，常规文件数据回收0。编译/fixture错误、阶段源码、实际输入及全部日志/XML保留，未清理其他任务或受保护PDF。
 
 当前IsolatedSegmentStorage和SegmentProfileService的运行/发布图仍为单Arena，v2构造拒绝保持；新本地creator不生产commissioning、旧服务退役/UID隔离、Main输入或registration authority。共同Classic/Profile route claim及全部legacy入口、完整多Arena startup/readiness、每Arena维护/coverage协同、全局buffer/CONTROL/index/filesystem预算仍须接线并验收；本地组合不关闭步骤10/B11/B17、完整G1或生产Gate。全16步目标active，默认OFF/SYSTEM/PARK和disabled能力保持；Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED。
+
+
+## 共同 ROUTE 的持久命令与恢复
+
+2026-10-30在父源码`8269cd03282396f0f1ffdc9e71ba06d5df9ac1d0`上，原唯一Bookie control owner增加真实ROUTE variant，原Profile scope/descriptor/context不用于表示Classic。共同域用新的manifest schema2纳入完整Classic journal/ledger/有效index根及合并角色，原schema1字节、摘要域和旧构造保持；身份页继续显式v2并绑定新的完整digest，已绑定拓扑不原地修改。实际Classic根的canonical/alias、marker及commissioning检查仍属于后续启动装配，native清单读取不发行这些证明。
+
+native create/open增加显式RouteBinding（持久enable UUID＋完整manifest SHA）；schema2缺绑定或schema1混入绑定在资源创建/持锁前拒绝。ROUTE的body为固定64 bytes、frame为208 bytes，两个动作是CLAIM_CLASSIC和BOOTSTRAP_COMPLETE，header generation固定1、expected固定0。初始PREPARED查询不返回ABSENT，空owner也通过rollback facts拒绝旧二进制同scope回退；首次seal必须覆盖该记录前序applied cut，空cut=-1与ledger0分开。只有原Classic replay/flush完成后的启动调用方才能合法请求seal，当前native API不自行证明该外部条件。
+
+混合Change batch沿原reserved CONTROL I/O force后顺序apply；ROUTE与Profile共享operation-id索引和原结果保留。CLAIM_CLASSIC只把ABSENT变CLASSIC，匹配重试幂等，PROFILE/TOMBSTONED或同operation不同body拒绝；Profile命令不能覆盖CLASSIC，未seal前也不改变Profile状态。pending/UNKNOWN不重新开放ABSENT；实际I/O完成后的失败只在原owner置不确定，正常重开须验证完整日志并同步再重演同一winner。全部有效claim和seal继续保留在流式checkpoint及rotation后的历史里，不实现route GC；容量不足在I/O前明确拒绝。
+
+CONTROL typed envelope显式列入Command/RouteChange/RouteBinding、UUID/digest、common operation节点、CLASSIC索引及pending混合wrapper；208-byte最小frame和现有扫描/image上界保持。此费用不包含尚未创建的Classic master-key快照、跟随者、续接ticket或完整启动manifest/文件/MetadataStore图，不把旧Profile费用或局部浅大小验证说成full-bytes已完成。
+
+
+六项新增控制验证覆盖：CLAIM与INSTALL双向/同batch竞争及TOMBSTONED拒绝；独立208-byte CLAIM/封口完整向量与CRC；ledger0及空cut、精确前序cut/持久未apply后重开；force失败后的UNKNOWN及同winner恢复；enable UUID/manifest/schema/generation的重新校验；held CONTROL force下owner继续推进、关闭等真实I/O终结、回调一次；以及有限日志容量拒绝后的全部claim rotation/restart保留。manifest另两项验证schema1原前缀/摘要解释不变、schema2完整根/角色的独立解码和不完整/乱序/重叠拒绝。原288个控制测试及helpers去除新增块后与父源码逐字节相同。
+
+最终八类**420项同源码整轮通过，0 failure/error/skipped**：Bookie control294、Arena43、格式41、配置2、manifest10、CONTROL capacity3、install23及实际service/SDK四项。前一轮420项后发现PREPARED空owner的rollback facts仍可能允许旧二进制回退，补入明确绑定存在即拒绝的条件/断言后，最终整轮再次通过；不把前一轮移称最终源码证据。初次testCompile的final类夹具错误、一次8192-byte日志不支持rotation的夹具错误，以及4处Checkstyle行长诊断全部保留；未弱化生产门槛或断言。最终Spotless/Checkstyle exit0；RAT仍为432个父源码既有未批准路径/字节，无新增，不称CI全绿。
+
+复用原artifact-only Instrumentation helper，在最终源码class上以Corretto21默认及wide refs/256-byte alignment/no CompactStrings两个JVM配置检查9个相关类型；实际浅大小均不超过Layout费用。保留原helpers、classpath/class-load来源、命令及表格，这只支持所列类型/数组/字符串/缓冲对象的有限浅大小及数值容量，不证明完整reachable graph、峰值、JCA/Netty/native或Classic续接预算。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/route-owner-evidence-8269cd03`保留各阶段真实终态、源码/输入/日志/XML及最终相关90个class；native输入1181项，外层源码声明1208项。没有运行新模型、stock矩阵、完整SDK246、掉电或性能测量；这些旧PASS不重新绑定本项。
+
+下一项必须继续真实Classic根/commissioned scope/native sidecar与marker的OFF preflight、独占PREPARED导入/Journal replay/flush封口，再接BookieImpl异步首次claim及原HandleFactory/processor/force/replay gate和全部请求实际排空/字节预算。当前native RouteBinding及seal不是这些外部事实的替代，也没有新增常驻legacy listener、双引擎生产模式或开放service v2。共同claim完整G1、Main、full-bytes/B11、多Arena完整服务图与16步总验收继续OPEN，目标active；默认OFF/SYSTEM/PARK及disabled能力保持。
