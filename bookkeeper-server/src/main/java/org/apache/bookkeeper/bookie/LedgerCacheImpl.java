@@ -45,6 +45,7 @@ public class LedgerCacheImpl implements LedgerCache {
     private final IndexPersistenceMgr indexPersistenceManager;
     private final int pageSize;
     private final int entriesPerPage;
+    private final boolean freshLifecycle;
 
     public LedgerCacheImpl(ServerConfiguration conf, SnapshotMap<Long, Boolean> activeLedgers,
                            LedgerDirsManager ledgerDirsManager) throws IOException {
@@ -53,12 +54,40 @@ public class LedgerCacheImpl implements LedgerCache {
 
     public LedgerCacheImpl(ServerConfiguration conf, SnapshotMap<Long, Boolean> activeLedgers,
                            LedgerDirsManager ledgerDirsManager, StatsLogger statsLogger) throws IOException {
+        this(conf, activeLedgers, ledgerDirsManager, statsLogger, false);
+    }
+
+    static LedgerCacheImpl forFresh(ServerConfiguration conf, SnapshotMap<Long, Boolean> activeLedgers,
+            LedgerDirsManager directories, StatsLogger statsLogger) throws IOException {
+        return new LedgerCacheImpl(conf, activeLedgers, directories, statsLogger, true);
+    }
+
+    private LedgerCacheImpl(ServerConfiguration conf, SnapshotMap<Long, Boolean> activeLedgers,
+            LedgerDirsManager ledgerDirsManager, StatsLogger statsLogger, boolean freshLifecycle) throws IOException {
+        this.freshLifecycle = freshLifecycle;
         this.pageSize = conf.getPageSize();
         this.entriesPerPage = pageSize / 8;
-        this.indexPersistenceManager = new IndexPersistenceMgr(pageSize, entriesPerPage, conf, activeLedgers,
-                ledgerDirsManager, statsLogger);
+        this.indexPersistenceManager = freshLifecycle
+                ? IndexPersistenceMgr.forFresh(
+                        pageSize, entriesPerPage, conf, activeLedgers, ledgerDirsManager, statsLogger)
+                : new IndexPersistenceMgr(
+                        pageSize, entriesPerPage, conf, activeLedgers, ledgerDirsManager, statsLogger);
         this.indexPageManager = new IndexInMemPageMgr(pageSize, entriesPerPage, conf,
-                indexPersistenceManager, statsLogger);
+                indexPersistenceManager, statsLogger, freshLifecycle);
+    }
+
+    void initializeForFresh() throws IOException {
+        indexPersistenceManager.initializeForFresh();
+    }
+
+    FileInfoBackingCache.FreshDrainResult closeForFresh() throws InterruptedException {
+        if (!freshLifecycle) {
+            throw new IllegalStateException("Not a fresh ledger cache");
+        }
+        indexPersistenceManager.beginClosingForFresh();
+        // Page users may own FileInfo references. They must return before the file graph is closed.
+        indexPageManager.closeForFresh();
+        return indexPersistenceManager.closeForFresh();
     }
 
     IndexPersistenceMgr getIndexPersistenceManager() {

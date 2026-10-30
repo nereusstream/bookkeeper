@@ -23,7 +23,12 @@ package org.apache.bookkeeper.bookie;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import lombok.CustomLog;
 import org.apache.bookkeeper.util.collections.ConcurrentLongHashMap;
@@ -37,10 +42,26 @@ class FileInfoBackingCache {
             ConcurrentLongHashMap.<CachedFileInfo>newBuilder().build();
     final FileLoader fileLoader;
     final int fileInfoVersionToWrite;
+    private final boolean freshLifecycle;
+    private final Object freshCloseLock = new Object();
+    private final Condition freshProgress = lock.writeLock().newCondition();
+    private boolean freshClosing;
+    private int freshLoads;
+    private int freshRetirements;
+    private Throwable freshOperationFailure;
+    private final Map<Thread, Integer> freshRetirementThreads = new IdentityHashMap<>();
+
+    record FreshDrainResult(boolean drained, Throwable operationFailure,
+                            Throwable flushFailure, Throwable closeFailure) { }
 
     FileInfoBackingCache(FileLoader fileLoader, int fileInfoVersionToWrite) {
+        this(fileLoader, fileInfoVersionToWrite, false);
+    }
+
+    FileInfoBackingCache(FileLoader fileLoader, int fileInfoVersionToWrite, boolean freshLifecycle) {
         this.fileLoader = fileLoader;
         this.fileInfoVersionToWrite = fileInfoVersionToWrite;
+        this.freshLifecycle = freshLifecycle;
     }
 
     /**
@@ -57,6 +78,9 @@ class FileInfoBackingCache {
     }
 
     CachedFileInfo loadFileInfo(long ledgerId, byte[] masterKey) throws IOException {
+        if (freshLifecycle) {
+            return loadForFresh(ledgerId, masterKey);
+        }
         lock.readLock().lock();
         try {
             CachedFileInfo fi = fileInfos.get(ledgerId);
@@ -97,6 +121,28 @@ class FileInfoBackingCache {
     }
 
     private void releaseFileInfo(long ledgerId, CachedFileInfo fileInfo) {
+        if (freshLifecycle) {
+            boolean retire;
+            boolean force;
+            lock.writeLock().lock();
+            try {
+                retire = fileInfo.markDead();
+                force = !freshClosing;
+                if (retire) {
+                    Thread thread = Thread.currentThread();
+                    freshRetirementThreads.put(thread, freshRetirementThreads.getOrDefault(thread, 0) + 1);
+                    freshRetirements++;
+                }
+                freshProgress.signalAll();
+            } finally {
+                lock.writeLock().unlock();
+            }
+            if (retire) {
+                // Neither native I/O nor watcher callbacks execute under the backing-cache lock.
+                retireForFresh(ledgerId, fileInfo, force);
+            }
+            return;
+        }
         lock.writeLock().lock();
         try {
             if (fileInfo.markDead()) {
@@ -115,6 +161,9 @@ class FileInfoBackingCache {
     }
 
     void closeAllWithoutFlushing() throws IOException {
+        if (freshLifecycle) {
+            throw new IllegalStateException("Use the explicit fresh cache drain result");
+        }
         try {
             fileInfos.forEach((key, fileInfo) -> {
                 try {
@@ -128,12 +177,188 @@ class FileInfoBackingCache {
         }
     }
 
+    void requireFreshAdmission() throws IOException {
+        if (!freshLifecycle) {
+            return;
+        }
+        lock.readLock().lock();
+        try {
+            if (freshClosing || freshOperationFailure != null) {
+                throw new IOException("Fresh index backing cache is closing or failed", freshOperationFailure);
+            }
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    private CachedFileInfo loadForFresh(long ledgerId, byte[] masterKey) throws IOException {
+        lock.writeLock().lock();
+        try {
+            requireFreshAdmission();
+            CachedFileInfo existing = fileInfos.get(ledgerId);
+            if (existing != null) {
+                return retainForFresh(existing);
+            }
+            freshLoads++;
+        } finally {
+            lock.writeLock().unlock();
+        }
+        CachedFileInfo candidate = null;
+        boolean published = false;
+        try {
+            File backingFile = fileLoader.load(ledgerId, masterKey != null);
+            candidate = new CachedFileInfo(ledgerId, backingFile, masterKey);
+            lock.writeLock().lock();
+            try {
+                requireFreshAdmission();
+                CachedFileInfo existing = fileInfos.get(ledgerId);
+                if (existing != null) {
+                    return retainForFresh(existing);
+                }
+                fileInfos.put(ledgerId, candidate);
+                published = true;
+                return retainForFresh(candidate);
+            } finally {
+                lock.writeLock().unlock();
+            }
+        } finally {
+            // Construction is heap-only; an unpublished candidate has never performed lazy open.
+            if (candidate != null && !published) {
+                candidate.recycle();
+            }
+            lock.writeLock().lock();
+            try {
+                freshLoads--;
+                freshProgress.signalAll();
+            } finally {
+                lock.writeLock().unlock();
+            }
+        }
+    }
+
+    private CachedFileInfo retainForFresh(CachedFileInfo file) throws IOException {
+        if (!file.tryRetain()) {
+            throw new IOException("Fresh FileInfo is retiring: " + file.ledgerId);
+        }
+        return file;
+    }
+
+    void beginClosingForFresh() {
+        List<CachedFileInfo> snapshot = new ArrayList<>();
+        lock.writeLock().lock();
+        try {
+            freshClosing = true;
+            fileInfos.forEach((id, file) -> snapshot.add(file));
+        } finally {
+            lock.writeLock().unlock();
+        }
+        for (CachedFileInfo file : snapshot) {
+            file.beginClosingForFresh();
+        }
+    }
+
+    private void retireForFresh(long ledgerId, CachedFileInfo file, boolean force) {
+        FileInfo.FreshCloseResult result = null;
+        Throwable unexpected = null;
+        try {
+            result = file.closeForFresh(force);
+        } catch (Throwable failure) {
+            unexpected = failure;
+        }
+        lock.writeLock().lock();
+        try {
+            if (result != null && result.drained()) {
+                fileInfos.remove(ledgerId, file);
+            }
+            Throwable failure = unexpected != null ? unexpected : result == null ? null
+                    : result.operationFailure() != null ? result.operationFailure()
+                    : result.flushFailure() != null ? result.flushFailure() : result.closeFailure();
+            if (freshOperationFailure == null) {
+                freshOperationFailure = failure;
+            }
+            freshRetirements--;
+            Thread thread = Thread.currentThread();
+            int depth = freshRetirementThreads.get(thread);
+            if (depth == 1) {
+                freshRetirementThreads.remove(thread);
+            } else {
+                freshRetirementThreads.put(thread, depth - 1);
+            }
+            freshProgress.signalAll();
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+
+    /** Called after both front caches have released their own references. */
+    FreshDrainResult closeForFresh() throws InterruptedException {
+        if (!freshLifecycle || isCurrentRetirementThread()) {
+            throw new IllegalStateException("Not a fresh backing cache");
+        }
+        synchronized (freshCloseLock) {
+            beginClosingForFresh();
+            List<CachedFileInfo> snapshot = new ArrayList<>();
+            lock.writeLock().lockInterruptibly();
+            try {
+                while (freshLoads != 0 || freshRetirements != 0 || hasBorrowersForFresh()) {
+                    freshProgress.await();
+                }
+                fileInfos.forEach((id, file) -> {
+                    file.markDead();
+                    snapshot.add(file);
+                });
+            } finally {
+                lock.writeLock().unlock();
+            }
+            Throwable operationFailure = freshOperationFailure;
+            Throwable flushFailure = null;
+            Throwable closeFailure = null;
+            for (CachedFileInfo file : snapshot) {
+                FileInfo.FreshCloseResult result = file.closeForFresh(false);
+                if (operationFailure == null) {
+                    operationFailure = result.operationFailure();
+                }
+                if (flushFailure == null) {
+                    flushFailure = result.flushFailure();
+                }
+                if (closeFailure == null) {
+                    closeFailure = result.closeFailure();
+                }
+                if (result.drained()) {
+                    lock.writeLock().lock();
+                    try {
+                        fileInfos.remove(file.ledgerId, file);
+                    } finally {
+                        lock.writeLock().unlock();
+                    }
+                }
+            }
+            return new FreshDrainResult(fileInfos.isEmpty() && flushFailure == null && closeFailure == null,
+                    operationFailure, flushFailure, closeFailure);
+        }
+    }
+
+    boolean isCurrentRetirementThread() {
+        lock.readLock().lock();
+        try {
+            return freshRetirementThreads.containsKey(Thread.currentThread());
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+
+    private boolean hasBorrowersForFresh() {
+        boolean[] borrowed = {false};
+        fileInfos.forEach((id, file) -> borrowed[0] |= file.getRefCount() > 0);
+        return borrowed[0];
+    }
+
     class CachedFileInfo extends FileInfo {
         final long ledgerId;
         final AtomicInteger refCount;
 
         CachedFileInfo(long ledgerId, File lf, byte[] masterKey) throws IOException {
-            super(lf, masterKey, fileInfoVersionToWrite);
+            super(lf, masterKey, fileInfoVersionToWrite, freshLifecycle);
             this.ledgerId = ledgerId;
             this.refCount = new AtomicInteger(0);
         }
@@ -166,6 +391,21 @@ class FileInfoBackingCache {
          * @return true if we managed to increment the refcount, false otherwise
          */
         boolean tryRetain() {
+            if (freshLifecycle) {
+                lock.readLock().lock();
+                try {
+                    if (freshClosing || freshOperationFailure != null || isClosed()) {
+                        return false;
+                    }
+                    return tryRetainInternal();
+                } finally {
+                    lock.readLock().unlock();
+                }
+            }
+            return tryRetainInternal();
+        }
+
+        private boolean tryRetainInternal() {
             while (true) {
                 int count = refCount.get();
                 if (count < 0) {

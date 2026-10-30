@@ -120,9 +120,76 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
     private OpStatsLogger getEntryStats;
     private OpStatsLogger pageScanStats;
     private Counter retryCounter;
+    private final boolean freshLifecycle;
+    private final Object freshLifecycleLock = new Object();
+    private final Object freshCloseLock = new Object();
+    private boolean freshInitAttempted;
+    private boolean freshInitializing;
+    private volatile boolean freshInitialized;
+    private volatile boolean freshClosing;
+    private Thread freshInitializingThread;
+    private Throwable freshInitializationFailure;
+    private Throwable freshFinalFlushFailure;
+    private Throwable freshOperationFailure;
+    private boolean freshFinalFlushComplete;
+
+    record FreshDrainResult(boolean drained, Throwable initializationFailure, Throwable operationFailure,
+                            Throwable finalFlushFailure,
+                            Throwable gcFailure, DefaultEntryLogger.FreshDrainResult entryLogger,
+                            FileInfoBackingCache.FreshDrainResult index) { }
 
     public InterleavedLedgerStorage() {
+        this(false);
+    }
+
+    private InterleavedLedgerStorage(boolean freshLifecycle) {
+        this.freshLifecycle = freshLifecycle;
         activeLedgers = new SnapshotMap<>();
+    }
+
+    static InterleavedLedgerStorage forFresh() {
+        return new InterleavedLedgerStorage(true);
+    }
+
+    void initializeForFresh(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
+            LedgerDirsManager indexDirsManager, StatsLogger statsLogger, ByteBufAllocator allocator)
+            throws IOException {
+        synchronized (freshLifecycleLock) {
+            if (!freshLifecycle || freshInitAttempted || freshClosing) {
+                throw new IllegalStateException("Fresh Interleaved initialization is one-use");
+            }
+            freshInitAttempted = true;
+            freshInitializing = true;
+            freshInitializingThread = Thread.currentThread();
+        }
+        try {
+            checkNotNull(checkpointSource, "invalid null checkpoint source");
+            checkNotNull(checkpointer, "invalid null checkpointer");
+            entryLogger = DefaultEntryLogger.forFresh(conf, ledgerDirsManager, this,
+                    statsLogger.scope(ENTRYLOGGER_SCOPE), allocator);
+            entryLogger.initializeForFresh();
+            ledgerCache = LedgerCacheImpl.forFresh(conf, activeLedgers,
+                    indexDirsManager == null ? ledgerDirsManager : indexDirsManager, statsLogger);
+            ((LedgerCacheImpl) ledgerCache).initializeForFresh();
+            gcThread = GarbageCollectorThread.forFresh(
+                    conf, ledgerDirsManager, this, entryLogger, statsLogger.scope("gc"));
+            ledgerDirsManager.addLedgerDirsListener(getLedgerDirsListener());
+            initializeStats(statsLogger);
+            synchronized (freshLifecycleLock) {
+                if (!freshClosing) {
+                    freshInitialized = true;
+                }
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            freshInitializationFailure = failure;
+            throw failure;
+        } finally {
+            synchronized (freshLifecycleLock) {
+                freshInitializing = false;
+                freshInitializingThread = null;
+                freshLifecycleLock.notifyAll();
+            }
+        }
     }
 
     @Override
@@ -150,6 +217,9 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
                                         EntryLogListener entryLogListener,
                                         StatsLogger statsLogger,
                                         ByteBufAllocator allocator) throws IOException {
+        if (freshLifecycle) {
+            throw new IllegalStateException("Use explicit fresh initialization");
+        }
         initializeWithEntryLogger(
                 conf,
                 ledgerManager,
@@ -179,6 +249,9 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
                 LedgerDirsManager indexDirsManager,
                 EntryLogger entryLogger,
                 StatsLogger statsLogger) throws IOException {
+        if (freshLifecycle) {
+            throw new IllegalStateException("Use explicit fresh initialization");
+        }
         checkNotNull(checkpointSource, "invalid null checkpoint source");
         checkNotNull(checkpointer, "invalid null checkpointer");
         this.entryLogger = (DefaultEntryLogger) entryLogger;
@@ -188,6 +261,10 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
         gcThread = new GarbageCollectorThread(conf, ledgerManager, ledgerDirsManager,
                                               this, entryLogger, statsLogger.scope("gc"));
         ledgerDirsManager.addLedgerDirsListener(getLedgerDirsListener());
+        initializeStats(statsLogger);
+    }
+
+    private void initializeStats(StatsLogger statsLogger) {
         // Expose Stats
         getOffsetStats = statsLogger.getOpStatsLogger(STORAGE_GET_OFFSET);
         getEntryStats = statsLogger.getOpStatsLogger(STORAGE_GET_ENTRY);
@@ -294,11 +371,23 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
 
     @Override
     public void start() {
-        gcThread.start();
+        if (freshLifecycle) {
+            synchronized (freshLifecycleLock) {
+                if (!freshInitialized || freshClosing) {
+                    throw new IllegalStateException("Fresh storage is not ready or is closing");
+                }
+                gcThread.start();
+            }
+        } else {
+            gcThread.start();
+        }
     }
 
     @Override
     public void shutdown() throws InterruptedException {
+        if (freshLifecycle) {
+            throw new IllegalStateException("Use the explicit fresh storage drain result");
+        }
         // shut down gc thread, which depends on zookeeper client
         // also compaction will write entries again to entry log file
         log.info("Shutting down InterleavedLedgerStorage");
@@ -312,6 +401,65 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
             log.error().exception(e).log("Error while closing the ledger cache");
         }
         log.info("Complete shutting down Ledger Storage");
+    }
+
+    /** Requests and SyncThread must already have actually stopped. GC may still be finishing its own work. */
+    FreshDrainResult closeForFresh() throws InterruptedException {
+        synchronized (freshLifecycleLock) {
+            if (!freshLifecycle || Thread.currentThread() == freshInitializingThread
+                    || gcThread != null && gcThread.isCurrentExecutorThread()
+                    || ledgerCache != null && ((LedgerCacheImpl) ledgerCache).getIndexPersistenceManager()
+                            .isCurrentResourceActivityForFresh()
+                    || entryLogger != null && entryLogger.getEntryLoggerAllocator() != null
+                            && entryLogger.getEntryLoggerAllocator().isCurrentExecutorThread()) {
+                throw new IllegalStateException("Fresh storage close requires its external owner worker");
+            }
+            freshClosing = true;
+            while (freshInitializing) {
+                freshLifecycleLock.wait();
+            }
+        }
+        synchronized (freshCloseLock) {
+            Throwable gcFailure = null;
+            if (gcThread != null) {
+                try {
+                    gcThread.shutdownForFresh();
+                } catch (IOException | RuntimeException failure) {
+                    gcFailure = failure;
+                    rememberFreshOperationFailure(failure);
+                }
+                if (!gcThread.freshUsersTerminated()) {
+                    return new FreshDrainResult(false, freshInitializationFailure, freshOperationFailure,
+                            freshFinalFlushFailure, gcFailure, null, null);
+                }
+            }
+            if (freshInitialized && !freshFinalFlushComplete) {
+                try {
+                    // Do not use the periodic somethingWritten shortcut for the final fixed cut.
+                    flushOrCheckpoint(false);
+                    freshFinalFlushComplete = true;
+                    freshFinalFlushFailure = null;
+                } catch (IOException | RuntimeException failure) {
+                    freshFinalFlushFailure = failure;
+                    rememberFreshOperationFailure(failure);
+                    return new FreshDrainResult(false, freshInitializationFailure, freshOperationFailure,
+                            failure, gcFailure, null, null);
+                }
+            }
+            var index = ledgerCache == null ? null : ((LedgerCacheImpl) ledgerCache).closeForFresh();
+            var entries = entryLogger == null ? null : entryLogger.closeForFresh();
+            boolean drained = gcFailure == null && (index == null || index.drained())
+                    && (entries == null || entries.drained());
+            return new FreshDrainResult(drained, freshInitializationFailure,
+                    freshOperationFailure, freshFinalFlushFailure,
+                    gcFailure, entries, index);
+        }
+    }
+
+    private void rememberFreshOperationFailure(Throwable failure) {
+        if (freshOperationFailure == null) {
+            freshOperationFailure = failure;
+        }
     }
 
     @Override
@@ -393,6 +541,7 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
 
     @Override
     public long addEntry(ByteBuf entry) throws IOException {
+        requireFreshService();
         long ledgerId = entry.getLong(entry.readerIndex() + 0);
         long entryId = entry.getLong(entry.readerIndex() + 8);
         long lac = entry.getLong(entry.readerIndex() + 16);
@@ -405,6 +554,7 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
 
     @Override
     public ByteBuf getEntry(long ledgerId, long entryId) throws IOException {
+        requireFreshService();
         long offset;
         /*
          * If entryId is BookieProtocol.LAST_ADD_CONFIRMED, then return the last written.
@@ -449,6 +599,7 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
             throws IOException {
 
         boolean flushFailed = false;
+        IOException firstFailure = null;
         try {
             ledgerCache.flushLedger(true);
         } catch (LedgerDirsManager.NoWritableLedgerDirException e) {
@@ -456,6 +607,7 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
         } catch (IOException ioe) {
             log.error().exception(ioe).log("Exception flushing Ledger cache");
             flushFailed = true;
+            firstFailure = ioe;
         }
 
         try {
@@ -471,8 +623,14 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
         } catch (IOException ioe) {
             log.error().exception(ioe).log("Exception flushing Ledger");
             flushFailed = true;
+            if (firstFailure == null) {
+                firstFailure = ioe;
+            }
         }
         if (flushFailed) {
+            if (freshLifecycle) {
+                throw firstFailure;
+            }
             throw new IOException("Flushing to storage failed, check logs");
         }
     }
@@ -488,10 +646,22 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
 
     @Override
     public synchronized void flush() throws IOException {
+        if (freshLifecycle) {
+            requireFreshService();
+            flushOrCheckpoint(false);
+            somethingWritten.set(false);
+            return;
+        }
         if (!somethingWritten.compareAndSet(true, false)) {
             return;
         }
         flushOrCheckpoint(false);
+    }
+
+    private void requireFreshService() throws IOException {
+        if (freshLifecycle && (!freshInitialized || freshClosing)) {
+            throw new IOException("Fresh Interleaved storage is not ready or is closing", freshInitializationFailure);
+        }
     }
 
     @Override

@@ -32,7 +32,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -83,6 +85,15 @@ public class IndexPersistenceMgr {
     final LedgerDirsManager ledgerDirsManager;
 
     private final IndexPersistenceMgrStats persistenceMgrStats;
+    private final boolean freshLifecycle;
+    private final Object freshAdmission = new Object();
+    private boolean freshInitAttempted;
+    private boolean freshInitializing;
+    private boolean freshInitialized;
+    private boolean freshClosing;
+    private int freshGets;
+    private Throwable freshInitializationFailure;
+    private final Map<Thread, Integer> freshGetThreads = new IdentityHashMap<>();
 
     public IndexPersistenceMgr(int pageSize,
                                int entriesPerPage,
@@ -90,6 +101,19 @@ public class IndexPersistenceMgr {
                                SnapshotMap<Long, Boolean> activeLedgers,
                                LedgerDirsManager ledgerDirsManager,
                                StatsLogger statsLogger) throws IOException {
+        this(pageSize, entriesPerPage, conf, activeLedgers, ledgerDirsManager, statsLogger, false);
+    }
+
+    static IndexPersistenceMgr forFresh(int pageSize, int entriesPerPage, ServerConfiguration conf,
+            SnapshotMap<Long, Boolean> activeLedgers, LedgerDirsManager directories,
+            StatsLogger statsLogger) throws IOException {
+        return new IndexPersistenceMgr(pageSize, entriesPerPage, conf, activeLedgers, directories, statsLogger, true);
+    }
+
+    private IndexPersistenceMgr(int pageSize, int entriesPerPage, ServerConfiguration conf,
+            SnapshotMap<Long, Boolean> activeLedgers, LedgerDirsManager ledgerDirsManager,
+            StatsLogger statsLogger, boolean freshLifecycle) throws IOException {
+        this.freshLifecycle = freshLifecycle;
         this.openFileLimit = conf.getOpenFileLimit();
         this.activeLedgers = activeLedgers;
         this.ledgerDirsManager = ledgerDirsManager;
@@ -97,12 +121,14 @@ public class IndexPersistenceMgr {
         this.entriesPerPage = entriesPerPage;
         log.info().attr("openFileLimit", openFileLimit).log("openFileLimit");
         // Retrieve all of the active ledgers.
-        getActiveLedgers();
+        if (!freshLifecycle) {
+            getActiveLedgers();
+        }
 
         // build the file info cache
         int concurrencyLevel = Math.max(1, Math.max(conf.getNumAddWorkerThreads(), conf.getNumReadWorkerThreads()));
         fileInfoBackingCache = new FileInfoBackingCache(this::createFileInfoBackingFile,
-                conf.getFileInfoFormatVersionToWrite());
+                conf.getFileInfoFormatVersionToWrite(), freshLifecycle);
         RemovalListener<Long, CachedFileInfo> fileInfoEvictionListener = this::handleLedgerEviction;
         writeFileInfoCache = buildCache(
             concurrencyLevel,
@@ -177,6 +203,15 @@ public class IndexPersistenceMgr {
      * could even increase the reference counter.
      */
     CachedFileInfo getFileInfo(final Long ledger, final byte[] masterKey) throws IOException {
+        beginFreshGet();
+        try {
+            return getFileInfoInternal(ledger, masterKey);
+        } finally {
+            endFreshGet();
+        }
+    }
+
+    private CachedFileInfo getFileInfoInternal(Long ledger, byte[] masterKey) throws IOException {
         try {
             CachedFileInfo fi;
             persistenceMgrStats.getPendingGetFileInfoCounter().inc();
@@ -270,6 +305,10 @@ public class IndexPersistenceMgr {
                                         || (!index.getName().endsWith(IDX) && !index.getName().endsWith(RLOC))) {
                                     continue;
                                 }
+                                if (freshLifecycle) {
+                                    throw new IOException("Fresh index initialization found historical files: "
+                                            + index);
+                                }
 
                                 // We've found a ledger index file. The file
                                 // name is the HexString representation of the
@@ -338,16 +377,115 @@ public class IndexPersistenceMgr {
     }
 
     boolean ledgerExists(long ledgerId) throws IOException {
+        requireFreshAdmission();
         return activeLedgers.containsKey(ledgerId);
     }
 
     void close() throws IOException {
+        if (freshLifecycle) {
+            throw new IllegalStateException("Use the explicit fresh index drain result");
+        }
         // Don't force create the file. We may have many dirty ledgers and file create/flush
         // can be quite expensive as a result. We can use this optimization in this case
         // because metadata will be recovered from the journal when we restart anyway.
         fileInfoBackingCache.closeAllWithoutFlushing();
         writeFileInfoCache.invalidateAll();
         readFileInfoCache.invalidateAll();
+    }
+
+    void initializeForFresh() throws IOException {
+        synchronized (freshAdmission) {
+            if (!freshLifecycle || freshInitAttempted || freshClosing) {
+                throw new IllegalStateException("Fresh index initialization is one-use");
+            }
+            freshInitAttempted = true;
+            freshInitializing = true;
+        }
+        try {
+            getActiveLedgers();
+            synchronized (freshAdmission) {
+                freshInitialized = true;
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            freshInitializationFailure = failure;
+            throw failure;
+        } finally {
+            synchronized (freshAdmission) {
+                freshInitializing = false;
+                freshAdmission.notifyAll();
+            }
+        }
+    }
+
+    void requireFreshAdmission() throws IOException {
+        if (!freshLifecycle) {
+            return;
+        }
+        synchronized (freshAdmission) {
+            if (!freshInitialized || freshClosing || freshInitializationFailure != null) {
+                throw new IOException("Fresh index is not initialized or is closing", freshInitializationFailure);
+            }
+        }
+        fileInfoBackingCache.requireFreshAdmission();
+    }
+
+    private void beginFreshGet() throws IOException {
+        if (freshLifecycle) {
+            synchronized (freshAdmission) {
+                requireFreshAdmission();
+                Thread thread = Thread.currentThread();
+                freshGetThreads.put(thread, freshGetThreads.getOrDefault(thread, 0) + 1);
+                freshGets++;
+            }
+        }
+    }
+
+    private void endFreshGet() {
+        if (freshLifecycle) {
+            synchronized (freshAdmission) {
+                freshGets--;
+                Thread thread = Thread.currentThread();
+                int depth = freshGetThreads.get(thread);
+                if (depth == 1) {
+                    freshGetThreads.remove(thread);
+                } else {
+                    freshGetThreads.put(thread, depth - 1);
+                }
+                freshAdmission.notifyAll();
+            }
+        }
+    }
+
+    void beginClosingForFresh() throws InterruptedException {
+        if (!freshLifecycle || isCurrentResourceActivityForFresh()) {
+            throw new IllegalStateException("Not a fresh index owner");
+        }
+        synchronized (freshAdmission) {
+            freshClosing = true;
+            while (freshInitializing || freshGets != 0) {
+                freshAdmission.wait();
+            }
+        }
+    }
+
+    boolean isCurrentResourceActivityForFresh() {
+        synchronized (freshAdmission) {
+            return freshGetThreads.containsKey(Thread.currentThread())
+                    || fileInfoBackingCache.isCurrentRetirementThread();
+        }
+    }
+
+    FileInfoBackingCache.FreshDrainResult closeForFresh() throws InterruptedException {
+        beginClosingForFresh();
+        fileInfoBackingCache.beginClosingForFresh();
+        writeFileInfoCache.invalidateAll();
+        readFileInfoCache.invalidateAll();
+        writeFileInfoCache.cleanUp();
+        readFileInfoCache.cleanUp();
+        var result = fileInfoBackingCache.closeForFresh();
+        return new FileInfoBackingCache.FreshDrainResult(result.drained(),
+                freshInitializationFailure != null ? freshInitializationFailure : result.operationFailure(),
+                result.flushFailure(), result.closeFailure());
     }
 
     Long getLastAddConfirmed(long ledgerId) throws IOException {

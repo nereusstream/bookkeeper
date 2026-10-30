@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-31 当前增量为[fresh entry logger 的实际资源图关闭](#fresh-entry-logger-的实际资源图关闭)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
+2026-10-31 当前增量为[fresh ledger-index 与 Interleaved 关闭](#fresh-ledger-index-与-interleaved-关闭)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -2141,3 +2141,27 @@ compaction flush/markCompacted/makeAvailable/abort沿原文件与hard-link流程
 最终Spotless/Checkstyle实际exit0；独立RAT实际exit1，431个未批准路径及字节与父源码相同、无新增，保护PDF在读取前排除。五个已终态native临时目录的45个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节9,486,424；归档硬链接保留数据，常规文件数据块回收0。未清理默认目录或其他任务资源。
 
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-entrylogger-graph-evidence-babf7cc4`保留五阶段原始Java回执，最终native输入1231项及49个交付相关class，早期47个class另行保留。entry logger子图已接线，Interleaved/ledger-index cache严格结果、Journal、根锁释放失败的逐句柄进度、完整稳定owner/facade及初始化总图仍OPEN；不发行fresh permit，不以本结果解锁根或证明全Bookie/ACK终态。共同owner/Main/G1/full-bytes及16步总验收继续OPEN/active，默认OFF/SYSTEM/PARK和disabled保持，Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。
+
+## fresh ledger-index 与 Interleaved 关闭
+
+2026-10-31在父源码`3898802ead099882bbd69fe5cd6936e8ac62d039`上，继续包内fresh资源owner，将LedgerCacheImpl、IndexPersistenceMgr、FileInfoBackingCache/CachedFileInfo、FileInfo与既有entry logger/GC接成Interleaved关闭子图。普通构造及默认Classic接线保持；仍未发行fresh许可或公开owner/facade。
+
+IndexPersistenceMgr先创建不执行扫描/I/O的owner，后显式初始化；fresh扫描遇历史idx/rloc即拒绝，不借用旧恢复rename/delete重标历史。Interleaved也先返回owner，再逐项登记entry logger、ledger cache及GC，才执行下一可能失败的初始化步骤。初始化一用，原cause保留，部分子图可继续清理；完整启动配置快照及根租约仍由待接外层负责。
+
+read/write两个Guava cache仍共享同一CachedFileInfo，缓存引用与调用者借用按原计数分别归还。关闭先封锁cache hit、loader、lazy open；IndexPersistenceMgr记录完整get/发布区间，先等待已有loader实际返回，防止invalidate之后又发布缓存引用。释放两份cache自己的引用后，等待真实借用和已开始的retirement返回，才关闭文件。运行期size eviction也沿同一实际对象退役，成功对象条件移除；失败对象及原close结果保留，拒绝绕过失败重开。选择/提交状态用原backing锁，实际I/O、等待借用及watcher回调不持该锁；实际get/retirement线程不能调用阻塞close等待自身。
+
+fresh FileInfo在lazy open前登记具体channel记录；header解析失败、relocation候选/原fd/新fd均持续可追踪。native close只观察第一次真实结果，已逻辑closed但无原成功结果为sticky未知，不以JDK的第二次no-op补发成功。healthy relocation完成copy/force/candidate close及原fd close后才删除/rename，失败保留仍可达候选和原cause。close结果分别保留资源drained、原operation failure、未完成flush及sticky close failure；旧结果不随重试变为成功。
+
+fresh index page write在原FileInfo锁内保存固定位置的不可变字节副本，逐段positional write并force；失败后只允许匹配原坐标/字节的直接重试，flush/关闭可以先续完已持有的旧范围。后续flush的新页内容必须等旧范围完成后再写。header关闭续接同样冻结字节并从固定位置重写，不能改为相对位置追加。副本归属实际FileInfo，成功后退役；该额外内存的完整字节预算与full-bytes测量仍OPEN，未声称性能提升。运行期eviction保留header/fence flush与force义务；最终关闭不为从未打开的lazy index强行创建文件。
+
+index page继续使用原direct ByteBuffer。fresh专用路径记录owner持有的实际page，封锁新获取并等待已有page操作/借用归还，再标记不可重新use、移除pages/LRU/free集合及owner引用。未调用Unsafe清理，不把引用退役、releasePage或一次GC当作native内存已释放。旧延后release回调不能重新加入已退休page；页迭代构造失败会归还已取得的FileInfo借用。
+
+Interleaved关闭仍要求外层请求和SyncThread先实际停止；它先等待原fresh GC executor/线程终结，再最终flush index及entry log，之后关闭index和entry logger。实际GC仍可能写入时，不提前关闭其依赖。最终flush不用somethingWritten快捷返回；可安全重试的固定范围完成后才进入资源关闭阶段，原操作cause仍保留。未初始化、部分初始化及已运行图有独立结果，普通shutdown不能代替fresh结果；它不包含Journal、外层callback/output、根锁或全Bookie终态。
+
+十三类159项组合全部通过，0 failure/error/skipped：新fresh index/storage21、FileInfoBackingCache5、IndexPersistenceMgr11、LedgerCache13、Interleaved14，以及原fresh GC4、fresh entry logger14、fresh entry-log10、BufferedChannel9、DefaultEntryLog30、CreateNewLog14、BookieImpl3和根/Classic组合11。最后仅将LedgerCache测试夹具的stopCluster改为killCluster，清除自己创建的ZK数据目录，13项单独复跑通过；1243份其余native输入和89份其余交付class逐字节不变，159项原回执仍绑原fixture源码，未移绑为最终fixture整轮PASS。最终native输入1244项、外层1271源码加9文档、交付class90份。未重跑完整SDK、stock、TLC、Rust JNI或性能/掉电矩阵。
+
+既有LedgerCacheTest原Null registration backend不支持共同route读取，13项曾在启动前失败；仅在该测试夹具显式借用真实隔离ZK registration manager读取ABSENT，保留原隔离ledger-manager行为及断言，不给予Null driver默认权限。所有测试Bookie使用本例明确的journal目录，缺配置时创建测试私有目录；逐实例记录已完成的shutdown，修正了新清理路径的两项重复关闭错误。原startup拒绝、重复关闭以及8项首次Checkstyle行长/导入诊断均保留各自source/receipt。
+
+最终Spotless/Checkstyle实际exit0；独立RAT实际exit1，431个未批准路径及字节与父源码一致、无新增，保护PDF在读取前排除。七个已终态native临时目录的55个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节202,970,493；归档硬链接保留全部数据，常规文件数据块回收0。未清理默认目录或其他任务资源。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-index-evidence-3898802e`保留各阶段原始源码/输入/命令/XML及失败诊断，初轮loopback夹具错误和一次缺Map导入的编译失败不改写为PASS。此处只闭合限定存储子图；Journal完整严格关闭、FreshClassicRoots逐句柄释放结果、稳定outer owner/facade与一次性permit仍待接线。完整fresh/ACK/root unlock、共同owner/Main/G1/full-bytes与16步验收继续OPEN/active。OFF/SYSTEM/PARK及disabled保持，Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED。

@@ -48,6 +48,8 @@ public class LedgerEntryPage implements AutoCloseable {
     private volatile int last = -1; // Last update position
     private final LEPStateChangeCallback callback;
     private boolean deleted;
+    private volatile boolean freshRetired;
+    private final boolean freshLifecycle;
 
     public static int getIndexEntrySize() {
         return indexEntrySize;
@@ -58,6 +60,11 @@ public class LedgerEntryPage implements AutoCloseable {
     }
 
     public LedgerEntryPage(int pageSize, int entriesPerPage, LEPStateChangeCallback callback) {
+        this(pageSize, entriesPerPage, callback, false);
+    }
+
+    LedgerEntryPage(int pageSize, int entriesPerPage, LEPStateChangeCallback callback, boolean freshLifecycle) {
+        this.freshLifecycle = freshLifecycle;
         this.pageSize = pageSize;
         this.entriesPerPage = entriesPerPage;
         page = ByteBuffer.allocateDirect(pageSize);
@@ -103,10 +110,38 @@ public class LedgerEntryPage implements AutoCloseable {
     }
 
     public void usePage() {
+        if (freshLifecycle) {
+            synchronized (this) {
+                if (freshRetired) {
+                    throw new IllegalStateException("Fresh index page is retired");
+                }
+                usePageInternal();
+            }
+        } else {
+            usePageInternal();
+        }
+    }
+
+    private void usePageInternal() {
         int oldVal = useCount.getAndIncrement();
         if ((0 == oldVal) && (null != callback)) {
             callback.onSetInUse(this);
         }
+    }
+
+    synchronized boolean retireForFresh() {
+        if (!freshLifecycle) {
+            throw new IllegalStateException("Not a fresh page");
+        }
+        if (inUse()) {
+            return false;
+        }
+        freshRetired = true;
+        return true;
+    }
+
+    boolean isRetiredForFresh() {
+        return freshRetired;
     }
 
     public void releasePageNoCallback() {

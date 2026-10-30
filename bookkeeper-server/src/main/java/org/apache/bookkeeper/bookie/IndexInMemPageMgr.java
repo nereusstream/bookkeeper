@@ -32,6 +32,7 @@ import io.netty.util.internal.PlatformDependent;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
@@ -62,11 +63,19 @@ class IndexInMemPageMgr {
         final ConcurrentMap<Long, ConcurrentMap<Long, LedgerEntryPage>> pages;
         final Map<EntryKey, LedgerEntryPage> lruCleanPageMap;
         final ConcurrentLinkedQueue<LedgerEntryPage> listOfFreePages;
+        final Set<LedgerEntryPage> freshPages;
+        boolean freshClosing;
+        int freshOperations;
 
         // Stats
         private final IndexInMemPageMgrStats inMemPageMgrStats;
 
         public InMemPageCollection(StatsLogger statsLogger) {
+            this(statsLogger, false);
+        }
+
+        InMemPageCollection(StatsLogger statsLogger, boolean freshLifecycle) {
+            freshPages = freshLifecycle ? Collections.newSetFromMap(new IdentityHashMap<>()) : null;
             pages = new ConcurrentHashMap<>();
             lruCleanPageMap =
                     Collections.synchronizedMap(new LinkedHashMap<EntryKey, LedgerEntryPage>(16, 0.75f, true));
@@ -302,6 +311,22 @@ class IndexInMemPageMgr {
 
         @Override
         public void onResetInUse(LedgerEntryPage lep) {
+            if (freshPages != null) {
+                synchronized (this) {
+                    if (!lep.isRetiredForFresh()) {
+                        freshPages.add(lep);
+                        if (!freshClosing) {
+                            if (!lep.isDeleted()) {
+                                addToCleanPagesList(lep);
+                            } else {
+                                addToListOfFreePages(lep);
+                            }
+                        }
+                    }
+                    notifyAll();
+                }
+                return;
+            }
             if (!lep.isDeleted()) {
                 addToCleanPagesList(lep);
             } else {
@@ -342,10 +367,15 @@ class IndexInMemPageMgr {
                              ServerConfiguration conf,
                              IndexPersistenceMgr indexPersistenceManager,
                              StatsLogger statsLogger) {
+        this(pageSize, entriesPerPage, conf, indexPersistenceManager, statsLogger, false);
+    }
+
+    IndexInMemPageMgr(int pageSize, int entriesPerPage, ServerConfiguration conf,
+            IndexPersistenceMgr indexPersistenceManager, StatsLogger statsLogger, boolean freshLifecycle) {
         this.pageSize = pageSize;
         this.entriesPerPage = entriesPerPage;
         this.indexPersistenceManager = indexPersistenceManager;
-        this.pageMapAndList = new InMemPageCollection(statsLogger);
+        this.pageMapAndList = new InMemPageCollection(statsLogger, freshLifecycle);
 
         long maxDirectMemory = PlatformDependent.estimateMaxDirectMemory();
 
@@ -406,6 +436,15 @@ class IndexInMemPageMgr {
      */
     LedgerEntryPage getLedgerEntryPage(long ledger,
                                               long pageEntry) throws IOException {
+        beginFreshOperation();
+        try {
+            return getLedgerEntryPageInternal(ledger, pageEntry);
+        } finally {
+            endFreshOperation();
+        }
+    }
+
+    private LedgerEntryPage getLedgerEntryPageInternal(long ledger, long pageEntry) throws IOException {
         LedgerEntryPage lep = getLedgerEntryPageFromCache(ledger, pageEntry, false);
         if (lep == null) {
             ledgerCacheMissCounter.inc();
@@ -473,10 +512,12 @@ class IndexInMemPageMgr {
     }
 
     void removePagesForLedger(long ledgerId) {
+        requireFreshMemoryAdmission();
         pageMapAndList.removeEntriesForALedger(ledgerId);
     }
 
     long getLastEntryInMem(long ledgerId) {
+        requireFreshMemoryAdmission();
         return pageMapAndList.getLastEntryInMem(ledgerId);
     }
 
@@ -494,7 +535,8 @@ class IndexInMemPageMgr {
             }
 
             if (canAllocate) {
-                LedgerEntryPage lep = new LedgerEntryPage(pageSize, entriesPerPage, pageMapAndList);
+                LedgerEntryPage lep = new LedgerEntryPage(pageSize, entriesPerPage, pageMapAndList,
+                        pageMapAndList.freshPages != null);
                 lep.setLedgerAndFirstEntry(ledger, entry);
                 lep.usePage();
                 return lep;
@@ -513,6 +555,15 @@ class IndexInMemPageMgr {
     }
 
     void flushOneOrMoreLedgers(boolean doAll) throws IOException {
+        beginFreshOperation();
+        try {
+            flushOneOrMoreLedgersInternal(doAll);
+        } finally {
+            endFreshOperation();
+        }
+    }
+
+    private void flushOneOrMoreLedgersInternal(boolean doAll) throws IOException {
         List<Long> ledgersToFlush = new ArrayList<>(pageMapAndList.getActiveLedgers());
         for (Long potentiallyDirtyLedger : ledgersToFlush) {
             try {
@@ -638,7 +689,14 @@ class IndexInMemPageMgr {
         PageEntriesIterableImpl(long ledgerId) throws IOException {
             this.ledgerId = ledgerId;
             this.fi = indexPersistenceManager.getFileInfo(ledgerId, null);
-            this.totalEntries = max(entriesPerPage * (fi.size() / pageSize), getLastEntryInMem(ledgerId));
+            try {
+                this.totalEntries = max(entriesPerPage * (fi.size() / pageSize), getLastEntryInMem(ledgerId));
+            } catch (IOException | RuntimeException | Error failure) {
+                if (pageMapAndList.freshPages != null) {
+                    fi.release();
+                }
+                throw failure;
+            }
         }
 
         @Override
@@ -671,6 +729,68 @@ class IndexInMemPageMgr {
      * @throws IOException
      */
     public LedgerCache.PageEntriesIterable listEntries(long ledgerId) throws IOException {
+        requireFreshAdmission();
         return new PageEntriesIterableImpl(ledgerId);
+    }
+
+    private void requireFreshAdmission() throws IOException {
+        if (pageMapAndList.freshPages != null) {
+            synchronized (pageMapAndList) {
+                if (pageMapAndList.freshClosing) {
+                    throw new IOException("Fresh index pages are closing");
+                }
+            }
+            indexPersistenceManager.requireFreshAdmission();
+        }
+    }
+
+    private void requireFreshMemoryAdmission() {
+        try {
+            requireFreshAdmission();
+        } catch (IOException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
+    private void beginFreshOperation() throws IOException {
+        if (pageMapAndList.freshPages != null) {
+            synchronized (pageMapAndList) {
+                requireFreshAdmission();
+                pageMapAndList.freshOperations++;
+            }
+        }
+    }
+
+    private void endFreshOperation() {
+        if (pageMapAndList.freshPages != null) {
+            synchronized (pageMapAndList) {
+                pageMapAndList.freshOperations--;
+                pageMapAndList.notifyAll();
+            }
+        }
+    }
+
+    /** Retires owned references after actual page users return; does not claim native memory reclamation. */
+    void closeForFresh() throws InterruptedException {
+        if (pageMapAndList.freshPages == null) {
+            throw new IllegalStateException("Not a fresh page owner");
+        }
+        synchronized (pageMapAndList) {
+            pageMapAndList.freshClosing = true;
+            while (pageMapAndList.freshOperations != 0
+                    || pageMapAndList.freshPages.stream().anyMatch(LedgerEntryPage::inUse)) {
+                pageMapAndList.wait();
+            }
+            for (LedgerEntryPage page : pageMapAndList.freshPages) {
+                if (!page.retireForFresh()) {
+                    throw new IllegalStateException("Fresh page acquired after admission closed");
+                }
+            }
+            pageMapAndList.pages.clear();
+            pageMapAndList.lruCleanPageMap.clear();
+            pageMapAndList.listOfFreePages.clear();
+            pageMapAndList.freshPages.clear();
+            pageCount.set(0);
+        }
     }
 }

@@ -33,7 +33,11 @@ import io.netty.buffer.Unpooled;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -44,12 +48,15 @@ import org.apache.bookkeeper.bookie.CheckpointSource.Checkpoint;
 import org.apache.bookkeeper.bookie.FileInfoBackingCache.CachedFileInfo;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.conf.TestBKConfiguration;
+import org.apache.bookkeeper.discover.ZKRegistrationManager;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks;
 import org.apache.bookkeeper.stats.StatsLogger;
+import org.apache.bookkeeper.test.ZooKeeperUtil;
 import org.apache.bookkeeper.util.BookKeeperConstants;
 import org.apache.bookkeeper.util.IOUtils;
+import org.apache.bookkeeper.util.PortManager;
 import org.apache.bookkeeper.util.SnapshotMap;
 import org.apache.commons.io.FileUtils;
 import org.junit.After;
@@ -74,9 +81,14 @@ public class LedgerCacheTest {
     private final List<File> tempDirs = new ArrayList<File>();
 
     private BookieImpl bookie;
+    private final ZooKeeperUtil cluster = new ZooKeeperUtil();
+    private final List<TestBookieImpl> ownedBookies = new ArrayList<>();
+    private final Map<List<String>, Integer> portsByJournal = new HashMap<>();
+    private final Set<TestBookieImpl> stoppedBookies = new HashSet<>();
 
     @Before
     public void setUp() throws Exception {
+        cluster.startCluster();
         txnDir = IOUtils.createTempDir("ledgercache", "txn");
         ledgerDir = IOUtils.createTempDir("ledgercache", "ledger");
         // create current dir
@@ -86,7 +98,7 @@ public class LedgerCacheTest {
         conf.setMetadataServiceUri(null);
         conf.setJournalDirName(txnDir.getPath());
         conf.setLedgerDirNames(new String[] { ledgerDir.getPath() });
-        bookie = new TestBookieImpl(conf);
+        bookie = newBookieForTest(conf);
 
         activeLedgers = new SnapshotMap<Long, Boolean>();
         ledgerCache = ((InterleavedLedgerStorage) bookie.getLedgerStorage().getUnderlyingLedgerStorage()).ledgerCache;
@@ -98,11 +110,43 @@ public class LedgerCacheTest {
             flushThread.interrupt();
             flushThread.join();
         }
-        bookie.getLedgerStorage().shutdown();
+        try {
+            for (TestBookieImpl owned : ownedBookies) {
+                shutdownBookieForTest(owned);
+            }
+        } finally {
+            cluster.killCluster();
+        }
         FileUtils.deleteDirectory(txnDir);
         FileUtils.deleteDirectory(ledgerDir);
         for (File dir : tempDirs) {
             FileUtils.deleteDirectory(dir);
+        }
+    }
+
+    private TestBookieImpl newBookieForTest(ServerConfiguration configuration) throws Exception {
+        if (configuration.getProperty("journalDirectories") == null
+                && configuration.getProperty("journalDirectory") == null) {
+            configuration.setJournalDirName(createTempDir("ledgercache", "journal").getPath());
+        }
+        configuration.setBookiePort(portsByJournal.computeIfAbsent(
+                List.of(configuration.getJournalDirNames()), ignored -> PortManager.nextFreePort()));
+        // Keep the original isolated ledger-manager fixture, but obtain native absence from an actual ZK read.
+        var registration = new ZKRegistrationManager(configuration, cluster.getZooKeeperClient(), "/ledgers");
+        var resources = new TestBookieImpl.ResourceBuilder(configuration).withRegistrationManager(registration).build();
+        var result = new TestBookieImpl(resources);
+        ownedBookies.add(result);
+        return result;
+    }
+
+    private void shutdownBookieForTest(TestBookieImpl candidate) throws Exception {
+        if (!stoppedBookies.contains(candidate)) {
+            boolean running = candidate.isRunning();
+            candidate.shutdown();
+            if (!running) {
+                candidate.getLedgerStorage().shutdown();
+            }
+            stoppedBookies.add(candidate);
         }
     }
 
@@ -274,7 +318,7 @@ public class LedgerCacheTest {
         ServerConfiguration conf = TestBKConfiguration.newServerConfiguration();
         conf.setLedgerDirNames(new String[] { ledgerDir1.getAbsolutePath(), ledgerDir2.getAbsolutePath() });
 
-        BookieImpl bookie = new TestBookieImpl(conf);
+        BookieImpl bookie = newBookieForTest(conf);
         InterleavedLedgerStorage ledgerStorage =
             ((InterleavedLedgerStorage) bookie.getLedgerStorage().getUnderlyingLedgerStorage());
         LedgerCacheImpl ledgerCache = (LedgerCacheImpl) ledgerStorage.ledgerCache;
@@ -327,7 +371,7 @@ public class LedgerCacheTest {
             .setPageLimit(1)
             .setLedgerStorageClass(InterleavedLedgerStorage.class.getName());
 
-        Bookie b = new TestBookieImpl(conf);
+        Bookie b = newBookieForTest(conf);
         b.start();
         for (int i = 1; i <= numLedgers; i++) {
             ByteBuf packet = generateEntry(i, 1);
@@ -339,7 +383,7 @@ public class LedgerCacheTest {
         conf.setJournalDirName(journalDir.getPath())
             .setLedgerDirNames(new String[] { ledgerDir.getPath() });
 
-        b = new TestBookieImpl(conf);
+        b = newBookieForTest(conf);
         for (int i = 1; i <= numLedgers; i++) {
             try {
                 b.readEntry(i, 1);
@@ -730,7 +774,7 @@ public class LedgerCacheTest {
         conf.setLedgerDirNames(new String[] { tmpDir.toString() });
         conf.setLedgerStorageClass(FlushTestSortedLedgerStorage.class.getName());
 
-        Bookie bookie = new TestBookieImpl(conf);
+        Bookie bookie = newBookieForTest(conf);
         FlushTestSortedLedgerStorage flushTestSortedLedgerStorage =
             (FlushTestSortedLedgerStorage) bookie.getLedgerStorage();
         EntryMemTable memTable = flushTestSortedLedgerStorage.memTable;
@@ -777,7 +821,7 @@ public class LedgerCacheTest {
             .setJournalDirName(tmpDir.toString())
             .setLedgerStorageClass(FlushTestSortedLedgerStorage.class.getName());
 
-        Bookie bookie = new TestBookieImpl(conf);
+        Bookie bookie = newBookieForTest(conf);
         bookie.start();
         FlushTestSortedLedgerStorage flushTestSortedLedgerStorage = (FlushTestSortedLedgerStorage) bookie.
                 getLedgerStorage();
@@ -809,7 +853,7 @@ public class LedgerCacheTest {
 
         }, null, "passwd".getBytes());
         latch.await();
-        bookie.shutdown();
+        shutdownBookieForTest((TestBookieImpl) bookie);
 
     }
 
@@ -832,7 +876,7 @@ public class LedgerCacheTest {
         // enable entrylog per ledger
         conf.setEntryLogPerLedgerEnabled(true);
 
-        Bookie bookie = new TestBookieImpl(conf);
+        Bookie bookie = newBookieForTest(conf);
         FlushTestSortedLedgerStorage flushTestSortedLedgerStorage =
             (FlushTestSortedLedgerStorage) bookie.getLedgerStorage();
         EntryMemTable memTable = flushTestSortedLedgerStorage.memTable;
@@ -873,7 +917,7 @@ public class LedgerCacheTest {
         // enable entrylog per ledger
         conf.setEntryLogPerLedgerEnabled(true);
 
-        Bookie bookie = new TestBookieImpl(conf);
+        Bookie bookie = newBookieForTest(conf);
         FlushTestSortedLedgerStorage flushTestSortedLedgerStorage =
             (FlushTestSortedLedgerStorage) bookie.getLedgerStorage();
         EntryMemTable memTable = flushTestSortedLedgerStorage.memTable;

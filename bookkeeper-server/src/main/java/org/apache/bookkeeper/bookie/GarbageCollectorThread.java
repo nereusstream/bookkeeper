@@ -913,6 +913,14 @@ public class GarbageCollectorThread implements Runnable {
         }
     }
 
+    boolean freshUsersTerminated() {
+        if (!freshLifecycle) {
+            throw new IllegalStateException("Not a fresh GC owner");
+        }
+        Thread thread = freshExecutorThread;
+        return gcExecutor.isTerminated() && (thread == null || !thread.isAlive());
+    }
+
     /**
      * Remove entry log.
      *

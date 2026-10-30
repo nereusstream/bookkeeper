@@ -33,6 +33,9 @@ import java.io.RandomAccessFile;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.List;
 import lombok.CustomLog;
 import org.apache.bookkeeper.common.util.Watchable;
 import org.apache.bookkeeper.common.util.Watcher;
@@ -101,10 +104,73 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
     int headerVersion;
 
     private boolean deleted;
+    private final FreshState fresh;
+
+    record FreshCloseResult(boolean drained, Throwable operationFailure,
+                            Throwable flushFailure, Throwable closeFailure) { }
+
+    private static final class FreshChannel {
+        FileChannel channel;
+        boolean closeAttempted;
+        Throwable closeFailure;
+    }
+
+    private static final class FreshState {
+        final List<FreshChannel> channels = new ArrayList<>();
+        volatile boolean closing;
+        boolean notifyClose;
+        boolean notificationRunning;
+        Boolean forceClose;
+        ByteBuffer closeHeader;
+        Throwable operationFailure;
+        Throwable flushFailure;
+        Throwable closeFailure;
+        PendingIndexWrite pendingWrite;
+        Throwable priorWriteFailure;
+    }
+
+    private static final class PendingIndexWrite {
+        final long position;
+        final List<ByteBuffer> bytes = new ArrayList<>();
+        long length;
+
+        PendingIndexWrite(long position, ByteBuffer[] source) {
+            this.position = position;
+            for (ByteBuffer buffer : source) {
+                ByteBuffer copy = ByteBuffer.allocate(buffer.remaining());
+                copy.put(buffer.duplicate()).flip();
+                length = Math.addExact(length, copy.remaining());
+                bytes.add(copy);
+            }
+        }
+
+        boolean matches(long candidatePosition, ByteBuffer[] source) {
+            if (position != candidatePosition || source.length != bytes.size()) {
+                return false;
+            }
+            for (int i = 0; i < source.length; i++) {
+                ByteBuffer expected = bytes.get(i).duplicate();
+                expected.rewind();
+                if (!expected.equals(source[i])) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
 
     public FileInfo(File lf, byte[] masterKey, int fileInfoVersionToWrite) throws IOException {
+        this(lf, masterKey, fileInfoVersionToWrite, false);
+    }
+
+    static FileInfo forFresh(File lf, byte[] masterKey, int fileInfoVersionToWrite) throws IOException {
+        return new FileInfo(lf, masterKey, fileInfoVersionToWrite, true);
+    }
+
+    FileInfo(File lf, byte[] masterKey, int fileInfoVersionToWrite, boolean freshLifecycle) throws IOException {
         super(WATCHER_RECYCLER);
 
+        fresh = freshLifecycle ? new FreshState() : null;
         this.lf = lf;
         this.masterKey = masterKey;
         mode = "rw";
@@ -113,6 +179,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
     }
 
     synchronized Long getLastAddConfirmed() {
+        requireFreshMemoryAccess();
         return lac;
     }
 
@@ -120,6 +187,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
         long lacToReturn;
         boolean changed = false;
         synchronized (this) {
+            requireFreshMemoryAccess();
             if (null == this.lac || this.lac < lac) {
                 this.lac = lac;
                 changed = true;
@@ -156,6 +224,9 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
     }
 
     public boolean isClosed() {
+        if (fresh != null) {
+            return fresh.closing;
+        }
         return isClosed;
     }
 
@@ -170,6 +241,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
     public ByteBuf getExplicitLac() {
         ByteBuf retLac = null;
         synchronized (this) {
+            requireFreshMemoryAccess();
             log.debug().attr("explicitLac", explicitLac).log("fileInfo:GetLac");
             if (explicitLac != null) {
                 retLac = Unpooled.buffer(explicitLac.capacity());
@@ -185,6 +257,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
     public void setExplicitLac(ByteBuf lac) {
         long explicitLacValue;
         synchronized (this) {
+            requireFreshMemoryAccess();
             if (explicitLac == null) {
                 explicitLac = ByteBuffer.allocate(lac.capacity());
             }
@@ -202,19 +275,31 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
     }
 
     public synchronized void readHeader() throws IOException {
+        requireFreshAccess();
+        try {
+            readHeaderInternal();
+        } catch (IOException | RuntimeException | Error failure) {
+            recordFreshOperationFailure(failure);
+            throw failure;
+        }
+    }
+
+    private void readHeaderInternal() throws IOException {
         if (lf.exists()) {
             if (fc != null) {
                 return;
             }
 
-            fc = new RandomAccessFile(lf, mode).getChannel();
+            fc = openIndexFile(lf);
             size = fc.size();
             sizeSinceLastWrite = size;
 
             // avoid hang on reading partial index
             ByteBuffer bb = ByteBuffer.allocate((int) (Math.min(size, START_OF_DATA)));
             while (bb.hasRemaining()) {
-                fc.read(bb);
+                if (fc.read(bb) <= 0 && fresh != null) {
+                    throw new ShortReadException("Short index header at " + lf);
+                }
             }
             bb.flip();
             if (bb.getInt() != SIGNATURE) {
@@ -277,6 +362,18 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
 
     private synchronized void checkOpen(boolean create, boolean openBeforeClose)
             throws IOException {
+        if (!openBeforeClose) {
+            requireFreshAccess();
+        }
+        try {
+            checkOpenInternal(create, openBeforeClose);
+        } catch (IOException | RuntimeException | Error failure) {
+            recordFreshOperationFailure(failure);
+            throw failure;
+        }
+    }
+
+    private void checkOpenInternal(boolean create, boolean openBeforeClose) throws IOException {
         if (deleted) {
             throw new FileInfoDeletedException();
         }
@@ -292,7 +389,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
             if (create) {
                 // delayed the creation of parents directories
                 checkParents(lf);
-                fc = new RandomAccessFile(lf, mode).getChannel();
+                fc = openIndexFile(lf);
                 size = fc.size();
                 if (size == 0) {
                     writeHeader();
@@ -306,6 +403,9 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
             try {
                 readHeader();
             } catch (BufferUnderflowException buf) {
+                if (fresh != null) {
+                    throw new IOException("Incomplete fresh index header " + lf, buf);
+                }
                 log.warn()
                         .exception(buf)
                         .attr("file", lf)
@@ -321,6 +421,21 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
     }
 
     private void writeHeader() throws IOException {
+        ByteBuffer bb = headerBytes();
+        if (fresh != null) {
+            try {
+                writeHeaderAtFixedPosition(bb);
+            } catch (Throwable failure) {
+                recordFreshOperationFailure(failure);
+                throw asIOException(failure);
+            }
+            return;
+        }
+        fc.position(0);
+        fc.write(bb);
+    }
+
+    private ByteBuffer headerBytes() {
         ByteBuffer bb = ByteBuffer.allocate((int) START_OF_DATA);
         bb.putInt(SIGNATURE);
         bb.putInt(this.headerVersion);
@@ -338,8 +453,17 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
             }
         }
         bb.rewind();
-        fc.position(0);
-        fc.write(bb);
+        return bb;
+    }
+
+    private void writeHeaderAtFixedPosition(ByteBuffer header) throws IOException {
+        ByteBuffer remaining = header.duplicate();
+        remaining.rewind();
+        while (remaining.hasRemaining()) {
+            if (fc.write(remaining, remaining.position()) <= 0) {
+                throw new IOException("Short index header write at " + lf);
+            }
+        }
     }
 
     public synchronized boolean isFenced() throws IOException {
@@ -376,6 +500,13 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
 
     // flush the header when header is changed
     public synchronized void flushHeader() throws IOException {
+        if (fresh != null && fresh.pendingWrite != null && !needFlushHeader && !fresh.closing
+                && fresh.operationFailure == null && fresh.closeFailure == null) {
+            // The header preceding this fixed-coordinate write already completed. Only its exact DATA range retries.
+            finishPendingIndexWrite();
+            return;
+        }
+        requireFreshAccess();
         if (needFlushHeader) {
             checkOpen(true);
             writeHeader();
@@ -414,6 +545,20 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
      */
     private int readAbsolute(ByteBuffer bb, long start, boolean bestEffort)
             throws IOException {
+        if (fresh != null) {
+            synchronized (this) {
+                try {
+                    return readAbsoluteInternal(bb, start, bestEffort);
+                } catch (IOException | RuntimeException | Error failure) {
+                    recordFreshOperationFailure(failure);
+                    throw failure;
+                }
+            }
+        }
+        return readAbsoluteInternal(bb, start, bestEffort);
+    }
+
+    private int readAbsoluteInternal(ByteBuffer bb, long start, boolean bestEffort) throws IOException {
         checkOpen(false);
         synchronized (this) {
             if (fc == null) {
@@ -451,6 +596,15 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
      *          if set to false, the index is not forced to create.
      */
     public void close(boolean force) throws IOException {
+        if (fresh != null) {
+            FreshCloseResult result = closeForFresh(force);
+            Throwable failure = result.closeFailure() != null ? result.closeFailure()
+                    : result.flushFailure() != null ? result.flushFailure() : result.operationFailure();
+            if (failure != null) {
+                throw asIOException(failure);
+            }
+            return;
+        }
         boolean changed = false;
         synchronized (this) {
             if (isClosed) {
@@ -475,7 +629,55 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
     }
 
     public synchronized long write(ByteBuffer[] buffs, long position) throws IOException {
+        if (fresh != null) {
+            if (fresh.closing || fresh.operationFailure != null || fresh.closeFailure != null) {
+                throw new IOException("Fresh index cannot accept a write", fresh.operationFailure);
+            }
+            if (fresh.pendingWrite == null) {
+                checkOpen(true);
+                fresh.pendingWrite = new PendingIndexWrite(position, buffs);
+            } else if (!fresh.pendingWrite.matches(position, buffs)) {
+                throw new IOException("Fresh index has a different unresolved write", fresh.priorWriteFailure);
+            }
+            long length = finishPendingIndexWrite();
+            for (ByteBuffer buffer : buffs) {
+                buffer.position(buffer.limit());
+            }
+            return length;
+        }
         checkOpen(true);
+        return writeInternal(buffs, position);
+    }
+
+    private long finishPendingIndexWrite() throws IOException {
+        PendingIndexWrite write = fresh.pendingWrite;
+        try {
+            long offset = Math.addExact(write.position, START_OF_DATA);
+            for (ByteBuffer buffer : write.bytes) {
+                while (buffer.hasRemaining()) {
+                    if (fc.write(buffer, Math.addExact(offset, buffer.position())) <= 0) {
+                        throw new IOException("Short fresh index write at " + lf);
+                    }
+                }
+                offset = Math.addExact(offset, buffer.limit());
+            }
+            fc.force(true);
+            long writtenSize = fc.size();
+            size = Math.max(size, Math.addExact(Math.addExact(write.position, START_OF_DATA), write.length));
+            sizeSinceLastWrite = writtenSize;
+            fresh.pendingWrite = null;
+            fresh.flushFailure = null;
+            return write.length;
+        } catch (Throwable failure) {
+            if (fresh.priorWriteFailure == null) {
+                fresh.priorWriteFailure = failure;
+            }
+            fresh.flushFailure = failure;
+            throw asIOException(failure);
+        }
+    }
+
+    private long writeInternal(ByteBuffer[] buffs, long position) throws IOException {
         long total = 0;
         try {
             fc.position(position + START_OF_DATA);
@@ -486,8 +688,16 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
                 }
                 total += rc;
             }
+        } catch (IOException | RuntimeException | Error failure) {
+            recordFreshOperationFailure(failure);
+            throw failure;
         } finally {
-            fc.force(true);
+            try {
+                fc.force(true);
+            } catch (IOException | RuntimeException | Error failure) {
+                recordFreshOperationFailure(failure);
+                throw failure;
+            }
             long newsize = position + START_OF_DATA + total;
             if (newsize > size) {
                 size = newsize;
@@ -504,6 +714,19 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
      */
     public synchronized void moveToNewLocation(File newFile, long size) throws IOException {
         checkOpen(false);
+        if (fresh != null) {
+            try {
+                moveToNewLocationInternal(newFile, size);
+            } catch (Throwable failure) {
+                recordFreshOperationFailure(failure);
+                throw asIOException(failure);
+            }
+            return;
+        }
+        moveToNewLocationInternal(newFile, size);
+    }
+
+    private void moveToNewLocationInternal(File newFile, long size) throws IOException {
         // If the channel is null, or same file path, just return.
         if (null == fc || isSameFile(newFile)) {
             return;
@@ -519,11 +742,11 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
             }
         }
         // copy contents from old.idx to new.idx.rloc
-        FileChannel newFc = new RandomAccessFile(rlocFile, "rw").getChannel();
+        FileChannel newFc = openIndexFile(rlocFile);
         try {
             long written = 0;
             while (written < size) {
-                long count = fc.transferTo(written, size, newFc);
+                long count = fc.transferTo(written, fresh == null ? size : size - written, newFc);
                 if (count <= 0) {
                     throw new IOException("Copying to new location " + rlocFile + " failed");
                 }
@@ -532,12 +755,31 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
             if (written <= 0 && size > 0) {
                 throw new IOException("Copying to new location " + rlocFile + " failed");
             }
+        } catch (IOException | RuntimeException | Error failure) {
+            recordFreshOperationFailure(failure);
+            throw failure;
         } finally {
-            newFc.force(true);
-            newFc.close();
+            if (fresh == null) {
+                newFc.force(true);
+                newFc.close();
+            } else {
+                try {
+                    newFc.force(true);
+                } catch (IOException | RuntimeException | Error failure) {
+                    recordFreshOperationFailure(failure);
+                    throw failure;
+                } finally {
+                    closeIndexFile(newFc);
+                }
+            }
         }
         // delete old.idx
-        fc.close();
+        if (fresh == null) {
+            fc.close();
+        } else {
+            closeIndexFile(fc);
+            fc = null;
+        }
         if (!delete()) {
             log.error().attr("file", lf).log("Failed to delete the previous index file");
             throw new IOException("Failed to delete the previous index file " + lf);
@@ -551,7 +793,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
                     .log("Failed to rename file");
             throw new IOException("Failed to rename " + rlocFile + " to " + newFile);
         }
-        fc = new RandomAccessFile(newFile, mode).getChannel();
+        fc = openIndexFile(newFile);
         lf = newFile;
         deleted = false;
     }
@@ -562,8 +804,193 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
     }
 
     public synchronized boolean delete() {
+        if (fresh != null && !fresh.channels.isEmpty()) {
+            throw new IllegalStateException("Fresh index resources must close successfully before deletion");
+        }
         deleted = true;
         return lf.delete();
+    }
+
+    /** Cache admission and reference ownership are handled by the backing cache, before this method is called. */
+    FreshCloseResult closeForFresh(boolean force) {
+        boolean notify;
+        synchronized (this) {
+            if (fresh == null) {
+                throw new IllegalStateException("Not a fresh index file owner");
+            }
+            fresh.closing = true;
+            isClosed = true;
+            notify = !fresh.notifyClose;
+            fresh.notifyClose = true;
+            if (notify) {
+                fresh.notificationRunning = true;
+            }
+            if (fresh.forceClose == null) {
+                fresh.forceClose = force;
+            }
+            fresh.flushFailure = null;
+            for (FreshChannel resource : List.copyOf(fresh.channels)) {
+                if (!resource.closeAttempted && !resource.channel.isOpen()) {
+                    try {
+                        closeIndexFile(resource.channel);
+                    } catch (IOException failure) {
+                        // Record unobserved automatic close even when a pending flush cannot finish.
+                    }
+                }
+            }
+            if (fresh.pendingWrite != null) {
+                try {
+                    finishPendingIndexWrite();
+                } catch (IOException failure) {
+                    fresh.flushFailure = failure;
+                }
+            }
+            if (fresh.flushFailure == null && fresh.forceClose && !deleted
+                    && fresh.operationFailure == null && fresh.closeFailure == null) {
+                try {
+                    if (fc == null && (!lf.exists() || needFlushHeader)) {
+                        checkParents(lf);
+                        fc = openIndexFile(lf);
+                        size = fc.size();
+                        if (size == 0) {
+                            needFlushHeader = true;
+                        }
+                    }
+                    if (fc != null) {
+                        if (needFlushHeader) {
+                            if (fresh.closeHeader == null) {
+                                fresh.closeHeader = headerBytes();
+                            }
+                            writeHeaderAtFixedPosition(fresh.closeHeader);
+                        }
+                        fc.force(true);
+                        needFlushHeader = false;
+                    }
+                } catch (Throwable failure) {
+                    fresh.flushFailure = failure;
+                }
+            }
+            if (fresh.flushFailure == null) {
+                // Every candidate was registered before open, including failed relocation candidates.
+                for (FreshChannel resource : List.copyOf(fresh.channels)) {
+                    try {
+                        closeIndexFile(resource.channel);
+                    } catch (IOException failure) {
+                        // The original result stays on the resource. Independent handles still drain.
+                    }
+                }
+                if (fresh.channels.isEmpty()) {
+                    fc = null;
+                }
+            }
+        }
+        if (notify) {
+            try {
+                notifyWatchers(LastAddConfirmedUpdateNotification.FUNC, Long.MAX_VALUE);
+            } catch (Throwable failure) {
+                synchronized (this) {
+                    recordFreshOperationFailure(failure);
+                }
+            } finally {
+                synchronized (this) {
+                    fresh.notificationRunning = false;
+                    notifyAll();
+                }
+            }
+        }
+        synchronized (this) {
+            return new FreshCloseResult(fresh.channels.isEmpty() && fresh.flushFailure == null
+                    && fresh.closeFailure == null && !fresh.notificationRunning,
+                    fresh.operationFailure != null ? fresh.operationFailure : fresh.priorWriteFailure,
+                    fresh.flushFailure, fresh.closeFailure);
+        }
+    }
+
+    synchronized void beginClosingForFresh() {
+        if (fresh == null) {
+            throw new IllegalStateException("Not a fresh index file owner");
+        }
+        fresh.closing = true;
+        isClosed = true;
+    }
+
+    private FileChannel openIndexFile(File file) throws IOException {
+        if (fresh == null) {
+            return new RandomAccessFile(file, mode).getChannel();
+        }
+        FreshChannel resource = new FreshChannel();
+        fresh.channels.add(resource);
+        try {
+            resource.channel = FileChannel.open(file.toPath(), StandardOpenOption.CREATE,
+                    StandardOpenOption.READ, StandardOpenOption.WRITE);
+            return resource.channel;
+        } catch (Throwable failure) {
+            fresh.channels.remove(resource); // No channel was returned; there is no acquired handle.
+            throw asIOException(failure);
+        }
+    }
+
+    private void closeIndexFile(FileChannel channel) throws IOException {
+        FreshChannel resource = null;
+        for (FreshChannel candidate : fresh.channels) {
+            if (candidate.channel == channel) {
+                resource = candidate;
+                break;
+            }
+        }
+        if (resource == null) {
+            throw new IOException("Unregistered fresh index channel");
+        }
+        if (!resource.closeAttempted) {
+            resource.closeAttempted = true;
+            try {
+                if (!channel.isOpen()) {
+                    throw new IOException("Fresh index channel closed without an observed native close result");
+                }
+                channel.close();
+                fresh.channels.remove(resource);
+                return;
+            } catch (Throwable failure) {
+                resource.closeFailure = failure;
+                if (fresh.closeFailure == null) {
+                    fresh.closeFailure = failure;
+                }
+            }
+        }
+        throw asIOException(resource.closeFailure);
+    }
+
+    private void requireFreshAccess() throws IOException {
+        if (fresh != null) {
+            if (fresh.closing) {
+                throw new IOException("Fresh index file is closing");
+            }
+            Throwable failure = fresh.operationFailure != null ? fresh.operationFailure : fresh.closeFailure;
+            if (failure == null && fresh.pendingWrite != null) {
+                failure = fresh.flushFailure;
+            }
+            if (failure != null) {
+                throw new IOException("Fresh index file has an unresolved operation", failure);
+            }
+        }
+    }
+
+    private void requireFreshMemoryAccess() {
+        try {
+            requireFreshAccess();
+        } catch (IOException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
+    private void recordFreshOperationFailure(Throwable failure) {
+        if (fresh != null && fresh.operationFailure == null) {
+            fresh.operationFailure = failure;
+        }
+    }
+
+    private static IOException asIOException(Throwable failure) {
+        return failure instanceof IOException io ? io : new IOException("Fresh index operation failed", failure);
     }
 
     private static void checkParents(File f) throws IOException {

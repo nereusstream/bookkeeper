@@ -1030,3 +1030,6 @@ Segment production candidate 的最低 Gate：
 
 
 [fresh entry logger 的实际资源图关闭](rfcs/unified-wal/implementation/local-storage/README.md#fresh-entry-logger-的实际资源图关闭)：2026-10-31父babf7cc4e2上，包内DefaultEntryLogger先登记owner再初始化，实际active/candidate/rotation/compaction及读fd的winner/loser/partial均保留关闭结果；弱heap alias不强留，活引用各释放一次，命中CLOSING拒绝，未知首次close仍sticky。结果区分资源drained、operation/flush/close失败，framing buffer按owner回收，独立caller ByteBuf保持。八类95项通过，原阶段/格式失败及交付输入由canonical拥有；不是全Bookie、根解锁或ACK验收。下一项继续Interleaved/index cache、Journal、根释放进度及完整owner/facade，目标active，相关Gate OPEN。
+
+
+2026-10-31接续[fresh ledger-index 与 Interleaved 关闭](rfcs/unified-wal/implementation/local-storage/README.md#fresh-ledger-index-与-interleaved-关闭)：fresh索引文件/共享借用/页引用退役与原GC、entry logger已组合，实际验证和证据边界由该节拥有。Journal、根锁释放进度及完整outer owner/facade/permit仍OPEN，不提升完整fresh、ACK、G1或16步Gate；持续目标active。

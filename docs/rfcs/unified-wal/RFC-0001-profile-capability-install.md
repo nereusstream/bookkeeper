@@ -1068,3 +1068,6 @@ RFC 进入 Accepted 前必须：
 2026-10-12 [网络 WRITE_LAC 与确认前缀生产](implementation/profile-wire/README.md#网络-write_lac-与确认前缀生产)已接原网络WRITE_LAC、durable control force/apply与SDK确认prefix的distinct AQ，fence后只解析同值，UNKNOWN/cancel不提前归还actual output/wire custody；既有URL2/required-prefix实际消费新producer。7类337项Java和29有限模型配置（5完整正向/24指定反例）通过；其他required authority/自动策略/默认routing/总预算/Main/stock/GC/退役/性能/运维及全16步综合验收仍OPEN，生产Gate不提升。
 
 2026-10-13 [默认 SDK open 的 Profile 拒绝边界](implementation/profile-wire/README.md#默认-sdk-open-的-profile-拒绝边界)已在原LedgerOpenOp密码/digest验证后、Classic handle/listener/recovery创建前识别mandatory Profile backlink，返回原IllegalOpException，避免当前SDK误用Classic路径。真实CLOSED旧行为红、新OPEN/CLOSED/valid-CRC future marker拒绝绿及三Bookie Classic兼容，最终2类17项通过；Main/外部issuer、默认Profile routing、released stock矩阵及全16步Gate仍OPEN，默认OFF/SYSTEM/PARK与disabled不变。
+
+
+2026-10-31实现接续见[fresh ledger-index 与 Interleaved 关闭](implementation/local-storage/README.md#fresh-ledger-index-与-interleaved-关闭)：包内资源图保留borrower、实际flush/native-close和失败进度，direct页仅证明引用退役；尚不发行NO_CLUSTER_AUTHORITY/fresh许可，不包含Journal、完整Bookie、根解锁或full-bytes证明。
