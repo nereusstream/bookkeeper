@@ -1071,3 +1071,6 @@ RFC 进入 Accepted 前必须：
 
 
 2026-10-31实现接续见[fresh ledger-index 与 Interleaved 关闭](implementation/local-storage/README.md#fresh-ledger-index-与-interleaved-关闭)：包内资源图保留borrower、实际flush/native-close和失败进度，direct页仅证明引用退役；尚不发行NO_CLUSTER_AUTHORITY/fresh许可，不包含Journal、完整Bookie、根解锁或full-bytes证明。
+
+
+2026-10-31接续[fresh Journal 的完整资源图关闭](implementation/local-storage/README.md#fresh-journal-的完整资源图关闭)：包内fresh Journal沿原Journal→ForceWrite链排空已接纳工作，分别保存连续force、checkpoint/lastMark及首次native close结果；首版配置冻结Journal V6/FileInfo V1，不静默改写。实际验证及原阶段证据由该节拥有。下一项为根锁逐句柄释放结果，再接稳定outer owner/facade和一次性permit；尚不发行fresh许可或解锁根，完整fresh/ACK、Main/G1/full-bytes与16步Gate继续OPEN，持续目标active。

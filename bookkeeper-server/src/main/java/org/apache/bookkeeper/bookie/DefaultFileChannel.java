@@ -37,6 +37,8 @@ public class DefaultFileChannel implements BookieFileChannel {
     private final File file;
     private RandomAccessFile randomAccessFile;
     private final ServerConfiguration configuration;
+    private boolean freshCloseAttempted;
+    private Throwable freshCloseFailure;
 
     DefaultFileChannel(File file, ServerConfiguration serverConfiguration) throws IOException {
         this.file = file;
@@ -46,6 +48,9 @@ public class DefaultFileChannel implements BookieFileChannel {
     @Override
     public FileChannel getFileChannel() throws FileNotFoundException {
         synchronized (this) {
+            if (freshCloseAttempted) {
+                throw new FileNotFoundException("Fresh file channel is closing");
+            }
             if (randomAccessFile == null) {
                 randomAccessFile = new RandomAccessFile(file, "rw");
             }
@@ -75,5 +80,33 @@ public class DefaultFileChannel implements BookieFileChannel {
                 randomAccessFile.close();
             }
         }
+    }
+
+    /** Single close record for the RAF and its FileChannel alias, including partial lazy open. */
+    synchronized void closeForFresh() throws IOException {
+        if (!freshCloseAttempted) {
+            freshCloseAttempted = true;
+            try {
+                if (randomAccessFile != null) {
+                    if (!randomAccessFile.getFD().valid()) {
+                        throw new IOException("Fresh RAF closed without an observed native close result");
+                    }
+                    randomAccessFile.close();
+                }
+            } catch (IOException | RuntimeException | Error failure) {
+                freshCloseFailure = failure;
+            }
+        }
+        if (freshCloseFailure instanceof IOException failure) {
+            throw failure;
+        } else if (freshCloseFailure instanceof RuntimeException failure) {
+            throw failure;
+        } else if (freshCloseFailure instanceof Error failure) {
+            throw failure;
+        }
+    }
+
+    synchronized boolean closedForFresh() {
+        return freshCloseAttempted && freshCloseFailure == null;
     }
 }

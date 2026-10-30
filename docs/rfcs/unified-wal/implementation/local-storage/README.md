@@ -2165,3 +2165,26 @@ Interleaved关闭仍要求外层请求和SyncThread先实际停止；它先等�
 最终Spotless/Checkstyle实际exit0；独立RAT实际exit1，431个未批准路径及字节与父源码一致、无新增，保护PDF在读取前排除。七个已终态native临时目录的55个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节202,970,493；归档硬链接保留全部数据，常规文件数据块回收0。未清理默认目录或其他任务资源。
 
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-index-evidence-3898802e`保留各阶段原始源码/输入/命令/XML及失败诊断，初轮loopback夹具错误和一次缺Map导入的编译失败不改写为PASS。此处只闭合限定存储子图；Journal完整严格关闭、FreshClassicRoots逐句柄释放结果、稳定outer owner/facade与一次性permit仍待接线。完整fresh/ACK/root unlock、共同owner/Main/G1/full-bytes与16步验收继续OPEN/active。OFF/SYSTEM/PARK及disabled保持，Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED。
+
+
+## fresh Journal 的完整资源图关闭
+
+2026-10-31在父源码`0821b6fa382dc0075c121251db4abc2f9ef57a29`上，包内Journal先返回纯owner，再显式初始化现存空current目录并启动原Journal→ForceWrite线程。沿用原队列、batch、Recycler与逐条回调，不新增写入pipeline或后台pool。fresh仅接受Journal V6、FileInfo V1、writeData/syncData=true、非busy-wait及内置DefaultFileChannelProvider；不匹配在资源创建前拒绝，不静默覆盖。普通Classic的旧格式、默认构造和恢复分支保持。
+
+append quiesce先拒绝新提交，等待已进入producer实际交付或退还，随后由原Journal排空输入队列、本地数组、当前entry与toFlush，再由ForceWrite处理其队列、本地batch和callback，最后等待两个实际线程退出。关闭信号不占DATA队列slot；有界poll与共享失败状态使满队列或对端失败仍可结束交接，不通过interrupt中止文件I/O。实际producer、初始化、checkpoint、writer/force及drain调用线程按身份判断，拒绝阻塞等待自身；调用者超时或中断不取消实际使用者，也不提前关闭fd或释放输入。
+
+每个fresh ticket分别记录retain、配额、发布与终结；发布前失败同步拒绝且不回调，已发布项由实际持有者结算。回调前标记终态并清空callback/context，finally归还source与配额；callback/stats异常单独保存，继续处理其他ticket。Recycler与本地数组不再同时保留已回收的旧项；成功退役的对象及时移除，失败的释放记录保留。普通QueueEntry仅新增可空fresh状态引用，不为普通提交分配fresh ticket。
+
+跨log的group force按实际channel分别证明覆盖，再顺序推进Journal连续durable mark。内部回调使用BookieProtocol.EOK/EIO：所需write/force已证明成功即一次EOK；未证明即一次EIO，EIO不表示磁盘必然没有数据。仅后续native close失败不能抹掉已成立的EOK，但sticky close failure仍禁止DRAINED；前一个log force失败时，后一个文件不能补齐缺口。清理中的flush/force不会把已失败请求重新追加或补发成功。
+
+JournalChannel在lazy provider/native open前已有owner；RAF、FileChannel及BufferedChannel别名共用DefaultFileChannel的首次native close记录，buffer单独退役自有引用，不重复关闭同一fd。header、padding、预分配及buffer flush完整处理短写；固定字节/坐标才允许续接，完整成功后推进位置。active、rolled、partial-open及失败close对象均持续登记，provider的no-op close不替代逐fd结果。首次关闭前已发生自动close或native close首次失败保持sticky，不能由第二次no-op升级为成功。
+
+append quiesce保留checkpoint入口，供实际Sync等外部使用者完成最后checkpoint；最终close才封锁checkpoint并等待已进入调用返回。Journal durable mark、存储checkpoint后的持久lastMark与资源终结分别记录。lastMark按固定16字节位置完整写、force并观察首次native close；失败保留原cut，下一调用先续完旧范围，不倒退、不因清理成功就推进lastPersistedMark或执行依赖删除。未关闭的rolled log也不能被checkpoint unlink。最终close要求外层先停止实际Sync使用者；本子图不替代该外层编排。
+
+新增16项真实文件与受控失败验证覆盖V6普通/fence/explicit-LAC记录及独立解析、未start/半start/部分初始化、实际force挂起与close调用者中断、callback异常及自身等待拒绝、跨log force缺口与close-only失败、输入/force/local持有区满载及未发布producer中断、header/预分配/flush短写、lastMark部分写/force失败的固定范围重试、外部checkpoint挂起与JDK实际自动close。失败注入仅在测试包装真实FileChannel/RAF，不新增生产可插拔后端。
+
+最终十七类185项同源码通过，0 failure/error/skipped：fresh Journal16、普通Journal force6、page-cache flush3、memory1，及原fresh index/storage21、FileInfoBackingCache5、IndexPersistenceMgr11、LedgerCache13、Interleaved14、fresh GC4、fresh entry logger14、fresh entry-log10、BufferedChannel9、DefaultEntryLog30、CreateNewLog14、BookieImpl3和根/Classic组合11。阶段52项与55项分别保留当时输入及源码；早期两轮编译错误、测试包装器字段错误、force与预分配共用锁导致的阻塞、跨log测试未等实际rollover的前置竞争，以及首次格式检查两项import诊断，均保留原始回执，不移绑为最终PASS。完整SDK、stock、TLC、Rust JNI、性能和掉电矩阵未在本切片重跑。
+
+最终Spotless/Checkstyle实际exit0；独立RAT实际exit1，431个未批准路径及字节与父源码一致、无新增，保护PDF在读取前排除。最终native输入1262项、外层1289源码加9文档及132份交付class留存。八个已终态native临时目录的66个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节103,440,556；归档硬链接保留全部数据，常规文件数据块回收0。未清理默认目录或其他任务资源。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-journal-evidence-0821b6fa`保存各阶段原始inputs、源码、XML和日志，不移绑旧PASS。下一依赖为FreshClassicRoots逐句柄释放结果，然后接稳定outer owner/facade及一次性permit；当前仍不发行NO_CLUSTER_AUTHORITY/fresh许可，不解锁根，不证明全Bookie、output/ACK或full-bytes终态。共同owner、Main/G1及完整16步总验收继续OPEN/active，默认OFF/SYSTEM/PARK与disabled保持，Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。

@@ -76,6 +76,7 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
     private boolean freshCloseReturned;
     private boolean freshWriteReleased;
     private boolean freshReadReleased;
+    private boolean freshExternalNativeOwner;
     private Throwable freshCloseFailure;
     private ByteBuffer freshPendingFlush;
     private long freshPendingFlushStart;
@@ -149,6 +150,9 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
         if (!freshLifecycle) {
             throw new IllegalStateException("Strict close requires a fresh buffered channel");
         }
+        if (freshExternalNativeOwner) {
+            throw new IllegalStateException("The fresh native channel has a separate explicit owner");
+        }
         if (freshCloseStarted && !freshCloseReturned) {
             throw new IllegalStateException("Fresh native close is still executing");
         }
@@ -165,6 +169,24 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
                 freshCloseReturned = true;
             }
         }
+        releaseFreshBuffers();
+        throwFreshCloseFailure();
+    }
+
+    /** The Journal's DefaultFileChannel owns its RAF/fd. This method makes no native-close claim. */
+    synchronized void releaseBuffersForFresh() throws IOException {
+        if (!freshLifecycle) {
+            throw new IllegalStateException("Strict release requires a fresh buffered channel");
+        }
+        if (!freshCloseStarted) {
+            freshExternalNativeOwner = true;
+            freshCloseStarted = true;
+        }
+        releaseFreshBuffers();
+        throwFreshCloseFailure();
+    }
+
+    private void releaseFreshBuffers() {
         // Buffer ownership and native-close success are separate. Never repeat an attempted release.
         if (!freshWriteReleased) {
             freshWriteReleased = true;
@@ -183,6 +205,9 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
             }
         }
         closed = true;
+    }
+
+    private void throwFreshCloseFailure() throws IOException {
         if (freshCloseFailure instanceof IOException) {
             throw (IOException) freshCloseFailure;
         } else if (freshCloseFailure instanceof RuntimeException) {

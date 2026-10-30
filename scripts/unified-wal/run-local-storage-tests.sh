@@ -77,6 +77,9 @@ paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / nam
     'proto/BookieServer.java', 'proto/BookieNettyServer.java', 'proto/BookieRequestProcessor.java',
     'discover/ZKRegistrationManager.java', 'meta/zk/ZKMetadataBookieDriver.java'))
 paths.add(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common/component/LifecycleComponentStack.java'))
+paths.update(Path('bookkeeper-common/src/main/java/org/apache/bookkeeper/common') / name for name in (
+    'util/MemoryLimitController.java', 'collections/BatchedBlockingQueue.java',
+    'collections/BatchedArrayBlockingQueue.java', 'collections/RecyclableArrayList.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/meta/zk/ZKMetadataClientDriver.java'))
 paths.add(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper/zookeeper/ZooKeeperWatcherBase.java'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / name for name in
@@ -89,7 +92,9 @@ paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie'
               'MockLedgerStorage.java', 'FreshClassicEntryLogDrainTest.java', 'BufferedChannelTest.java',
               'DefaultEntryLogTest.java', 'CreateNewLogTest.java', 'FreshDefaultEntryLoggerTest.java',
               'FreshClassicIndexDrainTest.java', 'FileInfoBackingCacheTest.java', 'IndexPersistenceMgrTest.java',
-              'LedgerCacheTest.java', 'InterleavedLedgerStorageTest.java'))
+              'LedgerCacheTest.java', 'InterleavedLedgerStorageTest.java', 'FreshClassicJournalDrainTest.java',
+              'BookieJournalForceTest.java', 'BookieJournalTest.java', 'BookieJournalPageCacheFlushTest.java',
+              'BookieJournalMaxMemoryTest.java'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / name for name in
              ('bookie/Cookie.java', 'bookie/LegacyCookieValidation.java', 'util/PortManager.java',
               'bookie/FreshClassicRoots.java', 'bookie/LedgerDirsMonitor.java', 'bookie/GarbageCollectorThread.java',
@@ -104,7 +109,10 @@ paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / nam
               'bookie/FreshEntryLogReadResource.java', 'bookie/FileInfo.java', 'bookie/FileInfoBackingCache.java',
               'bookie/IndexPersistenceMgr.java', 'bookie/IndexInMemPageMgr.java', 'bookie/LedgerEntryPage.java',
               'bookie/LEPStateChangeCallback.java', 'bookie/stats/IndexInMemPageMgrStats.java',
-              'bookie/stats/IndexPersistenceMgrStats.java'))
+              'bookie/stats/IndexPersistenceMgrStats.java', 'bookie/JournalChannel.java', 'bookie/DefaultFileChannel.java',
+              'bookie/FileChannelProvider.java', 'bookie/DefaultFileChannelProvider.java', 'bookie/BookieFileChannel.java',
+              'bookie/LogMark.java', 'bookie/BookieCriticalThread.java', 'bookie/BookieThread.java',
+              'bookie/stats/JournalStats.java'))
 paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie/storage/EntryLogTestUtils.java'))
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper') / name for name in
              ('conf/TestBKConfiguration.java', 'test/BookKeeperClusterTestCase.java'))

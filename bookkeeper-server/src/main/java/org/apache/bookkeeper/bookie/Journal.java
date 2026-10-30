@@ -38,9 +38,16 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import lombok.CustomLog;
@@ -54,6 +61,7 @@ import org.apache.bookkeeper.common.util.MathUtils;
 import org.apache.bookkeeper.common.util.MemoryLimitController;
 import org.apache.bookkeeper.common.util.affinity.CpuAffinity;
 import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.proto.BookieProtocol;
 import org.apache.bookkeeper.proto.BookieRequestHandler;
 import org.apache.bookkeeper.proto.BookkeeperInternalCallbacks.WriteCallback;
 import org.apache.bookkeeper.stats.Counter;
@@ -73,6 +81,120 @@ public class Journal implements CheckpointSource {
         new RecyclableArrayList.Recycler<QueueEntry>();
 
     private BookieCriticalThread thread;
+    private final FreshState fresh;
+
+    private static final class FreshState {
+        final Object gate = new Object();
+        final Object closeLock = new Object();
+        final Set<QueueEntry> entries = Collections.newSetFromMap(new IdentityHashMap<>());
+        final Set<ForceWriteRequest> requests = Collections.newSetFromMap(new IdentityHashMap<>());
+        final Set<RecyclableArrayList<QueueEntry>> lists = Collections.newSetFromMap(new IdentityHashMap<>());
+        final List<JournalChannel> channels = new ArrayList<>();
+        final List<FreshMarkWrite> markWrites = new ArrayList<>();
+        final Set<Path> markFiles = new java.util.HashSet<>();
+        final Map<Thread, Integer> producerThreads = new IdentityHashMap<>();
+        final Map<Thread, Integer> checkpointThreads = new IdentityHashMap<>();
+        List<File> markDirectories;
+        LastLogMark pendingMark;
+        int preparedMarkDirectories;
+        boolean initAttempted;
+        boolean initializing;
+        boolean initialized;
+        boolean started;
+        boolean closing;
+        boolean writerDone;
+        boolean checkpointClosing;
+        boolean providerClosed;
+        int producers;
+        int checkpoints;
+        Thread initializingThread;
+        Thread drainingThread;
+        ByteBuf lengthBuffer;
+        ByteBuf paddingBuffer;
+        boolean lengthReleased;
+        boolean paddingReleased;
+        QueueEntry[] writerLocal;
+        ForceWriteRequest[] forceLocal;
+        Throwable initializationFailure;
+        Throwable operationFailure;
+        Throwable callbackFailure;
+        Throwable checkpointFailure;
+        Throwable cleanupFailure;
+        Throwable releaseFailure;
+        Throwable closeFailure;
+        java.nio.file.DirectoryStream<Path> listing;
+        boolean listingCloseAttempted;
+        Throwable listingCloseFailure;
+    }
+
+    private static final class FreshMarkWrite {
+        final Path path;
+        final ByteBuffer bytes;
+        final boolean existingOwned;
+        FileChannel channel;
+        boolean forced;
+        boolean closeAttempted;
+        Throwable closeFailure;
+
+        FreshMarkWrite(Path path, ByteBuffer bytes, boolean existingOwned) {
+            this.path = path;
+            this.bytes = bytes.asReadOnlyBuffer();
+            this.existingOwned = existingOwned;
+        }
+
+        void complete(FreshState state) throws IOException {
+            if (closeFailure != null) {
+                throw freshIo("Unresolved lastMark native close", closeFailure);
+            }
+            if (channel == null) {
+                channel = existingOwned
+                        ? FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE,
+                                LinkOption.NOFOLLOW_LINKS)
+                        : FileChannel.open(path, StandardOpenOption.CREATE_NEW,
+                                StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+                state.markFiles.add(path);
+            }
+            if (!channel.isOpen() && !closeAttempted) {
+                close();
+            }
+            if (!forced) {
+                ByteBuffer remaining = bytes.duplicate();
+                remaining.rewind();
+                while (remaining.hasRemaining()) {
+                    if (channel.write(remaining, remaining.position()) <= 0) {
+                        throw new IOException("Fresh lastMark write made no progress");
+                    }
+                }
+                channel.force(true);
+                forced = true;
+            }
+            close();
+        }
+
+        private void close() throws IOException {
+            if (!closeAttempted) {
+                closeAttempted = true;
+                try {
+                    if (!channel.isOpen()) {
+                        throw new IOException("Fresh lastMark channel closed without an observed native close result");
+                    }
+                    channel.close();
+                } catch (IOException | RuntimeException | Error failure) {
+                    closeFailure = failure;
+                }
+            }
+            if (closeFailure != null) {
+                throw freshIo("Fresh lastMark native close failed", closeFailure);
+            }
+        }
+    }
+
+    record FreshQuiesceResult(boolean quiesced, Throwable operationFailure,
+                              Throwable callbackFailure, Throwable releaseFailure) { }
+
+    record FreshDrainResult(boolean drained, Throwable initializationFailure, Throwable operationFailure,
+                            Throwable callbackFailure, Throwable checkpointFailure,
+                            Throwable flushFailure, Throwable closeFailure) { }
 
     /**
      * Filter to pickup journals.
@@ -171,6 +293,7 @@ public class Journal implements CheckpointSource {
      */
     public class LastLogMark {
         private final LogMark curMark;
+        private final Journal source = Journal.this;
 
         LastLogMark(long logId, long logPosition) {
             this.curMark = new LogMark(logId, logPosition);
@@ -181,6 +304,11 @@ public class Journal implements CheckpointSource {
         }
 
         LastLogMark markLog() {
+            if (fresh != null) {
+                synchronized (curMark) {
+                    return new LastLogMark(curMark.getLogFileId(), curMark.getLogFileOffset());
+                }
+            }
             return new LastLogMark(curMark.getLogFileId(), curMark.getLogFileOffset());
         }
 
@@ -189,6 +317,9 @@ public class Journal implements CheckpointSource {
         }
 
         void rollLog(LastLogMark lastMark) throws NoWritableLedgerDirException {
+            if (fresh != null) {
+                throw new IllegalStateException("Fresh lastMark writes require the owned checkpoint path");
+            }
             byte[] buff = new byte[16];
             ByteBuffer bb = ByteBuffer.wrap(buff);
             // we should record <logId, logPosition> marked in markLog
@@ -228,6 +359,9 @@ public class Journal implements CheckpointSource {
          * and then max log position in max journal log.
          */
         public void readLog() {
+            if (fresh != null) {
+                throw new IllegalStateException("Fresh Journal does not replay historical lastMark files");
+            }
             byte[] buff = new byte[16];
             ByteBuffer bb = ByteBuffer.wrap(buff);
             LogMark mark = new LogMark();
@@ -297,6 +431,23 @@ public class Journal implements CheckpointSource {
     /**
      * Journal Entry to Record.
      */
+    /** Only fresh admission allocates this ticket; ordinary QueueEntry keeps its existing data fields. */
+    private static final class FreshTicket {
+        final Journal owner;
+        long reservedBytes;
+        boolean retained;
+        boolean releaseAttempted;
+        boolean memoryReleaseAttempted;
+        boolean published;
+        boolean completed;
+        boolean durable;
+        Throwable releaseFailure;
+
+        FreshTicket(Journal owner) {
+            this.owner = owner;
+        }
+    }
+
     static class QueueEntry implements Runnable {
         ByteBuf entry;
         long ledgerId;
@@ -305,6 +456,7 @@ public class Journal implements CheckpointSource {
         Object ctx;
         long enqueueTime;
         boolean ackBeforeSync;
+        FreshTicket freshTicket;
 
         OpStatsLogger journalAddEntryStats;
         Counter callbackTime;
@@ -327,6 +479,11 @@ public class Journal implements CheckpointSource {
 
         @Override
         public void run() {
+            if (freshTicket != null) {
+                freshTicket.owner.completeFreshEntry(this,
+                        freshTicket.durable ? BookieProtocol.EOK : BookieProtocol.EIO);
+                return;
+            }
             long startTime = System.nanoTime();
             log.debug()
                     .attr("ledgerId", ledgerId)
@@ -361,6 +518,7 @@ public class Journal implements CheckpointSource {
             this.ctx = null;
             this.journalAddEntryStats = null;
             this.callbackTime = null;
+            this.freshTicket = null;
             recyclerHandle.recycle(this);
         }
     }
@@ -376,8 +534,24 @@ public class Journal implements CheckpointSource {
         private long lastFlushedPosition;
         private long logId;
         private boolean flushed;
+        private Journal freshOwner;
 
         public int process(ObjectHashSet<BookieRequestHandler> writeHandlers) {
+            if (freshOwner != null) {
+                freshOwner.closeRolledForFresh(this);
+                int size = forceWriteWaiters.size();
+                for (int i = 0; i < size; i++) {
+                    QueueEntry qe = forceWriteWaiters.set(i, null);
+                    if (qe != null) {
+                        if (qe.getCtx() instanceof BookieRequestHandler
+                                && qe.entryId != BookieImpl.METAENTRY_ID_FORCE_LEDGER) {
+                            writeHandlers.add((BookieRequestHandler) qe.getCtx());
+                        }
+                        qe.run();
+                    }
+                }
+                return size;
+            }
             closeFileIfNecessary();
 
             // Notify the waiters that the force write succeeded
@@ -397,12 +571,20 @@ public class Journal implements CheckpointSource {
 
         private void flushFileToDisk() throws IOException {
             if (!flushed) {
-                logFile.forceWrite(false);
+                if (freshOwner != null) {
+                    logFile.forceThroughForFresh(lastFlushedPosition);
+                } else {
+                    logFile.forceWrite(false);
+                }
                 flushed = true;
             }
         }
 
         public void closeFileIfNecessary() {
+            if (freshOwner != null) {
+                freshOwner.closeRolledForFresh(this);
+                return;
+            }
             // Close if shouldClose is set
             if (shouldClose) {
                 // We should guard against exceptions so its
@@ -425,6 +607,11 @@ public class Journal implements CheckpointSource {
         }
 
         private void recycle() {
+            Journal owner = freshOwner;
+            if (owner != null) {
+                owner.releaseFreshRequest(this);
+                freshOwner = null;
+            }
             logFile = null;
             flushed = false;
             if (forceWriteWaiters != null) {
@@ -446,6 +633,12 @@ public class Journal implements CheckpointSource {
         req.logId = logId;
         req.lastFlushedPosition = lastFlushedPosition;
         req.shouldClose = shouldClose;
+        if (fresh != null) {
+            req.freshOwner = this;
+            synchronized (fresh.gate) {
+                fresh.requests.add(req);
+            }
+        }
         journalStats.getForceWriteQueueSize().inc();
         return req;
     }
@@ -483,6 +676,10 @@ public class Journal implements CheckpointSource {
         }
         @Override
         public void run() {
+            if (fresh != null) {
+                runForFresh();
+                return;
+            }
             log.info("ForceWrite Thread started");
             ThreadRegistry.register(super.getName());
 
@@ -540,6 +737,102 @@ public class Journal implements CheckpointSource {
             // the parent thread as it should either exit or be in the process
             // of exiting else we will have write requests hang
             threadToNotifyOnEx.accept(null);
+        }
+
+        private void runForFresh() {
+            if (Thread.currentThread() != this) {
+                throw new IllegalStateException("Fresh force work must run on its original owned thread");
+            }
+            try {
+                ThreadRegistry.register(super.getName());
+                ObjectHashSet<BookieRequestHandler> handlers = new ObjectHashSet<>();
+                ForceWriteRequest[] local = new ForceWriteRequest[conf.getJournalQueueSize()];
+                fresh.forceLocal = local;
+                while (!hasFreshFailure()) {
+                    int count = forceWriteRequests.pollAll(local, 50, TimeUnit.MILLISECONDS);
+                    if (count == 0) {
+                        synchronized (fresh.gate) {
+                            if (fresh.writerDone && forceWriteRequests.isEmpty()) {
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    journalStats.getForceWriteQueueSize().addCount(-count);
+                    syncFreshBatch(local, count);
+                    int entries = 0;
+                    for (int i = 0; i < count; i++) {
+                        ForceWriteRequest request = local[i];
+                        local[i] = null;
+                        entries += request.process(handlers);
+                        request.recycle();
+                    }
+                    try {
+                        journalStats.getForceWriteGroupingCountStats().registerSuccessfulValue(entries);
+                    } catch (Throwable failure) {
+                        rememberFreshCallbackFailure(failure);
+                    }
+                    handlers.forEach((ObjectProcedure<? super BookieRequestHandler>) handler -> {
+                        try {
+                            handler.flushPendingResponse();
+                        } catch (Throwable failure) {
+                            rememberFreshCallbackFailure(failure);
+                        }
+                    });
+                    handlers.clear();
+                }
+            } catch (Throwable failure) {
+                failFresh(failure);
+                if (failure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+            } finally {
+                running = false;
+                synchronized (fresh.gate) {
+                    fresh.gate.notifyAll();
+                }
+            }
+        }
+
+        private void syncFreshBatch(ForceWriteRequest[] requests, int count) throws IOException {
+            int first = 0;
+            while (first < count) {
+                int last = first;
+                while (last + 1 < count && requests[last + 1].logFile == requests[first].logFile) {
+                    last++;
+                }
+                ForceWriteRequest covering = requests[last];
+                long start = MathUtils.nowInNano();
+                try {
+                    covering.flushFileToDisk();
+                } catch (IOException | RuntimeException | Error failure) {
+                    try {
+                        journalStats.getJournalSyncStats().registerFailedEvent(
+                                MathUtils.elapsedNanos(start), TimeUnit.NANOSECONDS);
+                    } catch (Throwable statsFailure) {
+                        rememberFreshCallbackFailure(statsFailure);
+                    }
+                    throw failure;
+                }
+                // A later file's force cannot prove this file's prefix. Commit each covered group in order.
+                for (int i = first; i <= last; i++) {
+                    ForceWriteRequest request = requests[i];
+                    request.flushed = true;
+                    for (QueueEntry ticket : request.forceWriteWaiters) {
+                        if (ticket != null) {
+                            ticket.freshTicket.durable = true;
+                        }
+                    }
+                }
+                lastLogMark.setCurLogMark(covering.logId, covering.lastFlushedPosition);
+                try {
+                    journalStats.getJournalSyncStats().registerSuccessfulEvent(
+                            MathUtils.elapsedNanos(start), TimeUnit.NANOSECONDS);
+                } catch (Throwable failure) {
+                    rememberFreshCallbackFailure(failure);
+                }
+                first = last + 1;
+            }
         }
 
         private void syncJournal(ForceWriteRequest lastRequest) throws IOException {
@@ -663,6 +956,56 @@ public class Journal implements CheckpointSource {
 
     public Journal(int journalIndex, File journalDirectory, ServerConfiguration conf,
             LedgerDirsManager ledgerDirsManager, StatsLogger statsLogger, ByteBufAllocator allocator) {
+        this(journalIndex, journalDirectory, conf, ledgerDirsManager, statsLogger, allocator, false);
+    }
+
+    static Journal forFresh(int journalIndex, File directory, ServerConfiguration configuration,
+            LedgerDirsManager directories, StatsLogger stats, ByteBufAllocator allocator,
+            JournalAliveListener listener) {
+        Object provider = configuration.getProperty("journalChannelProvider");
+        if (configuration.isBusyWaitEnabled() || !configuration.getJournalSyncData()
+                || !configuration.getJournalWriteData() || configuration.getJournalFormatVersionToWrite() != 6
+                || configuration.getFileInfoFormatVersionToWrite() != 1
+                || provider != null && !DefaultFileChannelProvider.class.getName().equals(provider)) {
+            throw new IllegalArgumentException("Fresh Journal requires V6/V1, sync data and the default provider");
+        }
+        if (configuration.getProperty("journalDirectories") == null
+                && configuration.getProperty("journalDirectory") == null) {
+            throw new IllegalArgumentException("Fresh Journal requires explicitly configured journal directories");
+        }
+        String[] explicit = configuration.getStringArray("journalDirectories");
+        if (explicit.length == 0) {
+            Object single = configuration.getProperty("journalDirectory");
+            if (!(single instanceof String name) || name.isBlank()) {
+                throw new IllegalArgumentException("Fresh Journal requires nonempty explicit journal directories");
+            }
+        } else {
+            for (String configured : explicit) {
+                if (configured == null || configured.isBlank()) {
+                    throw new IllegalArgumentException("Fresh Journal directory entries cannot be empty");
+                }
+            }
+        }
+        int count = configuration.getJournalDirNames().length;
+        long memory = Math.multiplyExact(configuration.getJournalMaxMemorySizeMb() / count, MB);
+        if (memory <= 0 || configuration.getJournalQueueSize() <= 0
+                || Math.multiplyExact(configuration.getJournalWriteBufferSizeKB(), KB) <= 0
+                || Math.multiplyExact(configuration.getJournalAlignmentSize(), 2) <= 0
+                || configuration.getJournalAlignmentSize() < JournalChannel.SECTOR_SIZE
+                || configuration.getJournalAlignmentSize() % JournalChannel.SECTOR_SIZE != 0
+                || Math.multiplyExact((long) configuration.getJournalPreAllocSizeMB(), MB)
+                        < JournalChannel.HEADER_SIZE + (long) configuration.getJournalAlignmentSize()) {
+            throw new IllegalArgumentException("Fresh Journal requires finite positive queues, buffers and memory");
+        }
+        Journal journal = new Journal(journalIndex, directory, configuration, directories, stats, allocator, true);
+        journal.journalAliveListener = listener;
+        return journal;
+    }
+
+    private Journal(int journalIndex, File journalDirectory, ServerConfiguration conf,
+            LedgerDirsManager ledgerDirsManager, StatsLogger statsLogger,
+            ByteBufAllocator allocator, boolean freshLifecycle) {
+        fresh = freshLifecycle ? new FreshState() : null;
         this.allocator = allocator;
 
         StatsLogger journalStatsLogger = statsLogger.scopeLabel("journalIndex", String.valueOf(journalIndex));
@@ -708,13 +1051,16 @@ public class Journal implements CheckpointSource {
         } else {
             lastMarkFileName = LAST_MARK_DEFAULT_NAME + "." + journalIndex;
         }
-        lastLogMark.readLog();
+        if (fresh == null) {
+            lastLogMark.readLog();
+        }
         lastPersistedMark.setLogMark(
                 lastLogMark.getCurMark().getLogFileId(), lastLogMark.getCurMark().getLogFileOffset());
         log.debug().attr("lastMark", () -> lastLogMark.getCurMark()).log("Last Log Mark");
 
         try {
-            this.fileChannelProvider = FileChannelProvider.newProvider(conf.getJournalChannelProvider());
+            this.fileChannelProvider = fresh != null ? new DefaultFileChannelProvider()
+                    : FileChannelProvider.newProvider(conf.getJournalChannelProvider());
         } catch (IOException e) {
             log.error()
                     .attr("journalChannelProvider", conf.getJournalChannelProvider())
@@ -725,6 +1071,58 @@ public class Journal implements CheckpointSource {
         // Expose Stats
         this.journalStats = new JournalStats(journalStatsLogger, journalMaxMemory,
                 () -> memoryLimitController.currentUsage());
+    }
+
+    void initializeForFresh() throws IOException {
+        if (fresh == null) {
+            throw new IllegalStateException("Not a fresh Journal owner");
+        }
+        synchronized (fresh.gate) {
+            if (fresh.initAttempted || fresh.closing) {
+                throw new IllegalStateException("Fresh Journal initialization is one-use");
+            }
+            fresh.initAttempted = true;
+            fresh.initializing = true;
+            fresh.initializingThread = Thread.currentThread();
+        }
+        try {
+            if (!Files.isDirectory(journalDirectory.toPath())) {
+                throw new IOException("Fresh Journal needs an existing current directory");
+            }
+            fresh.listing = Files.newDirectoryStream(journalDirectory.toPath());
+            try {
+                if (fresh.listing.iterator().hasNext()) {
+                    throw new IOException("Fresh Journal current directory contains history");
+                }
+            } finally {
+                closeFreshListing();
+            }
+            if (fresh.listingCloseFailure != null) {
+                throw freshIo("Fresh Journal directory listing did not close", fresh.listingCloseFailure);
+            }
+            fresh.markDirectories = List.copyOf(ledgerDirsManager.getAllLedgerDirs());
+            if (fresh.markDirectories.isEmpty()) {
+                throw new IOException("Fresh Journal requires its complete lastMark directory set");
+            }
+            for (File directory : fresh.markDirectories) {
+                if (!Files.isDirectory(directory.toPath())
+                        || Files.exists(directory.toPath().resolve(lastMarkFileName))) {
+                    throw new IOException("Fresh Journal lastMark directories are missing or contain history");
+                }
+            }
+            synchronized (fresh.gate) {
+                fresh.initialized = !fresh.closing;
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            fresh.initializationFailure = failure;
+            throw failure;
+        } finally {
+            synchronized (fresh.gate) {
+                fresh.initializing = false;
+                fresh.initializingThread = null;
+                fresh.gate.notifyAll();
+            }
+        }
     }
 
     public Journal(int journalIndex, File journalDirectory, ServerConfiguration conf,
@@ -771,6 +1169,13 @@ public class Journal implements CheckpointSource {
      */
     @Override
     public Checkpoint newCheckpoint() {
+        if (fresh != null) {
+            synchronized (fresh.gate) {
+                if (!fresh.initialized || fresh.checkpointClosing) {
+                    throw new IllegalStateException("Fresh Journal checkpoint entry is not available");
+                }
+            }
+        }
         return new LogMarkCheckpoint(lastLogMark.markLog());
     }
 
@@ -784,6 +1189,10 @@ public class Journal implements CheckpointSource {
      */
     @Override
     public void checkpointComplete(Checkpoint checkpoint, boolean compact) throws IOException {
+        if (fresh != null) {
+            checkpointCompleteForFresh(checkpoint, compact);
+            return;
+        }
         if (!(checkpoint instanceof LogMarkCheckpoint)) {
             return; // we didn't create this checkpoint, so dont do anything with it
         }
@@ -801,24 +1210,113 @@ public class Journal implements CheckpointSource {
         }
 
         if (compact) {
-            // list the journals that have been marked
-            List<Long> logs = listJournalIds(journalDirectory, new JournalRollingFilter(mark));
-            // keep MAX_BACKUP_JOURNALS journal files before marked journal
-            if (logs.size() >= maxBackupJournals) {
-                int maxIdx = logs.size() - maxBackupJournals;
-                for (int i = 0; i < maxIdx; i++) {
-                    long id = logs.get(i);
-                    // make sure the journal id is smaller than marked journal id
-                    if (id < mark.getCurMark().getLogFileId()) {
-                        File journalFile = new File(journalDirectory, Long.toHexString(id) + ".txn");
-                        if (!journalFile.delete()) {
-                            log.warn().attr("journalFile", journalFile).log("Could not delete old journal file");
+            compactJournals(mark);
+        }
+    }
+
+    private void compactJournals(LastLogMark mark) {
+        // list the journals that have been marked
+        List<Long> logs = listJournalIds(journalDirectory, new JournalRollingFilter(mark));
+        // keep MAX_BACKUP_JOURNALS journal files before marked journal
+        if (logs.size() >= maxBackupJournals) {
+            int maxIdx = logs.size() - maxBackupJournals;
+            for (int i = 0; i < maxIdx; i++) {
+                long id = logs.get(i);
+                if (fresh != null) {
+                    synchronized (fresh.gate) {
+                        if (fresh.channels.stream().anyMatch(channel -> channel.ownsFreshLog(id))) {
+                            continue; // Never unlink a rolled channel whose original close is still unresolved.
                         }
-                        log.info().attr("journalFile", journalFile.getName()).log("garbage collected journal");
                     }
+                }
+                // make sure the journal id is smaller than marked journal id
+                if (id < mark.getCurMark().getLogFileId()) {
+                    File journalFile = new File(journalDirectory, Long.toHexString(id) + ".txn");
+                    if (!journalFile.delete()) {
+                        log.warn().attr("journalFile", journalFile).log("Could not delete old journal file");
+                    }
+                    log.info().attr("journalFile", journalFile.getName()).log("garbage collected journal");
                 }
             }
         }
+    }
+
+    private void checkpointCompleteForFresh(Checkpoint checkpoint, boolean compact) throws IOException {
+        synchronized (fresh.gate) {
+            if (!fresh.initialized || fresh.checkpointClosing) {
+                throw new IOException("Fresh Journal checkpoint entry is closed");
+            }
+            Thread current = Thread.currentThread();
+            fresh.checkpointThreads.put(current, fresh.checkpointThreads.getOrDefault(current, 0) + 1);
+            fresh.checkpoints++;
+        }
+        try {
+            if (!(checkpoint instanceof LogMarkCheckpoint selected)) {
+                return;
+            }
+            if (selected.mark.source != this) {
+                throw new IOException("Checkpoint belongs to another Journal");
+            }
+            LastLogMark committed;
+            synchronized (checkpointLock) {
+                finishFreshMark();
+                if (selected.mark.getCurMark().compare(lastPersistedMark) > 0) {
+                    fresh.pendingMark = selected.mark.markLog();
+                    fresh.preparedMarkDirectories = 0;
+                    finishFreshMark();
+                }
+                committed = new LastLogMark(lastPersistedMark.getLogFileId(), lastPersistedMark.getLogFileOffset());
+            }
+            if (compact) {
+                compactJournals(committed);
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            synchronized (fresh.gate) {
+                if (fresh.checkpointFailure == null) {
+                    fresh.checkpointFailure = failure;
+                }
+            }
+            throw failure;
+        } finally {
+            synchronized (fresh.gate) {
+                decrementFreshThread(fresh.checkpointThreads);
+                fresh.checkpoints--;
+                fresh.gate.notifyAll();
+            }
+        }
+    }
+
+    private void finishFreshMark() throws IOException {
+        if (fresh.pendingMark == null) {
+            return;
+        }
+        ByteBuffer bytes = ByteBuffer.allocate(16);
+        fresh.pendingMark.getCurMark().writeLogMark(bytes);
+        bytes.rewind();
+        while (fresh.preparedMarkDirectories < fresh.markDirectories.size()) {
+            Path path = fresh.markDirectories.get(fresh.preparedMarkDirectories).toPath().resolve(lastMarkFileName);
+            FreshMarkWrite resource = new FreshMarkWrite(path, bytes, fresh.markFiles.contains(path));
+            fresh.markWrites.add(resource);
+            fresh.preparedMarkDirectories++;
+        }
+        Throwable first = null;
+        for (FreshMarkWrite resource : List.copyOf(fresh.markWrites)) {
+            try {
+                resource.complete(fresh);
+                fresh.markWrites.remove(resource);
+            } catch (IOException | RuntimeException | Error failure) {
+                if (first == null) {
+                    first = failure;
+                }
+            }
+        }
+        if (first != null) {
+            throw freshIo("Fresh Journal lastMark did not complete", first);
+        }
+        lastPersistedMark.setLogMark(fresh.pendingMark.getCurMark().getLogFileId(),
+                fresh.pendingMark.getCurMark().getLogFileOffset());
+        fresh.pendingMark = null;
+        fresh.preparedMarkDirectories = 0;
     }
 
     @VisibleForTesting
@@ -843,6 +1341,9 @@ public class Journal implements CheckpointSource {
      */
     public long scanJournal(long journalId, long journalPos, JournalScanner scanner, boolean skipInvalidRecord)
         throws IOException {
+        if (fresh != null) {
+            throw new IOException("Fresh Journal has no historical scan/recovery entry");
+        }
         JournalChannel recLog;
         if (journalPos <= 0) {
             recLog = new JournalChannel(journalDirectory, journalId, journalPreAllocSize, journalWriteBufferSize,
@@ -931,6 +1432,13 @@ public class Journal implements CheckpointSource {
     public void logAddEntry(long ledgerId, long entryId, ByteBuf entry,
                             boolean ackBeforeSync, WriteCallback cb, Object ctx)
             throws InterruptedException {
+        if (fresh != null) {
+            if (ackBeforeSync) {
+                throw new IllegalArgumentException("Fresh Journal never acknowledges before sync");
+            }
+            enqueueFresh(ledgerId, entryId, entry, cb, ctx, journalStats.getJournalAddEntryStats(), true);
+            return;
+        }
         // Retain entry until it gets written to journal
         entry.retain();
 
@@ -945,6 +1453,16 @@ public class Journal implements CheckpointSource {
     }
 
     void forceLedger(long ledgerId, WriteCallback cb, Object ctx) {
+        if (fresh != null) {
+            try {
+                enqueueFresh(ledgerId, BookieImpl.METAENTRY_ID_FORCE_LEDGER, null, cb, ctx,
+                        journalStats.getJournalForceLedgerStats(), false);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new java.util.concurrent.RejectedExecutionException(interrupted);
+            }
+            return;
+        }
         queue.add(QueueEntry.create(
                 null, false /* ackBeforeSync */, ledgerId,
                 BookieImpl.METAENTRY_ID_FORCE_LEDGER, cb, ctx, MathUtils.nowInNano(),
@@ -952,6 +1470,260 @@ public class Journal implements CheckpointSource {
                 callbackTime));
         // Increment afterwards because the add operation could fail.
         journalStats.getJournalQueueSize().inc();
+    }
+
+    private void enqueueFresh(long ledgerId, long entryId, ByteBuf entry, WriteCallback cb, Object ctx,
+            OpStatsLogger stats, boolean blocking) throws InterruptedException {
+        java.util.Objects.requireNonNull(cb);
+        synchronized (fresh.gate) {
+            requireFreshSubmission();
+            Thread current = Thread.currentThread();
+            fresh.producerThreads.put(current, fresh.producerThreads.getOrDefault(current, 0) + 1);
+            fresh.producers++;
+        }
+        QueueEntry ticket = null;
+        boolean published = false;
+        try {
+            ticket = QueueEntry.create(entry, false, ledgerId, entryId, cb, ctx,
+                    MathUtils.nowInNano(), stats, callbackTime);
+            ticket.freshTicket = new FreshTicket(this);
+            synchronized (fresh.gate) {
+                fresh.entries.add(ticket);
+                requireFreshSubmission();
+                long bytes = entry == null ? 0 : entry.readableBytes();
+                while (!memoryLimitController.tryReserveMemory(bytes)) {
+                    if (!blocking) {
+                        throw new java.util.concurrent.RejectedExecutionException("Fresh Journal memory is full");
+                    }
+                    fresh.gate.wait();
+                    requireFreshSubmission();
+                }
+                ticket.freshTicket.reservedBytes = bytes;
+            }
+            if (entry != null) {
+                entry.retain();
+                ticket.freshTicket.retained = true;
+            }
+            synchronized (fresh.gate) {
+                requireFreshSubmission();
+                while (!queue.offer(ticket)) {
+                    if (!blocking) {
+                        throw new java.util.concurrent.RejectedExecutionException("Fresh Journal queue is full");
+                    }
+                    fresh.gate.wait();
+                    requireFreshSubmission();
+                }
+                ticket.freshTicket.published = true;
+                published = true;
+            }
+            try {
+                journalStats.getJournalQueueSize().inc();
+            } catch (Throwable failure) {
+                failFresh(failure);
+            }
+        } finally {
+            try {
+                if (!published && ticket != null) {
+                    if (ticket.freshTicket == null) {
+                        ticket.recycle(); // No ticket state means no retain, reservation or publication occurred.
+                    } else {
+                        ticket.freshTicket.completed = true;
+                        ticket.cb = null;
+                        ticket.ctx = null;
+                        releaseFreshSource(ticket);
+                        retireFreshEntry(ticket);
+                    }
+                }
+            } finally {
+                synchronized (fresh.gate) {
+                    decrementFreshThread(fresh.producerThreads);
+                    fresh.producers--;
+                    fresh.gate.notifyAll();
+                }
+            }
+        }
+    }
+
+    private void requireFreshSubmission() {
+        if (!fresh.initialized || !fresh.started || fresh.closing || fresh.operationFailure != null) {
+            throw new java.util.concurrent.RejectedExecutionException(
+                    "Fresh Journal is not running or is closing", fresh.operationFailure);
+        }
+    }
+
+    private void failFresh(Throwable failure) {
+        synchronized (fresh.gate) {
+            if (fresh.operationFailure == null) {
+                fresh.operationFailure = failure;
+            }
+            fresh.closing = true;
+            fresh.gate.notifyAll();
+        }
+    }
+
+    private boolean hasFreshFailure() {
+        synchronized (fresh.gate) {
+            return fresh.operationFailure != null;
+        }
+    }
+
+    private void rememberFreshCallbackFailure(Throwable failure) {
+        synchronized (fresh.gate) {
+            if (fresh.callbackFailure == null) {
+                fresh.callbackFailure = failure;
+            }
+        }
+    }
+
+    private void rememberFreshReleaseFailure(QueueEntry ticket, Throwable failure) {
+        ticket.freshTicket.releaseFailure = failure;
+        synchronized (fresh.gate) {
+            if (fresh.releaseFailure == null) {
+                fresh.releaseFailure = failure;
+            }
+            fresh.closing = true;
+            fresh.gate.notifyAll();
+        }
+    }
+
+    private void releaseFreshSource(QueueEntry ticket) {
+        if (ticket.freshTicket.retained && !ticket.freshTicket.releaseAttempted) {
+            ticket.freshTicket.releaseAttempted = true;
+            try {
+                ticket.entry.release();
+                ticket.entry = null;
+            } catch (Throwable failure) {
+                rememberFreshReleaseFailure(ticket, failure);
+            }
+        }
+        if (ticket.freshTicket.releaseFailure == null && !ticket.freshTicket.memoryReleaseAttempted) {
+            ticket.freshTicket.memoryReleaseAttempted = true;
+            try {
+                memoryLimitController.releaseMemory(ticket.freshTicket.reservedBytes);
+            } catch (Throwable failure) {
+                rememberFreshReleaseFailure(ticket, failure);
+            }
+        }
+        synchronized (fresh.gate) {
+            fresh.gate.notifyAll();
+        }
+    }
+
+    private void completeFreshEntry(QueueEntry ticket, int rc) {
+        if (ticket.freshTicket.completed) {
+            return;
+        }
+        ticket.freshTicket.completed = true;
+        WriteCallback callback = ticket.cb;
+        Object context = ticket.ctx;
+        ticket.cb = null;
+        ticket.ctx = null;
+        long start = MathUtils.nowInNano();
+        try {
+            try {
+                if (rc == BookieProtocol.EOK) {
+                    ticket.journalAddEntryStats.registerSuccessfulEvent(
+                            MathUtils.elapsedNanos(ticket.enqueueTime), TimeUnit.NANOSECONDS);
+                } else {
+                    ticket.journalAddEntryStats.registerFailedEvent(
+                            MathUtils.elapsedNanos(ticket.enqueueTime), TimeUnit.NANOSECONDS);
+                }
+            } catch (Throwable failure) {
+                rememberFreshCallbackFailure(failure);
+            }
+            try {
+                callback.writeComplete(rc, ticket.ledgerId, ticket.entryId, null, context);
+            } catch (Throwable failure) {
+                rememberFreshCallbackFailure(failure);
+            }
+        } finally {
+            releaseFreshSource(ticket);
+            try {
+                ticket.callbackTime.addLatency(MathUtils.elapsedNanos(start), TimeUnit.NANOSECONDS);
+            } catch (Throwable failure) {
+                rememberFreshCallbackFailure(failure);
+            }
+            retireFreshEntry(ticket);
+        }
+    }
+
+    private void retireFreshEntry(QueueEntry ticket) {
+        if (ticket.freshTicket.releaseFailure != null) {
+            return; // Keep the uncertain owned reference and its first result; never release it twice.
+        }
+        synchronized (fresh.gate) {
+            fresh.entries.remove(ticket);
+        }
+        try {
+            ticket.recycle();
+        } catch (Throwable failure) {
+            synchronized (fresh.gate) {
+                if (fresh.releaseFailure == null) {
+                    fresh.releaseFailure = failure;
+                }
+            }
+        }
+    }
+
+    private RecyclableArrayList<QueueEntry> newEntryList() {
+        RecyclableArrayList<QueueEntry> list = entryListRecycler.newInstance();
+        if (fresh != null) {
+            synchronized (fresh.gate) {
+                fresh.lists.add(list);
+            }
+        }
+        return list;
+    }
+
+    private void releaseFreshList(RecyclableArrayList<QueueEntry> list) {
+        if (list == null) {
+            return;
+        }
+        synchronized (fresh.gate) {
+            fresh.lists.remove(list);
+        }
+        try {
+            list.recycle();
+        } catch (Throwable failure) {
+            synchronized (fresh.gate) {
+                if (fresh.releaseFailure == null) {
+                    fresh.releaseFailure = failure;
+                }
+            }
+        }
+    }
+
+    private void releaseFreshRequest(ForceWriteRequest request) {
+        releaseFreshList(request.forceWriteWaiters);
+        request.forceWriteWaiters = null;
+        synchronized (fresh.gate) {
+            fresh.requests.remove(request);
+        }
+    }
+
+    private void closeRolledForFresh(ForceWriteRequest request) {
+        if (!request.shouldClose) {
+            return;
+        }
+        JournalChannel.FreshCloseResult result = request.logFile.closeForFresh();
+        synchronized (fresh.gate) {
+            if (result.drained()) {
+                fresh.channels.remove(request.logFile);
+                request.shouldClose = false;
+            }
+            Throwable failure = result.closeFailure() != null ? result.closeFailure()
+                    : result.flushFailure() != null ? result.flushFailure() : result.operationFailure();
+            if (failure != null) {
+                if (fresh.cleanupFailure == null) {
+                    fresh.cleanupFailure = failure;
+                }
+                if (fresh.closeFailure == null) {
+                    fresh.closeFailure = result.closeFailure();
+                }
+                fresh.closing = true;
+                fresh.gate.notifyAll();
+            }
+        }
     }
 
     /**
@@ -965,6 +1737,15 @@ public class Journal implements CheckpointSource {
 
     @VisibleForTesting
     JournalChannel newLogFile(long logId, Long replaceLogId) throws IOException {
+        if (fresh != null) {
+            JournalChannel channel = JournalChannel.forFresh(journalDirectory, logId,
+                    journalPreAllocSize, journalWriteBufferSize, journalAlignmentSize, conf, allocator);
+            synchronized (fresh.gate) {
+                fresh.channels.add(channel);
+            }
+            channel.initializeForFresh((DefaultFileChannelProvider) fileChannelProvider);
+            return channel;
+        }
         return new JournalChannel(journalDirectory, logId, journalPreAllocSize, journalWriteBufferSize,
                 journalAlignmentSize, removePagesFromCache,
                 journalFormatVersionToWrite, getBufferedChannelBuilder(),
@@ -987,6 +1768,34 @@ public class Journal implements CheckpointSource {
      * @see org.apache.bookkeeper.bookie.SyncThread
      */
     public void run() {
+        if (fresh == null) {
+            runJournalLoop();
+            return;
+        }
+        if (Thread.currentThread() != thread) {
+            throw new IllegalStateException("Fresh Journal must run on its original owned thread");
+        }
+        try {
+            runJournalLoop();
+        } catch (Throwable failure) {
+            failFresh(failure);
+        } finally {
+            synchronized (fresh.gate) {
+                fresh.writerDone = true;
+                running = false;
+                fresh.gate.notifyAll();
+            }
+            if (journalAliveListener != null) {
+                try {
+                    journalAliveListener.onJournalExit();
+                } catch (Throwable failure) {
+                    rememberFreshCallbackFailure(failure);
+                }
+            }
+        }
+    }
+
+    private void runJournalLoop() {
         log.info().attr("journalDirectory", journalDirectory).log("Starting journal");
         ThreadRegistry.register(journalThreadName);
 
@@ -1001,10 +1810,16 @@ public class Journal implements CheckpointSource {
             }
         }
 
-        RecyclableArrayList<QueueEntry> toFlush = entryListRecycler.newInstance();
+        RecyclableArrayList<QueueEntry> toFlush = newEntryList();
         int numEntriesToFlush = 0;
         ByteBuf lenBuff = Unpooled.buffer(4);
+        if (fresh != null) {
+            fresh.lengthBuffer = lenBuff;
+        }
         ByteBuf paddingBuff = Unpooled.buffer(2 * conf.getJournalAlignmentSize());
+        if (fresh != null) {
+            fresh.paddingBuffer = paddingBuff;
+        }
         paddingBuff.writeZero(paddingBuff.capacity());
 
         BufferedChannel bc = null;
@@ -1027,10 +1842,16 @@ public class Journal implements CheckpointSource {
 
             final ObjectHashSet<BookieRequestHandler> writeHandlers = new ObjectHashSet<>();
             QueueEntry[] localQueueEntries = new QueueEntry[conf.getJournalQueueSize()];
+            if (fresh != null) {
+                fresh.writerLocal = localQueueEntries;
+            }
             int localQueueEntriesIdx = 0;
             int localQueueEntriesLen = 0;
             QueueEntry qe = null;
             while (true) {
+                if (fresh != null && hasFreshFailure()) {
+                    break;
+                }
                 // new journal file to write
                 if (null == logFile) {
                     logId = logId + 1;
@@ -1063,7 +1884,8 @@ public class Journal implements CheckpointSource {
                     if (numEntriesToFlush == 0) {
                         // There are no entries pending. We can wait indefinitely until the next
                         // one is available
-                        localQueueEntriesLen = queue.takeAll(localQueueEntries);
+                        localQueueEntriesLen = fresh == null ? queue.takeAll(localQueueEntries)
+                                : queue.pollAll(localQueueEntries, 50, TimeUnit.MILLISECONDS);
                     } else {
                         // There are already some entries pending. We must adjust
                         // the waiting time to the remaining groupWait time
@@ -1072,12 +1894,20 @@ public class Journal implements CheckpointSource {
                         if (flushWhenQueueEmpty || pollWaitTimeNanos < 0) {
                             pollWaitTimeNanos = 0;
                         }
+                        if (fresh != null) {
+                            pollWaitTimeNanos = Math.min(pollWaitTimeNanos, TimeUnit.MILLISECONDS.toNanos(50));
+                        }
 
                         localQueueEntriesLen = queue.pollAll(localQueueEntries,
                                 pollWaitTimeNanos, TimeUnit.NANOSECONDS);
                     }
 
                     dequeueStartTime = MathUtils.nowInNano();
+                    if (fresh != null) {
+                        synchronized (fresh.gate) {
+                            fresh.gate.notifyAll(); // Space for a pre-publication producer, without interrupting I/O.
+                        }
+                    }
 
                     if (localQueueEntriesLen > 0) {
                         qe = localQueueEntries[localQueueEntriesIdx];
@@ -1086,7 +1916,7 @@ public class Journal implements CheckpointSource {
                 }
 
                 if (numEntriesToFlush > 0) {
-                    boolean shouldFlush = false;
+                    boolean shouldFlush = fresh != null && freshWriterCanFinish(qe);
                     // We should issue a forceWrite if any of the three conditions below holds good
                     // 1. If the oldest pending entry has been pending for longer than the max wait time
                     if (maxGroupWaitInNanos > 0 && !groupWhenTimeout && (MathUtils
@@ -1181,11 +2011,16 @@ public class Journal implements CheckpointSource {
                                 || shouldRolloverJournal
                                 || (System.currentTimeMillis() - lastFlushTimeMs
                                 >= journalPageCacheFlushIntervalMSec)) {
-                            forceWriteRequests.put(createForceWriteRequest(logFile, logId, lastFlushPosition,
-                                    toFlush, shouldRolloverJournal));
+                            ForceWriteRequest request = createForceWriteRequest(
+                                    logFile, logId, lastFlushPosition, toFlush, shouldRolloverJournal);
+                            if (fresh == null) {
+                                forceWriteRequests.put(request);
+                            } else {
+                                publishForceForFresh(request);
+                            }
                             lastFlushTimeMs = System.currentTimeMillis();
                         }
-                        toFlush = entryListRecycler.newInstance();
+                        toFlush = newEntryList();
                         numEntriesToFlush = 0;
 
                         batchSize = 0L;
@@ -1194,12 +2029,14 @@ public class Journal implements CheckpointSource {
                             // if the journal file is rolled over, the journal file will be closed after last
                             // entry is force written to disk.
                             logFile = null;
-                            continue;
+                            if (fresh == null || !freshWriterCanFinish(qe)) {
+                                continue;
+                            }
                         }
                     }
                 }
 
-                if (!running) {
+                if (fresh == null ? !running : freshWriterCanFinish(qe)) {
                     log.info("Journal Manager is asked to shut down, quit.");
                     break;
                 }
@@ -1227,17 +2064,21 @@ public class Journal implements CheckpointSource {
                     int entrySize = qe.entry.readableBytes();
                     journalStats.getJournalWriteBytes().addCount(entrySize);
 
-                    batchSize += (4 + entrySize);
+                    batchSize += fresh == null ? 4 + entrySize : 4L + entrySize;
 
                     lenBuff.clear();
                     lenBuff.writeInt(entrySize);
 
                     // preAlloc based on size
-                    logFile.preAllocIfNeeded(4 + entrySize);
+                    logFile.preAllocIfNeeded(fresh == null ? 4 + entrySize : 4L + entrySize);
 
                     bc.write(lenBuff, qe.entry);
-                    memoryLimitController.releaseMemory(qe.entry.readableBytes());
-                    ReferenceCountUtil.release(qe.entry);
+                    if (fresh == null) {
+                        memoryLimitController.releaseMemory(qe.entry.readableBytes());
+                        ReferenceCountUtil.release(qe.entry);
+                    } else {
+                        releaseFreshSource(qe);
+                    }
                 }
 
                 toFlush.add(qe);
@@ -1251,9 +2092,15 @@ public class Journal implements CheckpointSource {
                 }
             }
         } catch (IOException ioe) {
+            if (fresh != null) {
+                failFresh(ioe);
+            }
             log.error().exception(ioe).log("I/O exception in Journal thread!");
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
+            if (fresh != null) {
+                failFresh(ie);
+            }
             log.info("Journal exits when shutting down");
         } finally {
             // There could be packets queued for forceWrite on this logFile
@@ -1261,9 +2108,13 @@ public class Journal implements CheckpointSource {
             // the bookie. If we execute this as a part of graceful shutdown,
             // close will flush the file system cache making any previous
             // cached writes durable so this is fine as well.
-            IOUtils.close(log, bc);
+            if (fresh == null) {
+                IOUtils.close(log, bc);
+            }
             if (journalAliveListener != null) {
-                journalAliveListener.onJournalExit();
+                if (fresh == null) {
+                    journalAliveListener.onJournalExit();
+                }
             }
         }
         log.info("Journal exited loop!");
@@ -1277,6 +2128,9 @@ public class Journal implements CheckpointSource {
      * Shuts down the journal.
      */
     public synchronized void shutdown() {
+        if (fresh != null) {
+            throw new IllegalStateException("Use the explicit fresh Journal quiesce/close results");
+        }
         try {
             if (!running) {
                 return;
@@ -1318,18 +2172,41 @@ public class Journal implements CheckpointSource {
      */
     @VisibleForTesting
     public void joinThread() throws InterruptedException {
+        if (fresh != null && Thread.currentThread() == thread) {
+            throw new IllegalStateException("Fresh Journal cannot join itself");
+        }
         if (thread != null) {
             thread.join();
         }
     }
 
     public void interruptThread() {
+        if (fresh != null) {
+            throw new IllegalStateException("Fresh Journal shutdown must not interrupt file I/O");
+        }
         if (thread != null) {
             thread.interrupt();
         }
     }
 
     public synchronized void start() {
+        if (fresh != null) {
+            synchronized (fresh.gate) {
+                if (!fresh.initialized || fresh.started || fresh.closing) {
+                    throw new IllegalStateException("Fresh Journal is not ready or is closing");
+                }
+                thread = new BookieCriticalThread(() -> run(), journalThreadName + "-" + conf.getBookiePort());
+                thread.setPriority(Thread.MAX_PRIORITY);
+                fresh.started = true;
+                try {
+                    thread.start();
+                } catch (RuntimeException | Error failure) {
+                    failFresh(failure);
+                    throw failure;
+                }
+            }
+            return;
+        }
         thread = new BookieCriticalThread(() -> run(), journalThreadName + "-" + conf.getBookiePort());
         thread.setPriority(Thread.MAX_PRIORITY);
         thread.start();
@@ -1341,11 +2218,234 @@ public class Journal implements CheckpointSource {
 
     @VisibleForTesting
     void setMemoryLimitController(MemoryLimitController memoryLimitController) {
+        if (fresh != null) {
+            throw new IllegalStateException("Fresh Journal owns its original memory reservations");
+        }
         this.memoryLimitController = memoryLimitController;
     }
 
     @VisibleForTesting
     public void setForceWriteRequests(BatchedBlockingQueue<ForceWriteRequest> forceWriteRequests) {
+        if (fresh != null) {
+            throw new IllegalStateException("Fresh Journal owns its original force queue");
+        }
         this.forceWriteRequests = forceWriteRequests;
+    }
+
+    private boolean freshWriterCanFinish(QueueEntry current) {
+        synchronized (fresh.gate) {
+            return fresh.closing && fresh.producers == 0 && current == null && queue.isEmpty();
+        }
+    }
+
+    boolean isCurrentResourceActivityForFresh() {
+        if (fresh == null) {
+            return false;
+        }
+        synchronized (fresh.gate) {
+            Thread current = Thread.currentThread();
+            return current == thread || current == forceWriteThread || current == fresh.initializingThread
+                    || current == fresh.drainingThread || fresh.producerThreads.containsKey(current)
+                    || fresh.checkpointThreads.containsKey(current);
+        }
+    }
+
+    private static void decrementFreshThread(Map<Thread, Integer> threads) {
+        Thread current = Thread.currentThread();
+        int depth = threads.get(current);
+        if (depth == 1) {
+            threads.remove(current);
+        } else {
+            threads.put(current, depth - 1);
+        }
+    }
+
+    /** Append/callback quiescence only; checkpoint/lastMark users remain admitted until final close. */
+    FreshQuiesceResult quiesceForFresh() throws InterruptedException {
+        if (fresh == null || isCurrentResourceActivityForFresh()) {
+            throw new IllegalStateException("Fresh Journal quiesce requires an external owner worker");
+        }
+        synchronized (fresh.closeLock) {
+            fresh.drainingThread = Thread.currentThread();
+            try {
+                return quiesceFreshInternal();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            } finally {
+                fresh.drainingThread = null;
+            }
+        }
+    }
+
+    private FreshQuiesceResult quiesceFreshInternal() throws InterruptedException {
+        synchronized (fresh.gate) {
+            fresh.closing = true;
+            fresh.gate.notifyAll();
+            while (fresh.initializing || fresh.producers != 0) {
+                fresh.gate.wait();
+            }
+        }
+        if (thread != null) {
+            thread.join();
+        }
+        synchronized (fresh.gate) {
+            fresh.writerDone = true;
+            fresh.gate.notifyAll();
+        }
+        forceWriteThread.join();
+        // Both actual threads have returned. No buffer is retired while a writer or callback can still use it.
+        for (QueueEntry ticket : List.copyOf(fresh.entries)) {
+            if (!ticket.freshTicket.completed) {
+                completeFreshEntry(ticket, ticket.freshTicket.durable ? BookieProtocol.EOK : BookieProtocol.EIO);
+            }
+        }
+        for (ForceWriteRequest request : List.copyOf(fresh.requests)) {
+            try {
+                request.recycle();
+            } catch (Throwable failure) {
+                if (fresh.releaseFailure == null) {
+                    fresh.releaseFailure = failure;
+                }
+            }
+        }
+        for (RecyclableArrayList<QueueEntry> list : List.copyOf(fresh.lists)) {
+            releaseFreshList(list);
+        }
+        queue.clear();
+        forceWriteRequests.clear();
+        if (fresh.writerLocal != null) {
+            java.util.Arrays.fill(fresh.writerLocal, null);
+        }
+        if (fresh.forceLocal != null) {
+            java.util.Arrays.fill(fresh.forceLocal, null);
+        }
+        if (fresh.lengthBuffer != null && !fresh.lengthReleased) {
+            fresh.lengthReleased = true;
+            try {
+                fresh.lengthBuffer.release();
+                fresh.lengthBuffer = null;
+            } catch (Throwable failure) {
+                if (fresh.releaseFailure == null) {
+                    fresh.releaseFailure = failure;
+                }
+            }
+        }
+        if (fresh.paddingBuffer != null && !fresh.paddingReleased) {
+            fresh.paddingReleased = true;
+            try {
+                fresh.paddingBuffer.release();
+                fresh.paddingBuffer = null;
+            } catch (Throwable failure) {
+                if (fresh.releaseFailure == null) {
+                    fresh.releaseFailure = failure;
+                }
+            }
+        }
+        return new FreshQuiesceResult(fresh.entries.isEmpty() && fresh.requests.isEmpty()
+                && fresh.lists.isEmpty() && fresh.releaseFailure == null,
+                fresh.operationFailure, fresh.callbackFailure, fresh.releaseFailure);
+    }
+
+    /** Caller must first stop external Sync/checkpoint users; append quiescence alone does not do that. */
+    FreshDrainResult closeForFresh() throws InterruptedException {
+        if (fresh == null || isCurrentResourceActivityForFresh()) {
+            throw new IllegalStateException("Fresh Journal close requires an external owner worker");
+        }
+        synchronized (fresh.closeLock) {
+            fresh.drainingThread = Thread.currentThread();
+            try {
+                FreshQuiesceResult quiet = quiesceFreshInternal();
+                synchronized (fresh.gate) {
+                    fresh.checkpointClosing = true;
+                    while (fresh.checkpoints != 0) {
+                        fresh.gate.wait();
+                    }
+                }
+                Throwable flushFailure = null;
+                for (JournalChannel channel : List.copyOf(fresh.channels)) {
+                    JournalChannel.FreshCloseResult result = channel.closeForFresh();
+                    if (result.drained()) {
+                        fresh.channels.remove(channel);
+                    }
+                    if (fresh.cleanupFailure == null) {
+                        fresh.cleanupFailure = result.operationFailure() != null
+                                ? result.operationFailure() : result.flushFailure();
+                    }
+                    if (flushFailure == null) {
+                        flushFailure = result.flushFailure();
+                    }
+                    if (fresh.closeFailure == null) {
+                        fresh.closeFailure = result.closeFailure();
+                    }
+                }
+                synchronized (checkpointLock) {
+                    // Resolve only the already frozen writes. Closing never manufactures a checkpoint/GC receipt.
+                    for (FreshMarkWrite mark : List.copyOf(fresh.markWrites)) {
+                        try {
+                            mark.complete(fresh);
+                            fresh.markWrites.remove(mark);
+                        } catch (Throwable failure) {
+                            if (mark.closeFailure != null) {
+                                if (fresh.closeFailure == null) {
+                                    fresh.closeFailure = mark.closeFailure;
+                                }
+                            } else if (flushFailure == null) {
+                                flushFailure = failure;
+                            }
+                        }
+                    }
+                }
+                closeFreshListing();
+                if (fresh.channels.isEmpty() && fresh.markWrites.isEmpty() && !fresh.providerClosed) {
+                    try {
+                        fileChannelProvider.close();
+                        fresh.providerClosed = true;
+                    } catch (Throwable failure) {
+                        if (fresh.closeFailure == null) {
+                            fresh.closeFailure = failure;
+                        }
+                    }
+                }
+                boolean drained = quiet.quiesced() && fresh.channels.isEmpty() && fresh.markWrites.isEmpty()
+                        && fresh.providerClosed && flushFailure == null && fresh.closeFailure == null;
+                return new FreshDrainResult(drained, fresh.initializationFailure,
+                        fresh.operationFailure != null ? fresh.operationFailure : fresh.cleanupFailure,
+                        fresh.callbackFailure, fresh.checkpointFailure, flushFailure,
+                        fresh.closeFailure != null ? fresh.closeFailure : fresh.releaseFailure);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            } finally {
+                fresh.drainingThread = null;
+            }
+        }
+    }
+
+    private static IOException freshIo(String message, Throwable failure) {
+        return failure instanceof IOException io ? io : new IOException(message, failure);
+    }
+
+    private void closeFreshListing() {
+        if (fresh.listing != null && !fresh.listingCloseAttempted) {
+            fresh.listingCloseAttempted = true;
+            try {
+                fresh.listing.close();
+                fresh.listing = null;
+            } catch (Throwable failure) {
+                fresh.listingCloseFailure = failure;
+                if (fresh.closeFailure == null) {
+                    fresh.closeFailure = failure;
+                }
+            }
+        }
+    }
+
+    private void publishForceForFresh(ForceWriteRequest request) throws IOException, InterruptedException {
+        while (!forceWriteRequests.offer(request, 50, TimeUnit.MILLISECONDS)) {
+            if (hasFreshFailure() || !forceWriteThread.isAlive()) {
+                throw new IOException("Fresh ForceWrite thread stopped before accepting the batch");
+            }
+        }
     }
 }

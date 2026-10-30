@@ -445,6 +445,8 @@ public class FreshClassicEntryLogDrainTest {
         Runnable beforeClose;
         Long failAtPosition;
         IOException forceFailure;
+        Runnable beforeForce;
+        int maxPositionalWrite = Integer.MAX_VALUE;
 
         ControlledFileChannel(File file) throws IOException {
             delegate = FileChannel.open(file.toPath(), StandardOpenOption.READ, StandardOpenOption.WRITE);
@@ -479,7 +481,13 @@ public class FreshClassicEntryLogDrainTest {
                 }
                 throw writeFailure;
             }
-            return delegate.write(src, position);
+            int limit = src.limit();
+            src.limit(src.position() + Math.min(maxPositionalWrite, src.remaining()));
+            try {
+                return delegate.write(src, position);
+            } finally {
+                src.limit(limit);
+            }
         }
 
         @Override
@@ -531,6 +539,9 @@ public class FreshClassicEntryLogDrainTest {
 
         @Override
         public void force(boolean metadata) throws IOException {
+            if (beforeForce != null) {
+                beforeForce.run();
+            }
             if (forceFailure != null) {
                 IOException failure = forceFailure;
                 forceFailure = null;

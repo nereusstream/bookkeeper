@@ -23,11 +23,13 @@ package org.apache.bookkeeper.bookie;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 
+import io.netty.buffer.ByteBufAllocator;
 import java.io.Closeable;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
 import java.util.Arrays;
 import lombok.CustomLog;
 import org.apache.bookkeeper.conf.ServerConfiguration;
@@ -42,10 +44,10 @@ import org.apache.bookkeeper.util.ZeroBuffer;
 class JournalChannel implements Closeable {
 
     static final long MB = 1024 * 1024L;
-    final BookieFileChannel channel;
-    final int fd;
-    final FileChannel fc;
-    final int formatVersion;
+    BookieFileChannel channel;
+    int fd;
+    FileChannel fc;
+    int formatVersion;
     BufferedChannel bc;
     long nextPrealloc = 0;
 
@@ -83,6 +85,86 @@ class JournalChannel implements Closeable {
     private long lastDropPosition = 0L;
 
     final ServerConfiguration configuration;
+    private boolean freshLifecycle;
+    private File freshFile;
+    private long freshLogId;
+    private Object freshForceLock;
+    private int freshWriteCapacity;
+    private ByteBufAllocator freshAllocator;
+    private boolean freshInitAttempted;
+    private volatile boolean freshClosing;
+    private boolean freshFinalForceComplete;
+    private boolean freshMetadataForced;
+    private long freshDurablePosition;
+    private Throwable freshOperationFailure;
+    private Throwable freshFlushFailure;
+    private Throwable freshCloseFailure;
+
+    record FreshCloseResult(boolean drained, Throwable operationFailure,
+                            Throwable flushFailure, Throwable closeFailure) { }
+
+    /** Pure owner, registered by Journal before initialization can acquire its RAF/fd. */
+    static JournalChannel forFresh(File directory, long logId, long preAllocSize, int writeCapacity,
+            int alignment, ServerConfiguration configuration, ByteBufAllocator allocator) {
+        return new JournalChannel(directory, logId, preAllocSize, writeCapacity, alignment, configuration, allocator);
+    }
+
+    private JournalChannel(File directory, long logId, long preAllocSize, int writeCapacity,
+            int alignment, ServerConfiguration configuration, ByteBufAllocator allocator) {
+        if (alignment <= 0 || preAllocSize < HEADER_SIZE + (long) alignment || writeCapacity <= 0
+                || configuration.getJournalFormatVersionToWrite() != V6) {
+            throw new IllegalArgumentException("Invalid fresh Journal V6 channel configuration");
+        }
+        freshLifecycle = true;
+        freshForceLock = new Object();
+        freshFile = new File(directory, Long.toHexString(logId) + ".txn");
+        freshLogId = logId;
+        freshWriteCapacity = writeCapacity;
+        freshAllocator = allocator;
+        this.preAllocSize = preAllocSize - preAllocSize % alignment;
+        journalAlignSize = alignment;
+        zeros = ByteBuffer.allocate(alignment);
+        fRemoveFromPageCache = configuration.getJournalRemovePagesFromCache();
+        this.configuration = configuration;
+        formatVersion = V6;
+        fd = -1;
+    }
+
+    synchronized void initializeForFresh(DefaultFileChannelProvider provider) throws IOException {
+        if (!freshLifecycle || freshInitAttempted || freshClosing) {
+            throw new IllegalStateException("Fresh journal channel initialization is one-use");
+        }
+        freshInitAttempted = true;
+        try {
+            // The default provider is heap-only. Keep its lazy wrapper before acquiring the fd.
+            channel = provider.open(freshFile, configuration);
+            Files.createFile(freshFile.toPath());
+            fc = channel.getFileChannel();
+            ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE);
+            header.put(magicWord).putInt(V6).rewind();
+            writeFullyAt(header, 0);
+            fc.position(HEADER_SIZE);
+            bc = new BufferedChannel(freshAllocator, fc, freshWriteCapacity, freshWriteCapacity, 0, true);
+            forceWrite(true);
+            writeFullyAt(zeros.duplicate(), preAllocSize - journalAlignSize);
+            nextPrealloc = preAllocSize;
+            if (fRemoveFromPageCache) {
+                fd = PageCacheUtil.getSysFileDescriptor(channel.getFD());
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            freshOperationFailure = failure;
+            throw failure;
+        }
+    }
+
+    private void writeFullyAt(ByteBuffer bytes, long position) throws IOException {
+        while (bytes.hasRemaining()) {
+            int written = fc.write(bytes, Math.addExact(position, bytes.position()));
+            if (written <= 0) {
+                throw new IOException("Fresh journal positional write made no progress");
+            }
+        }
+    }
 
     // Mostly used by tests
     JournalChannel(File journalDirectory, long logId) throws IOException {
@@ -286,6 +368,21 @@ class JournalChannel implements Closeable {
     }
 
     void preAllocIfNeeded(long size) throws IOException {
+        if (freshLifecycle) {
+            synchronized (this) {
+                requireFreshWrite();
+                long end = Math.addExact(bc.position(), size);
+                if (end > nextPrealloc) {
+                    long candidate = nextPrealloc;
+                    while (end > candidate) {
+                        candidate = Math.addExact(candidate, preAllocSize);
+                    }
+                    writeFullyAt(zeros.duplicate(), candidate - journalAlignSize);
+                    nextPrealloc = candidate;
+                }
+                return;
+            }
+        }
         if (bc.position() + size > nextPrealloc) {
             nextPrealloc += preAllocSize;
             zeros.clear();
@@ -300,6 +397,9 @@ class JournalChannel implements Closeable {
 
     @Override
     public void close() throws IOException {
+        if (freshLifecycle) {
+            throw new IllegalStateException("Use the explicit fresh journal channel close result");
+        }
         if (bc != null) {
             bc.close();
         } else if (fc != null) {
@@ -308,8 +408,24 @@ class JournalChannel implements Closeable {
     }
 
     public void forceWrite(boolean forceMetadata) throws IOException {
+        if (freshLifecycle) {
+            synchronized (freshForceLock) {
+                if (freshClosing) {
+                    throw new IOException("Fresh journal channel is closing");
+                }
+                long cut = bc.forceWrite(forceMetadata);
+                freshDurablePosition = Math.max(freshDurablePosition, cut);
+                freshMetadataForced |= forceMetadata;
+                dropCache(cut);
+            }
+            return;
+        }
         log.debug("Journal ForceWrite");
         long newForceWritePosition = bc.forceWrite(forceMetadata);
+        dropCache(newForceWritePosition);
+    }
+
+    private void dropCache(long newForceWritePosition) {
         //
         // For POSIX_FADV_DONTNEED, we want to drop from the beginning
         // of the file to a position prior to the current position.
@@ -330,6 +446,92 @@ class JournalChannel implements Closeable {
             }
             this.lastDropPosition = newDropPos;
         }
+    }
+
+    void forceThroughForFresh(long cut) throws IOException {
+        if (!freshLifecycle) {
+            throw new IllegalStateException("Not a fresh journal channel");
+        }
+        synchronized (freshForceLock) {
+            if (freshClosing) {
+                if (freshMetadataForced && freshDurablePosition >= cut && channel instanceof DefaultFileChannel file
+                        && file.closedForFresh() && freshCloseFailure == null && freshFlushFailure == null) {
+                    return; // Only the original completed barrier/close may satisfy a retired channel.
+                }
+                throw new IOException("Fresh journal channel has not completed this durable cut", freshCloseFailure);
+            }
+            forceWrite(false);
+            if (freshDurablePosition < cut) {
+                throw new IOException("Fresh journal force did not cover the requested cut");
+            }
+        }
+    }
+
+    synchronized FreshCloseResult closeForFresh() {
+        if (!freshLifecycle) {
+            throw new IllegalStateException("Not a fresh journal channel");
+        }
+        synchronized (freshForceLock) {
+            return closeFreshInternal();
+        }
+    }
+
+    private FreshCloseResult closeFreshInternal() {
+        freshClosing = true;
+        DefaultFileChannel file = (DefaultFileChannel) channel;
+        if (file != null && fc != null && !fc.isOpen() && !file.closedForFresh()) {
+            closeNativeForFresh(file); // Do not requalify an unobserved automatic close.
+        }
+        if (freshCloseFailure == null && bc != null && !freshFinalForceComplete) {
+            try {
+                bc.flushAndForceWrite(true);
+                freshDurablePosition = Math.max(freshDurablePosition, bc.getFileChannelPosition());
+                freshMetadataForced = true;
+                freshFinalForceComplete = true;
+                freshFlushFailure = null;
+            } catch (IOException | RuntimeException | Error failure) {
+                freshFlushFailure = failure;
+            }
+        }
+        if (freshFlushFailure == null || freshCloseFailure != null) {
+            if (file != null) {
+                closeNativeForFresh(file);
+            }
+            if (bc != null) {
+                try {
+                    bc.releaseBuffersForFresh();
+                } catch (IOException | RuntimeException | Error failure) {
+                    if (freshCloseFailure == null) {
+                        freshCloseFailure = failure;
+                    }
+                }
+            }
+        }
+        Throwable writeFailure = bc == null ? null : bc.freshWriteFailure();
+        return new FreshCloseResult(freshFlushFailure == null && freshCloseFailure == null
+                && (file == null || file.closedForFresh()),
+                freshOperationFailure != null ? freshOperationFailure : writeFailure,
+                freshFlushFailure, freshCloseFailure);
+    }
+
+    private void closeNativeForFresh(DefaultFileChannel file) {
+        try {
+            file.closeForFresh();
+        } catch (IOException | RuntimeException | Error failure) {
+            if (freshCloseFailure == null) {
+                freshCloseFailure = failure;
+            }
+        }
+    }
+
+    private void requireFreshWrite() throws IOException {
+        if (freshClosing || freshOperationFailure != null) {
+            throw new IOException("Fresh journal channel is closing or initialization failed", freshOperationFailure);
+        }
+    }
+
+    boolean ownsFreshLog(long id) {
+        return freshLifecycle && freshLogId == id;
     }
 
 }
