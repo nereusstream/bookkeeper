@@ -414,3 +414,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 [fresh 执行器的实际终结与严格 flush](local-storage/README.md#fresh-执行器的实际终结与严格-flush)：2026-10-31父03835ed598上，原SyncThread新增严格fresh关闭/终结后flush重试，磁盘monitor/state manager等待实际termination并拒绝自身线程等待；四类26项及阶段输入由canonical拥有。外层owner/facade、逐资源构造登记、Journal/GC/allocator/文件cache实际关闭及完整fresh仍未接线，不提前解锁或发行NoCluster许可；共同owner/Main/G1/full-bytes和完整目标继续OPEN，目标active。
 
 [fresh GC 的删除权威与实际终结](local-storage/README.md#fresh-gc-的删除权威与实际终结)：2026-10-31父6b47e4de8e上，fresh GC子工厂不接收manager，固定跳过无权威的集群删除，保留本地GC/metadata/默认compaction和预分配；等待原executor及真实线程退出后清理map，中断保留原进度。五类30项通过，独立旧GC轮次5通过/1因macOS JNI缺失报错；原失败及各自源码回执保留。配置接受create实际收到的值：空串允许，实际空白/多值/非法类型拒绝，不追溯库已裁掉的空白；外层仍须捕获同一批值再验证/冻结。下一项继续Journal/allocator/entry logger/cache严格关闭及完整owner/facade，不将GC子组件终结当全Bookie drain或解锁依据。完整16步active、相关Gate OPEN。
+
+
+[fresh 预分配资源与固定坐标 flush](local-storage/README.md#fresh-预分配资源与固定坐标-flush)：2026-10-31父41aba209ca上，fresh buffer保留native close的sticky结果与单次自有引用释放，部分flush使用冻结范围/固定坐标重试；allocator登记open/构造/header/lastId及未交付候选，停止新提交后等真实任务/线程退出再清理，结果分别保留allocation failure与close failure。七类81项与style通过，原磁盘满夹具错误及17项阶段回执由canonical拥有；夹具改为真实本地Interleaved，未放宽Null启动。DefaultEntryLogger完整图、Journal/cache、根解锁严格结果和稳定owner/facade仍待接线，不授予许可或全Bookie排空证明；完整目标active，相关Gate OPEN。

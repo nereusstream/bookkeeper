@@ -6,7 +6,7 @@
 
 ## 当前实现
 
-2026-10-31 当前增量为[fresh GC 的删除权威与实际终结](#fresh-gc-的删除权威与实际终结)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
+2026-10-31 当前增量为[fresh 预分配资源与固定坐标 flush](#fresh-预分配资源与固定坐标-flush)。下文早期步骤及回执保留原范围；当前可写服务图仍为单Arena，健康CLOSED管理会话恢复、full-bytes及完整16步边界由各最新条目拥有。v2基础没有授予多Arena服务、未关闭会话恢复或生产权限。
 
 步骤1：`IsolatedSegmentConfig` 固定单 Arena、4个逻辑 shard、两个16 MiB DATA文件、4096字节对齐、1 MiB payload上限、256个pending上限及 FILE_CHANNEL/OFF/SYSTEM/PARK。参数检查拒绝容量溢出、非对齐容量和未实现模式。配置合同由步骤3的文件实现消费。
 
@@ -2097,3 +2097,24 @@ fresh关闭取消周期调度但不interrupt正在运行的文件I/O；等待原
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-gc-evidence-6b47e4de`分别保留三阶段输入/源码/日志/XML及43个相关class，最终native输入1225项。完整外层owner/窄facade、初始化逐资源登记、Journal/预分配/entry logger与文件cache严格关闭仍OPEN，不能因GC子组件已终结而提前解锁或发行许可。共同owner/Main/G1/full-bytes与完整16步验收继续OPEN，目标active，默认OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。
 
 本轮Spotless/Checkstyle exit0；实际RAT exit1，431个未批准路径及其字节与父源码一致、无新增，保护PDF在读取前排除。三个已终态native临时目录的18个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节2,841,116；归档硬链接保留数据，常规文件数据块回收0。未清理默认目录或其他任务资源。
+
+
+## fresh 预分配资源与固定坐标 flush
+
+2026-10-31在父源码`41aba209ca641459cdca53d74620de93fb71779d`上，增加包内fresh BufferedChannel/BufferedLogChannel及EntryLoggerAllocator子入口，仍不发行fresh上下文或接公开启动。普通Classic构造与flush/stop路径保留；只有显式fresh子工厂使用新状态。尚未将这些子入口接入DefaultEntryLogger完整构造、rotation/read-cache/compaction、Interleaved严格关闭或外层owner，因此不能据此声称整个entry logger或Bookie已排空。
+
+指定规划会话冻结底层close失败为sticky：第一次实际FileChannel.close抛异常后保存原cause，不再尝试未知fd；isOpen=false、第二次no-op close或worker退出均不能把它提升为成功。fresh buffered channel等待实际close调用返回，分别释放自有write/read引用各一次，保留独立close结果；同一allocator登记槽中的裸channel和buffered别名由buffered路径共享实际关闭结果。构造buffer失败时只释放已取得的buffer，裸fd仍由原登记槽持有，不在失败构造器中丢掉它。
+
+fresh flush冻结待写字节视图及起始文件坐标，使用同一范围的positional write；失败后保留原buffer、坐标与范围，不允许新write/clear覆盖它，重试从原范围起点覆盖，不能从已前移的相对位置重复追加。完整写入和位置更新成功后才清空buffer并推进writeBufferStartPosition，force继续使用原持久化屏障；不把部分写入、单次write成功或close当作持久化成功。该保证限于新flush子路径，未把复杂rotation/header更新或其他旧布局失败改称可重试。
+
+fresh allocator在每次文件open前先登记heap-only槽，之后持续登记裸fd、buffered channel、header及lastId更新过程。lastId写入/关闭不吞错；文件构造或预分配失败阻止继续创建未登记候选。仅在明确交给接收方前移交候选，Future取消不能丢失实际晚到的文件。关闭请求与新预分配提交共用一道门：先拒绝新分配/提交，等待已接纳的交付、原executor及真实线程退出，再由调用的外层关闭worker清理仍归allocator的候选/partial资源及header；不向关闭的executor提交清理，不使用shutdownNow冒充终结。自线程改名后也拒绝等待，调用方中断保留原执行器和进度。接收方仍持有的active/compaction channel不会由allocator提前关闭。
+
+规划会话同时区分分配失败与资源终态：FreshDrainResult一次返回allocator自有资源是否排空、永久保留的原allocation cause及独立close cause，重复stop观察同一个结果。构造失败但所有实际资源成功关闭，可以同时是“资源已排空＋原分配失败”；任何native close失败仍未排空，且其他独立资源可以完成清理。该局部drained不含已转交给entry-log manager的资源，不恢复服务、不重发fresh资格或授权解锁。
+
+新增10项场景覆盖真实文件的部分写后错误/同坐标重试与逐字节文件内容、JDK逻辑closed但真实fd未关闭时的sticky错误、重复关闭无双release、取消close观察而实际关闭仍挂起、默认预分配候选与已交付active的分离、预分配Future取消后晚到文件的实际清理/关闭方中断、buffer构造失败后的裸fd、真实lastId open失败、关闭先赢时禁止后续预分配提交、线程改名及未start关闭。partial raw槽的native-close错误只在测试源码中注入，检查其他候选仍实际关闭但结果保持未排空；不增加公开raw getter，也不把该注入当作完整fresh根锁或掉电验收。
+
+第一轮fresh/原buffered组合17项通过。扩大组合首次79通过/1错误，整体exit1：旧DefaultEntryLog磁盘满夹具仅需本地存储，却构造无metadata authority的Bookie，被既有UNSUPPORTED检查拒绝。改为直接初始化真实Interleaved/双目录，保留相同disk-full与三ledger读回断言并释放实际资源，不放宽Null启动、不伪造ABSENT。最终七类81项同源码通过，0 failure/error/skipped：新entry-log10、原BufferedChannel9、DefaultEntryLog30、CreateNewLog14、fresh GC4、BookieImpl3、原根/Classic组合11。原失败及各轮源码/输入/XML/日志分别保留，不改称产品RED，不把17项或失败轮次移绑至最后源码；本轮未重跑完整SDK、stock/TLC、JNI或性能矩阵。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/fresh-entrylog-evidence-41aba209`保留三阶段回执及46个相关class，最终native输入1229项。Spotless/Checkstyle exit0。完整owner/窄facade、初始化登记、Journal、entry logger/rotation/read cache、ledger/index cache的严格结果以及根锁释放失败的逐句柄状态仍OPEN；下一项沿实际调用图完成这些接线，不能用本子组件drained替代全Bookie终态。共同owner/Main/G1/full-bytes及完整16步目标仍OPEN/active，默认OFF/SYSTEM/PARK和disabled保持，Linux NUMA、真实掉电及正式性能/canary仍NOT_EXECUTED。
+
+实际RAT exit1，431个未批准路径及字节与父源码相同、无新增，保护PDF在读取前排除。三个已终态native临时目录的25个原文件经同inode/hash/mode/owner及两次无reader检查后移除，逻辑路径字节6,138,318；归档硬链接保留数据，常规文件数据块回收0。未清理默认目录或其他任务资源。

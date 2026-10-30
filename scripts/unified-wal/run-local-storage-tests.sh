@@ -86,7 +86,8 @@ paths.add(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/server/Tes
 paths.update(Path('bookkeeper-server/src/test/java/org/apache/bookkeeper/bookie') / name for name in
              ('BookieImplTest.java', 'TestBookieImpl.java', 'FreshClassicRootsTest.java', 'SyncThreadTest.java',
               'FreshClassicExecutorDrainTest.java', 'FreshClassicGcDrainTest.java', 'GarbageCollectorThreadTest.java',
-              'MockLedgerStorage.java'))
+              'MockLedgerStorage.java', 'FreshClassicEntryLogDrainTest.java', 'BufferedChannelTest.java',
+              'DefaultEntryLogTest.java', 'CreateNewLogTest.java'))
 paths.update(Path('bookkeeper-server/src/main/java/org/apache/bookkeeper') / name for name in
              ('bookie/Cookie.java', 'bookie/LegacyCookieValidation.java', 'util/PortManager.java',
               'bookie/FreshClassicRoots.java', 'bookie/LedgerDirsMonitor.java', 'bookie/GarbageCollectorThread.java',

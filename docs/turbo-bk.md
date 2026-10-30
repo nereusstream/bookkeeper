@@ -1024,3 +1024,6 @@ Segment production candidate 的最低 Gate：
 [fresh 执行器的实际终结与严格 flush](rfcs/unified-wal/implementation/local-storage/README.md#fresh-执行器的实际终结与严格-flush)：2026-10-31父03835ed598上，Sync严格flush/终结后重试、monitor及state manager的真实executor termination与自等待拒绝已实现；四类26项通过，阶段源码/回执与有限边界由canonical拥有。fresh外层owner/窄facade、逐资源登记及Journal/GC/预分配/文件关闭仍未实现，不发行许可或提前解锁；共同owner/Main/G1/full-bytes及完整目标保持OPEN，目标active，OFF/SYSTEM/PARK与disabled保持。
 
 [fresh GC 的删除权威与实际终结](rfcs/unified-wal/implementation/local-storage/README.md#fresh-gc-的删除权威与实际终结)：2026-10-31父6b47e4de8e上，fresh GC固定无集群删除authority，保留本地metadata/compaction/预分配；原executor及真实线程退出后才清理map，中断重试和自等待拒绝不提前退役资源。五类30项通过，独立旧GC轮次5通过/1因macOS JNI缺失报错；原失败与配置归一化边界由canonical拥有。完整fresh owner/facade、Journal/allocator/文件cache关闭和共同owner/Main/G1/full-bytes仍OPEN，不发行许可或提前解锁；16步目标active，OFF/SYSTEM/PARK与disabled保持。
+
+
+[fresh 预分配资源与固定坐标 flush](rfcs/unified-wal/implementation/local-storage/README.md#fresh-预分配资源与固定坐标-flush)：2026-10-31父41aba209ca上，fresh buffer保留native close的sticky结果与单次自有引用释放，部分flush使用冻结范围/固定坐标重试；allocator登记open/构造/header/lastId及未交付候选，停止新提交后等真实任务/线程退出再清理，结果分别保留allocation failure与close failure。七类81项与style通过，原磁盘满夹具错误及17项阶段回执由canonical拥有；夹具改为真实本地Interleaved，未放宽Null启动。DefaultEntryLogger完整图、Journal/cache、根解锁严格结果和稳定owner/facade仍待接线，不授予许可或全Bookie排空证明；完整目标active，相关Gate OPEN。

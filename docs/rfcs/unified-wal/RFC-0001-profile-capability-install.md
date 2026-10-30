@@ -516,6 +516,8 @@ normal Add 与 legacy `RECOVERY_ADD` 变体都必须经过相同 routing gate。
 
 Null的例外需另行显式NO_CLUSTER_AUTHORITY上下文：完整实际root集全新且无历史/身份/共同标记，factory持有独占所有权，绑定Bookie、canonical roots及单次episode，消费前复核物理身份；不注册、不用于Profile、共同commissioning或restart。不得由公开构造器/布尔配置、Null/unsupported默认路径伪造，实际清理未终结不能重新发行。该上下文当前尚未实现，普通Null启动拒绝保持。 进一步冻结首个切片仅支持显式本地fresh Classic及内置InterleavedLedgerStorage，稳定外层owner先返回再初始化，逐项登记并只在实际可重试drain完成后解锁；不把shutdown返回码或isRunning=false当终态，不新增EmbeddedServer fresh入口。实现仍OPEN，详见执行正文的后续接续。 根资源子组件已新增持久`fresh-classic-owner.lock`，仅作为本地一次使用排除；Classic/Profile各实际根发现它均拒绝普通未绑定路径。该子组件不发行上下文、集群authority或实际drain证明，完整fresh入口仍OPEN。 后续冻结返回final FreshClassicHandle而非Bookie，不暴露raw后端、watch/惰性iterator；写沿原callback/单引用移交且Add固定不早ACK，fence future取消不撤销实际工作。首版要求Journal写入和同步均true、persistent GC map=false、无额外cache path、busyWait=false，非法配置先于所有标记/资源拒绝；保留正常GC/预分配。一个实际关闭worker保留原进度，caller等待期限/中断不终止它，全部实际资源终结后才释放根锁、worker退出后才报告DRAINED。执行器严格子入口已开始接线，完整owner/facade仍OPEN。 fresh GC子工厂固定传null LedgerManager，仅跳过需集群authority的ledger删除，不接收Null manager空枚举作为删除依据；本地GC及默认compaction保留，真实线程终结前不关闭其map。配置边界以create实际收到的值为准：空串允许，实际空白/多值/非法类型拒绝，不追溯配置库已丢弃的原字符串，验证与冻结必须使用同一批捕获值；详见[fresh GC实现边界](implementation/local-storage/README.md#fresh-gc-的删除权威与实际终结)。
 
+fresh底层文件close失败须保留原cause，不以isOpen=false或后续no-op重试提升成功；buffer自身引用释放与fd结果分开记账。分配失败和实际资源排空分别报告，已交付channel仍由接收方负责；只有所有资源实际终结后才进入根锁逐句柄释放，部分失败不能虚报仍全部持锁或已全部释放。fresh固定坐标flush和allocator登记/排空子入口已实现，完整owner/entry logger/Journal/cache接线仍OPEN，见[fresh预分配实现边界](implementation/local-storage/README.md#fresh-预分配资源与固定坐标-flush)。
+
 ### 7.2 幂等与冲突
 
 | 已有状态 | 请求 | 结果 |

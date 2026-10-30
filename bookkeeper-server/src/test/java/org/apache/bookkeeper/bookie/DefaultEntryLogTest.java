@@ -68,6 +68,7 @@ import org.apache.bookkeeper.bookie.LedgerDirsManager.NoWritableLedgerDirExcepti
 import org.apache.bookkeeper.common.testing.annotations.FlakyTest;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.conf.TestBKConfiguration;
+import org.apache.bookkeeper.stats.NullStatsLogger;
 import org.apache.bookkeeper.test.TestStatsProvider;
 import org.apache.bookkeeper.util.DiskChecker;
 import org.apache.bookkeeper.util.IOUtils;
@@ -343,27 +344,46 @@ public class DefaultEntryLogTest {
         conf.setJournalDirName(ledgerDir1.toString());
         conf.setLedgerDirNames(new String[] { ledgerDir1.getAbsolutePath(),
                 ledgerDir2.getAbsolutePath() });
-        BookieImpl bookie = new TestBookieImpl(conf);
-        DefaultEntryLogger entryLogger = new DefaultEntryLogger(conf,
-                bookie.getLedgerDirsManager());
-        InterleavedLedgerStorage ledgerStorage =
-                ((InterleavedLedgerStorage) bookie.ledgerStorage.getUnderlyingLedgerStorage());
-        ledgerStorage.entryLogger = entryLogger;
-        // Create ledgers
-        ledgerStorage.setMasterKey(1, "key".getBytes());
-        ledgerStorage.setMasterKey(2, "key".getBytes());
-        ledgerStorage.setMasterKey(3, "key".getBytes());
-        // Add entries
-        ledgerStorage.addEntry(generateEntry(1, 1));
-        ledgerStorage.addEntry(generateEntry(2, 1));
-        // Add entry with disk full failure simulation
-        bookie.getLedgerDirsManager().addToFilledDirs(((EntryLogManagerBase) entryLogger.getEntryLogManager())
-                .getCurrentLogForLedger(DefaultEntryLogger.UNASSIGNED_LEDGERID).getLogFile().getParentFile());
-        ledgerStorage.addEntry(generateEntry(3, 1));
-        // Verify written entries
-        assertEquals(0, generateEntry(1, 1).compareTo(ledgerStorage.getEntry(1, 1)));
-        assertEquals(0, generateEntry(2, 1).compareTo(ledgerStorage.getEntry(2, 1)));
-        assertEquals(0, generateEntry(3, 1).compareTo(ledgerStorage.getEntry(3, 1)));
+        for (File root : conf.getLedgerDirs()) {
+            BookieImpl.checkDirectoryStructure(BookieImpl.getCurrentDirectory(root));
+        }
+        LedgerDirsManager directories = new LedgerDirsManager(conf, conf.getLedgerDirs(),
+                new DiskChecker(conf.getDiskUsageThreshold(), conf.getDiskUsageWarnThreshold()));
+        // This test exercises local storage only; it does not start or authorize a Bookie.
+        InterleavedLedgerStorage ledgerStorage = new InterleavedLedgerStorage();
+        ledgerStorage.initialize(conf, null, directories, null, NullStatsLogger.INSTANCE,
+                UnpooledByteBufAllocator.DEFAULT);
+        try {
+            DefaultEntryLogger entryLogger = ledgerStorage.getEntryLogger();
+            for (int ledger = 1; ledger <= 3; ledger++) {
+                ledgerStorage.setMasterKey(ledger, "key".getBytes());
+            }
+            for (int ledger = 1; ledger <= 3; ledger++) {
+                if (ledger == 3) {
+                    directories.addToFilledDirs(((EntryLogManagerBase) entryLogger.getEntryLogManager())
+                            .getCurrentLogForLedger(DefaultEntryLogger.UNASSIGNED_LEDGERID)
+                            .getLogFile().getParentFile());
+                }
+                ByteBuf entry = generateEntry(ledger, 1);
+                try {
+                    ledgerStorage.addEntry(entry);
+                } finally {
+                    entry.release();
+                }
+            }
+            for (int ledger = 1; ledger <= 3; ledger++) {
+                ByteBuf expected = generateEntry(ledger, 1);
+                ByteBuf actual = ledgerStorage.getEntry(ledger, 1);
+                try {
+                    assertEquals(0, expected.compareTo(actual));
+                } finally {
+                    expected.release();
+                    actual.release();
+                }
+            }
+        } finally {
+            ledgerStorage.shutdown();
+        }
     }
 
     /**

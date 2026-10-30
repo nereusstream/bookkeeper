@@ -41,7 +41,7 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
     /**
      * The position of the file channel's write pointer.
      */
-    protected AtomicLong writeBufferStartPosition = new AtomicLong(0);
+    protected AtomicLong writeBufferStartPosition;
     /**
      * The buffer used to write operations.
      */
@@ -71,6 +71,14 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
     protected final AtomicLong unpersistedBytes;
 
     private boolean closed = false;
+    private final boolean freshLifecycle;
+    private boolean freshCloseStarted;
+    private boolean freshCloseReturned;
+    private boolean freshWriteReleased;
+    private boolean freshReadReleased;
+    private Throwable freshCloseFailure;
+    private ByteBuffer freshPendingFlush;
+    private long freshPendingFlushStart;
 
     // make constructor to be public for unit test
     public BufferedChannel(ByteBufAllocator allocator, FileChannel fc, int capacity) throws IOException {
@@ -86,24 +94,106 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
 
     public BufferedChannel(ByteBufAllocator allocator, FileChannel fc, int writeCapacity, int readCapacity,
             long unpersistedBytesBound) throws IOException {
+        this(allocator, fc, writeCapacity, readCapacity, unpersistedBytesBound, false);
+    }
+
+    /** The fresh allocator retains the raw channel if construction fails. */
+    BufferedChannel(ByteBufAllocator allocator, FileChannel fc, int writeCapacity, int readCapacity,
+            long unpersistedBytesBound, boolean freshLifecycle) throws IOException {
         super(fc, readCapacity);
+        this.freshLifecycle = freshLifecycle;
         this.writeCapacity = writeCapacity;
-        this.position = fc.position();
-        this.writeBufferStartPosition.set(position);
-        this.writeBuffer = allocator.directBuffer(writeCapacity);
-        this.unpersistedBytes = new AtomicLong(0);
-        this.unpersistedBytesBound = unpersistedBytesBound;
-        this.doRegularFlushes = unpersistedBytesBound > 0;
+        ByteBuf allocatedWrite = null;
+        try {
+            this.position = fc.position();
+            this.writeBufferStartPosition = new AtomicLong(position);
+            allocatedWrite = allocator.directBuffer(writeCapacity);
+            this.writeBuffer = allocatedWrite;
+            this.unpersistedBytes = new AtomicLong(0);
+            this.unpersistedBytesBound = unpersistedBytesBound;
+            this.doRegularFlushes = unpersistedBytesBound > 0;
+        } catch (IOException | RuntimeException | Error failure) {
+            if (freshLifecycle) {
+                try {
+                    ReferenceCountUtil.release(allocatedWrite);
+                } catch (RuntimeException | Error releaseFailure) {
+                    failure.addSuppressed(releaseFailure);
+                }
+                try {
+                    readBuffer.release();
+                } catch (RuntimeException | Error releaseFailure) {
+                    failure.addSuppressed(releaseFailure);
+                }
+            }
+            throw failure;
+        }
     }
 
     @Override
     public synchronized void close() throws IOException {
+        if (freshLifecycle) {
+            closeForFresh();
+            return;
+        }
         if (closed) {
             return;
         }
         ReferenceCountUtil.release(writeBuffer);
         fileChannel.close();
         closed = true;
+    }
+
+    /** All readers/writers must have actually returned before the fresh close worker calls this. */
+    synchronized void closeForFresh() throws IOException {
+        if (!freshLifecycle) {
+            throw new IllegalStateException("Strict close requires a fresh buffered channel");
+        }
+        if (freshCloseStarted && !freshCloseReturned) {
+            throw new IllegalStateException("Fresh native close is still executing");
+        }
+        if (!freshCloseStarted) {
+            freshCloseStarted = true;
+            try {
+                fileChannel.close();
+            } catch (IOException | RuntimeException | Error failure) {
+                freshCloseFailure = failure;
+            } finally {
+                freshCloseReturned = true;
+            }
+        }
+        // Buffer ownership and native-close success are separate. Never repeat an attempted release.
+        if (!freshWriteReleased) {
+            freshWriteReleased = true;
+            try {
+                writeBuffer.release();
+            } catch (RuntimeException | Error failure) {
+                recordFreshCloseFailure(failure);
+            }
+        }
+        if (!freshReadReleased) {
+            freshReadReleased = true;
+            try {
+                readBuffer.release();
+            } catch (RuntimeException | Error failure) {
+                recordFreshCloseFailure(failure);
+            }
+        }
+        closed = true;
+        if (freshCloseFailure instanceof IOException) {
+            throw (IOException) freshCloseFailure;
+        } else if (freshCloseFailure instanceof RuntimeException) {
+            throw (RuntimeException) freshCloseFailure;
+        } else if (freshCloseFailure instanceof Error) {
+            throw (Error) freshCloseFailure;
+        }
+    }
+
+    private void recordFreshCloseFailure(Throwable failure) {
+        if (freshCloseFailure == null) {
+            freshCloseFailure = failure;
+        } else if (freshCloseFailure != failure) {
+            freshCloseFailure.addSuppressed(failure);
+        }
     }
 
     /**
@@ -148,6 +238,9 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
 
     // must be called while holding the lock on this instance
     private int copyIntoWriteBuffer(ByteBuf src) throws IOException {
+        if (freshLifecycle && (freshCloseStarted || freshPendingFlush != null)) {
+            throw new IOException("Fresh channel is closing or requires the pending flush to finish first");
+        }
         int copied = 0;
         int len = src.readableBytes();
         while (copied < len) {
@@ -229,12 +322,45 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
      * @throws IOException if the write fails.
      */
     public synchronized void flush() throws IOException {
+        if (freshLifecycle) {
+            flushForFresh();
+            return;
+        }
         ByteBuffer toWrite = writeBuffer.internalNioBuffer(0, writeBuffer.writerIndex());
         do {
             fileChannel.write(toWrite);
         } while (toWrite.hasRemaining());
         writeBuffer.clear();
         writeBufferStartPosition.set(fileChannel.position());
+    }
+
+    private void flushForFresh() throws IOException {
+        if (freshCloseStarted) {
+            throw new IOException("Fresh channel close has already started");
+        }
+        if (freshPendingFlush == null) {
+            freshPendingFlushStart = writeBufferStartPosition.get();
+            freshPendingFlush = writeBuffer.nioBuffer(0, writeBuffer.writerIndex()).asReadOnlyBuffer();
+        }
+        try {
+            while (freshPendingFlush.hasRemaining()) {
+                int written = fileChannel.write(freshPendingFlush,
+                        Math.addExact(freshPendingFlushStart, freshPendingFlush.position()));
+                if (written <= 0) {
+                    throw new IOException("Fresh positional flush made no progress");
+                }
+            }
+            long end = Math.addExact(freshPendingFlushStart, freshPendingFlush.limit());
+            fileChannel.position(end);
+            writeBufferStartPosition.set(end);
+            writeBuffer.clear();
+            freshPendingFlush = null;
+        } catch (IOException | RuntimeException | Error failure) {
+            // A failed syscall may have written bytes without reporting progress. Overwrite the
+            // same frozen range on retry; never append that range at an advanced relative position.
+            freshPendingFlush.rewind();
+            throw failure;
+        }
     }
 
     /**
@@ -322,6 +448,9 @@ public class BufferedChannel extends BufferedReadChannel implements Closeable {
 
     @Override
     public synchronized void clear() {
+        if (freshLifecycle && (freshCloseStarted || freshPendingFlush != null)) {
+            throw new IllegalStateException("Cannot clear a closing channel or a pending fresh flush");
+        }
         super.clear();
         writeBuffer.clear();
     }

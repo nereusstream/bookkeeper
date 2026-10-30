@@ -98,6 +98,21 @@ public class DefaultEntryLogger implements EntryLogger {
             this.entryLogMetadata = new EntryLogMetadata(logId);
             this.logFile = logFile;
         }
+
+        static BufferedLogChannel forFresh(ByteBufAllocator allocator, FileChannel fc, int writeCapacity,
+                int readCapacity, long logId, File logFile, long unpersistedBytesBound) throws IOException {
+            // Allocate metadata before the direct buffer; construction then has no allocation after super returns.
+            return new BufferedLogChannel(allocator, fc, writeCapacity, readCapacity, logId, logFile,
+                    unpersistedBytesBound, new EntryLogMetadata(logId));
+        }
+
+        private BufferedLogChannel(ByteBufAllocator allocator, FileChannel fc, int writeCapacity, int readCapacity,
+                long logId, File logFile, long unpersistedBytesBound, EntryLogMetadata metadata) throws IOException {
+            super(allocator, fc, writeCapacity, readCapacity, unpersistedBytesBound, true);
+            this.logId = logId;
+            this.entryLogMetadata = metadata;
+            this.logFile = logFile;
+        }
         public long getLogId() {
             return logId;
         }
