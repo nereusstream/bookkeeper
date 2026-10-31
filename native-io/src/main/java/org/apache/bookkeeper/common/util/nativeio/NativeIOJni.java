@@ -20,10 +20,6 @@
  */
 package org.apache.bookkeeper.common.util.nativeio;
 
-import java.util.List;
-import org.apache.bookkeeper.common.util.nativelib.NativeUtils;
-import org.apache.commons.lang3.SystemUtils;
-
 class NativeIOJni {
 
     static native int open(String pathname, int flags, int mode) throws NativeIOException;
@@ -55,32 +51,6 @@ class NativeIOJni {
     static native int hasExtendedAcl(String path) throws NativeIOException;
 
     static {
-        String explicitPath = NativeIOLibraryPath.configuredLibraryPath();
-        if (explicitPath != null) {
-            System.load(explicitPath);
-        } else {
-            List<String> candidates = NativeIOLibraryPath.currentPlatformLibraryCandidates();
-            if (candidates.isEmpty()) {
-                throw new IllegalStateException("No native-io JNI library candidates found for platform "
-                        + SystemUtils.OS_NAME + "/" + SystemUtils.OS_ARCH);
-            }
-
-            boolean loaded = false;
-            Throwable lastFailure = null;
-            for (String candidate : candidates) {
-                try {
-                    NativeUtils.loadLibraryFromJar(candidate);
-                    loaded = true;
-                    break;
-                } catch (Exception | UnsatisfiedLinkError e) {
-                    lastFailure = e;
-                }
-            }
-
-            if (!loaded) {
-                throw new IllegalStateException("Failed to load any native-io JNI library candidate for platform "
-                        + SystemUtils.OS_NAME + "/" + SystemUtils.OS_ARCH, lastFailure);
-            }
-        }
+        NativeIOBootstrap.initializeJni();
     }
 }
