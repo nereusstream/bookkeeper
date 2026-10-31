@@ -720,9 +720,19 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## 固定 systemd 查询的原 Process 与有界管道
+
+2026-11-01在本地父`90a0f1a0cf`上实现包内SegmentClassicSystemdQuery。固定argv只调用`/usr/bin/systemctl --system --no-pager --no-ask-password --all --property=<fixed fields> show <one literal service>`，拒绝外部路径/字段/host/user manager/通配符/控制字节或多个unit；查询命令使用空环境、固定`/` cwd和独立stdin/stdout/stderr。命名属性集含规划要求的四组及各Exec入口对应的Ex属性，字段列表固定且保留空值，UTF8/总64KiB/完整行/恰好完整集合/重复或未知字段/Id不一致均拒绝。Exec值只保留原字符串，不声称已完成批准版本的argv语法解析、unit审批或连续隔离。参考官方[show接口](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#show%20%5BPATTERN%E2%80%A6%7CJOB%E2%80%A6%5D)与[Service属性](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html)。
+
+每实例只创建一个原query Process。先登记heap owner并启动两条固定non-daemon consumer，再构造Process和附加其原pipes；调用不持生命周期gate跨Process构造、read、close、等待。原stdin首次close明确成功，stdout/stderr分别最多留64KiB/16KiB、各4KiB读取工作区，超限永久拒绝观察但继续读至实际EOF；首次pipe close失败或未知构造/附加均保留未决，不重试close、kill、打断reader或堆积新查询。取得结果须先原Process实际退出、两reader实际join、三个原pipe首次关闭明确成功，非零退出/诊断stderr/解析失败都不生产可用属性。caller deadline/中断只使原观察永久失败，后续实际退出只能完成资源终结，不能把迟到结果刷绿。原launcher仍须在initialize前完成CLI/全部实际依赖批准，持有最多一个未排空查询，并将失败保留在同episode；这些v2接线尚未完成，本组件本身不能发行Unix或签发资格。
+
+data-only首轮三项通过；增加原Process/pipe后七项通过，随后明确核对三个原pipe的首次关闭完成位，相关七项再次实际通过（0失败/错误/跳过）。真实子JVM验证stdin EOF、两路pipe字节、两路各4MiB输出超限后继续排空、exit7拒绝，以及80ms观察超时后进程仍未排空、释放私有gate后实际结束且迟到结果仍拒绝。子JVM仅是query-pipe fixture，没有运行真实systemctl或检查systemd unit；macOS的生产Owner在创建Process前拒绝。首次样式仅一行121字符注释失败，最终删去该注释一词后Spotless/Checkstyle退出0；代码/声明/行数不变，不为此重复运行测试或移绑原七项。
+
+证据保留于`/Users/liusinan/.codex/artifacts/unified-wal/classic-systemd-evidence-90a0f1a0`。原三阶段各1405项输入/source/测试class/XML保持原绑定；前两阶段class选择器遗漏producer class，未重构或追认缺失字节，最终阶段已从该次Maven时间窗内的实际target补采七个本组件class并保存哈希。最终样式源码与受测源码的一词注释差异另记原SHA，不覆盖原测试输入。 三个raw scope经两次独立lsof及原inode/哈希/归档硬链接核验，只移除六目录、12文件路径、1,083,882逻辑字节；原归档保留、regular-file数据块回收0，共享target及用户文件不清理。RAT/TLA/性能及真实Linux manager查询未执行；v2装载/额外文件批准、root操作入口/Ctl、固定dropper/seccomp/cgroup/权限交接/资格与所有整体Gate仍OPEN，完整16步目标active，默认OFF/SYSTEM/PARK及disabled保持。
+
 ## 固定 UDS 操作报文与有界字节交换实施中
 
-2026-11-01在本地父`88802b2be2`上新增包内SegmentClassicLauncherOperationCodec及OperationIo，作为既定v2/专用Ctl的必要字节接线，尚未接入launcher或发行实际受理。独立UWCLO001报文头16字节（magic/schema1/kind/flags0/正文长度），GREETING与STOP各带非零episode，HANDOFF另带非零bindingId，REPLY仅ACCEPTED/REJECTED；最大48字节，不携私钥、可签facts或drain结果。固定头全部验证后才分配固定正文，截断/尾随/未知码/非法identity拒绝；旧HELLO/START不能互解为操作。所有episode值仍为数据，后续原owner必须关联真实unit/Process并拒绝旧episode，不以codec解析成功授予操作。
+2026-11-01在本地父`88802b2be2`上新增包内SegmentClassicLauncherOperationCodec及OperationIo，字节依赖已本地提交`90a0f1a0cf`、未push；作为既定v2/专用Ctl的必要接线，尚未接入launcher或发行实际受理。独立UWCLO001报文头16字节（magic/schema1/kind/flags0/正文长度），GREETING与STOP各带非零episode，HANDOFF另带非零bindingId，REPLY仅ACCEPTED/REJECTED；最大48字节，不携私钥、可签facts或drain结果。固定头全部验证后才分配固定正文，截断/尾随/未知码/非法identity拒绝；旧HELLO/START不能互解为操作。所有episode值仍为数据，后续原owner必须关联真实unit/Process并拒绝旧episode，不以codec解析成功授予操作。
 
 OperationIo只在原owner已登记的一个非阻塞Unix channel与专用selector上工作；一个原absolute deadline贯穿connect或整个帧，固定头通过前不按声明长度分配。不会自动替换/重连channel，不建立线程、认证root、创建endpoint或提交业务操作；EOF/超时/中断后资源仍归原owner实际关闭，中断flag保持。selector短等待仅推进这条原连接，不能复用为通用RPC或业务事件循环。后续listener/Ctl还须核验固定路径父链/实际对象、kernel peer UID/PID和原Main出生，单命令/连接、预算、原owner关闭图及STOP/HANDOFF竞争均未接通。
 

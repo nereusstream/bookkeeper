@@ -78,6 +78,8 @@ systemd实际取证入口裁决：规划会话2026-11-01采用固定`/usr/bin/sy
 
 操作字节接线WIP：父88802b2be2上新增包内UWCLO001 codec（16字节头/最大48字节、同episode greeting/STOP/HANDOFF/受理状态）及原Unix channel/专用selector的同absolute deadline字节交换。原codec四项通过；首轮I/O因fixture叶子过长四error，短叶子修正后两类八项实际全部通过，原失败保存。只有字节及私有真实socket证据，未认证root或接入launcher/Ctl/v2/实际受理，不提升任何Gate；正式Linux资格及systemctl冷读继续依原规划边界实施，详见startup-readiness对应节。
 
+固定CLI query局部实现：父90a0f1a0cf上包内SegmentClassicSystemdQuery已实现固定argv/40个命名属性的有界纯数据解析，以及原Process/两条fixed consumer/原三pipe首次关闭的真实资源owner。每实例一次query，空环境/根cwd/关闭stdin；stdout64KiB、stderr16KiB，超限继续排空但观察永久失败，超时/中断不取消原进程或提升迟到结果。原launcher在initialize前的CLI依赖批准、最多一个活动query和同episode失败保留仍待v2接线。3项data及前后两组7项实际通过；实际子JVM仅验证pipe/exit/overflow/late资源行为，Mac生产Owner拒绝，真实Linux systemctl未执行。最终仅一词注释样式修正，原7项不移绑；类收集前两阶段遗漏producer class、最终补采实际7个class的证据限度由startup-readiness对应节记录。RAT/TLA/性能未执行，各整体Gate仍OPEN，持续目标active。
+
 运行方式：按当前持续目标的执行约束，本会话是唯一实施入口，使用 `gpt-6.1-sol` / `xhigh`（极高）；不启动子agent、explorer/worker、第二编码CLI或另一实施会话，不恢复旧实施会话编码。2026-10-25的多agent授权保留为历史，当前执行按本条收束。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 仅做总体规划与只读检查，其用户已另行指定 `gpt-6-astra` / `xhigh`；规划裁决不构成第二实施入口。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
 
 SDK接入方式：按用户2026-10-25答复，首版采用显式 Profile create/open，先接CLOSED只读open与实际排空。默认Classic行为和缺少可信Profile环境时的拒绝保持；这不授予same-ledger writer takeover。继续实现public create时，必须持有自身取得的原子fresh reservation/lifecycle birth，不把control的matching READY续接当作新writer发行。
