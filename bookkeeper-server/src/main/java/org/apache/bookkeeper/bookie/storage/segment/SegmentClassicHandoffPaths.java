@@ -89,6 +89,11 @@ final class SegmentClassicHandoffPaths {
         if (!path.equals(path.toRealPath())) {
             throw new IOException("Handoff path must contain no symbolic aliases");
         }
+        return loadingIdentity(path);
+    }
+
+    /** Raw leaf identity only. The Linux loading observer must validate each original parent before using it. */
+    static Identity loadingIdentity(Path path) throws IOException {
         try {
             Map<String, Object> attributes = Files.readAttributes(path, "unix:*", LinkOption.NOFOLLOW_LINKS);
             return new Identity(((Number) attributes.get("dev")).longValue(),

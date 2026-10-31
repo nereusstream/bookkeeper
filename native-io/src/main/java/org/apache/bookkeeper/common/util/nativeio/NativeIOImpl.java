@@ -94,6 +94,25 @@ public class NativeIOImpl implements NativeIO {
     }
 
     @Override
+    public SymbolicLinkObservation observeSymbolicLink(String path) throws NativeIOException {
+        try {
+            var result = NativeIOJni.observeSymbolicLink(path);
+            if (result == null) {
+                throw new NativeIOException("Unknown native symbolic-link observation outcome");
+            }
+            return result;
+        } catch (IllegalArgumentException invalid) {
+            var failure = new NativeIOException("Invalid native symbolic-link observation");
+            failure.initCause(invalid);
+            throw failure;
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Symbolic-link observation is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
     public boolean hasExtendedAcl(String path) throws NativeIOException {
         try {
             int result = NativeIOJni.hasExtendedAcl(path);

@@ -720,6 +720,20 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## Linux 声明加载路径的物理观察
+
+2026-11-01在父`33353b2ad6571c4566c2342a68d00576c4f8f98b`上，按规划会话只读裁决，在原SegmentClassicLaunchTrust增加包内Loading路径观察；它只核验声明alias、目录、config/cache存在或缺失和interpreter入口，返回原物理身份/缺失位置及流式父链摘要。逐段验证root或原owner的真实父目录、ACL及替换权限，再处理已声明链接；未声明/不符owner/多链接/错误target/循环或超限拒绝，目标文件仍单独走原hash/ELF合同。缺失只接受原始NoSuchFileException，且实际存在的父目录不允许其他主体创建；不把不可读、错误或悬空链接当缺失。整组观察两次必须相同，不循环刷绿，也不把A/B相同当作原子或连续保护证明。摘要只比较同进程观察，不是持久或签名编码；流式处理不保留无界父链列表。普通checked、根/key/recipe/一般文件的禁止别名及regular/dir ACL语义保持。
+
+窄NativeIO.observeSymbolicLink返回复制的原始target byte[]和无跟随身份；复用受控JNI，固定lstat→readlink→lstat，比较dev/inode/type/owner/group/nlink/size/mtime/ctime，不比较atime；4097-byte固定buffer检测4096-byte上限，拒绝截断、未知结果/平台/文件系统/缺符号，不open/dup/close或跟随最终target。Linux支持的本地文件系统白名单排除procfs magic link，完整生产profile仍限实际ext4及既有Linux资格；Mac APFS/HFS只作组件观察，不取得Linux资格。普通Linux symlink mode0777不按regular文件写权限解释，绝不把hasExtendedAcl(symlink)的拒绝转换成无ACL。trust严格UTF8且与声明原UTF8 bytes相同后，才按批准规则解析target；一般路径读取入口不扩张。
+
+初始native8项为7通过/1 Linux条件跳过，server三类43项全部通过；最终native/readlink/ACL/rename三类16项为15通过/1 proc magic-link的Linux条件跳过，server trust/program/deployment/materials/publication/preload六类67项全部通过、0失败/错误/跳过。覆盖实际相对多跳/loader叶链接、目录缺失层级、错误presence/target、未知和悬空链接、世界可写sticky父目录下不可接受的缺失、同字节alias替换、实际路径调用体挂起时close等待/重入拒绝及旧无别名文件读取仍拒绝。四阶段各1415项输入分别核验原快照或父Git字节，无缺失/错配；最终八个代码源与通过样式和最终native/server输入完全一致。首次两处Java长行样式失败已修正、最终Spotless/Checkstyle退出0；不存在的测试名曾在Maven前被选择预检拒绝，未计为测试执行，原记录保留。
+
+host release和Linux x86_64交叉check初始/最终各退出0；只对新增Rust函数格式化并检查退出0，不把它扩成全Rust样式结论。最终Mac JNI SHA-256为`75a9e733c7e0635960eafb590bc9a7d6d6f41b52e8dd2270f8484edf9b7bf44c`。另有四个真实独立JVM探针均退出0：原始非法UTF8 target和含重复斜线的relative target原字节保留、trust严格拒绝非法目标、前一精确JNI的新符号缺失拒绝而原open/close保持；class/source/native精确绑定保留。Mac文件系统创建4096字节target被errno63拒绝，未取得该内核边界阳性，Java4096/4097边界是纯数据验证。build.rs在构建后从已验证不变的父Git字节补存，另外三个原生输入在各次构建前快照；不把晚采样伪称原始快照。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-paths-evidence-33353b2a`保留各原source/class/XML、命令、库、失败及探针结果。终态RAT退出1，原431项未批准路径及父333字节不变，扫描前排除用户PDF。两次独立lsof及原inode/SHA/硬链接检查后，清理四个Maven raw scope的8目录/26文件路径/1,584,691逻辑字节，归档原硬链接保留、regular-file数据块回收0；清理四个任务自有Cargo target的194目录/894文件/182,334,563逻辑字节，物理回收未测；原始探针fixture另清理1目录/2 symlink/1 regular file/21逻辑字节，原目标hex和结果保留。共享target、工具链和用户文件未清理。
+
+当前仍是包内物理来源观察，不是完整候选目录枚举、ld.so config/cache解释、hwcap选择或传递依赖闭合；没有从这些结果签发Installed/START/Unix资格，也尚未接入launcher qualified启动。Linux实际运行阳性、service/target新schema、cgroup/dropper/v2启动/UDS/Ctl和各整体Gate仍OPEN/NOT_EXECUTED，本增量无TLA/性能；完整16步目标active，默认OFF/SYSTEM/PARK及disabled不变。
+
 ## Linux 最终文件的原句柄摘要与 ELF 观察
 
 2026-11-01在父`0882733b0a8ba7466590ca95606bb224cf6d316f`上，SegmentClassicLaunchTrust复用原保护路径/ACL、固定owner、单链接、mode、长度、父链、流式SHA-256和SegmentOwnedFiles首次关闭合同。v1原程序角色与向量不变；包内Linux文件适配支持真实零长度配置，不借用JDK角色。ELF元数据与摘要使用同一原FileChannel，检查读取和关闭后的deadline、路径对象及父链；任何读取/解析/关闭失败保留在原launcherFailure。外部close等待实际读取体退出，重入drain拒绝，首次关闭失败不重试或伪称排空。返回值只包含观察身份及元数据，不产生Installed、START或Unix资格。

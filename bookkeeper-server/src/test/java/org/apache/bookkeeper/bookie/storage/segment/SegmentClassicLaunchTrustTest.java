@@ -41,11 +41,14 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.commons.lang3.SystemUtils;
 import org.junit.Before;
@@ -97,6 +100,175 @@ public class SegmentClassicLaunchTrustTest {
         Path directory = Files.createDirectory(root.resolve("launcher"));
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
         return directory;
+    }
+
+    private static SegmentClassicLinuxDeployment.Loading loading(Path interpreter,
+            List<SegmentClassicLinuxDeployment.Alias> aliases,
+            List<SegmentClassicLinuxDeployment.Directory> directories,
+            List<SegmentClassicLinuxDeployment.Requirement> configuration) {
+        return new SegmentClassicLinuxDeployment.Loading(0, 0, interpreter,
+                aliases.stream().sorted(Comparator.comparing(a -> a.link().toString())).toList(),
+                directories.stream().sorted(Comparator.comparing(d -> d.path().toString())).toList(),
+                configuration.stream().sorted(Comparator.comparing(c -> c.path().toString())).toList(),
+                List.of(), List.of());
+    }
+
+    @Test
+    public void loadingPathsObserveActualRelativeMultiHopAliasesDirectoriesAndProtectedAbsence() throws Exception {
+        Path physical = Files.createDirectory(root.resolve("lib-real"));
+        Files.setPosixFilePermissions(physical, PosixFilePermissions.fromString("rwx------"));
+        Path file = physical.resolve("ld-real.so");
+        write(file, new byte[]{7});
+        Path first = Files.createSymbolicLink(root.resolve("lib"), Path.of("lib-link"));
+        Path second = Files.createSymbolicLink(root.resolve("lib-link"), Path.of("lib-real"));
+        Path leaf = Files.createSymbolicLink(physical.resolve("ld.so"), Path.of("ld-real.so"));
+        var input = loading(first.resolve("ld.so"), List.of(
+                new SegmentClassicLinuxDeployment.Alias(first, "lib-link"),
+                new SegmentClassicLinuxDeployment.Alias(second, "lib-real"),
+                new SegmentClassicLinuxDeployment.Alias(leaf, "ld-real.so")), List.of(
+                new SegmentClassicLinuxDeployment.Directory(first, true),
+                new SegmentClassicLinuxDeployment.Directory(first.resolve("hwcaps"), false),
+                new SegmentClassicLinuxDeployment.Directory(first.resolve("hwcaps/v4"), false)), List.of(
+                new SegmentClassicLinuxDeployment.Requirement(root.resolve("loader.cache"), -1)));
+        var owner = owner();
+        owner.initialize();
+        var paths = owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline());
+        assertEquals(8, paths.size());
+        var interpreter = paths.get(paths.size() - 1);
+        assertEquals(file, interpreter.resolved());
+        assertEquals(SegmentClassicHandoffPaths.fileIdentity(file), interpreter.identity());
+        assertTrue(paths.stream().anyMatch(o -> o.absentAt() != null
+                && o.absentAt().equals(physical.resolve("hwcaps"))));
+        assertThrows(IOException.class, owner::installed);
+        var aliasFile = new SegmentClassicLinuxDeployment.File(first.resolve("ld.so"),
+                SegmentClassicLinuxDeployment.Role.LOADER_CONFIG, 1, SegmentClassicHandoff.digest(new byte[]{7}));
+        assertThrows(IOException.class, () -> owner.verifyLinuxFile(aliasFile, SegmentClassicLinuxElfTest.deadline()));
+        assertTrue(owner.closeAndDrain().drained());
+        assertEquals(Path.of("lib-link"), Files.readSymbolicLink(first));
+    }
+
+    @Test
+    public void loadingPathsRejectFalseAbsenceUnknownLinksWrongTargetsAndUnprotectedParents() throws Exception {
+        Path file = root.resolve("interpreter");
+        write(file, new byte[]{7});
+        Path alias = Files.createSymbolicLink(root.resolve("alias"), Path.of("interpreter"));
+        Path dangling = Files.createSymbolicLink(root.resolve("dangling"), Path.of("missing"));
+        Path unsafe = Files.createDirectory(root.resolve("unsafe"));
+        Files.setAttribute(unsafe, "unix:mode", 01777);
+        var inputs = List.of(
+                loading(file, List.of(), List.of(), List.of(new SegmentClassicLinuxDeployment.Requirement(file, -1))),
+                loading(file, List.of(), List.of(), List.of(
+                        new SegmentClassicLinuxDeployment.Requirement(dangling, -1))),
+                loading(alias, List.of(), List.of(), List.of()),
+                loading(alias, List.of(new SegmentClassicLinuxDeployment.Alias(alias, "different")),
+                        List.of(), List.of()),
+                loading(file, List.of(), List.of(new SegmentClassicLinuxDeployment.Directory(unsafe, true)), List.of()),
+                loading(file, List.of(), List.of(), List.of(
+                        new SegmentClassicLinuxDeployment.Requirement(unsafe.resolve("missing"), -1))));
+        for (var input : inputs) {
+            var owner = owner();
+            owner.initialize();
+            var failure = assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline()));
+            assertThrows(IOException.class, owner::parsed);
+            var result = owner.closeAndDrain();
+            assertSame(failure, result.launcherFailure());
+            assertTrue(result.drained());
+        }
+        assertTrue(Files.isSymbolicLink(alias));
+        assertTrue(Files.isSymbolicLink(dangling));
+        assertEquals(01777, ((Number) Files.getAttribute(unsafe, "unix:mode")).intValue() & 07777);
+    }
+
+    @Test
+    public void replacementOfOriginalAliasAfterNativeObservationCannotReturnMatchingPathFacts() throws Exception {
+        Path file = root.resolve("interpreter");
+        write(file, new byte[]{7});
+        Path alias = Files.createSymbolicLink(root.resolve("alias"), Path.of("interpreter"));
+        var input = loading(alias, List.of(new SegmentClassicLinuxDeployment.Alias(alias, "interpreter")),
+                List.of(), List.of());
+        var owner = owner();
+        owner.initialize();
+        var reads = new AtomicInteger();
+        try (var calls = mockStatic(Files.class, invocation -> {
+            if (invocation.getMethod().getName().equals("readAttributes")
+                    && alias.equals(invocation.getArgument(0)) && reads.incrementAndGet() == 2) {
+                Files.delete(alias);
+                Files.createSymbolicLink(alias, Path.of("interpreter"));
+            }
+            return invocation.callRealMethod();
+        })) {
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertTrue(reads.get() >= 2);
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
+    @Test(timeout = 30000)
+    public void loadingPathBodyOwnsExternalCloseAndCannotDrainItself() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        var input = loading(key, List.of(), List.of(), List.of());
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var read = new FutureTask<>(() -> {
+            try (var calls = mockStatic(Files.class, invocation -> {
+                if (invocation.getMethod().getName().equals("readAttributes")
+                        && key.equals(invocation.getArgument(0))) {
+                    assertThrows(IllegalStateException.class, owner::closeAndDrain);
+                    entered.countDown();
+                    assertTrue(release.await(5, TimeUnit.SECONDS));
+                }
+                return invocation.callRealMethod();
+            })) {
+                return owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline());
+            }
+        });
+        var close = new FutureTask<>(owner::closeAndDrain);
+        Thread reader = new Thread(read);
+        Thread closer = new Thread(close);
+        try {
+            reader.start();
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            closer.start();
+            await().atMost(5, TimeUnit.SECONDS).until(() -> closer.getState() == Thread.State.BLOCKED);
+            assertThrows(TimeoutException.class, () -> close.get(20, TimeUnit.MILLISECONDS));
+            release.countDown();
+            assertEquals(1, read.get(5, TimeUnit.SECONDS).size());
+            assertTrue(close.get(5, TimeUnit.SECONDS).drained());
+        } finally {
+            release.countDown();
+            reader.join(5000);
+            if (closer.getState() != Thread.State.NEW) {
+                closer.join(5000);
+            }
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertFalse(reader.isAlive());
+        assertFalse(closer.isAlive());
+    }
+
+    /** Raw invalid UTF-8 is retained by JNI and must fail the declaration reader, never replacement-decode. */
+    public static final class RawAliasProbe {
+        public static void main(String[] args) throws Exception {
+            var fixture = new SegmentClassicLaunchTrustTest();
+            fixture.temporary.create();
+            try {
+                fixture.fixture();
+                var owner = fixture.owner();
+                owner.initialize();
+                Path alias = Path.of(args[0]);
+                var input = loading(fixture.key,
+                        List.of(new SegmentClassicLinuxDeployment.Alias(alias, "\uFFFD\uFFFD/./a//b")),
+                        List.of(), List.of());
+                assertThrows(java.nio.charset.CharacterCodingException.class,
+                        () -> owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(owner.closeAndDrain().drained());
+            } finally {
+                fixture.temporary.delete();
+            }
+        }
     }
 
     private SegmentClassicLinuxDeployment.File linuxFile(Path path, SegmentClassicLinuxDeployment.Role role,

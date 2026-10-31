@@ -48,6 +48,8 @@ class NativeIOJni {
 
     static native int renameNoReplace(String source, String target) throws NativeIOException;
 
+    static native NativeIO.SymbolicLinkObservation observeSymbolicLink(String path) throws NativeIOException;
+
     static native int hasExtendedAcl(String path) throws NativeIOException;
 
     static native long[] currentProcessCredentials() throws NativeIOException;

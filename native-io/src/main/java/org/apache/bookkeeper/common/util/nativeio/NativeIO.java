@@ -38,6 +38,26 @@ public interface NativeIO {
         }
     }
 
+    /** Raw ordinary-link facts only; callers separately protect and bind the original physical parent chain. */
+    record SymbolicLinkObservation(long device, long inode, long uid, long gid, int mode, long links, long size,
+                                  long modifiedSeconds, long modifiedNanos, long changedSeconds, long changedNanos,
+                                  byte[] target) {
+        public SymbolicLinkObservation {
+            if (uid < 0 || uid >= 0xffff_ffffL || gid < 0 || gid >= 0xffff_ffffL
+                    || (mode & 0170000) != 0120000 || links < 1 || target == null || target.length < 1
+                    || target.length > 4096 || size != target.length || modifiedNanos < 0
+                    || modifiedNanos >= 1_000_000_000L || changedNanos < 0 || changedNanos >= 1_000_000_000L) {
+                throw new IllegalArgumentException("Invalid bounded ordinary symbolic-link observation");
+            }
+            target = target.clone();
+        }
+
+        @Override
+        public byte[] target() {
+            return target.clone();
+        }
+    }
+
     /** Read-only observations of this process; never proof of saved credentials or startup permission. */
     record ProcessCredentials(long realUid, long effectiveUid, long realGid, long effectiveGid,
                               List<Long> supplementaryGroups) {
@@ -120,6 +140,15 @@ public interface NativeIO {
      */
     default boolean hasExtendedAcl(String path) throws NativeIOException {
         throw new NativeIOException("Native ACL presence query is unsupported");
+    }
+
+    /**
+     * Fixed lstat/readlink/lstat observation on a supported local filesystem; target bytes are never decoded,
+     * followed or normalized. At most 4096 bytes, no descriptors or permission changes. Unavailable rejects.
+     * This is not atomic and cannot replace caller protection of the original parent chain.
+     */
+    default SymbolicLinkObservation observeSymbolicLink(String path) throws NativeIOException {
+        throw new NativeIOException("Native symbolic-link observation is unsupported");
     }
 
     /** Direct getuid/geteuid/getgid/getegid/getgroups observations; no external PID or credential input. */

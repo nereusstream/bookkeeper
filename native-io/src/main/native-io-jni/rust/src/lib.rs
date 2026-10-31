@@ -597,6 +597,138 @@ fn acl_presence(path: &CString) -> Result<bool, libc::c_int> {
     Ok(present)
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ordinary_symbolic_link(path: &CString) -> Result<(libc::stat, Vec<u8>), libc::c_int> {
+    let errno = || {
+        std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO)
+    };
+    let bytes = path.as_bytes();
+    if !bytes.starts_with(b"/") {
+        return Err(libc::EINVAL);
+    }
+    let mut before: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::lstat(path.as_ptr(), &mut before) } != 0 {
+        return Err(errno());
+    }
+    if before.st_mode & libc::S_IFMT != libc::S_IFLNK {
+        return Err(libc::EINVAL);
+    }
+    let slash = bytes.iter().rposition(|&b| b == b'/').unwrap();
+    let parent = CString::new(&bytes[..slash.max(1)]).map_err(|_| libc::EINVAL)?;
+    let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(parent.as_ptr(), &mut filesystem) } != 0 {
+        return Err(errno());
+    }
+    #[cfg(target_os = "linux")]
+    if !matches!(
+        filesystem.f_type as u64,
+        0xef53 | 0x58465342 | 0x9123683e | 0x01021994
+    ) {
+        // In particular, do not treat procfs magic links as ordinary filesystem aliases.
+        return Err(libc::EOPNOTSUPP);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let name = unsafe { std::ffi::CStr::from_ptr(filesystem.f_fstypename.as_ptr()) }.to_bytes();
+        if filesystem.f_flags & libc::MNT_LOCAL as u32 == 0 || (name != b"apfs" && name != b"hfs") {
+            return Err(libc::EOPNOTSUPP);
+        }
+    }
+    let mut target = [0_u8; 4097];
+    let count = unsafe { libc::readlink(path.as_ptr(), target.as_mut_ptr().cast(), target.len()) };
+    if count < 0 {
+        return Err(errno());
+    }
+    if count == 0 || count > 4096 {
+        return Err(libc::ENAMETOOLONG);
+    }
+    let mut after: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::lstat(path.as_ptr(), &mut after) } != 0 {
+        return Err(errno());
+    }
+    if before.st_dev != after.st_dev
+        || before.st_ino != after.st_ino
+        || before.st_mode != after.st_mode
+        || before.st_uid != after.st_uid
+        || before.st_gid != after.st_gid
+        || before.st_nlink != after.st_nlink
+        || before.st_size != after.st_size
+        || before.st_mtime != after.st_mtime
+        || before.st_mtime_nsec != after.st_mtime_nsec
+        || before.st_ctime != after.st_ctime
+        || before.st_ctime_nsec != after.st_ctime_nsec
+    {
+        return Err(libc::EAGAIN);
+    }
+    if before.st_size != count as libc::off_t {
+        return Err(libc::EINVAL);
+    }
+    Ok((before, target[..count as usize].to_vec()))
+}
+
+/// Raw ordinary symlink bytes and the compared no-follow identity; no handles, target lookup or retry.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_observeSymbolicLink(
+    mut env: JNIEnv,
+    _class: JClass,
+    path: JString,
+) -> jni::sys::jobject {
+    let path = match native_path(&mut env, &path) {
+        Some(path) => path,
+        None => return ptr::null_mut(),
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let (identity, target) = match ordinary_symbolic_link(&path) {
+            Ok(observed) => observed,
+            Err(errno) => {
+                throw_exception_with_error_code(
+                    &mut env,
+                    "Ordinary symbolic-link observation failed",
+                    errno,
+                );
+                return ptr::null_mut();
+            }
+        };
+        let bytes = match env.byte_array_from_slice(&target) {
+            Ok(value) => value,
+            Err(_) => return ptr::null_mut(),
+        };
+        match env.new_object(
+            "org/apache/bookkeeper/common/util/nativeio/NativeIO$SymbolicLinkObservation",
+            "(JJJJIJJJJJJ[B)V",
+            &[
+                (identity.st_dev as jlong).into(),
+                (identity.st_ino as jlong).into(),
+                (identity.st_uid as jlong).into(),
+                (identity.st_gid as jlong).into(),
+                (identity.st_mode as jint).into(),
+                (identity.st_nlink as jlong).into(),
+                (identity.st_size as jlong).into(),
+                (identity.st_mtime as jlong).into(),
+                (identity.st_mtime_nsec as jlong).into(),
+                (identity.st_ctime as jlong).into(),
+                (identity.st_ctime_nsec as jlong).into(),
+                (&bytes).into(),
+            ],
+        ) {
+            Ok(value) => value.into_raw(),
+            Err(_) => ptr::null_mut(),
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Ordinary symbolic-link observation unsupported",
+            libc::ENOSYS,
+        );
+        ptr::null_mut()
+    }
+}
+
 /// Read-only ACL presence, not Unix trust. Unsupported or unreadable is never converted to absence.
 #[no_mangle]
 pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_hasExtendedAcl(

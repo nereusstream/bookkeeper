@@ -28,18 +28,23 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileTime;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.PublicKey;
 import java.security.spec.X509EncodedKeySpec;
+import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.jar.Attributes;
@@ -96,6 +101,12 @@ final class SegmentClassicLaunchTrust {
             parents = List.copyOf(parents);
         }
     }
+
+    enum LinuxPathKind { ALIAS, DIRECTORY, CONFIGURATION, INTERPRETER }
+
+    /** Bounded path facts only. The chain digest compares two observations, never startup authority. */
+    record LinuxPathObservation(LinuxPathKind kind, Path entry, Path resolved, Path absentAt, Identity identity,
+                                SegmentClassicHandoff.Digest chain) { }
 
     /** Only the fixed-root UID-0 loader can create this provenance; a fixture cannot promote parsed values. */
     static final class Installed {
@@ -448,7 +459,165 @@ final class SegmentClassicLaunchTrust {
                 auxiliaryReads.size(), auxiliaryCloseFailure, programFailure, configurationFailure, launcherFailure);
     }
 
-    /** Same original file owner as v1. Loading aliases and dependency selection are checked separately. */
+    /** Declared loading paths only; compares actual protected components without granting startup authority. */
+    synchronized List<LinuxPathObservation> verifyLinuxLoadingPaths(SegmentClassicLinuxDeployment.Loading loading,
+                                                                   long deadlineNanos) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadlineNanos);
+            var first = observeLinuxLoadingPaths(loading, deadlineNanos);
+            if (!first.equals(observeLinuxLoadingPaths(loading, deadlineNanos))) {
+                throw new IOException("Original Linux loading paths changed between observations");
+            }
+            files.requireHealthy();
+            requireTime(deadlineNanos);
+            return first;
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private List<LinuxPathObservation> observeLinuxLoadingPaths(SegmentClassicLinuxDeployment.Loading loading,
+                                                               long deadline) throws IOException {
+        Map<Path, SegmentClassicLinuxDeployment.Alias> aliases = new HashMap<>();
+        for (var alias : loading.aliases()) {
+            aliases.put(alias.link(), alias);
+        }
+        var result = new ArrayList<LinuxPathObservation>();
+        for (var alias : loading.aliases()) {
+            result.add(observeLinuxPath(LinuxPathKind.ALIAS, alias.link(), aliases, true, deadline));
+        }
+        for (var directory : loading.directories()) {
+            result.add(observeLinuxPath(LinuxPathKind.DIRECTORY, directory.path(), aliases, directory.present(),
+                    deadline));
+        }
+        for (var configuration : loading.configuration()) {
+            result.add(observeLinuxPath(LinuxPathKind.CONFIGURATION, configuration.path(), aliases,
+                    configuration.file() >= 0, deadline));
+        }
+        result.add(observeLinuxPath(LinuxPathKind.INTERPRETER, loading.interpreter(), aliases, true, deadline));
+        return List.copyOf(result);
+    }
+
+    private LinuxPathObservation observeLinuxPath(LinuxPathKind kind, Path entry,
+            Map<Path, SegmentClassicLinuxDeployment.Alias> aliases, boolean present, long deadline) throws IOException {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (GeneralSecurityException unavailable) {
+            throw new IOException("Required loading path SHA-256 is unavailable", unavailable);
+        }
+        Path value = entry;
+        int followed = 0;
+        resolve: while (true) {
+            requireTime(deadline);
+            Path current = value.getRoot();
+            Identity parent = checked(current);
+            observeLinuxComponent(digest, current, parent.parent());
+            for (int i = 0; i < value.getNameCount(); i++) {
+                requireTime(deadline);
+                current = current.resolve(value.getName(i));
+                Identity raw;
+                try {
+                    raw = SegmentClassicHandoffPaths.loadingIdentity(current);
+                } catch (NoSuchFileException missing) {
+                    if (present || (parent.mode() & 022) != 0) {
+                        throw new IOException("Linux path missing or absence parent permits creation", missing);
+                    }
+                    requireTime(deadline);
+                    return new LinuxPathObservation(kind, entry, value, current, null,
+                            new SegmentClassicHandoff.Digest(digest.digest()));
+                }
+                if ((parent.mode() & 022) != 0 && ((parent.mode() & 01000) == 0
+                        || raw.uid() != parent.uid() && raw.uid() != ownerUid)) {
+                    throw new IOException("Linux loading parent permits replacement by an untrusted principal");
+                }
+                boolean last = i == value.getNameCount() - 1;
+                if ((raw.mode() & 0170000) == 0120000) {
+                    var alias = aliases.get(current);
+                    if (alias == null || raw.uid() != ownerUid || raw.links() != 1 || !present && last) {
+                        throw new IOException("Undeclared, untrusted or falsely absent Linux loading alias");
+                    }
+                    readLoadingAlias(current, raw, alias, deadline);
+                    observeLinuxComponent(digest, current, raw);
+                    byte[] target = alias.target().getBytes(StandardCharsets.UTF_8);
+                    digest.update(ByteBuffer.allocate(4).putInt(target.length).array());
+                    digest.update(target);
+                    if (kind == LinuxPathKind.ALIAS && last) {
+                        if (!current.equals(entry)) {
+                            throw new IOException("Declared alias leaf must use its original physical parent");
+                        }
+                        return new LinuxPathObservation(kind, entry, current, null, raw,
+                                new SegmentClassicHandoff.Digest(digest.digest()));
+                    }
+                    if (++followed > aliases.size()) {
+                        throw new IOException("Cyclic or excessive Linux loading alias expansion");
+                    }
+                    value = alias.resolvedTarget().resolve(current.relativize(value)).normalize();
+                    if (value.getParent() == null || value.toString().getBytes(StandardCharsets.UTF_8).length > 4096) {
+                        throw new IOException("Expanded Linux loading path exceeds its fixed capacity");
+                    }
+                    continue resolve;
+                }
+                Identity identity = checked(current);
+                if (!identity.equals(raw) || !last && !identity.directory()) {
+                    throw new IOException("Linux loading component changed or is not a directory");
+                }
+                observeLinuxComponent(digest, current, last ? identity : identity.parent());
+                if (last) {
+                    if (!present || kind == LinuxPathKind.ALIAS
+                            || (kind == LinuxPathKind.DIRECTORY) != identity.directory()
+                            || (identity.mode() & 022) != 0) {
+                        throw new IOException("Linux loading leaf differs from its presence, kind or protection rule");
+                    }
+                    requireTime(deadline);
+                    return new LinuxPathObservation(kind, entry, current, null, identity,
+                            new SegmentClassicHandoff.Digest(digest.digest()));
+                }
+                parent = identity;
+            }
+            throw new IOException("Linux loading entry must name an explicit non-root path");
+        }
+    }
+
+    private static void observeLinuxComponent(MessageDigest digest, Path path, Identity identity) {
+        // A same-process comparison, not a persistent/signable encoding. No unbounded parent list is retained.
+        for (String value : List.of(path.toString(), identity.toString())) {
+            byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+            digest.update(ByteBuffer.allocate(4).putInt(bytes.length).array());
+            digest.update(bytes);
+        }
+    }
+
+    private void readLoadingAlias(Path path, Identity before, SegmentClassicLinuxDeployment.Alias alias,
+                                  long deadline) throws IOException {
+        requireTime(deadline);
+        var link = nativeIo.observeSymbolicLink(path.toString());
+        requireTime(deadline);
+        Identity observed;
+        try {
+            observed = new Identity(link.device(), link.inode(), link.uid(), link.gid(), link.mode(), link.links(),
+                    link.size(), FileTime.from(Instant.ofEpochSecond(link.modifiedSeconds(), link.modifiedNanos())),
+                    FileTime.from(Instant.ofEpochSecond(link.changedSeconds(), link.changedNanos())), false);
+        } catch (java.time.DateTimeException unsupported) {
+            throw new IOException("Unsupported native loading alias timestamp", unsupported);
+        }
+        byte[] target = link.target();
+        String text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(target)).toString();
+        if (!before.equals(observed) || !before.equals(SegmentClassicHandoffPaths.loadingIdentity(path))
+                || !text.equals(alias.target())
+                || !MessageDigest.isEqual(target, alias.target().getBytes(StandardCharsets.UTF_8))) {
+            throw new IOException("Original loading alias identity or exact target bytes differ from declaration");
+        }
+        requireTime(deadline);
+    }
+
+    /** Same fixed file owner as v1; no loading alias is accepted by the ordinary file reader. */
     synchronized LinuxFileObservation verifyLinuxFile(SegmentClassicLinuxDeployment.File file, long deadlineNanos)
             throws IOException {
         requireReady();
