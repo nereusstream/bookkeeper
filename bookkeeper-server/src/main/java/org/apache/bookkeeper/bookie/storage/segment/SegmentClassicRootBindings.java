@@ -47,7 +47,7 @@ import org.apache.bookkeeper.discover.ZKRegistrationManager;
  */
 final class SegmentClassicRootBindings implements AutoCloseable {
     static final String FILE_NAME = "route-claim-binding";
-    private static final String LOCK_NAME = "route-claim.lock";
+    static final String LOCK_NAME = "route-claim.lock";
     private static final int MAX_MARKER_BYTES = 16384;
     private static final int MAX_COOKIE_BYTES = 1024 * 1024;
     private static final long MAGIC = 0x5557435242303031L; // UWCRB001

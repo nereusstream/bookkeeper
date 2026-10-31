@@ -1048,3 +1048,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-31接续[既有 Bookie control 的文件 owner 与 guard 终结](rfcs/unified-wal/implementation/local-storage/README.md#既有-bookie-control-的文件-owner-与-guard-终结)：显式包内control子owner先登记后打开已有图，manifest/header/checkpoint/rotation临时及常驻fd共用首次关闭结果；所有文件实际排空后才释放control guard，原操作异常与资源终态分离。实际验证由该节拥有。本子项不发行外部authority或完整导入许可；公开SegmentClassicBootstrap、固定可信交接loader、完整Arena核验/Classic恢复桥及离线封口仍OPEN，完整目标active，Main/G1/full-bytes与16步Gate不提升，默认OFF/SYSTEM/PARK及disabled保持。
+
+
+2026-10-31接续[离线 bootstrap 的全部 Arena 输入核验](rfcs/unified-wal/implementation/local-storage/README.md#离线-bootstrap-的全部-arena-输入核验)：已有共同manifest的全部Arena guard、身份/几何及原control只读历史核验已接包内资源子owner；缺失/错配不补建，成功分配后FREE或空session历史仍拒绝，纯维护/原条件失败历史可接受。检查fd实际关闭后才释放Arena guard，并排除与共同根guard的物理别名。实际验证与输入绑定由canonical节拥有。本子项不发行commissioning/旧服务隔离authority或readiness；公开bootstrap/可信loader/Classic严格恢复桥与完整离线封口仍OPEN，完整目标active，Main/G1/full-bytes/生产Gate不提升，默认OFF/SYSTEM/PARK及disabled保持。

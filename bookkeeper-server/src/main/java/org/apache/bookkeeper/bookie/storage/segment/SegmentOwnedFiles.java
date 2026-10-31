@@ -25,6 +25,7 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.nio.file.Files;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -45,9 +46,27 @@ final class SegmentOwnedFiles {
     private final Object gate = new Object();
     private final Set<Entry> entries = new LinkedHashSet<>();
     private final Map<Thread, Integer> openingThreads = new IdentityHashMap<>();
+    private final List<Path> protectedLocks;
     private int opening;
     private volatile boolean closing;
     private volatile Throwable closeFailure;
+
+    SegmentOwnedFiles() {
+        this(List.of());
+    }
+
+    /** Closing another descriptor for a POSIX lock's inode can release that process's exclusion. */
+    SegmentOwnedFiles(List<Path> protectedLocks) {
+        this.protectedLocks = List.copyOf(protectedLocks);
+    }
+
+    private void requireDistinctFromLocks(Path path) throws IOException {
+        for (Path lock : protectedLocks) {
+            if (Files.isSameFile(path, lock)) {
+                throw new IOException("Checked file aliases a protected lock: " + path);
+            }
+        }
+    }
 
     static FileChannel open(SegmentOwnedFiles owner, Path path, OpenOption... options) throws IOException {
         if (owner == null) {
@@ -55,6 +74,7 @@ final class SegmentOwnedFiles {
         }
         Entry entry = owner.begin(path);
         try {
+            owner.requireDistinctFromLocks(path);
             entry.resource = FileChannel.open(path, options);
             entry.wrapper = owner.new Channel(entry);
             return entry.wrapper;
@@ -70,6 +90,7 @@ final class SegmentOwnedFiles {
         }
         Entry entry = owner.begin(path);
         try {
+            owner.requireDistinctFromLocks(path);
             entry.resource = FileChannel.open(path, options, attributes);
             entry.wrapper = owner.new Channel(entry);
             return entry.wrapper;

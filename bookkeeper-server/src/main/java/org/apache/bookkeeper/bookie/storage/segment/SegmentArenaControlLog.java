@@ -394,6 +394,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private final FileChannel originalChannel;
     private final SegmentDataFileLock writerLock;
     private final boolean inspectionOnly;
+    private final SegmentOwnedFiles inspectionFiles;
     private SegmentControlRotation.Root rotationRoot;
     private Thread rotating;
     private Generation physicalGeneration = LOG_GENERATION;
@@ -435,6 +436,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private SegmentArenaControlLog(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                    long maxLogBytes, SegmentFileIo io,
                                    FileChannel channel, SegmentDataFileLock writerLock, boolean inspectionOnly) {
+        this(config, identity, maxLogBytes, io, channel, writerLock, inspectionOnly, null);
+    }
+
+    private SegmentArenaControlLog(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SegmentFileIo io, FileChannel channel, SegmentDataFileLock writerLock,
+            boolean inspectionOnly, SegmentOwnedFiles inspectionFiles) {
+        this.inspectionFiles = inspectionFiles;
         this.config = config;
         this.identity = identity;
         this.maxLogBytes = maxLogBytes;
@@ -553,6 +561,51 @@ final class SegmentArenaControlLog implements AutoCloseable {
             return new Inspection(observed.physicalGeneration.value(), observed.appliedThrough,
                     observed.checkpointGeneration, observed.sessionEpoch, observed.sessionOpen,
                     observed.currentAllocations.size(), observed.retiredBlockCount(), List.copyOf(quarantine));
+        }
+    }
+
+    /** The bootstrap child already holds both existing guards and owns every reader, including failed opens. */
+    static void requireUnusedInspection(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SegmentOwnedFiles files) throws IOException {
+        Objects.requireNonNull(files, "files");
+        if (identity.manifest() == null || identity.bookieScope() || maxLogBytes < FIRST_RECORD + 192) {
+            throw new IllegalArgumentException("Bounded manifest Arena inspection required");
+        }
+        identity.requireStoredManifest(config, -4, files);
+        Path path = config.directory().resolve("arena-control");
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Required Arena control must be an existing regular file");
+        }
+        FileChannel original = SegmentOwnedFiles.open(files, path,
+                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
+        // No mutable authority or raw handle escapes; the original owner retains all readers on any failure.
+        var observed = new SegmentArenaControlLog(config, identity, maxLogBytes, new SegmentFileIo(),
+                original, null, true, files);
+        observed.validateStorageFiles(identity);
+        observed.recover(identity);
+        observed.requireUnused();
+        if (observed.channel != original) {
+            observed.channel.close();
+        }
+        original.close();
+        files.requireHealthy();
+    }
+
+    private void requireUnused() throws IOException {
+        if (sessionEpoch != 0 || sessionOpen || allocationHighWatermark != 0 || !allocations.isEmpty()
+                || !retiredSlots.isEmpty() || !retiredRanges.isEmpty() || !selectedMoves.isEmpty()) {
+            throw new IOException("Classic bootstrap requires an Arena never admitted to DATA use");
+        }
+        for (boolean quarantine : durableQuarantine) {
+            if (quarantine) {
+                throw new IOException("Classic bootstrap cannot accept a quarantined Arena");
+            }
+        }
+        for (AppliedOperation operation : appliedOperations.values()) {
+            if (!(operation.command() instanceof CheckpointCommit)
+                    && (operation.status() == Status.APPLIED_DURABLE || operation.status() == Status.ALREADY_DURABLE)) {
+                throw new IOException("Classic bootstrap cannot accept applied DATA history");
+            }
         }
     }
 
@@ -1826,8 +1879,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
         for (int slot = 0; slot < 2; slot++) {
             SegmentControlRotation.Root root;
             try {
-                SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.ARENA, slot);
-                root = SegmentControlRotation.publication(config, SegmentControlFormat.Owner.ARENA, slot);
+                SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.ARENA, slot, inspectionFiles);
+                root = SegmentControlRotation.publication(config, SegmentControlFormat.Owner.ARENA,
+                        slot, inspectionFiles);
             } catch (IOException invalidPublication) {
                 // An invalid page is optional. A selected generation's journal is never optional.
                 continue;
@@ -1842,8 +1896,12 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (rotationRoot != null) {
             Path path = SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA,
                     rotationRoot.generation());
-            channel = inspectionOnly ? FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
-                    : FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE,
+            if (inspectionFiles != null && !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IOException("Required rotated Arena control must be an existing regular file");
+            }
+            channel = inspectionOnly
+                    ? SegmentOwnedFiles.open(inspectionFiles, path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
+                    : SegmentOwnedFiles.open(inspectionFiles, path, StandardOpenOption.READ, StandardOpenOption.WRITE,
                             LinkOption.NOFOLLOW_LINKS);
             ByteBuffer header = ByteBuffer.allocate(4096);
             SegmentFileIo.readFully(channel, header, 0);
@@ -1868,9 +1926,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
             boolean valid = false;
             try {
                 SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.publication(
-                        config, SegmentControlFormat.Owner.ARENA, slot);
+                        config, SegmentControlFormat.Owner.ARENA, slot, inspectionFiles);
                 if (rotationRoot.equals(SegmentControlRotation.publication(config,
-                        SegmentControlFormat.Owner.ARENA, slot))) {
+                        SegmentControlFormat.Owner.ARENA, slot, inspectionFiles))) {
                     publications[slot] = reference;
                     valid = true;
                 }
@@ -1970,7 +2028,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             if (apply(command).ordinal() + 1 != operation.status()) {
                 throw new IOException("Arena checkpoint conditional result mismatch");
             }
-        });
+        }, inspectionFiles);
         if (checkpointGeneration != reference.generation() - 1) {
             throw new IOException("Arena checkpoint does not retain its committed predecessor");
         }
@@ -2004,7 +2062,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         for (int slot = 0; slot < publications.length; slot++) {
             try {
                 publications[slot] = SegmentControlCheckpoint.publication(
-                        config, SegmentControlFormat.Owner.ARENA, slot);
+                        config, SegmentControlFormat.Owner.ARENA, slot, inspectionFiles);
             } catch (IOException incompletePublication) {
                 // The immutable identity page remains required; an incomplete publication uses another slot or log.
             }
@@ -2053,7 +2111,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             SegmentControlCheckpoint.Reference reference = checkpoints.get(index);
             try {
                 if (!reference.equals(SegmentControlCheckpoint.publication(
-                        config, SegmentControlFormat.Owner.ARENA, reference.slot()))) {
+                        config, SegmentControlFormat.Owner.ARENA, reference.slot(), inspectionFiles))) {
                     continue;
                 }
                 restoreSnapshot(reference);
@@ -2115,7 +2173,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Isolated storage file must be a regular file: " + path);
         }
-        try (FileChannel input = FileChannel.open(path, StandardOpenOption.READ)) {
+        try (FileChannel input = SegmentOwnedFiles.open(inspectionFiles, path,
+                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
             boolean superblock = fileId == -1 || fileId == -2;
             if ((superblock && (input.size() < 4096 || input.size() > 12288))
                     || (!superblock && expectedSize < 0 && input.size() < 4096)
