@@ -82,6 +82,95 @@ fn throw_exception(env: &mut JNIEnv, message: &str) {
 // JNI exported functions
 // ============================================================================
 
+// Read UTF-16 directly: the usual lossy JavaStr conversion must never rename a different path.
+fn rename_path(env: &mut JNIEnv, path: &JString) -> Option<CString> {
+    if path.is_null() {
+        throw_exception_with_error_code(env, "Null atomic rename path", libc::EINVAL);
+        return None;
+    }
+    let units = unsafe {
+        // These functions are mandatory in the JNI 1.1 interface supplied by the current JVM.
+        let raw = env.get_raw();
+        let length = (**raw).GetStringLength.unwrap()(raw, path.as_raw());
+        if env.exception_check().unwrap_or(true) {
+            return None;
+        }
+        let mut units = vec![0_u16; length as usize];
+        (**raw).GetStringRegion.unwrap()(raw, path.as_raw(), 0, length, units.as_mut_ptr());
+        if env.exception_check().unwrap_or(true) {
+            return None;
+        }
+        units
+    };
+    let value = match String::from_utf16(&units) {
+        Ok(value) => value,
+        Err(_) => {
+            throw_exception_with_error_code(
+                env,
+                "Invalid atomic rename path encoding",
+                libc::EINVAL,
+            );
+            return None;
+        }
+    };
+    match CString::new(value) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            throw_exception_with_error_code(env, "NUL in atomic rename path", libc::EINVAL);
+            None
+        }
+    }
+}
+
+/// One atomic no-replace rename only. The caller owns file close and directory durability.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_renameNoReplace(
+    mut env: JNIEnv,
+    _class: JClass,
+    source: JString,
+    target: JString,
+) -> jint {
+    let source = match rename_path(&mut env, &source) {
+        Some(path) => path,
+        None => return -1,
+    };
+    let target = match rename_path(&mut env, &target) {
+        Some(path) => path,
+        None => return -1,
+    };
+    #[cfg(target_os = "linux")]
+    let result = unsafe {
+        // Do not add a newer glibc symbol requirement to the existing JNI library.
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Atomic no-replace rename unsupported",
+            libc::ENOSYS,
+        );
+        return -1;
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        if result != 0 {
+            throw_exception_with_errno(&mut env, "Atomic no-replace rename failed");
+            return -1;
+        }
+        0
+    }
+}
+
 /// Class: org.apache.bookkeeper.common.util.nativeio.NativeIOJni
 /// Method: open
 /// Signature: (Ljava/lang/String;II)I

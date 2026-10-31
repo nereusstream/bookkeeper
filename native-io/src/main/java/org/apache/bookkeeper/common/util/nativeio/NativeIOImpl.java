@@ -74,4 +74,20 @@ public class NativeIOImpl implements NativeIO {
     public long pread(int fd, long pointer, long size, long offset) throws NativeIOException {
         return NativeIOJni.pread(fd, pointer, size, offset);
     }
+
+    @Override
+    public int renameNoReplace(String source, String target) throws NativeIOException {
+        try {
+            int result = NativeIOJni.renameNoReplace(source, target);
+            if (result != 0) {
+                throw new NativeIOException("Atomic rename returned an unknown native outcome");
+            }
+            return result;
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException(
+                    "Atomic rename without replacement is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
 }

@@ -50,6 +50,8 @@ class NativeIOJni {
 
     static native int close(int fd) throws NativeIOException;
 
+    static native int renameNoReplace(String source, String target) throws NativeIOException;
+
     static {
         String explicitPath = NativeIOLibraryPath.configuredLibraryPath();
         if (explicitPath != null) {

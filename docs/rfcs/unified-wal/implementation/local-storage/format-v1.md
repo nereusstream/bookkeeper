@@ -380,3 +380,6 @@ proof payload依次为operation、u16成员数及带权限的成员数组、u32�
 
 
 材料读取子owner采用的已有supervisor文件名为`scope-<hex>.lock`，对应intent为同stem加`.retirement`。hex是以下字节的SHA-256小写十六进制：ASCII `BookKeeper/CommonClassicSupervisor/v1\0`（实际末尾NUL）、clusterId的u32 UTF-8字节长度及原字节、原clusterBirthZxid:i64、BookieId的u32 UTF-8字节长度及原字节。所有整数big-endian；同cluster出生与Bookie的binding/episode/PID变化不改变名称。外部部署必须固定同一受保护supervisor目录，不能为重试换目录。loader子owner不创建这些文件；launcher的create-only intent、完整写入/force/真实close/不可覆盖发布与目录同步尚待实现。属性检查及fd/guard终态的当前边界由[交接材料 I/O owner 与 supervisor 终态](../startup-readiness/README.md#交接材料-io-owner-与-supervisor-终态)拥有。
+
+
+原子发布沿用既有临时字节与final文件，不新增proof/native编码。只使用native-io窄renameNoReplace：Linux renameat2(RENAME_NOREPLACE)，macOS renamex_np(RENAME_EXCL)；temp与final同一受保护目录并持原supervisor guard，不用hardlink或可能覆盖的move。写入、force、首次native close成功后才改名，再目录同步及真实资源终结。successor仅核验同操作原final；临时文件无论是否完整/已签名都不自动promote或补签。rename后dirsync失败保留原失败和final，不回滚/重签；重启后final确实存在且所有原scope/物理/签名/retirement/当前metadata/Unix条件通过时，可完成恢复同步后复用，不追认原调用成功。final缺失/损坏/冲突拒绝。当前原语及未完成的publisher接合边界见[固定交接的原子不覆盖改名](../startup-readiness/README.md#固定交接的原子不覆盖改名)。

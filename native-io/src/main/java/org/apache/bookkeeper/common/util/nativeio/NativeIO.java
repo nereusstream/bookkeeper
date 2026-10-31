@@ -64,4 +64,15 @@ public interface NativeIO {
     long pread(int fd, long pointer, long size, long offset) throws NativeIOException;
 
     int close(int fd) throws NativeIOException;
+
+    /**
+     * Atomically rename without replacing any existing target, including a symbolic link.
+     * This operation neither synchronizes the directory nor retries or copies across file systems.
+     * Older implementations reject this explicit capability without performing I/O.
+     *
+     * @return zero only when the operating system reported a successful rename
+     */
+    default int renameNoReplace(String source, String target) throws NativeIOException {
+        throw new NativeIOException("Atomic rename without replacement is unsupported");
+    }
 }

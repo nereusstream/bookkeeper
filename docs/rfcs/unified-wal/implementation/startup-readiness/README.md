@@ -682,3 +682,21 @@ supervisor文件名按clusterId、原cluster birth和Bookie固定，绑定UUID�
 首次style因一个测试lambda的换行退出1；修正后最终spotless/checkstyle退出0，最终源码81项重新执行并通过。首轮8项、格式前81项与最终81项分别保留原源码/日志/XML/class，首次style失败与最终成功单独留档，不将早期PASS移绑后续字节。RAT实际退出1，431条未批准路径集合及各项字节与父提交/前次封存一致，没有新增或解决；受保护PDF在扫描前排除，不宣称全量CI通过。
 
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-sources-evidence-78a31704`保留上述原阶段与终态；最终声明1329项源码/资源及十项文档输入，native runner实际1302项，相关class快照108项，其余源码逐项核对父Git blob。实际终态、归档硬链接/内容/身份及两次独立lsof检查后，仅移除本次三个raw scope的六个目录、26个文件路径，共3,904,880逻辑字节；归档保留，regular-file数据块回收为0。PDF、默认目录及其他任务产物未触碰。本增量只交付真实来源读取及其资源子owner，完整交接loader/issuer/Unix隔离、公开bootstrap与Classic恢复封口仍OPEN。
+
+
+## 固定交接的原子不覆盖改名
+
+2026-10-31在父源码`facda20fcc9ef6ce31202fee1ddcdc02a1d53648`上，接续规划裁决，为固定retirement/proof发布增加既有native-io的窄renameNoReplace依赖。NativeIO新增默认拒绝，旧方法集合的Java实现无需增加实现即可明确拒绝新能力；NativeIOImpl/NativeIOJni及原Rust库增加一次原子改名。Linux走libc架构常量与syscall(RENAME_NOREPLACE)，不直接链接较新的glibc renameat2符号；macOS走renamex_np(RENAME_EXCL)。不增加通用flags、I/O后端、客户端线程或自动重试，不复制/删除源、fsync或打开业务fd；只有原生明确返回0才成功，其余保留真实errno或明确报能力不可用。旧库缺符号/装载失败不回退到Java move或hardlink。JNI直接读取UTF-16并严格转换，NUL、null或未配对surrogate拒绝，不经lossy转换改名另一路径；有效非BMP/非ASCII路径保持。
+
+原语成功只表示名字原子切换，不等于证明已经持久发布。完整顺序仍为同一已核验受保护目录及supervisor guard下：owned temp完整写入→force→首次native close明确成功→renameNoReplace→父目录同步及对应资源终结。该owned publisher接合、dirsync/close故障与完整issuer仍须完成；源码中的原语不签名、不产生旧服务DRAINED、可采用session或readiness。操作系统语义依据[Java Files.move](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/Files.html#move(java.nio.file.Path,java.nio.file.Path,java.nio.file.CopyOption...))、[Linux rename](https://man7.org/linux/man-pages/man2/rename.2.html)、[Apple rename](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/man/man2/rename.2)及[fsync](https://man7.org/linux/man-pages/man2/fsync.2.html)。Java ATOMIC_MOVE本身不承诺已存在目标必定拒绝，本流程不采用该替代算法。
+
+successor恢复规则已由指定规划会话收紧：只有temp，即使完整且签名正确，也不补签或自动promote；只允许核验复用同操作原final。rename成功但目录同步失败，原调用仍失败/未决，不删除final、回滚或重签。进程退出后若实际final存在且单硬链接/身份/签名/retirement/当前native与requirements/Unix条件均通过，可完成必要的目录恢复同步后复用，不追认原调用成功。final缺失/损坏/错操作则拒绝，不能从temp重建或删除冲突目标。原材料I/O和真实冷读子owner尚未接成这个完整恢复流程，不把本次原语验收当作publisher或bootstrap验收。Main/G1/full-bytes/生产Gate保持OPEN，完整16步目标active，默认OFF/SYSTEM/PARK及disabled保持。
+
+
+本机实际构建并加载macOS arm64 host JNI，runtime记录文件系统为APFS、实现来自本工作区native-io/target/classes，使用原有显式library-path覆盖。原库和新库均以Cargo.lock锁定依赖构建，JNI导出集合保留原十项，仅新增renameNoReplace。首次offline构建因本地缺libc缓存实际退出101，没有产生库或测试结果；锁定fetch后原库与新库分别构建成功，Cargo.lock/toml/build.rs/pom未改。Rust编译两次均保留原九条warning，不借本任务清理；Java样式及Rust格式检查均退出0。两个独立JVM分别用原版精确JNI库核验旧open/close仍能调用，而新符号缺失必须返回带UnsatisfiedLinkError原因的NativeIOException，源与目标不发生改名，无其他算法回退。
+
+首组NativeIORenameNoReplaceTest八项与既有NativeIOLibraryPathTest十二项共20项通过；增加实际filesystem/implementation/library来源输出后，最终在同一显式JNI库上执行这两类及SegmentClassicHandoffTest、SegmentClassicHandoffMaterialsTest、SegmentProfileInitialSocketClientTest的三个owned SDK/服务/重启/handoff方法：五类39项全通过，0失败/错误/跳过。完整Maven命令、原源码和实际加载库路径/SHA由证据目录各阶段inputs.json保存。新八项覆盖旧Java方法集合默认拒绝、原native open/fsync/close、有效非BMP与非ASCII路径、null/NUL/未配对UTF-16拒绝且不改名replacement路径、已有普通文件/目录/有效及悬空symlink保持原inode与内容、缺失源保留errno、两个真实JVM竞争仅一个成功、改名前后实际进程cut后只留下完整单链接文件。原语cut不执行目录同步，不称作持久发布或真实掉电证明。原20项、最终39项及两次旧库子进程均保留各自原源码/class/库绑定，不把早期PASS移绑新增来源输出后的字节。
+
+本次仅实际验证macOS/APFS；Linux运行及交叉编译、跨文件系统的真实调用仍NOT_EXECUTED，不从源码分支或一般errno处理推定通过。RAT实际退出1，431条既有未批准路径及字节与父提交/前次封存相同，无新增或解决；PDF扫描前排除，不宣称全量CI通过。完整owned temp→force/首次close→rename→dirsync发布图、目录同步/关闭失败、successor恢复同步、实际issuer/Unix隔离与离线bootstrap继续OPEN。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/atomic-publication-evidence-facda20f`保留原版/新JNI库、源、命令、实际日志/XML、导出对照、运行时来源与兼容probe。最终声明1340项源码/资源及十项文档输入，本次Maven实际来源清单同为1340项，相关class快照78项。实际终态与两次独立lsof及硬链接/字节/身份核对后，仅移除本次两个raw scope的四个目录、13个文件路径，共897,482逻辑字节；归档硬链接保留，regular-file数据块回收0。另核对两个固定JNI库与实际构建输出完全相同且独立保留后，清理本次两处私有Rust target的86目录、340文件、85,641,851逻辑字节；原库/新库、锁定依赖、源码/日志/指纹及测试证据保留，不将路径逻辑字节当作卷空间回收量。用户PDF、默认目录及其他任务产物未触碰。

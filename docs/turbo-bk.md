@@ -1063,3 +1063,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-31接续[Classic bootstrap 的真实冷读与借用回调排空](rfcs/unified-wal/implementation/startup-readiness/README.md#classic-bootstrap-的真实冷读与借用回调排空)：显式native manager桥按真实相同client/固定namespace借用冷读owner，重新读取原native/cluster/Cookie及commissioned requirements并核对共同incarnation/完整manifest与两类registration缺席；超时/中断后仍保留实际回调，首次错误与真实drain分开，未决不关闭caller资源。验证与原始来源由canonical拥有。只返回冷读数据，不发行session；完整loader/launcher/UID隔离、公开bootstrap及Classic恢复封口仍OPEN，完整目标active，Main/G1/full-bytes/生产Gate和默认OFF/SYSTEM/PARK及disabled保持。
+
+
+2026-10-31接续[固定交接的原子不覆盖改名](rfcs/unified-wal/implementation/startup-readiness/README.md#固定交接的原子不覆盖改名)：既有native-io增加窄renameNoReplace及旧实现默认拒绝，Linux/macOS使用原生不覆盖操作，无move/hardlink fallback；完整发布仍须owned write/force/首次close成功与目录同步。successor只验证原final，不promote temp；rename后dirsync失败不得回滚或重签。实际原语验证由canonical拥有，owned publisher/issuer/Unix隔离/完整bootstrap仍OPEN，目标active，Main/G1/full-bytes/生产Gate及默认OFF/SYSTEM/PARK和disabled保持。
