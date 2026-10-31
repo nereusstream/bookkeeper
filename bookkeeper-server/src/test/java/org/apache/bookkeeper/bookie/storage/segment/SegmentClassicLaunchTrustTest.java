@@ -80,6 +80,19 @@ public class SegmentClassicLaunchTrustTest {
         Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-r--r--"));
     }
 
+    private static Path rawLink(Path path, String target) throws Exception {
+        // Path.of removes trailing '/', so use the host symlink command to retain those actual target bytes.
+        Process process = new ProcessBuilder("/bin/ln", "-s", target, path.toString())
+                .redirectErrorStream(true).start();
+        String output;
+        try (var stream = process.getInputStream()) {
+            output = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertEquals(output, 0, process.waitFor());
+        assertEquals(target, Files.readSymbolicLink(path).toString());
+        return path;
+    }
+
     @Before
     public void fixture() throws Exception {
         uid = new UnixSystem().getUid();
@@ -371,6 +384,111 @@ public class SegmentClassicLaunchTrustTest {
                 assertTrue(owner.closeAndDrain().drained());
             } finally {
                 fixture.temporary.delete();
+            }
+        }
+    }
+
+    @Test
+    public void loadingPathDotDotFollowsTheOriginalLinkBeforeChoosingThePhysicalParent() throws Exception {
+        Path remote = Files.createDirectory(root.resolve("remote"));
+        Files.createDirectory(remote.resolve("deep"));
+        Path expected = remote.resolve("interpreter");
+        write(expected, new byte[]{7});
+        write(root.resolve("interpreter"), new byte[]{8});
+        Path jump = Files.createSymbolicLink(root.resolve("jump"), Path.of("remote/deep"));
+        Path entry = Files.createSymbolicLink(root.resolve("entry"), Path.of("jump/../interpreter"));
+        String absoluteTarget = root + "/jump/../interpreter";
+        Path absolute = Files.createSymbolicLink(root.resolve("absolute"), Path.of(absoluteTarget));
+        for (Path interpreter : List.of(entry, absolute)) {
+            assertEquals(expected, interpreter.toRealPath());
+            var input = loading(interpreter, List.of(
+                    new SegmentClassicLinuxDeployment.Alias(absolute, absoluteTarget),
+                    new SegmentClassicLinuxDeployment.Alias(entry, "jump/../interpreter"),
+                    new SegmentClassicLinuxDeployment.Alias(jump, "remote/deep")), List.of(), List.of());
+            var owner = owner();
+            owner.initialize();
+            try {
+                var paths = owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline());
+                assertEquals(expected, paths.get(paths.size() - 1).resolved());
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void loadingPathCannotEraseNonDirectoriesMissingOrUndeclaredComponents() throws Exception {
+        write(root.resolve("interpreter"), new byte[]{7});
+        Files.createSymbolicLink(root.resolve("undeclared"), Path.of("."));
+        var targets = List.of("interpreter/../interpreter", "interpreter/./../interpreter", "interpreter/",
+                "missing/../interpreter", "undeclared/../interpreter");
+        for (int i = 0; i < targets.size(); i++) {
+            String target = targets.get(i);
+            Path entry = rawLink(root.resolve("entry" + i), target);
+            if (i < 4) {
+                assertThrows(IOException.class, () -> Files.readAttributes(entry, "unix:mode"));
+            }
+            var input = loading(entry, List.of(new SegmentClassicLinuxDeployment.Alias(entry, target)),
+                    List.of(), List.of());
+            var owner = owner();
+            owner.initialize();
+            try {
+                assertThrows(target, IOException.class,
+                        () -> owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline()));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void loadingPathCanRevisitAnAliasWithADifferentSuffixAndRequireATrailingDirectory() throws Exception {
+        Path directory = Files.createDirectory(root.resolve("directory"));
+        Path expected = directory.resolve("interpreter");
+        write(expected, new byte[]{7});
+        Path again = Files.createSymbolicLink(root.resolve("again"), Path.of("."));
+        String target = "again/again/directory/";
+        Path entry = rawLink(root.resolve("entry"), target);
+        var input = loading(entry.resolve("interpreter"), List.of(
+                new SegmentClassicLinuxDeployment.Alias(again, "."),
+                new SegmentClassicLinuxDeployment.Alias(entry, target)),
+                List.of(new SegmentClassicLinuxDeployment.Directory(entry, true)), List.of());
+        assertEquals(expected, entry.resolve("interpreter").toRealPath());
+        var owner = owner();
+        owner.initialize();
+        try {
+            var paths = owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline());
+            assertEquals(expected, paths.get(paths.size() - 1).resolved());
+            assertEquals(directory, paths.get(paths.size() - 2).resolved());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void loadingPathCountsEveryFollowAndRejectsTheFortyFirstWithoutChangingTheAliasTable() throws Exception {
+        Path expected = root.resolve("interpreter");
+        write(expected, new byte[]{7});
+        var aliases = new java.util.ArrayList<SegmentClassicLinuxDeployment.Alias>();
+        for (int i = 0; i < 41; i++) {
+            String target = i == 40 ? "interpreter" : String.format("chain%02d", i + 1);
+            Path entry = Files.createSymbolicLink(root.resolve(String.format("chain%02d", i)), Path.of(target));
+            aliases.add(new SegmentClassicLinuxDeployment.Alias(entry, target));
+        }
+        for (int first : List.of(1, 0)) {
+            var input = loading(root.resolve(String.format("chain%02d", first)), aliases, List.of(), List.of());
+            var owner = owner();
+            owner.initialize();
+            try {
+                if (first == 1) {
+                    var paths = owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline());
+                    assertEquals(expected, paths.get(paths.size() - 1).resolved());
+                } else {
+                    assertThrows(IOException.class,
+                            () -> owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline()));
+                }
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
             }
         }
     }

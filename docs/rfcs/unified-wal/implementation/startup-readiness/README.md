@@ -720,6 +720,16 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## Linux alias 的逐组件解析修复
+
+2026-11-01在父`3cdcfd3fc80ecd856b09fa72f4997756e498f8dc`上修正声明resolver和原trust owner提前normalize的问题：相对target从原链接物理父目录开始，绝对target从根开始；按原顺序展开每个组件，前置链接解析后才处理后续`.`/`..`，保留尾随`/`的目录要求。实际owner观察所有经过的目录、链接及其原始target bytes，包括后来被`..`消去的组件；中间普通文件、缺失、未知链接或权限/ACL失败不再被词法消去。新组件在相关I/O前还须与原字符串形成的UTF8 file:///路径字节等价，避免JNU替换后自洽。原父链保护、lstat/readlink/JNI身份、deadline、A/B观察及原关闭合同保持；最终显式加载叶仍不接受根目录，ALIAS叶只观察而不跟随。
+
+每个完整pathname最多跟随40次，alias表仍最多128项；同一alias在不同剩余后缀下可以合法重复，第41次才拒绝。展开队列按4096 UTF8路径上限限制，最多40次扩展及原组件数约束处理量，实际owner逐组件检查原绝对deadline。此规则依据[Linux路径解析合同](https://man7.org/linux/man-pages/man7/path_resolution.7.html)和规划会话裁决，不把macOS内核的链接遍历上限说成Linux实测。构造时去掉错误的词法self比较，真实cycle仍由follow上限拒绝；原序列化、摘要域和固定向量不变，声明模型本身不证明中间文件类型、真实路径或资格。
+
+先在原实现执行六项反例，实际5 failure、1 error：jump/../interpreter选错真实文件、file/..被消去、合法重复alias误拒以及声明/owner第41次仍接受。修后两类47项通过；再补同一用例中的绝对target、词法self但真实非self、根上方的`..`，最终串行八类96项全部通过、0失败/错误/跳过，独立Spotless/Checkstyle退出0。真实临时文件/JNI覆盖相对与绝对target对照系统toRealPath、file/..、file/.、原始尾随slash、缺失/未知组件、重复链接及40/41边界；尾随slash用实际host symlink命令保留原bytes，避免Path.of先删除slash。40/41是组件算法的host JNI观察，不是Linux完整lookup/启动验证。旧部署及launcher字节向量继续通过，早期47项不移绑后来源码。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-alias-evidence-3cdcfd3f`保留三阶段原source/class/log/XML，每阶段1418项输入逐项匹配原快照或父Git字节，最终代码与通过test/style快照一致。RAT退出1，原431项路径及父3cdc字节不变、本次无新增，扫描前排除用户PDF。三raw scope经两次独立lsof及inode/SHA/归档硬链接核验后仅清理6目录、21文件路径、1,532,702逻辑字节，原证据保留、regular-file数据块回收0；共享target/精确JNI库未动。本增量无Rust重建、模型或性能结论；conf/include、新schema/provider原字串、完整候选/选择/诊断及qualified启动仍OPEN，Linux接受路径NOT_EXECUTED，完整16步active，默认OFF/SYSTEM/PARK与disabled不变。
+
 ## Linux new-cache 的有界原句柄解析
 
 2026-11-01在父`80185847481561cd46896d60b7a6856b239945d5`上增加包内SegmentClassicLinuxCache数据观察，并接原trust的LOADER_CACHE角色：读取前按48 bytes…16MiB拒绝不支持长度，SHA与cache metadata使用同一原FileChannel，继续原路径/父链/ACL/单链接/身份、absolute deadline与首次关闭合同。v1程序角色解释与读取保持，新的cache字段不产生Installed/START/Unix资格；fixture仍拒绝Installed。只读positional读取，不移动/关闭调用方channel，不mmap或调用helper/loader/ldconfig，也不选实际winner。

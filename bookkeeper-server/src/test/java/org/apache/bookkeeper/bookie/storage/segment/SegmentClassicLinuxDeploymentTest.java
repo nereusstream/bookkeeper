@@ -85,6 +85,35 @@ public class SegmentClassicLinuxDeploymentTest {
     }
 
     @Test
+    public void declaredResolverKeepsDotDotUntilEarlierAliasesHaveBeenExpanded() {
+        var aliases = List.of(new Alias(Path.of("/entry"), "jump/../interpreter"),
+                new Alias(Path.of("/jump"), "remote/deep"));
+        assertEquals(Path.of("/remote/interpreter"), SegmentClassicLinuxDeployment.resolve(Path.of("/entry"),
+                aliases));
+        assertEquals(Path.of("/interpreter"), SegmentClassicLinuxDeployment.resolve(Path.of("/again/again/interpreter"),
+                List.of(new Alias(Path.of("/again"), "."))));
+        assertEquals(Path.of("/remote/entry"), SegmentClassicLinuxDeployment.resolve(Path.of("/entry"),
+                List.of(new Alias(Path.of("/entry"), "jump/../entry"),
+                        new Alias(Path.of("/jump"), "remote/deep"))));
+        assertEquals(Path.of("/interpreter"), SegmentClassicLinuxDeployment.resolve(Path.of("/entry"),
+                List.of(new Alias(Path.of("/entry"), "/../../interpreter"))));
+    }
+
+    @Test
+    public void declaredResolverUsesFortyFollowsRegardlessOfTheNumberOfDeclaredAliases() {
+        var aliases = new ArrayList<Alias>();
+        for (int i = 0; i < 41; i++) {
+            aliases.add(new Alias(Path.of(String.format("/chain%02d", i)),
+                    i == 40 ? "interpreter" : String.format("chain%02d", i + 1)));
+        }
+        assertEquals(Path.of("/interpreter"), SegmentClassicLinuxDeployment.resolve(Path.of("/chain01"), aliases));
+        assertThrows(IllegalArgumentException.class,
+                () -> SegmentClassicLinuxDeployment.resolve(Path.of("/chain00"), aliases));
+        assertThrows(IllegalArgumentException.class, () -> SegmentClassicLinuxDeployment.resolve(Path.of("/cycle"),
+                List.of(new Alias(Path.of("/cycle"), "cycle"))));
+    }
+
+    @Test
     public void independentVectorHasOneCanonicalIdentityAndExplicitAbsenceRules() throws Exception {
         byte[] bytes = vector("classic-linux-deployment-v1");
         var d = original();

@@ -24,6 +24,7 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -35,6 +36,7 @@ import java.util.Set;
 record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loading loading,
         List<Command> startChain, List<Unit> units, int launcherUnit, Isolation isolation, Operations operations) {
     static final int MAX_BYTES = 1024 * 1024;
+    static final int MAX_ALIAS_FOLLOWS = 40;
     static final String PROFILE = "linux-x86_64-systemd-cgroup2-ext4-v1";
     private static final long MAGIC = 0x5557434c44303031L; // UWCLD001
     private static final byte[] DOMAIN = "BookKeeper/ControlledClassicLinuxDeployment/v1\0"
@@ -79,11 +81,6 @@ record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loadin
         Alias {
             absolute(link);
             text(target);
-            absolute(link.getParent().resolve(Path.of(target)).normalize());
-        }
-
-        Path resolvedTarget() {
-            return link.getParent().resolve(target).normalize();
         }
     }
 
@@ -555,8 +552,8 @@ record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loadin
     private static void requireLoading(List<File> files, Loading loading) {
         Set<Path> paths = new HashSet<>(files.stream().map(File::path).toList());
         for (Alias alias : loading.aliases()) {
-            if (!paths.add(alias.link()) || alias.link().equals(alias.resolvedTarget())) {
-                throw new IllegalArgumentException("Conflicting or self-referential system loading alias");
+            if (!paths.add(alias.link())) {
+                throw new IllegalArgumentException("Conflicting system loading alias");
             }
             resolve(alias.link(), loading.aliases());
         }
@@ -665,25 +662,61 @@ record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loadin
 
     private static Path resolve(Path path, List<Alias> aliases, Set<Path> used) {
         absolute(path);
-        Path value = path;
-        for (int attempt = 0; attempt <= aliases.size(); attempt++) {
+        Path current = path.getRoot();
+        var pending = new ArrayDeque<String>();
+        prependLoadingTarget(pending, path.toString());
+        int followed = 0;
+        while (!pending.isEmpty()) {
+            String component = pending.removeFirst();
+            if (component.equals(".")) {
+                continue;
+            }
+            if (component.equals("..")) {
+                current = current.getParent() == null ? current : current.getParent();
+                continue;
+            }
+            Path candidate = current.resolve(component);
             Alias selected = null;
             for (Alias alias : aliases) {
-                if (value.startsWith(alias.link()) && (selected == null
-                        || alias.link().getNameCount() < selected.link().getNameCount())) {
+                if (candidate.equals(alias.link())) {
                     selected = alias;
+                    break;
                 }
             }
             if (selected == null) {
-                return value;
+                current = candidate;
+                continue;
+            }
+            if (++followed > MAX_ALIAS_FOLLOWS) {
+                throw new IllegalArgumentException("Cyclic or excessive system loading alias expansion");
             }
             if (used != null) {
                 used.add(selected.link());
             }
-            value = selected.resolvedTarget().resolve(selected.link().relativize(value)).normalize();
-            absolute(value);
+            if (selected.target().startsWith("/")) {
+                current = path.getRoot();
+            }
+            prependLoadingTarget(pending, selected.target());
+            requireLoadingPathCapacity(current, pending);
         }
-        throw new IllegalArgumentException("Cyclic or non-terminating system loading alias chain");
+        return current;
+    }
+
+    /** Retain dot components and the directory traversal required by a raw trailing slash. */
+    static void prependLoadingTarget(ArrayDeque<String> pending, String target) {
+        String[] components = target.split("/", -1);
+        for (int i = components.length - 1; i >= 0; i--) {
+            if (!components[i].isEmpty()) {
+                pending.addFirst(components[i]);
+            } else if (i == components.length - 1) {
+                pending.addFirst(".");
+            }
+        }
+    }
+
+    static void requireLoadingPathCapacity(Path prefix, ArrayDeque<String> pending) {
+        String base = prefix.toString();
+        text(base + (base.endsWith("/") ? "" : "/") + String.join("/", pending));
     }
 
     private static void requireCommand(List<File> files, Command command) {

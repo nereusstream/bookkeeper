@@ -646,78 +646,112 @@ final class SegmentClassicLaunchTrust {
         } catch (GeneralSecurityException unavailable) {
             throw new IOException("Required loading path SHA-256 is unavailable", unavailable);
         }
-        Path value = entry;
+        requireTime(deadline);
+        requireUtf8LoadingPath(entry);
+        Path current = entry.getRoot();
+        Identity parent = checked(current);
+        observeLinuxComponent(digest, current, parent.parent());
+        var pending = new ArrayDeque<String>();
+        SegmentClassicLinuxDeployment.prependLoadingTarget(pending, entry.toString());
         int followed = 0;
-        resolve: while (true) {
+        while (!pending.isEmpty()) {
             requireTime(deadline);
-            requireUtf8LoadingPath(value);
-            Path current = value.getRoot();
-            Identity parent = checked(current);
-            observeLinuxComponent(digest, current, parent.parent());
-            for (int i = 0; i < value.getNameCount(); i++) {
-                requireTime(deadline);
-                current = current.resolve(value.getName(i));
-                Identity raw;
-                try {
-                    raw = SegmentClassicHandoffPaths.loadingIdentity(current);
-                } catch (NoSuchFileException missing) {
-                    if (present || (parent.mode() & 022) != 0) {
-                        throw new IOException("Linux path missing or absence parent permits creation", missing);
-                    }
-                    requireTime(deadline);
-                    return new LinuxPathObservation(kind, entry, value, current, null,
-                            new SegmentClassicHandoff.Digest(digest.digest()));
+            String component = pending.removeFirst();
+            if (component.equals(".") || component.equals("..")) {
+                if (component.equals("..") && current.getParent() != null) {
+                    current = current.getParent();
                 }
-                if ((parent.mode() & 022) != 0 && ((parent.mode() & 01000) == 0
-                        || raw.uid() != parent.uid() && raw.uid() != ownerUid)) {
-                    throw new IOException("Linux loading parent permits replacement by an untrusted principal");
+                parent = checked(current);
+                if (!parent.directory()) {
+                    throw new IOException("Linux loading dot component requires a directory");
                 }
-                boolean last = i == value.getNameCount() - 1;
-                if ((raw.mode() & 0170000) == 0120000) {
-                    var alias = aliases.get(current);
-                    if (alias == null || raw.uid() != ownerUid || raw.links() != 1 || !present && last) {
-                        throw new IOException("Undeclared, untrusted or falsely absent Linux loading alias");
-                    }
-                    readLoadingAlias(current, raw, alias, deadline);
-                    observeLinuxComponent(digest, current, raw);
-                    byte[] target = alias.target().getBytes(StandardCharsets.UTF_8);
-                    digest.update(ByteBuffer.allocate(4).putInt(target.length).array());
-                    digest.update(target);
-                    if (kind == LinuxPathKind.ALIAS && last) {
-                        if (!current.equals(entry)) {
-                            throw new IOException("Declared alias leaf must use its original physical parent");
-                        }
-                        return new LinuxPathObservation(kind, entry, current, null, raw,
-                                new SegmentClassicHandoff.Digest(digest.digest()));
-                    }
-                    if (++followed > aliases.size()) {
-                        throw new IOException("Cyclic or excessive Linux loading alias expansion");
-                    }
-                    value = alias.resolvedTarget().resolve(current.relativize(value)).normalize();
-                    if (value.getParent() == null || value.toString().getBytes(StandardCharsets.UTF_8).length > 4096) {
-                        throw new IOException("Expanded Linux loading path exceeds its fixed capacity");
-                    }
-                    continue resolve;
+                observeLinuxComponent(digest, current, pending.isEmpty() ? parent : parent.parent());
+                if (pending.isEmpty()) {
+                    return linuxLoadingLeaf(kind, entry, current, parent, present, digest, deadline);
                 }
-                Identity identity = checked(current);
-                if (!identity.equals(raw) || !last && !identity.directory()) {
-                    throw new IOException("Linux loading component changed or is not a directory");
-                }
-                observeLinuxComponent(digest, current, last ? identity : identity.parent());
-                if (last) {
-                    if (!present || kind == LinuxPathKind.ALIAS
-                            || (kind == LinuxPathKind.DIRECTORY) != identity.directory()
-                            || (identity.mode() & 022) != 0) {
-                        throw new IOException("Linux loading leaf differs from its presence, kind or protection rule");
-                    }
-                    requireTime(deadline);
-                    return new LinuxPathObservation(kind, entry, current, null, identity,
-                            new SegmentClassicHandoff.Digest(digest.digest()));
-                }
-                parent = identity;
+                continue;
             }
-            throw new IOException("Linux loading entry must name an explicit non-root path");
+            Path candidate = current.resolve(component);
+            String base = current.toString();
+            if (!candidate.equals(utf8LoadingPath(base + (base.endsWith("/") ? "" : "/") + component))) {
+                throw new IOException("Expanded Linux loading component differs from its original UTF-8 bytes");
+            }
+            requireUtf8LoadingPath(candidate);
+            Identity raw;
+            try {
+                raw = SegmentClassicHandoffPaths.loadingIdentity(candidate);
+            } catch (NoSuchFileException missing) {
+                if (present || (parent.mode() & 022) != 0) {
+                    throw new IOException("Linux path missing or absence parent permits creation", missing);
+                }
+                requireTime(deadline);
+                Path unresolved = pending.isEmpty() ? candidate
+                        : utf8LoadingPath(candidate + "/" + String.join("/", pending));
+                requireUtf8LoadingPath(unresolved);
+                return new LinuxPathObservation(kind, entry, unresolved, candidate, null,
+                        new SegmentClassicHandoff.Digest(digest.digest()));
+            }
+            if ((parent.mode() & 022) != 0 && ((parent.mode() & 01000) == 0
+                    || raw.uid() != parent.uid() && raw.uid() != ownerUid)) {
+                throw new IOException("Linux loading parent permits replacement by an untrusted principal");
+            }
+            boolean last = pending.isEmpty();
+            if ((raw.mode() & 0170000) == 0120000) {
+                var alias = aliases.get(candidate);
+                if (alias == null || raw.uid() != ownerUid || raw.links() != 1 || !present && last) {
+                    throw new IOException("Undeclared, untrusted or falsely absent Linux loading alias");
+                }
+                readLoadingAlias(candidate, raw, alias, deadline);
+                observeLinuxComponent(digest, candidate, raw);
+                byte[] target = alias.target().getBytes(StandardCharsets.UTF_8);
+                digest.update(ByteBuffer.allocate(4).putInt(target.length).array());
+                digest.update(target);
+                if (kind == LinuxPathKind.ALIAS && last) {
+                    if (!candidate.equals(entry)) {
+                        throw new IOException("Declared alias leaf must use its original physical parent");
+                    }
+                    return new LinuxPathObservation(kind, entry, candidate, null, raw,
+                            new SegmentClassicHandoff.Digest(digest.digest()));
+                }
+                if (++followed > SegmentClassicLinuxDeployment.MAX_ALIAS_FOLLOWS) {
+                    throw new IOException("Cyclic or excessive Linux loading alias expansion");
+                }
+                if (alias.target().startsWith("/")) {
+                    current = entry.getRoot();
+                    parent = checked(current);
+                    observeLinuxComponent(digest, current, parent.parent());
+                }
+                SegmentClassicLinuxDeployment.prependLoadingTarget(pending, alias.target());
+                try {
+                    SegmentClassicLinuxDeployment.requireLoadingPathCapacity(current, pending);
+                } catch (IllegalArgumentException excessive) {
+                    throw new IOException("Expanded Linux loading path exceeds its fixed capacity", excessive);
+                }
+                continue;
+            }
+            Identity identity = checked(candidate);
+            if (!identity.equals(raw) || !last && !identity.directory()) {
+                throw new IOException("Linux loading component changed or is not a directory");
+            }
+            observeLinuxComponent(digest, candidate, last ? identity : identity.parent());
+            if (last) {
+                return linuxLoadingLeaf(kind, entry, candidate, identity, present, digest, deadline);
+            }
+            current = candidate;
+            parent = identity;
         }
+        throw new IOException("Linux loading entry must name an explicit non-root path");
+    }
+
+    private static LinuxPathObservation linuxLoadingLeaf(LinuxPathKind kind, Path entry, Path resolved,
+            Identity identity, boolean present, MessageDigest digest, long deadline) throws IOException {
+        if (resolved.getParent() == null || !present || kind == LinuxPathKind.ALIAS
+                || (kind == LinuxPathKind.DIRECTORY) != identity.directory() || (identity.mode() & 022) != 0) {
+            throw new IOException("Linux loading leaf differs from its presence, kind or protection rule");
+        }
+        requireTime(deadline);
+        return new LinuxPathObservation(kind, entry, resolved, null, identity,
+                new SegmentClassicHandoff.Digest(digest.digest()));
     }
 
     private static void observeLinuxComponent(MessageDigest digest, Path path, Identity identity) {
