@@ -17,7 +17,10 @@
 package org.apache.bookkeeper.discover.profile;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Objects;
@@ -43,20 +46,55 @@ public final class ZKProfileStartupRequirementsStore {
     public enum ProvisionStatus { APPLIED, ALREADY_APPLIED, CONFLICT, UNAVAILABLE, RESPONSE_LOST }
     public record ReadResult(Status status, Optional<Observation> observation) { }
 
+    /** Value for external proof matching, never authority by construction. Includes the original native birth. */
+    public record SourceIdentity(String nodePath, UUID birthId, long birthZxid, long modifiedZxid,
+                                 int version, byte[] sha256) {
+        public SourceIdentity {
+            PathUtils.validatePath(nodePath);
+            Objects.requireNonNull(birthId, "birthId");
+            sha256 = sha256.clone();
+            if (nodePath.equals("/") || birthId.equals(new UUID(0, 0)) || birthZxid <= 0 || modifiedZxid != birthZxid
+                    || version != 0 || sha256.length != 32) {
+                throw new IllegalArgumentException("Invalid immutable requirements source identity");
+            }
+        }
+
+        @Override
+        public byte[] sha256() {
+            return sha256.clone();
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            return other instanceof SourceIdentity identity && nodePath.equals(identity.nodePath)
+                    && birthId.equals(identity.birthId)
+                    && birthZxid == identity.birthZxid && modifiedZxid == identity.modifiedZxid
+                    && version == identity.version && Arrays.equals(sha256, identity.sha256);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(nodePath, birthId, birthZxid, modifiedZxid, version, Arrays.hashCode(sha256));
+        }
+    }
+
     /** Only this store's verified persistent bytes can create an observation. */
     public final class Observation {
         private final ProfileStartupRequirementsCodec.Envelope envelope;
         private final BookieCompatibilityFact effectiveCompatibility;
         private final long birthZxid;
         private final long modifiedZxid;
+        private final SourceIdentity sourceIdentity;
 
         private Observation(ProfileStartupRequirementsCodec.Envelope envelope,
                 BookieCompatibilityFact effectiveCompatibility,
-                long birthZxid, long modifiedZxid) {
+                long birthZxid, long modifiedZxid, int version, byte[] nativeBytes) {
             this.envelope = envelope;
             this.effectiveCompatibility = effectiveCompatibility;
             this.birthZxid = birthZxid;
             this.modifiedZxid = modifiedZxid;
+            sourceIdentity = new SourceIdentity(path(envelope.compatibility().bookieId()), envelope.birth(),
+                    birthZxid, modifiedZxid, version, digest(nativeBytes));
         }
 
         private ZKProfileStartupRequirementsStore owner() {
@@ -68,6 +106,11 @@ public final class ZKProfileStartupRequirementsStore {
         }
         public RequiredDeviceManifest requiredDevices() {
             return envelope.devices();
+        }
+
+        /** Exact commissioned node bytes, before any current native delete-assignment overlay. */
+        public SourceIdentity sourceIdentity() {
+            return sourceIdentity;
         }
 
         /** Actual graph replaces recovery/device observations later; scope/credential proof is external. */
@@ -267,7 +310,15 @@ public final class ZKProfileStartupRequirementsStore {
         synchronized (this) {
             observationStarted = true;
         }
-        return new Observation(envelope, c, stat.getCzxid(), stat.getMzxid());
+        return new Observation(envelope, c, stat.getCzxid(), stat.getMzxid(), stat.getVersion(), node.bytes());
+    }
+
+    private static byte[] digest(byte[] bytes) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(bytes);
+        } catch (NoSuchAlgorithmException unavailable) {
+            throw new IllegalStateException("Requirements source digest is unavailable", unavailable);
+        }
     }
 
     String path(String bookieId) {

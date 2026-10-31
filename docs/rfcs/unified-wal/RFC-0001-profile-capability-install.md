@@ -1089,3 +1089,6 @@ RFC 进入 Accepted 前必须：
 
 
 2026-10-31接续[离线 bootstrap 的全部 Arena 输入核验](implementation/local-storage/README.md#离线-bootstrap-的全部-arena-输入核验)：已有共同manifest的全部Arena guard、身份/几何及原control只读历史核验已接包内资源子owner；缺失/错配不补建，成功分配后FREE或空session历史仍拒绝，纯维护/原条件失败历史可接受。检查fd实际关闭后才释放Arena guard，并排除与共同根guard的物理别名。实际验证与输入绑定由canonical节拥有。本子项不发行commissioning/旧服务隔离authority或readiness；公开bootstrap/可信loader/Classic严格恢复桥与完整离线封口仍OPEN，完整目标active，Main/G1/full-bytes/生产Gate不提升，默认OFF/SYSTEM/PARK及disabled保持。
+
+
+2026-10-31接续[commissioned requirements 的原生来源指纹](implementation/startup-readiness/README.md#commissioned-requirements-的原生来源指纹)：真实requirements Observation提供原节点路径/envelope出生/native zxid与version/原始字节SHA-256，用于后续固定loader冷读匹配；值不构成授权，原publisher的store/client/observation绑定及持久格式不变。真实ZK同字节重建和同事务不同namespace对照、三类33项及style验证由canonical拥有；完整launcher/交接证明/公开bootstrap/Classic恢复封口仍OPEN，目标active，Main/G1/full-bytes/生产Gate及默认OFF/SYSTEM/PARK和disabled不提升。

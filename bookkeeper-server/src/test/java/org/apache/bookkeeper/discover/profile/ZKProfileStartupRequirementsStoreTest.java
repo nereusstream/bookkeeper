@@ -19,10 +19,12 @@ package org.apache.bookkeeper.discover.profile;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.ByteBuffer;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
@@ -42,6 +44,7 @@ import org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection
 import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.Op;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
 import org.junit.Test;
@@ -102,6 +105,86 @@ public class ZKProfileStartupRequirementsStoreTest extends ProfileZKTestBase {
         return new WritableRegistration(
                 BOOKIE, read.record().storageIncarnation(),
                 read.record().localReadinessGeneration(), read.storeVersion());
+    }
+
+    @Test
+    public void sourceIdentityMatchesVerifiedNativeBirthAndDefensivelyRetainsTheOriginalBytes() throws Exception {
+        var source = store(first);
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                source.provision(compatibility(1), devices()));
+        var identity = source.read(BOOKIE).observation().orElseThrow().sourceIdentity();
+        String path = source.path(BOOKIE);
+        var stat = first.exists(path, false);
+        byte[] original = first.getData(path, false, null);
+        byte[] digest = MessageDigest.getInstance("SHA-256").digest(original);
+        assertEquals(path, identity.nodePath());
+        assertEquals(ProfileStartupRequirementsCodec.decode(original).birth(), identity.birthId());
+        assertEquals(stat.getCzxid(), identity.birthZxid());
+        assertEquals(stat.getMzxid(), identity.modifiedZxid());
+        assertEquals(stat.getVersion(), identity.version());
+        assertArrayEquals(digest, identity.sha256());
+        var secondRead = store(second).read(BOOKIE).observation().orElseThrow().sourceIdentity();
+        assertEquals(identity, secondRead);
+        assertEquals(identity.hashCode(), secondRead.hashCode());
+        identity.sha256()[0] ^= 1;
+        assertArrayEquals(digest, identity.sha256());
+        var value = new ZKProfileStartupRequirementsStore.SourceIdentity(identity.nodePath(), identity.birthId(),
+                identity.birthZxid(), identity.modifiedZxid(), identity.version(), digest);
+        digest[0] ^= 1;
+        assertEquals(identity, value);
+        assertArrayEquals(original, first.getData(path, false, null));
+        assertEquals(stat, first.exists(path, false));
+    }
+
+    @Test
+    public void identicalBytesAndEnvelopeBirthCannotHideNativeSourceRecreation() throws Exception {
+        var source = store(first);
+        source.provision(compatibility(1), devices());
+        var original = source.read(BOOKIE).observation().orElseThrow().sourceIdentity();
+        String path = source.path(BOOKIE);
+        byte[] bytes = first.getData(path, false, null);
+        String marker = path + "/" + first.getChildren(path, false).get(0);
+        first.multi(List.of(Op.delete(marker, 0), Op.delete(path, 0),
+                Op.create(path, bytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+                Op.create(marker, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT)));
+        var current = store(second).read(BOOKIE).observation().orElseThrow().sourceIdentity();
+        assertEquals(original.birthId(), current.birthId());
+        assertEquals(original.version(), current.version());
+        assertArrayEquals(original.sha256(), current.sha256());
+        assertTrue(current.birthZxid() > original.birthZxid());
+        assertNotEquals(original, current);
+        assertArrayEquals(bytes, first.getData(path, false, null));
+    }
+
+    @Test
+    public void identicalBytesAndNativeBirthInDifferentNamespacesRemainDistinct() throws Exception {
+        var source = store(first);
+        source.provision(compatibility(1), devices());
+        byte[] bytes = first.getData(source.path(BOOKIE), false, null);
+        var birth = ProfileStartupRequirementsCodec.decode(bytes).birth();
+        String firstRoot = ROOT + "-a";
+        String secondRoot = ROOT + "-b";
+        first.create(firstRoot, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        first.create(secondRoot, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var firstStore = new ZKProfileStartupRequirementsStore(first, firstRoot, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                Duration.ofSeconds(5));
+        var secondStore = new ZKProfileStartupRequirementsStore(second, secondRoot, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                Duration.ofSeconds(5));
+        String firstPath = firstStore.path(BOOKIE);
+        String secondPath = secondStore.path(BOOKIE);
+        first.multi(List.of(Op.create(firstPath, bytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+                Op.create(firstPath + "/birth-" + birth, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                        CreateMode.PERSISTENT),
+                Op.create(secondPath, bytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+                Op.create(secondPath + "/birth-" + birth, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                        CreateMode.PERSISTENT)));
+        var firstIdentity = firstStore.read(BOOKIE).observation().orElseThrow().sourceIdentity();
+        var secondIdentity = secondStore.read(BOOKIE).observation().orElseThrow().sourceIdentity();
+        assertEquals(firstIdentity.birthId(), secondIdentity.birthId());
+        assertEquals(firstIdentity.birthZxid(), secondIdentity.birthZxid());
+        assertArrayEquals(firstIdentity.sha256(), secondIdentity.sha256());
+        assertNotEquals(firstIdentity.nodePath(), secondIdentity.nodePath());
+        assertNotEquals(firstIdentity, secondIdentity);
     }
 
     @Test
