@@ -720,6 +720,18 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## Linux 最终文件的原句柄摘要与 ELF 观察
+
+2026-11-01在父`0882733b0a8ba7466590ca95606bb224cf6d316f`上，SegmentClassicLaunchTrust复用原保护路径/ACL、固定owner、单链接、mode、长度、父链、流式SHA-256和SegmentOwnedFiles首次关闭合同。v1原程序角色与向量不变；包内Linux文件适配支持真实零长度配置，不借用JDK角色。ELF元数据与摘要使用同一原FileChannel，检查读取和关闭后的deadline、路径对象及父链；任何读取/解析/关闭失败保留在原launcherFailure。外部close等待实际读取体退出，重入drain拒绝，首次关闭失败不重试或伪称排空。返回值只包含观察身份及元数据，不产生Installed、START或Unix资格。
+
+SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文件与虚拟地址映射、entry、PT_INTERP、DYNAMIC终止与字符串、DT_NEEDED原顺序、SONAME、显式绝对RPATH/RUNPATH及批准flags。对表/范围/算术溢出、歧义映射、坏UTF8、相对/空搜索及token扩展、audit/filter/未知加载扩展明确拒绝；不打开或关闭调用方句柄，不mmap、装载、执行、搜索或自动批准依赖。它不是完整重定位/符号或运行时加载选择验证器。当前只读取普通无别名最终文件；物理系统别名、目录/config/cache/hwcap选择及完整依赖比较仍待接线。
+
+首轮两类27项中26通过、一处独立合成夹具将DYNAMIC的虚拟地址反例写到p_paddr（不参与此格式加载）而失败；修正夹具偏移200→192，生产代码未为此变更。最终ELF/trust/program/deployment/inputs/launcher六类54项全部通过，0失败/错误/跳过；覆盖真实文件、空配置、权限/SHA/角色拒绝、关闭时同字节inode替换、首次native close失败，以及实际ELF读取体挂起时close等待/自drain拒绝。每阶段1414项源码/资源分别与原快照或父Git blob核验，无缺失/错配；最终四个代码源与通过样式快照完全一致。独立Spotless/Checkstyle退出0。
+
+另只读既有缓存中的仓库声明Netty 4.2.15.Final Linux x86_64 ELF，106584字节、SHA-256 `422aab63e1e07cbac931d4b69d9df599b2a619bd72e9894eab6496689bb2e701`；实际parser与系统objdump的NEEDED原顺序`libdl.so.2/librt.so.1/libc.so.6`、SONAME及flags相符。该文件在macOS被复制/读取，没有被执行、装载或当作部署systemctl闭包；不计Linux实际运行阳性。终态RAT退出1，原431项未批准路径及父088字节不变，扫描前排除用户PDF。证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-files-evidence-0882733b`保留原source/class/XML、失败与objdump/parser输出；两个raw scope经两次独立lsof/原inode/SHA/归档硬链接核验后清理4目录、14文件路径、1,009,293逻辑字节，归档保留、regular-file数据块回收0，共享target和用户文件未清理。
+
+规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
+
 ## Linux v2 的批准输入与父身份
 
 2026-11-01在本地父`1108ab13b8a239b5494519e6f2559231409a4dd8`上，按规划会话最新裁决增加包内SegmentClassicLinuxDeployment数据和UWCLX002/schema2父输入。v1的UWCLX001/schema1字节、父程序v1公式、32KiB解析上限及ABI1命令保持；v2总输入上限1MiB，只允许Linux x86_64固定profile，公共dropper/path/长度/SHA/ABI2必须和部署表引用相同。D以`BookKeeper/ControlledClassicLinuxDeployment/v1\0`覆盖完整UWCLD001/schema1规范帧，P2以`BookKeeper/ControlledClassicLauncherProgram/v2\0`覆盖child program摘要、u32 UTF8长度及固定父Main、D；部署帧不含自身/P2/.launcher摘要，避免循环。P2仅是批准输入身份，不是实际程序、启动或Unix证明。

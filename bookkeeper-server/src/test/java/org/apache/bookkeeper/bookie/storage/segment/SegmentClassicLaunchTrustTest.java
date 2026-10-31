@@ -24,7 +24,11 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
 
 import com.sun.security.auth.module.UnixSystem;
 import java.io.IOException;
@@ -33,7 +37,9 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.concurrent.CountDownLatch;
@@ -91,6 +97,168 @@ public class SegmentClassicLaunchTrustTest {
         Path directory = Files.createDirectory(root.resolve("launcher"));
         Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
         return directory;
+    }
+
+    private SegmentClassicLinuxDeployment.File linuxFile(Path path, SegmentClassicLinuxDeployment.Role role,
+                                                        byte[] bytes) throws Exception {
+        write(path, bytes);
+        return new SegmentClassicLinuxDeployment.File(path, role, bytes.length,
+                new SegmentClassicHandoff.Digest(MessageDigest.getInstance("SHA-256").digest(bytes)));
+    }
+
+    @Test
+    public void linuxFilesUseOriginalHashAndElfHandleIncludingAnEmptyConfiguration() throws Exception {
+        var empty = linuxFile(root.resolve("loader.conf"), SegmentClassicLinuxDeployment.Role.LOADER_CONFIG,
+                new byte[0]);
+        var library = linuxFile(root.resolve("libowned.so.3"), SegmentClassicLinuxDeployment.Role.LIBRARY,
+                SegmentClassicLinuxElfTest.image());
+        var owner = owner();
+        owner.initialize();
+        var config = owner.verifyLinuxFile(empty, SegmentClassicLinuxElfTest.deadline());
+        assertEquals(0, config.identity().size());
+        assertEquals(null, config.elf());
+        var image = owner.verifyLinuxFile(library, SegmentClassicLinuxElfTest.deadline());
+        assertEquals(Arrays.asList("libz.so.1", "liba.so.2"), image.elf().needed());
+        assertFalse(image.parents().isEmpty());
+        assertThrows(IOException.class, owner::installed);
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
+    @Test
+    public void linuxFilePermissionsHashAndNativeRolesFailWithoutPromotionOrRepair() throws Exception {
+        for (int scenario = 0; scenario < 5; scenario++) {
+            var declared = linuxFile(root.resolve("image.so"), scenario == 0
+                    ? SegmentClassicLinuxDeployment.Role.SYSTEMCTL : SegmentClassicLinuxDeployment.Role.LIBRARY,
+                    SegmentClassicLinuxElfTest.image());
+            if (scenario == 1) {
+                Files.setPosixFilePermissions(declared.path(), PosixFilePermissions.fromString("rw-rw-r--"));
+            } else if (scenario == 2) {
+                byte[] changed = SegmentClassicLinuxElfTest.image();
+                changed[1400] = 1;
+                Files.write(declared.path(), changed);
+            } else if (scenario == 3) {
+                Files.createLink(root.resolve("same-inode.so"), declared.path());
+            } else if (scenario == 4) {
+                byte[] changed = SegmentClassicLinuxElfTest.image();
+                ByteBuffer.wrap(changed).order(java.nio.ByteOrder.LITTLE_ENDIAN).putShort(16, (short) 2);
+                declared = linuxFile(declared.path(), declared.role(), changed);
+            }
+            var owner = owner();
+            owner.initialize();
+            var input = declared;
+            var failure = assertThrows(IOException.class,
+                    () -> owner.verifyLinuxFile(input, SegmentClassicLinuxElfTest.deadline()));
+            assertThrows(IOException.class, owner::parsed);
+            var result = owner.closeAndDrain();
+            assertSame(failure, result.launcherFailure());
+            assertTrue(result.drained());
+            Files.delete(declared.path());
+        }
+    }
+
+    @Test
+    public void linuxFirstCloseFailureRetainsOriginalHandleAndReplacementCannotReturnFacts() throws Exception {
+        var file = linuxFile(root.resolve("original.so"), SegmentClassicLinuxDeployment.Role.LIBRARY,
+                SegmentClassicLinuxElfTest.image());
+        for (boolean failClose : new boolean[]{true, false}) {
+            var owner = owner();
+            owner.initialize();
+            var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+            IOException failure = new IOException("Linux original first close");
+            Path replacement = root.resolve("replacement.so");
+            write(replacement, SegmentClassicLinuxElfTest.image());
+            try (var opens = mockStatic(FileChannel.class, invocation -> {
+                Object actual = invocation.callRealMethod();
+                if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                        && file.path().equals(invocation.getArgument(0))) {
+                    var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                    captured.set(fault);
+                    if (failClose) {
+                        fault.closeFailure = failure;
+                    } else {
+                        fault.beforeClose = () -> {
+                            try {
+                                Files.move(replacement, file.path(), StandardCopyOption.REPLACE_EXISTING);
+                            } catch (IOException problem) {
+                                throw new AssertionError(problem);
+                            }
+                        };
+                    }
+                    return fault;
+                }
+                return actual;
+            })) {
+                var result = assertThrows(IOException.class,
+                        () -> owner.verifyLinuxFile(file, SegmentClassicLinuxElfTest.deadline()));
+                if (failClose) {
+                    assertSame(failure, result);
+                }
+            }
+            try {
+                assertEquals(!failClose, owner.closeAndDrain().drained());
+                assertEquals(1, captured.get().closes.get());
+                assertEquals(failClose, captured.get().actual.isOpen());
+                assertThrows(IOException.class, owner::parsed);
+            } finally {
+                captured.get().actual.close();
+            }
+            assertEquals(!failClose, owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void linuxExternalCloseWaitsForActualElfReadAndRejectsReentrantDrain() throws Exception {
+        var file = linuxFile(root.resolve("inflight.so"), SegmentClassicLinuxDeployment.Role.LIBRARY,
+                SegmentClassicLinuxElfTest.image());
+        var owner = owner();
+        owner.initialize();
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var captured = new AtomicReference<FileChannel>();
+        var read = new FutureTask<>(() -> {
+            try (var opens = mockStatic(FileChannel.class, invocation -> {
+                Object actual = invocation.callRealMethod();
+                if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                        && file.path().equals(invocation.getArgument(0))) {
+                    captured.set((FileChannel) actual);
+                    var fault = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
+                    doAnswer(call -> {
+                        assertThrows(IllegalStateException.class, owner::closeAndDrain);
+                        entered.countDown();
+                        assertTrue(release.await(5, TimeUnit.SECONDS));
+                        return call.callRealMethod();
+                    }).when(fault).read(any(ByteBuffer.class), anyLong());
+                    return fault;
+                }
+                return actual;
+            })) {
+                return owner.verifyLinuxFile(file, SegmentClassicLinuxElfTest.deadline());
+            }
+        });
+        var close = new FutureTask<>(owner::closeAndDrain);
+        Thread reader = new Thread(read);
+        Thread closer = new Thread(close);
+        try {
+            reader.start();
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            closer.start();
+            await().atMost(5, TimeUnit.SECONDS).until(() -> closer.getState() == Thread.State.BLOCKED);
+            assertThrows(TimeoutException.class, () -> close.get(20, TimeUnit.MILLISECONDS));
+            assertTrue(captured.get().isOpen());
+            release.countDown();
+            assertEquals(2, read.get(5, TimeUnit.SECONDS).elf().needed().size());
+            assertTrue(close.get(5, TimeUnit.SECONDS).drained());
+        } finally {
+            release.countDown();
+            reader.join(5000);
+            if (closer.getState() != Thread.State.NEW) {
+                closer.join(5000);
+            }
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertFalse(reader.isAlive());
+        assertFalse(closer.isAlive());
+        assertFalse(captured.get().isOpen());
     }
 
     @Test
