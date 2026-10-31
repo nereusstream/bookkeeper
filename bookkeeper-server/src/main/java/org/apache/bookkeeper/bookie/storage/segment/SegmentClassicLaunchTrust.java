@@ -318,7 +318,7 @@ final class SegmentClassicLaunchTrust {
             throw new IOException("Original launcher descriptor read is one-use");
         }
         launcherDescriptorAttempted = true;
-        return readLauncherPrivate(recipeId + ".launcher", 16, SegmentClassicLauncherInputs.MAX_BYTES);
+        return readLauncherPrivate(recipeId + ".launcher", 16, SegmentClassicLauncherInputs.MAX_V2_BYTES);
     }
 
     /** Key name is anchored by the original recipe, never by a command or a received packet. */

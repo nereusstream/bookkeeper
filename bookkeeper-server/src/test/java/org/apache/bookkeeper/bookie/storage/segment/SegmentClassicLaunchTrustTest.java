@@ -117,6 +117,37 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void parentDescriptorReadsLargerV2AndTheExactCapacityWithoutTruncationOrInstalledProvenance()
+            throws Exception {
+        write(recipe, SegmentClassicLinuxDeploymentTest.vector("classic-linux-recipe-v1"));
+        Path input = launcherDirectory().resolve("classic-1.launcher");
+        byte[] larger = SegmentClassicLinuxDeploymentTest.largerLauncherInput();
+        assertTrue(larger.length > SegmentClassicLauncherInputs.MAX_BYTES);
+        for (byte[] bytes : java.util.List.of(larger, new byte[SegmentClassicLauncherInputs.MAX_V2_BYTES],
+                new byte[SegmentClassicLauncherInputs.MAX_V2_BYTES + 1])) {
+            Files.write(input, bytes);
+            Files.setPosixFilePermissions(input, PosixFilePermissions.fromString("rw-------"));
+            var owner = owner();
+            owner.initialize();
+            try {
+                if (bytes.length > SegmentClassicLauncherInputs.MAX_V2_BYTES) {
+                    assertThrows(IOException.class, owner::readLauncherDescriptor);
+                } else {
+                    byte[] read = owner.readLauncherDescriptor();
+                    assertArrayEquals(bytes, read);
+                    if (bytes == larger) {
+                        SegmentClassicLauncherInputs.decode(read).requireRecipe(owner.parsed());
+                    }
+                }
+                assertThrows(IOException.class, owner::installed);
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+            assertEquals(bytes.length, Files.size(input));
+        }
+    }
+
+    @Test
     public void parentPrivateDirectoryAndFilePermissionsDoNotInheritTheChildPublicReadPolicy() throws Exception {
         Path directory = launcherDirectory();
         Path input = directory.resolve("classic-1.launcher");

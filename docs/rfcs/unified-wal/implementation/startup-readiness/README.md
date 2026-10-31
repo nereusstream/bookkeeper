@@ -720,6 +720,20 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## Linux v2 的批准输入与父身份
+
+2026-11-01在本地父`1108ab13b8a239b5494519e6f2559231409a4dd8`上，按规划会话最新裁决增加包内SegmentClassicLinuxDeployment数据和UWCLX002/schema2父输入。v1的UWCLX001/schema1字节、父程序v1公式、32KiB解析上限及ABI1命令保持；v2总输入上限1MiB，只允许Linux x86_64固定profile，公共dropper/path/长度/SHA/ABI2必须和部署表引用相同。D以`BookKeeper/ControlledClassicLinuxDeployment/v1\0`覆盖完整UWCLD001/schema1规范帧，P2以`BookKeeper/ControlledClassicLauncherProgram/v2\0`覆盖child program摘要、u32 UTF8长度及固定父Main、D；部署帧不含自身/P2/.launcher摘要，避免循环。P2仅是批准输入身份，不是实际程序、启动或Unix证明。
+
+批准数据绑定平台基线及解析格式、唯一有序文件/角色/长度/SHA、PT_INTERP入口和固定系统readlink字节、搜索目录存在或缺失、config/cache明确存在或缺失、全部声明ELF的DT_NEEDED/RPATH/RUNPATH与模块引用、批准exec启动链、unit fragment/drop-in/执行和激活关系、预期u32 GID及固定root/Type=exec/DynamicUser=no/Restart=no约束版本、dropper/filter/凭据清理/cgroup与root操作入口规则。文件1024、别名128、目录64、unit32/各drop-in32、每串4096 UTF8及总1MiB有独立上限；引用/排序/角色/重复、相互矛盾的存在规则、循环/无关别名、未知schema/profile/ABI/规则和溢出均拒绝，不截断。新v2公式绑定全部规则，改变filter或GID即使文件表不变也改变D/P2；父工具文件不进入child .program，重叠文件长度/SHA须一致，系统别名不能覆盖一般child文件或私有supervisor/material路径。
+
+systemctl的闭合依赖必须由外部受控部署预装批准，涵盖loader、传递库、动态模块、配置/cache/搜索及硬件能力候选，实际文件读取/ELF规则比较仍待实现；不会通过运行未批准程序或ldd发现并批准。preload明确必须不存在，未知不可读不当不存在；cache/config缺失要求显式表达。系统别名仅对已声明加载入口逐段替换并登记使用，支持相对多跳、cache和SONAME入口，最终批准文件仍需普通无别名合同。实际readlink/父链/owner/mode/ACL/inode/目录选择/首次关闭及运行中不变约束不能由这个纯数据解析器代替。kernel/vDSO、PID1、本地manager真实性、部署管理面和父JVM之前的可信启动链属于已冻结外部TCB；后置hash不补认不可信启动，“系统库”不免除用户态依赖清单。批准数据不携boot/InvocationID/PID/出生/实际cgroup/凭据/drain/registration事实。
+
+独立Python向量中，Linux child program614字节、recipe197字节、基本部署1205字节、父v2输入1634字节；基本D=`490df21d62cdfc28b967084f48b72d7478edcd1fb2968fdead7518926eb36edb`，P2=`68439ec6b45fb6ef7ca34e314bb5e5f996346fe581082784b6e85b7a6a527fe1`。额外2501字节向量含非空依赖、模块、RPATH顺序、drop-in、两段启动链、相关unit、unsigned GID、相对多跳及cache/SONAME别名；其D=`be613399a1e3ced73319d736bc7e4eb19612c0ec87aa51315a4c494905e463eb`。全部路径/文件SHA和版本为合成测试数据，没有执行这些文件或发行Installed/START/资格。原始生成器、早期隐含GID版本及各阶段输入不覆盖。
+
+首组11项及扩大29项通过，新增私有descriptor容量文件测试后的trust16项通过；随后扩展规则与多跳向量实际复现一项error（合法后继别名被单段关联判断误拒绝），修复沿声明替换链收集实际使用者，循环/无关链接及缺失目录与现存链接冲突仍拒绝。最终model/inputs/trust/launcher四类31项全部实际通过，0失败/错误/跳过；输入1412项。材料owner沿原0700/0600/ACL/首次关闭和one-use，仅扩大原字节读取上限；大于32KiB的合法v2、恰好1MiB原bytes及1MiB+1拒绝均以真实私有文件验证，fixture依旧不能取得Installed。父Main只新增child程序/表冲突检查；完整Linux资格/cgroup与listener尚未接通时，v2的childCommand直接拒绝，绝不调用旧ABI、启动child或提升handoff。
+
+样式首次十处import/长行失败，修正后独立检查通过；尝试合并test/style时cpu-affinity的原NAR生成源码产生十条样式错误，在server前退出、零相关测试，保留原生成源及失败，未修改生成代码、构建设置或跳过检查。最终仍按原分开的相关test和独立Spotless/Checkstyle命令验证：31项及最终独立样式退出0，1412项实际源码与12项代码/资源样式快照逐项一致；六个Maven原阶段全部输入分别与原快照或父Git blob核验，无缺失/错配。终态独立RAT退出1/431，全部路径及字节与父1108ab13一致、本次无新增；扫描前按精确名称排除用户PDF。证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-deployment-evidence-1108ab13`包含各原source/class/XML及失败，失败组合收集到的旧target库存不算新编译证明。 六个raw scope在两次独立lsof及原inode/哈希/归档硬链接核验后，只清理12目录、30文件路径、2,395,769逻辑字节；原归档保留、regular-file数据块回收0，共享target与用户文件未清理。TLA/性能/真实Linux本增量未执行；完整extra-file/ELF/依赖核验、v2启动producer/root UDS/Ctl、固定隔离dropper、Unix交接/签发及Main/G1/full-bytes/全16步和生产Gate仍OPEN，完整目标active，默认OFF/SYSTEM/PARK及disabled保持。
+
 ## 固定 systemd 查询的原 Process 与有界管道
 
 2026-11-01在本地父`90a0f1a0cf`上实现包内SegmentClassicSystemdQuery。固定argv只调用`/usr/bin/systemctl --system --no-pager --no-ask-password --all --property=<fixed fields> show <one literal service>`，拒绝外部路径/字段/host/user manager/通配符/控制字节或多个unit；查询命令使用空环境、固定`/` cwd和独立stdin/stdout/stderr。命名属性集含规划要求的四组及各Exec入口对应的Ex属性，字段列表固定且保留空值，UTF8/总64KiB/完整行/恰好完整集合/重复或未知字段/Id不一致均拒绝。Exec值只保留原字符串，不声称已完成批准版本的argv语法解析、unit审批或连续隔离。参考官方[show接口](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#show%20%5BPATTERN%E2%80%A6%7CJOB%E2%80%A6%5D)与[Service属性](https://www.freedesktop.org/software/systemd/man/latest/org.freedesktop.systemd1.html)。

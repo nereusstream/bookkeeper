@@ -275,6 +275,9 @@ public final class SegmentClassicLauncher {
         configuration = SegmentClassicLaunchConfiguration.materialize(frozen);
         input = SegmentClassicLauncherInputs.decode(trust.readLauncherDescriptor());
         input.requireRecipe(material);
+        if (input.linuxDeployment() != null) {
+            input.linuxDeployment().requireProgram(program, recipeId);
+        }
         requireRoot();
         if (!System.getenv().isEmpty() || !program.runtime().equals(System.getProperty("java.runtime.version"))
                 || !program.vendor().equals(System.getProperty("java.vendor"))

@@ -16,6 +16,7 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -104,5 +105,57 @@ public class SegmentClassicLauncherInputsTest {
                 inputs.proof(), inputs.proof(), inputs.aesKey()));
         assertTrue(inputs.parentProgram().equals(
                 SegmentClassicLauncherInputs.parentProgramIdentity(recipe.program())));
+    }
+
+    @Test
+    public void independentV2IdentityBindsTheWholeDeploymentWithoutChangingV1Bytes() throws Exception {
+        byte[] recipe = SegmentClassicLinuxDeploymentTest.vector("classic-linux-recipe-v1");
+        var original = new SegmentClassicLaunchTrust.Parsed(SegmentClassicLaunchTrust.decode(recipe),
+                SegmentClassicHandoff.digest("BookKeeper/ControlledClassicRecipe/v1\0"
+                        .getBytes(StandardCharsets.US_ASCII), recipe), null);
+        byte[] bytes = SegmentClassicLinuxDeploymentTest.vector("classic-launcher-inputs-v2");
+        var inputs = SegmentClassicLauncherInputs.decode(bytes);
+        inputs.requireRecipe(original);
+        assertArrayEquals(bytes, inputs.encode());
+        assertEquals(1634, bytes.length);
+        assertEquals("68439ec6b45fb6ef7ca34e314bb5e5f996346fe581082784b6e85b7a6a527fe1",
+                HexFormat.of().formatHex(inputs.parentProgram().value()));
+        var child = SegmentClassicLaunchProgram.decode(SegmentClassicLinuxDeploymentTest.vector(
+                "classic-linux-program-v1"));
+        inputs.linuxDeployment().requireProgram(child, "classic-1");
+        assertThrows(IOException.class, () -> inputs.childCommand(original, child));
+        byte[] old = vector("classic-launcher-inputs-v1");
+        assertArrayEquals(old, SegmentClassicLauncherInputs.decode(old).encode());
+    }
+
+    @Test
+    public void v2NeverFallsBackToV1AndChangedRulesInvalidateThePreviousParentApproval() throws Exception {
+        byte[] bytes = SegmentClassicLinuxDeploymentTest.vector("classic-launcher-inputs-v2");
+        for (int offset : List.of(0, 8, 10, 12)) {
+            byte[] corrupt = bytes.clone();
+            corrupt[offset] ^= 1;
+            assertThrows(IOException.class, () -> SegmentClassicLauncherInputs.decode(corrupt));
+        }
+        byte[] downgraded = bytes.clone();
+        downgraded[7] = '1';
+        ByteBuffer.wrap(downgraded).putShort(8, (short) 1);
+        assertThrows(IOException.class, () -> SegmentClassicLauncherInputs.decode(downgraded));
+        byte[] oversizedV1 = Arrays.copyOf(vector("classic-launcher-inputs-v1"), 32769);
+        ByteBuffer.wrap(oversizedV1).putInt(12, oversizedV1.length - 16);
+        assertThrows(IOException.class, () -> SegmentClassicLauncherInputs.decode(oversizedV1));
+        var input = SegmentClassicLauncherInputs.decode(bytes);
+        var d = input.linuxDeployment();
+        var i = d.isolation();
+        var other = new SegmentClassicLinuxDeployment(d.platform(), d.files(), d.loading(), d.startChain(), d.units(),
+                d.launcherUnit(), new SegmentClassicLinuxDeployment.Isolation(i.dropper(), i.dropperAbi(),
+                        SegmentClassicHandoff.digest(new byte[]{3}), 1, 1, 1), d.operations());
+        var changed = new SegmentClassicLauncherInputs(input.recipeId(), input.recipe(), input.signerKeyId(),
+                input.parentProgram(), input.os(), input.architecture(), input.dropper(), input.supervisorDirectory(),
+                input.targetUid(), input.manifest(), input.proof(), input.policy(), input.aesKey(), other);
+        byte[] recipe = SegmentClassicLinuxDeploymentTest.vector("classic-linux-recipe-v1");
+        var parsed = new SegmentClassicLaunchTrust.Parsed(SegmentClassicLaunchTrust.decode(recipe),
+                SegmentClassicHandoff.digest("BookKeeper/ControlledClassicRecipe/v1\0"
+                        .getBytes(StandardCharsets.US_ASCII), recipe), null);
+        assertThrows(IOException.class, () -> changed.requireRecipe(parsed));
     }
 }
