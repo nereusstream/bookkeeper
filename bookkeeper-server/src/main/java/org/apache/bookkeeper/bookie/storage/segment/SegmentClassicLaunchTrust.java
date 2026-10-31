@@ -100,7 +100,8 @@ final class SegmentClassicLaunchTrust {
     record Parsed(Recipe recipe, SegmentClassicHandoff.Digest recipeIdentity, PublicKey publicKey) { }
 
     /** Observed bytes/objects only; neither installed deployment approval nor live Linux qualification. */
-    record LinuxFileObservation(Identity identity, List<Identity> parents, SegmentClassicLinuxElf.Image elf) {
+    record LinuxFileObservation(Identity identity, List<Identity> parents, SegmentClassicLinuxElf.Image elf,
+                                SegmentClassicLinuxCache.Image cache) {
         LinuxFileObservation {
             parents = List.copyOf(parents);
         }
@@ -761,10 +762,14 @@ final class SegmentClassicLaunchTrust {
         try {
             requireBoundDeadline(deadlineNanos);
             requireUtf8LoadingPath(file.path());
+            if (file.role() == SegmentClassicLinuxDeployment.Role.LOADER_CACHE
+                    && (file.length() < 48 || file.length() > SegmentClassicLinuxCache.MAX_BYTES)) {
+                throw new IOException("Declared loader cache length exceeds its supported format bounds");
+            }
             boolean executable = file.role().elf() && file.role() != SegmentClassicLinuxDeployment.Role.LIBRARY
                     && file.role() != SegmentClassicLinuxDeployment.Role.MODULE;
             var observed = hashFile(file.path(), file.length(), file.sha256(), executable, file.role().elf(),
-                    deadlineNanos);
+                    file.role() == SegmentClassicLinuxDeployment.Role.LOADER_CACHE, deadlineNanos);
             if (executable && observed.elf().entry() == 0 || !executable && file.role().elf()
                     && observed.elf().type() != 3) {
                 throw new IOException("Linux ELF type or entry differs from its declared file role");
@@ -780,11 +785,11 @@ final class SegmentClassicLaunchTrust {
 
     private void hashProgramFile(SegmentClassicLaunchProgram.File file, long deadlineNanos) throws IOException {
         hashFile(file.path(), file.length(), file.sha256(), (file.roles() & SegmentClassicLaunchProgram.JAVA) != 0,
-                false, deadlineNanos);
+                false, false, deadlineNanos);
     }
 
     private LinuxFileObservation hashFile(Path path, long declaredLength, SegmentClassicHandoff.Digest sha256,
-            boolean executable, boolean elf, long deadlineNanos) throws IOException {
+            boolean executable, boolean elf, boolean cache, long deadlineNanos) throws IOException {
         requireTime(deadlineNanos);
         Identity before = checked(path);
         if (before.directory() || before.uid() != ownerUid || before.links() != 1
@@ -800,6 +805,7 @@ final class SegmentClassicLaunchTrust {
             throw new IOException("Required program SHA-256 is unavailable", unavailable);
         }
         SegmentClassicLinuxElf.Image image;
+        SegmentClassicLinuxCache.Image cacheImage;
         try (FileChannel channel = SegmentOwnedFiles.open(files, path,
                 StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
             requireTime(deadlineNanos);
@@ -820,6 +826,7 @@ final class SegmentClassicLaunchTrust {
                 digest.update(buffer);
             }
             image = elf ? SegmentClassicLinuxElf.read(channel, declaredLength, deadlineNanos) : null;
+            cacheImage = cache ? SegmentClassicLinuxCache.read(channel, declaredLength, deadlineNanos) : null;
             if (channel.size() != declaredLength || !before.equals(checked(path))) {
                 throw new IOException("Program file changed during its stream hash");
             }
@@ -831,7 +838,7 @@ final class SegmentClassicLaunchTrust {
         }
         files.requireHealthy();
         requireTime(deadlineNanos);
-        return new LinuxFileObservation(before, parents, image);
+        return new LinuxFileObservation(before, parents, image, cacheImage);
     }
 
     private void verifyJdkTree(SegmentClassicLaunchProgram program, long deadlineNanos) throws IOException {

@@ -541,6 +541,85 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void loaderCacheUsesTheSameOriginalHashHandleAndCannotPromoteItsParsedBytes() throws Exception {
+        var cache = linuxFile(root.resolve("loader.cache"), SegmentClassicLinuxDeployment.Role.LOADER_CACHE,
+                SegmentClassicLinuxCacheTest.vector());
+        var owner = owner();
+        owner.initialize();
+        var observed = owner.verifyLinuxFile(cache, SegmentClassicLinuxElfTest.deadline());
+        assertEquals(7, observed.cache().entries().size());
+        assertEquals(null, observed.elf());
+        assertThrows(IOException.class, owner::installed);
+        assertTrue(owner.closeAndDrain().drained());
+        byte[] bad = SegmentClassicLinuxCacheTest.vector();
+        bad[28] = 3;
+        var malformed = linuxFile(cache.path(), cache.role(), bad);
+        var rejected = owner();
+        rejected.initialize();
+        var failure = assertThrows(IOException.class,
+                () -> rejected.verifyLinuxFile(malformed, SegmentClassicLinuxElfTest.deadline()));
+        assertSame(failure, rejected.closeAndDrain().launcherFailure());
+        assertTrue(rejected.closeAndDrain().drained());
+    }
+
+    @Test
+    public void loaderCacheOverLimitRejectsBeforeAnyFileIo() throws Exception {
+        var input = new SegmentClassicLinuxDeployment.File(root.resolve("not-opened"),
+                SegmentClassicLinuxDeployment.Role.LOADER_CACHE, 16 * 1024 * 1024 + 1,
+                new SegmentClassicHandoff.Digest(MessageDigest.getInstance("SHA-256").digest(new byte[0])));
+        var owner = owner();
+        owner.initialize();
+        try (var calls = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Oversized cache reached file I/O");
+        })) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.verifyLinuxFile(input, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("cache length"));
+        }
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
+    @Test
+    public void loaderCacheMetadataReadAndFirstCloseFailuresKeepBothOriginalResults() throws Exception {
+        var cache = linuxFile(root.resolve("loader.cache"), SegmentClassicLinuxDeployment.Role.LOADER_CACHE,
+                SegmentClassicLinuxCacheTest.vector());
+        var owner = owner();
+        owner.initialize();
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        IOException readFailure = new IOException("cache original positional read");
+        IOException closeFailure = new IOException("cache original native first close");
+        try (var calls = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && cache.path().equals(invocation.getArgument(0))) {
+                var fault = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
+                fault.closeFailure = closeFailure;
+                captured.set(fault);
+                doAnswer(call -> {
+                    throw readFailure;
+                }).when(fault).read(any(ByteBuffer.class), anyLong());
+                return fault;
+            }
+            return actual;
+        })) {
+            assertSame(readFailure, assertThrows(IOException.class,
+                    () -> owner.verifyLinuxFile(cache, SegmentClassicLinuxElfTest.deadline())));
+        }
+        try {
+            var drain = owner.closeAndDrain();
+            assertFalse(drain.drained());
+            assertSame(readFailure, drain.launcherFailure());
+            assertSame(closeFailure, drain.files().closeFailure());
+            assertTrue(Arrays.asList(readFailure.getSuppressed()).contains(closeFailure));
+            assertEquals(1, captured.get().closes.get());
+            assertTrue(captured.get().actual.isOpen());
+        } finally {
+            captured.get().actual.close();
+        }
+        assertFalse(owner.closeAndDrain().drained());
+    }
+
+    @Test
     public void opaqueNonUtf8LoadingPathIsRejectedBeforeAnyFileIo() throws Exception {
         Path raw = Path.of(java.net.URI.create(root.toUri().toASCIIString() + "%FF.conf"));
         var file = new SegmentClassicLinuxDeployment.File(raw, SegmentClassicLinuxDeployment.Role.LOADER_CONFIG,

@@ -720,6 +720,22 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## Linux new-cache 的有界原句柄解析
+
+2026-11-01在父`80185847481561cd46896d60b7a6856b239945d5`上增加包内SegmentClassicLinuxCache数据观察，并接原trust的LOADER_CACHE角色：读取前按48 bytes…16MiB拒绝不支持长度，SHA与cache metadata使用同一原FileChannel，继续原路径/父链/ACL/单链接/身份、absolute deadline与首次关闭合同。v1程序角色解释与读取保持，新的cache字段不产生Installed/START/Unix资格；fixture仍拒绝Installed。只读positional读取，不移动/关闭调用方channel，不mmap或调用helper/loader/ldconfig，也不选实际winner。
+
+支持受限glibc2.39 new-cache1.1 standalone格式：完整header、明确little-endian2及受限unset0、262144表项上限、绝对字符串偏移与suffix-sharing、NUL边界、扩展magic/tag/flags/范围/对齐/重叠和零padding/尾部，以及generator的非NUL结尾字节和按字节排序的glibc-hwcaps。拒绝legacy/compat/未知布局和损坏引用，不自动修复或重写cache。输出原始顺序、全部ABI flags、osversion_unused和legacy/named hwcap/ISA信息；lp64()仅为0x303 flags匹配，不是ELF机器类型、CPU可用性或加载批准。字符串使用私有原始图像的不可变有界视图，按需复制或严格UTF8解码；因此不因大量重复/共享suffix引用复制整串，也不把合法无关ABI的raw bytes替换成另一个路径。
+
+查找顺序校验遵循支持范围内的numeric名称比较、flags降序、named hwcap优先及其名称字节顺序，不改成普通String/natural sort。规划会话冻结未验证的C回绕为明确UNSUPPORTED，既不报absence，也不跳过无关超界key：原C表达式value*10+字符-'0'的中间乘法/加ASCII字符也必须在int范围内。前导零不按长度拒绝；测试支持100个零前缀及2147483599，拒绝2147483600及INT_MAX的中间越界。新schema仍须显式绑定此比较policy，必要NEEDED查询也须遵守；确切vendor wrap profile将来有实证再扩展，当前未添加猜测分支。
+
+独立Python写出551-byte/7项固定向量（SHA-256 `19083594b3a782789e794bc4ed946141e1441d95657281826e2f0ac4d66e3640`），包括10/2数值排序、LP64/i386/x32、named与legacy hwcap、非UTF8 raw path、suffix引用及非NUL结尾generator；不是实际部署cache。原glibc2.39头文件在artifact外置shim下由host clang独立验证header48/entry24、各offset、17+3 magic/version及扩展常量，原头/hash/编译命令/程序保留，不称Linux或loader运行。实际临时文件覆盖恰好16MiB/262144项与超限、原channel位置/期限/零进展、同原hash句柄解析、格式错误后的排空、读取失败与首次关闭失败同时保留，未用mock成功代替这些文件读取。
+
+首轮两类41项有一个负向夹具将重复v3引用写成了合法suffix偏移，修正为实际第二索引；原1 failure保留。首次样式三项长行/unused import失败已修正。随后7项与样式误并行，虽原退出0，独立注记将其排除为最终证据；最终按串行命令，cache/trust/program/deployment/materials/publication/preload七类85项全部通过、0失败/错误/跳过，后续独立Spotless/Checkstyle退出0。三个原测试阶段各1418项源码/资源分别对照原快照或父Git字节，无缺失/错配；最终五个代码/资源与通过样式和最终test原源完全一致。不将早期C数值范围或并行回执移绑最终实现。
+
+两个已有本地Docker镜像均不含/etc/ld.so.cache，有限定位已停止；两个任务自有容器只create/cp/inspect、从未start，按原ID/label/created状态清理且仅删除本次匿名卷，镜像及其他容器不动。第一失败记录来自原tool stderr，第二命令/错误/实际状态保留；实际发行版cache样本、Linux glibc2.39接受路径及端到端运行仍NOT_EXECUTED，没有用固定向量冒充。metadata inspect中无关环境配置未作为证据保存。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-cache-evidence-80185847`包含各原source/class/XML、独立生成器/向量、header oracle、失败与并行边界注记。终态RAT退出1，原431项路径及父801字节不变，本次无新增，扫描前排除用户PDF。三raw scope经两次lsof及原inode/SHA/归档硬链接核验后清理6目录/19文件路径/1,432,185逻辑字节，归档保留、regular-file数据块回收0，共享target和精确JNI未动。本增量无Rust重建、模型或性能；conf/include、新schema/原字符串/provider绑定、完整候选/选择/诊断及v2 qualified启动仍OPEN，各整体Gate不提升，完整16步active，默认OFF/SYSTEM/PARK与disabled保持。
+
 ## Linux 加载目录成员与逐路径字节等价
 
 2026-11-01在父`b3bcb2f12f4eece7536e035a892a5e56d918cead`上，原SegmentClassicLaunchTrust/AuxiliaryRead增加完整成员名观察：先核验声明目录的物理路径，再持有原DirectoryStream、枚举名称并检查实际首次关闭，前后目录/父链及整组A/B必须一致；缺失和真正空目录分别表达。同一resolved目录的alias视图复用本轮名称列表。按规划会话冻结总成员262144，另用64MiB UTF8名称字节上限保护本组件，超限失败并关闭原iterator；这不是整个父进程的heap或full-bytes验收。名称包含确实无关成员，不跟随它们、不逐个读取内容，也不把枚举事实变成批准候选。异常/未知关闭保留原failure，外部close等待实际open体退出，自drain拒绝。
