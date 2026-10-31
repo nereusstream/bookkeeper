@@ -10,6 +10,8 @@ Main 首版部署决策：用户2026-10-27已选择先限已有旧服务的受�
 
 共同启动后端补充裁决：规划会话2026-10-30已冻结首版共同启用仅支持真实ZK native adapter，RegistrationManager的窄cold-read默认UNSUPPORTED；只有实际权威ABSENT且无本地marker/绑定引用/commissioned要求才走原ZK Classic。custom持久driver缺能力时首次/重启均不能取得未绑定资格，须补真实查询；Null只保留明确不注册、全新可丢弃独立Classic用途，不发行集群authority。固定namespace为真实ledgers root下bookie-route-bindings/<encodedBookieId>，不由实验配置重定向、不放Cookie子节点、不随removeCookie删除。scope直接用manifest外部commissioned StorageIncarnation，绑定真实cluster/Bookie及原Cookie来源birth/version/hash，不用旧进程nonce；上下文绑定manager/Bookie/全根集/episode并在Classic自身副作用前消费。该兼容限制已接受，不能写成所有旧custom行为不变；实际默认入口preflight已接线；完整共同owner装配与受控启用仍待完成。
 
+共同已有数据导入裁决：规划会话2026-10-31冻结下一块为离线导入、封口、PREPARED断点续接及ENABLED重启核验；运行期异步claim在其后接入。稳定owner先返回，核验外部commissioned manifest/真实ZK绑定及Cookie来源，持有完整共同根/control，先有界只读枚举有效index的.idx/.rloc及全部必要Journal suffix，经唯一SegmentBookieControlDriver.submitChanges持久并顺序apply CLASSIC claim后，才允许.rloc修改、master-key分配/cache/handle与replay副作用；严格flush及lastMark成功后以精确前序applied cut写BOOTSTRAP_COMPLETE，再条件完成同一native PREPARED。无seal重启复用同一ledger的claim身份/结果；已有seal只续原native完成；ENABLED核验所有成员与既有claim，不能重新自动导入。枚举失败、缺suffix、冲突/容量不足不封口；旧entry-log残留不复活已删除ledger。复用严格资源登记和首次关闭结果但保留fresh空根限制，为历史数据提供明确内部权限入口；扫描/Cookie/Journal reader/lastMark/.rloc/control/根锁均纳入资源图，超时中断不撤销实际CONTROL/I/O。ENABLED只证明导入封口，不发行readiness/registration/writable；本块不启listener、不接受Profile INSTALL/普通Classic请求，也不补造外部旧服务隔离authority。真实ZK/已有文件、多Journal/独立index、关键边界进程退出/同操作续接及挂起/失败资源验证均为本块验收，当前实现与验收仍OPEN。
+
 规划裁决方式：用户2026-10-28明确授权，后续规划判断和取舍交由「Unified WAL 总体规划与实施检查」会话（01a0c84a-11d9-7951-80a4-8f2a6933c139）直接完成，不再要求用户人为确认。该会话保持只读规划/检查，主实施会话负责接线、验证、同步文档和本地提交；已冻结的选择不重复提问，不把此授权扩展为push、发布或生产部署。
 
 运行方式：按当前持续目标的执行约束，本会话是唯一实施入口，使用 `gpt-6.1-sol` / `xhigh`（极高）；不启动子agent、explorer/worker、第二编码CLI或另一实施会话，不恢复旧实施会话编码。2026-10-25的多agent授权保留为历史，当前执行按本条收束。可以运行普通构建、测试和必要的并发测试进程。原规划会话 01a0c84a-11d9-7951-80a4-8f2a6933c139 仅做总体规划与只读检查，其用户已另行指定 `gpt-6-astra` / `xhigh`；规划裁决不构成第二实施入口。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
@@ -432,3 +434,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 2026-10-31接续[显式本地 fresh owner 与实际排空](local-storage/README.md#显式本地-fresh-owner-与实际排空)：FreshClassicOwner/窄facade、冻结配置、完整初始化登记与一次性包内permit已接线，按实际调用体/callback、Journal、GC、Sync、storage及根资源依赖排空；共享fence与普通Journal仅补必要引用交接/未发布回滚。配置限制、验证与原阶段回执由该节拥有。本地fresh不发行集群authority，不接EmbeddedServer；共同owner/Classic导入、Main、网络服务图、G1/full-bytes及完整16步仍OPEN，目标active，默认OFF/SYSTEM/PARK与disabled保持。
+
+
+2026-10-31接续[共同根锁的首次结果与获取 owner](local-storage/README.md#共同根锁的首次结果与获取-owner)：共享SegmentDataFileLock统一保留首次release/close结果，ACTIVE持有实际失败owner，共同根先登记再取得资源；部分获取失败和重复异常聚合沿同一进度。实际验证与证据由该节拥有。下一块继续完整共同已有Classic离线导入、严格恢复/flush/seal与native ENABLED核验，之后才接运行期异步claim。此根资源子项不证明control/完整owner已排空，不提升Main/G1/full-bytes或16步Gate，持续目标active，默认OFF/SYSTEM/PARK与disabled保持。

@@ -24,61 +24,117 @@ import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.util.HashSet;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 
-/** Keeps one channel per in-process lock scope; closing another channel can drop POSIX record locks. */
+/** Keeps one resource owner per in-process lock scope; failed cleanup retains that owner and its native handles. */
 final class SegmentDataFileLock implements AutoCloseable {
-    private static final Set<Path> ACTIVE = new HashSet<>();
+    private static final Map<Path, SegmentDataFileLock> ACTIVE = new HashMap<>();
 
-    private final Path scope;
-    private final FileChannel channel;
-    private final FileLock lock;
-    private boolean closed;
+    record ReleaseResult(boolean acquired, boolean started, boolean returned, Throwable failure) { }
 
-    private SegmentDataFileLock(Path scope, FileChannel channel, FileLock lock) {
-        this.scope = scope;
-        this.channel = channel;
-        this.lock = lock;
+    record DrainResult(boolean drained, Throwable acquisitionFailure, ReleaseResult lock, ReleaseResult channel) { }
+
+    private final Path requested;
+    private final boolean create;
+    private final boolean control;
+    private Path scope;
+    private FileChannel channel;
+    private FileLock lock;
+    private boolean attempted;
+    private boolean registered;
+    private boolean closing;
+    private Thread initializingThread;
+    private Thread closingThread;
+    private Throwable acquisitionFailure;
+    private boolean releaseStarted;
+    private boolean releaseReturned;
+    private Throwable releaseFailure;
+    private boolean channelCloseStarted;
+    private boolean channelCloseReturned;
+    private Throwable channelCloseFailure;
+    private boolean aggregated;
+    private Throwable closeFailure;
+
+    private SegmentDataFileLock(Path requested, boolean create, boolean control) {
+        this.requested = requested.toAbsolutePath();
+        this.create = create;
+        this.control = control;
     }
 
     static SegmentDataFileLock create(Path directory) throws IOException {
-        return acquire(directory, true);
+        return acquire(directory.resolve("isolated.lock"), true, false);
     }
 
     static SegmentDataFileLock open(Path directory) throws IOException {
-        return acquire(directory, false);
-    }
-
-    private static SegmentDataFileLock acquire(Path directory, boolean create) throws IOException {
-        Path scope = directory.toRealPath().resolve("isolated.lock");
-        return acquireFile(scope, create, false);
+        return acquire(directory.resolve("isolated.lock"), false, false);
     }
 
     static SegmentDataFileLock openControl(Path path) throws IOException {
-        return acquireFile(path.getParent().toRealPath().resolve(path.getFileName()), false, true);
+        return acquire(path, false, true);
     }
 
     /** Inspection must not create a missing lock or open a second channel for an active in-process owner. */
     static SegmentDataFileLock openExistingControl(Path path) throws IOException {
-        return acquireFile(path.getParent().toRealPath().resolve(path.getFileName()), false, false);
+        return acquire(path, false, false);
     }
 
-    private static SegmentDataFileLock acquireFile(Path scope, boolean create, boolean control) throws IOException {
-        synchronized (ACTIVE) {
-            if (!ACTIVE.add(scope)) {
-                throw new IOException("Isolated file scope already has a writer");
-            }
-        }
-        FileChannel channel = null;
+    /** Pure owner for a caller to register before any path lookup, file open or lock acquisition. */
+    static SegmentDataFileLock existingControlOwner(Path path) {
+        return new SegmentDataFileLock(path, false, false);
+    }
+
+    /** Pure owner for the first private lock-file creation in an explicitly commissioned common root. */
+    static SegmentDataFileLock creatingControlOwner(Path path) {
+        return new SegmentDataFileLock(path, true, true);
+    }
+
+    private static SegmentDataFileLock acquire(Path path, boolean create, boolean control) throws IOException {
+        SegmentDataFileLock owner = new SegmentDataFileLock(path, create, control);
         try {
-            channel = control
-                    ? FileChannel.open(scope, StandardOpenOption.CREATE, StandardOpenOption.READ,
-                            StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
-                    : create ? FileChannel.open(scope, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
-                    : FileChannel.open(scope, StandardOpenOption.READ, StandardOpenOption.WRITE,
-                            LinkOption.NOFOLLOW_LINKS);
-            FileLock lock;
+            owner.initialize();
+            return owner;
+        } catch (IOException | RuntimeException | Error failure) {
+            try {
+                owner.close();
+            } catch (Throwable cleanup) {
+                if (failure != cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+            }
+            throw failure;
+        }
+    }
+
+    /** Acquisition is one-use and serialized with close; failures leave this same owner available for cleanup. */
+    synchronized void initialize() throws IOException {
+        if (attempted || closing) {
+            throw new IOException("File lock acquisition is one-use and cannot follow close");
+        }
+        attempted = true;
+        initializingThread = Thread.currentThread();
+        try {
+            scope = requested.getParent().toRealPath().resolve(requested.getFileName());
+            synchronized (ACTIVE) {
+                if (ACTIVE.putIfAbsent(scope, this) != null) {
+                    throw new IOException("Isolated file scope already has a writer or unresolved resource owner");
+                }
+                registered = true;
+            }
+            if (create && control) {
+                channel = FileChannel.open(scope, Set.of(StandardOpenOption.CREATE, StandardOpenOption.READ,
+                        StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS),
+                        PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
+            } else {
+                channel = control
+                        ? FileChannel.open(scope, StandardOpenOption.CREATE, StandardOpenOption.READ,
+                                StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+                        : create ? FileChannel.open(scope, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)
+                        : FileChannel.open(scope, StandardOpenOption.READ, StandardOpenOption.WRITE,
+                                LinkOption.NOFOLLOW_LINKS);
+            }
             try {
                 lock = channel.tryLock();
             } catch (OverlappingFileLockException overlapping) {
@@ -87,61 +143,96 @@ final class SegmentDataFileLock implements AutoCloseable {
             if (lock == null) {
                 throw new IOException("Isolated file scope already has a writer");
             }
-            return new SegmentDataFileLock(scope, channel, lock);
         } catch (IOException | RuntimeException | Error failure) {
-            try {
-                if (channel != null) {
-                    channel.close();
-                }
-            } catch (IOException closeFailure) {
-                failure.addSuppressed(closeFailure);
-            }
-            synchronized (ACTIVE) {
-                ACTIVE.remove(scope);
-            }
+            acquisitionFailure = failure;
             throw failure;
+        } finally {
+            initializingThread = null;
         }
     }
 
-    FileChannel channel() {
+    synchronized FileChannel channel() {
         return channel;
     }
 
-    FileLock lock() {
+    synchronized FileLock lock() {
         return lock;
+    }
+
+    synchronized DrainResult drainResult() {
+        boolean drained = closing && initializingThread == null && closingThread == null
+                && (lock == null || releaseReturned && releaseFailure == null)
+                && (channel == null || channelCloseReturned && channelCloseFailure == null);
+        return new DrainResult(drained, acquisitionFailure,
+                new ReleaseResult(lock != null, releaseStarted, releaseReturned, releaseFailure),
+                new ReleaseResult(channel != null, channelCloseStarted, channelCloseReturned, channelCloseFailure));
     }
 
     @Override
     public synchronized void close() throws IOException {
-        if (closed) {
-            return;
+        if (initializingThread == Thread.currentThread() || closingThread == Thread.currentThread()) {
+            throw new IllegalStateException("File lock activity cannot close itself");
         }
-        IOException first = null;
-        boolean released = false;
+        closing = true;
+        closingThread = Thread.currentThread();
         try {
-            lock.release();
-            released = true;
-        } catch (IOException failure) {
-            first = failure;
-        }
-        try {
-            channel.close();
-            released = true;
-        } catch (IOException failure) {
-            if (first == null) {
-                first = failure;
-            } else {
-                first.addSuppressed(failure);
+            if (lock != null && !releaseStarted) {
+                releaseStarted = true;
+                try {
+                    if (!lock.isValid()) {
+                        throw new IOException("File lock became invalid without an observed release result: " + scope);
+                    }
+                    lock.release();
+                } catch (Throwable failure) {
+                    releaseFailure = failure;
+                } finally {
+                    releaseReturned = true;
+                }
             }
-        }
-        if (released) {
-            closed = true;
-            synchronized (ACTIVE) {
-                ACTIVE.remove(scope);
+            if (channel != null && !channelCloseStarted) {
+                channelCloseStarted = true;
+                try {
+                    if (!channel.isOpen()) {
+                        throw new IOException("File channel closed without an observed native result: " + scope);
+                    }
+                    channel.close();
+                } catch (Throwable failure) {
+                    channelCloseFailure = failure;
+                } finally {
+                    channelCloseReturned = true;
+                }
             }
+            if (!aggregated) {
+                aggregated = true;
+                closeFailure = releaseFailure == null ? channelCloseFailure : releaseFailure;
+                if (releaseFailure != null && channelCloseFailure != null && releaseFailure != channelCloseFailure) {
+                    closeFailure.addSuppressed(channelCloseFailure);
+                }
+            }
+            if (closeFailure == null && registered) {
+                synchronized (ACTIVE) {
+                    ACTIVE.remove(scope, this);
+                    registered = false;
+                }
+            }
+            rethrow(closeFailure);
+        } finally {
+            closingThread = null;
         }
-        if (first != null) {
-            throw first;
+    }
+
+    private static void rethrow(Throwable failure) throws IOException {
+        if (failure instanceof IOException io) {
+            throw io;
+        }
+        if (failure instanceof RuntimeException runtime) {
+            throw runtime;
+        }
+        if (failure instanceof Error error) {
+            throw error;
+        }
+        if (failure != null) {
+            throw new IOException("Unexpected file lock cleanup failure", failure);
         }
     }
 }

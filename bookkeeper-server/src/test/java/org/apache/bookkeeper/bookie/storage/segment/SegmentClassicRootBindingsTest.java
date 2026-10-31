@@ -20,6 +20,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -118,7 +119,7 @@ public class SegmentClassicRootBindingsTest {
 
     @After
     public void cleanup() throws Exception {
-        cluster.stopCluster();
+        cluster.killCluster();
     }
 
     private SegmentClassicRootBindings roots(BookieRouteBinding.Observation observation) throws IOException {
@@ -143,6 +144,79 @@ public class SegmentClassicRootBindingsTest {
         return member < 0 ? manifest.controlDirectory().resolve(SegmentClassicRootBindings.FILE_NAME)
                 : manifest.classicRoots().get(member).directory().resolve("current")
                         .resolve(SegmentClassicRootBindings.FILE_NAME);
+    }
+
+    @Test
+    public void firstCommonRootCloseFailuresStayAttachedAcrossRepeatedAggregation() throws Exception {
+        SegmentClassicRootBindings roots = roots(prepared);
+        roots.openLocks(new SegmentFileIo());
+        var leases = leases(roots);
+        var first = new SegmentDataFileLockTest.FaultChannel(leases.get(0).channel());
+        var second = new SegmentDataFileLockTest.FaultChannel(leases.get(1).channel());
+        first.closeFailure = new IOException("first root native close failed");
+        second.closeFailure = new IOException("second root native close failed");
+        SegmentDataFileLockTest.replace(leases.get(0), "channel", first);
+        SegmentDataFileLockTest.replace(leases.get(1), "channel", second);
+        try {
+            IOException failure = assertThrows(IOException.class, roots::close);
+            assertSame(second.closeFailure, failure);
+            assertArrayEquals(new Throwable[]{first.closeFailure}, failure.getSuppressed());
+            assertSame(failure, assertThrows(IOException.class, roots::close));
+            assertArrayEquals(new Throwable[]{first.closeFailure}, failure.getSuppressed());
+            assertEquals(1, first.closes.get());
+            assertEquals(1, second.closes.get());
+            assertEquals(2, leases.size());
+            assertTrue(first.actual.isOpen());
+            assertTrue(second.actual.isOpen());
+            for (var root : manifest.classicRoots()) {
+                assertThrows(IOException.class, () -> SegmentDataFileLock.openExistingControl(
+                        root.directory().resolve("current/route-claim.lock")));
+            }
+        } finally {
+            first.actual.close();
+            second.actual.close();
+        }
+    }
+
+    @Test
+    public void partialCommonAcquisitionIsRegisteredBeforeOpenAndOtherRootsStillClose() throws Exception {
+        SegmentClassicRootBindings roots = roots(prepared);
+        Path partialPath = manifest.classicRoots().get(1).directory().resolve("current/route-claim.lock");
+        Files.createFile(partialPath);
+        var actual = SegmentDataFileLockTest.openActual(partialPath);
+        var channel = new SegmentDataFileLockTest.FaultChannel(actual);
+        channel.lockFailure = new IOException("partial root lock failed");
+        channel.closeFailure = new IOException("partial root close failed");
+        try {
+            try (var factory = SegmentDataFileLockTest.returning(partialPath, channel)) {
+                assertSame(channel.lockFailure,
+                        assertThrows(IOException.class, () -> roots.openLocks(new SegmentFileIo())));
+            }
+            var leases = leases(roots);
+            assertEquals(2, leases.size());
+            assertSame(channel, leases.get(1).channel());
+            assertSame(channel.lockFailure, leases.get(1).drainResult().acquisitionFailure());
+            assertSame(channel.closeFailure, assertThrows(IOException.class, roots::close));
+            assertEquals(1, leases.size());
+            assertSame(channel, leases.get(0).channel());
+            assertSame(channel.closeFailure, assertThrows(IOException.class, roots::close));
+            assertEquals(1, channel.closes.get());
+            assertTrue(actual.isOpen());
+            Path released = manifest.classicRoots().get(0).directory().resolve("current/route-claim.lock");
+            try (var next = SegmentDataFileLock.openExistingControl(released)) {
+                assertTrue(next.lock().isValid());
+            }
+            assertThrows(IOException.class, () -> SegmentDataFileLock.openExistingControl(partialPath));
+        } finally {
+            actual.close();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<SegmentDataFileLock> leases(SegmentClassicRootBindings roots) throws Exception {
+        var field = SegmentClassicRootBindings.class.getDeclaredField("locks");
+        field.setAccessible(true);
+        return (List<SegmentDataFileLock>) field.get(roots);
     }
 
     @Test

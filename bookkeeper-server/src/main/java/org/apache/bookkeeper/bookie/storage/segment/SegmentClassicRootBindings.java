@@ -20,7 +20,6 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -112,22 +111,16 @@ final class SegmentClassicRootBindings implements AutoCloseable {
         for (var member : manifest.classicRoots()) {
             Path current = current(member.directory());
             Path path = current.resolve(LOCK_NAME);
-            if (nativeBinding.binding().phase() == BookieRouteBinding.Phase.PREPARED) {
-                if (bound && !Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
-                    throw new IOException("An already bound common root is missing its original lock");
-                }
-                try {
-                    Files.createFile(path, PosixFilePermissions.asFileAttribute(
-                            PosixFilePermissions.fromString("rw-------")));
-                } catch (FileAlreadyExistsException existing) {
-                    // Only this same fixed lock is reused; its channel is opened once by the existing lock owner.
-                }
-            }
-            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            boolean existing = Files.exists(path, LinkOption.NOFOLLOW_LINKS);
+            boolean prepared = nativeBinding.binding().phase() == BookieRouteBinding.Phase.PREPARED;
+            if (existing && !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+                    || !existing && (!prepared || bound)) {
                 throw new IOException("Required Classic common-scope lock is missing or is not a regular file");
             }
-            var acquired = SegmentDataFileLock.openExistingControl(path);
+            var acquired = existing ? SegmentDataFileLock.existingControlOwner(path)
+                    : SegmentDataFileLock.creatingControlOwner(path);
             locks.add(acquired);
+            acquired.initialize();
             io.force(acquired.channel(), true);
             IsolatedSegmentFiles.syncDirectory(current);
         }
@@ -334,21 +327,40 @@ final class SegmentClassicRootBindings implements AutoCloseable {
             return;
         }
         closing = true;
-        IOException first = null;
+        Throwable first = null;
         for (int index = locks.size() - 1; index >= 0; index--) {
+            SegmentDataFileLock lease = locks.get(index);
             try {
-                locks.get(index).close();
+                lease.close();
+                if (!lease.drainResult().drained()) {
+                    throw new IOException("Common root lease has not reached its actual resource terminal state");
+                }
                 locks.remove(index);
-            } catch (IOException failure) {
+            } catch (Throwable failure) {
                 if (first == null) {
                     first = failure;
-                } else {
-                    first.addSuppressed(failure);
+                } else if (first != failure) {
+                    boolean retained = false;
+                    for (Throwable prior : first.getSuppressed()) {
+                        retained |= prior == failure;
+                    }
+                    if (!retained) {
+                        first.addSuppressed(failure);
+                    }
                 }
             }
         }
+        if (first instanceof IOException io) {
+            throw io;
+        }
+        if (first instanceof RuntimeException runtime) {
+            throw runtime;
+        }
+        if (first instanceof Error error) {
+            throw error;
+        }
         if (first != null) {
-            throw first;
+            throw new IOException("Common root cleanup failed", first);
         }
         closed = true;
     }

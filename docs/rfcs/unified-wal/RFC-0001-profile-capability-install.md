@@ -1080,3 +1080,6 @@ RFC 进入 Accepted 前必须：
 
 
 2026-10-31接续[显式本地 fresh owner 与实际排空](implementation/local-storage/README.md#显式本地-fresh-owner-与实际排空)：FreshClassicOwner/窄facade、冻结配置、完整初始化登记与一次性包内permit已接线，按实际调用体/callback、Journal、GC、Sync、storage及根资源依赖排空；共享fence与普通Journal仅补必要引用交接/未发布回滚。配置限制、验证与原阶段回执由该节拥有。本地fresh不发行集群authority，不接EmbeddedServer；共同owner/Classic导入、Main、网络服务图、G1/full-bytes及完整16步仍OPEN，目标active，默认OFF/SYSTEM/PARK与disabled保持。
+
+
+2026-10-31接续[共同根锁的首次结果与获取 owner](implementation/local-storage/README.md#共同根锁的首次结果与获取-owner)：共享SegmentDataFileLock统一保留首次release/close结果，ACTIVE持有实际失败owner，共同根先登记再取得资源；部分获取失败和重复异常聚合沿同一进度。实际验证与证据由该节拥有。下一块继续完整共同已有Classic离线导入、严格恢复/flush/seal与native ENABLED核验，之后才接运行期异步claim。此根资源子项不证明control/完整owner已排空，不提升Main/G1/full-bytes或16步Gate，持续目标active，默认OFF/SYSTEM/PARK与disabled保持。
