@@ -1092,3 +1092,6 @@ RFC 进入 Accepted 前必须：
 
 
 2026-10-31接续[commissioned requirements 的原生来源指纹](implementation/startup-readiness/README.md#commissioned-requirements-的原生来源指纹)：真实requirements Observation提供原节点路径/envelope出生/native zxid与version/原始字节SHA-256，用于后续固定loader冷读匹配；值不构成授权，原publisher的store/client/observation绑定及持久格式不变。真实ZK同字节重建和同事务不同namespace对照、三类33项及style验证由canonical拥有；完整launcher/交接证明/公开bootstrap/Classic恢复封口仍OPEN，目标active，Main/G1/full-bytes/生产Gate及默认OFF/SYSTEM/PARK和disabled不提升。
+
+
+2026-10-31接续[固定 Classic 交接 codec 与精确材料绑定](implementation/startup-readiness/README.md#固定-classic-交接-codec-与精确材料绑定)：固定64KiB Ed25519 proof、exact-scope policy、retirement编码/摘要及独立AES key identity已接包内纯codec，按完整manifest角色/索引匹配成员，并绑定实际close与独立Unix隔离回执。原commissioned generations与当前assignment overlay分离；字节/验证由canonical与format-v1拥有。只返回数据，不发行adoptable session；真实launcher/retirement guard/材料owner-loader/UID-fd-ACL及当前native核验、完整bootstrap仍OPEN，目标active，Main/G1/full-bytes/生产Gate及默认OFF/SYSTEM/PARK和disabled保持。

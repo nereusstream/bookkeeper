@@ -627,3 +627,21 @@ issuer UID、受保护输入目录及metadata信任根由外部部署指定，�
 
 
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/requirements-source-evidence-1d8b9256`分别保留首组十项和最终33项的原源码/日志/XML/class，style退出0。RAT实际退出1，431项未批准路径集合及各项字节与父提交和前次封存一致，无新增或解决，受保护PDF在扫描前排除。当前声明1321项源码和十项文档输入，native runner实际记录1294项，相关class快照14项；其他输入逐项对应父Git blob，不将早期getter结果移绑新增namespace字段后的源码。完成实际终态与两次独立lsof检查后，仅移除本次两个raw scope的四个目录、十个文件路径，共1,479,573逻辑字节；归档硬链接完整保留，regular-file数据块回收为0。用户PDF、默认目录和其他任务产物未触碰。本增量只交付来源身份值，不关闭完整交接证明或bootstrap验收。
+
+
+## 固定 Classic 交接 codec 与精确材料绑定
+
+2026-10-31在父源码`967ef3dee3497be377c7f2ab58d1050abf8f20e9`上，实现包内SegmentClassicHandoff固定proof/policy/retirement字节、独立32-byte AES key identity及完整材料scope匹配。具体顺序/边界与固定向量由[受控 Classic 交接材料 v1](../local-storage/format-v1.md#受控-classic-交接材料-v1)拥有，既有Segment/ROUTE/seal/native格式不变。证明最大64KiB，固定JCA Ed25519和外部已信任signer/key；对稳定原始字节验签后解析，再检查规范字节。无私钥参数、通用sign(ProofRecord)、网络信任锚下载、算法协商或JSON重编码路径。
+
+packet复用原PREPARED native binding及SourceIdentity，绑定原cluster/Bookie/Cookie/birth/op/共同manifest/目标身份，按manifest角色与索引保存物理根而不复制路径表。原始retirement字节摘要绑定同operation及同物理identity；policy只接受本op/Bookie/incarnation/manifest/目标UID的完整相等，AES材料必须独立原始32字节。签名同时覆盖真实child关闭/正常退出和独立Unix隔离结果/回执摘要；mode与typed成功结果不自行构成这些事实。ZK Observation新增commissionedCompatibility只读原envelope兼容要求；proof requirements generations取原记录，保留当前delete-assignment overlay供原服务逻辑消费，getter不增加metadata I/O。
+
+本增量只返回已验签的数据与材料比较结果，没有发行bootstrap session、DRAINED、readiness或registration。真实launcher固定supervisor/retirement持久状态、实际child适配器、Unix/fd/ACL完整核验、受保护材料owner/loader、当前metadata冷读，以及Classic导入/flush/seal/native ENABLED仍须串联；完整issuer与离线包仍OPEN。Main/G1/full-bytes/生产Gate及完整16步不提升，目标active；默认OFF/SYSTEM/PARK与disabled保持。
+
+
+最终执行`scripts/unified-wal/run-local-storage-tests.sh 'SegmentClassicHandoffTest,ZKProfileStartupRequirementsStoreTest,ZKProfileEphemeralRegistrationStoreTest,SegmentProfileInitialSocketClientTest#ownedProfileServiceRejectsRequirementsBeforeStorageOpenAndCleansBindFailure+ownedProfileServicePublishesBoundEndpointSupportsSdkAndRetainsDrainAcrossRestart+deleteHandoffEffectiveAllRealTargetsRejoinG2AndKeepOldEventsWithNewJournalData'`：四类41项全通过（codec 8、requirements 11、ephemeral 19、实际服务/SDK/重启及handoff 3），0失败/错误/跳过；最终style退出0。独立Python struct/hashlib与OpenSSL 3.6.4生成最终policy 100、retirement 685、proof 973字节向量，OpenSSL验签成功，Java/JCA产出的签名逐字节相同。测试翻转proof全部973个字节逐一拒绝；即使重新使用测试key正确签名，未知purpose/flags/结果、坏UTF-8、溢出长度/计数、非规范时间或尾随字段仍拒绝。另验证错signer/key/policy/目标scope、完整manifest成员缺失、物理别名/重排、最大257成员、unsigned UID和不可变引用；时间戳不产生租约。真实native G2 handoff中确认Requirements.from仍取原commissioned assignment generation=1，原服务继续消费当前overlay。
+
+首轮主编译因遗漏有界count reader退出1，没有执行测试；补齐后八项通过。对照冻结合同补入独立Unix隔离结果/回执，并增加producer签名输入与独立向量比较后，最终41项通过；未发布的937-byte草稿向量、原八项源码/class和首次style=0保留原绑定，最终973-byte输入与style-final=0另存，不将早期结果移绑。编译错误不记作产品RED，也不把codec中固定的成功结果或测试fixture当真实launcher证据。RAT实际退出1，431项未批准路径及字节与父/前次封存相同，无新增或解决，PDF在扫描前排除，不宣称全量CI通过。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/classic-handoff-codec-evidence-967ef3de`保留各阶段源码、实际日志/XML/class及两次独立向量生成脚本/输入/签名/回执。固定key为公开RFC测试材料，OpenSSL只用于向量生成，不增加运行或Maven依赖。最终声明1326项源码/资源及十项文档输入，native runner实际1299项，相关class快照67项；其他输入逐项对父Git blob核对。实际终态和两次独立lsof检查后，仅移除本次三个raw scope的六个目录、14个文件路径，共1,647,820逻辑字节；归档硬链接与必要向量生成材料保留，regular-file数据块回收为0。PDF、默认目录与其他任务产物未触碰。完整材料owner/loader、真实issuer/旧进程及两UID验收、公共bootstrap/Classic恢复桥和封口继续OPEN。
+
+提交前审计首轮因本次审计脚本参数替换把已保存的清理字节数误写为6,779,573而退出1；依据原cleanup-result中的实际1,647,820修正参数，保留原脚本/日志/退出码后重新核对最终index、源码/文档/class及精确patch。该审计错误未修改产品源码或测试断言，不作为产品RED；最终提交以成功审计结果为准。

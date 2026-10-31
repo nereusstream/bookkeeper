@@ -112,10 +112,13 @@ public class ZKProfileStartupRequirementsStoreTest extends ProfileZKTestBase {
         var source = store(first);
         assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
                 source.provision(compatibility(1), devices()));
-        var identity = source.read(BOOKIE).observation().orElseThrow().sourceIdentity();
+        var observation = source.read(BOOKIE).observation().orElseThrow();
+        var identity = observation.sourceIdentity();
         String path = source.path(BOOKIE);
         var stat = first.exists(path, false);
         byte[] original = first.getData(path, false, null);
+        assertEquals(ProfileStartupRequirementsCodec.decode(original).compatibility(),
+                observation.commissionedCompatibility());
         byte[] digest = MessageDigest.getInstance("SHA-256").digest(original);
         assertEquals(path, identity.nodePath());
         assertEquals(ProfileStartupRequirementsCodec.decode(original).birth(), identity.birthId());

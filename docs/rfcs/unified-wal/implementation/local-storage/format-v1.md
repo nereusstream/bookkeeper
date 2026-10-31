@@ -350,3 +350,30 @@ v2保留所有现有业务状态表记录与原sequence/首次条件结果，包
 
 
 2026-10-05，[当前 COPY 与 selector 状态](README.md#当前-copy-证明与-selector-状态)由原成功 MOVE/FREE replay 重建。原 MOVE 完整命令和首次结果仍进入 image v1/v2；当前索引不是新的持久编码，不改变 COPY 记录的 MOVE UUID/generation、准确几何或 entry SHA-256 校验。
+
+## 受控 Classic 交接材料 v1
+
+本节只冻结离线bootstrap的输入字节，不改变既有Segment文件/ROUTE/seal/native binding格式。codec为包内SegmentClassicHandoff，固定用途OFFLINE_CLASSIC_BOOTSTRAP=1，不提供私钥或通用sign-facts入口。验签返回数据；受控launcher的实际关闭/正常退出/UID隔离、固定retirement记录、材料文件保护和当前native状态仍由完整issuer/loader核验，当前接线及验收OPEN。
+
+所有整数为big-endian；u32 Unix UID/GID按无符号读取。UUID为原16字节；摘要固定32字节。文本为u32字节长度＋严格UTF-8，不含NUL，不作Unicode或路径重写。未知schema/flags/purpose/role、重复/缺失必需组、超界长度、非规范字段和尾随字节拒绝。
+
+| 材料 | 固定编码 |
+| --- | --- |
+| proof header | `UWCHOF01[8]`、u16 schema=1、u16 flags=0、u32 payloadLength、signerKeyId[32]；共48字节。 |
+| proof signature | 末尾64字节Ed25519；总长≤65536，验签前先核对总长/payloadLength及外部已信任signer，再对原始header/payload验签后解析。 |
+| signature input | ASCII `BookKeeper/CommonClassicHandoff/v1\0`（末尾实际NUL）＋完整48字节header＋payload。仅JCA `Ed25519`，无算法协商/压缩/证书URL。 |
+| exact policy | `UWCBPOL1[8]`、u16 schema=1、u16 flags=0、u32 purpose=1、bindingId[16]、BookieId文本（1..255字节）、目标incarnation[16]、完整manifest identity[32]、目标UID:u32；总长≤512。只作完整字段相等匹配，无通配解释。 |
+| AES key identity | 独立原始key必须32字节；`SHA-256(ASCII("BookKeeper/CommonClassicAesKey/v1\0") || rawKey)`，证明不包含key。 |
+| retirement intent | `UWCRETI1[8]`、u16 schema=1、u16 flags=0、下述operation、u16物理成员数、物理成员数组；总长≤65536。policy与intent摘要各为其完整规范字节SHA-256。固定cluster＋Bookie文件路径/guard及create-only持久发布由launcher/loader承担，codec不写文件。 |
+
+operation依次包含：u32 purpose=1；部署身份文本（1..1024字节）；程序/classpath/config清单摘要[32]；signerKeyId[32]（与proof header一致）；u32原native binding字节数（1..8192）及原BookieRouteBinding规范字节；native原birth UUID[16]、creation/modification zxid:i64、version:u32。只接受原PREPARED/version0。目标cluster/Bookie/Cookie出生/version/hash、bindingId、incarnation、manifest/control根复用该native记录，不复制第二份路径清单，也不补造Classic历史incarnation。
+
+其后为requirements原来源：节点路径文本（1..4096字节）、envelope birth UUID[16]、creation/modification zxid:i64、version:u32=0、原metadata字节SHA-256[32]；原commissioned device/format/migration/delete-assignment generation各i64、minimum reader/writer各u32。均绑定原不可变记录，不能把当前native delete-assignment overlay重编码为旧材料。原始byte identity还覆盖其余requirements字段。
+
+随后为实际episode：控制通道UUID[16]、PID:i64、进程start epochSecond:i64与nano:u32、registration birth zxid:i64与ephemeralOwner:i64；旧UID:u32、目标UID:u32、AES key identity[32]、精确policy摘要[32]。旧UID不得为0且与目标UID不同；其专用/无提权及子进程/其他fd使用者终结由实际issuer证明。PID和时间只辅助关联，codec不据此产生租约或接管任意进程。
+
+物理成员为kind:u16、manifest索引:u16、device:i64、inode:i64（非零）；kind=1 Classic根（0..191）、2独立control根（仅0）、3 Arena根（0..63）。三组都必须存在，按kind/索引连续规范排序，禁止重复物理device/inode；总数≤257。proof对每成员另带当前uid:u32、gid:u32、mode:u32（仅07777位）。采用时还须与完整受保护manifest的准确成员数及实际物理/Unix状态匹配，不能从可读子集重算映射。
+
+proof payload依次为operation、u16成员数及带权限的成员数组、u32实际drain结果=1、u32正常exitCode=0、终结控制sequence:i64、退出epochSecond:i64与nano:u32、实际关闭回执摘要[32]、u32完整Unix隔离结果=1、独立Unix验证回执摘要[32]、原retirement intent摘要[32]。时间只作审计，nano必须0..999999999。intent绑定同operation及同物理成员identity，关闭/权限回执均须由固定实际适配器产生；uid/gid/mode或结果常量本身不替代真实证据。
+
+三个独立向量位于`bookkeeper-server/src/test/resources/unified-wal-segment/classic-handoff-{proof,policy,retirement}-v1.hex`。固定测试key来自[RFC 8032 §7.1 test 1](https://www.rfc-editor.org/rfc/rfc8032.html#section-7.1)，仅为公开测试材料；独立Python struct/hashlib按本节顺序编码，OpenSSL Ed25519签名及验签后，Java与JCA重现相同字节/签名。JCA算法名依据[Java 21 Signature标准名称](https://docs.oracle.com/en/java/javase/21/docs/specs/security/standard-names.html#signature-algorithms)。固定测试数据不证明真实旧服务episode、UID隔离或可采用session。

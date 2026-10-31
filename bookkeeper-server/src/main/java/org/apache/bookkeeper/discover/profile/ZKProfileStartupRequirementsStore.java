@@ -113,6 +113,11 @@ public final class ZKProfileStartupRequirementsStore {
             return sourceIdentity;
         }
 
+        /** Original commissioned generations, independent of the current native assignment overlay. */
+        public BookieCompatibilityFact commissionedCompatibility() {
+            return envelope.compatibility();
+        }
+
         /** Actual graph replaces recovery/device observations later; scope/credential proof is external. */
         public StartupReadinessInput applyTo(StartupReadinessInput requested) {
             return new StartupReadinessInput(compatibility(), requiredDevices(), requested.recoveryFacts(),

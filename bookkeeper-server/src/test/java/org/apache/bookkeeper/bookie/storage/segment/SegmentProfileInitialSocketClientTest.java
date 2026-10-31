@@ -7572,6 +7572,7 @@ public class SegmentProfileInitialSocketClientTest {
                     requirements.provision(requested.compatibility(), devices));
         }
         var observed = requirements.read(identity.bookieId().toString()).observation().orElseThrow();
+        assertEquals(1, SegmentClassicHandoff.Requirements.from(observed).assignmentGeneration());
         var policy = observed.applyTo(new StartupReadinessInput(requested.compatibility(), requested.requiredDevices(),
                 requested.recoveryFacts(), requested.newScopeFallback(), requested.rollbackSafetyFacts(),
                 new Generation(readinessGeneration), requested.capabilityGeneration(), requested.runtimeReaderVersion(),
