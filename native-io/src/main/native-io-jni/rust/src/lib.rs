@@ -25,7 +25,7 @@
 //! It is a Rust implementation of the original C native_io_jni.c
 
 use jni::objects::{JClass, JString, JThrowable};
-use jni::sys::{jint, jlong};
+use jni::sys::{jint, jlong, jlongArray};
 use jni::JNIEnv;
 use std::ffi::{c_void, CString};
 use std::ptr;
@@ -81,6 +81,44 @@ fn throw_exception(env: &mut JNIEnv, message: &str) {
 // ============================================================================
 // JNI exported functions
 // ============================================================================
+
+/// This process only. Saved credentials and exec/dropper authority remain external obligations.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentProcessCredentials(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jlongArray {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let before = unsafe { [libc::getuid(), libc::geteuid(), libc::getgid(), libc::getegid()] };
+        let mut groups = [0 as libc::gid_t; 64];
+        let count = unsafe { libc::getgroups(groups.len() as libc::c_int, groups.as_mut_ptr()) };
+        if count < 0 {
+            throw_exception_with_errno(&mut env, "Current process supplementary group query failed");
+            return ptr::null_mut();
+        }
+        let after = unsafe { [libc::getuid(), libc::geteuid(), libc::getgid(), libc::getegid()] };
+        if before != after || count as usize > groups.len() {
+            throw_exception_with_error_code(&mut env, "Current process credentials changed", libc::EAGAIN);
+            return ptr::null_mut();
+        }
+        let mut values: Vec<jlong> = before.iter().map(|value| *value as jlong).collect();
+        values.extend(groups[..count as usize].iter().map(|value| *value as jlong));
+        let array = match env.new_long_array(values.len() as jint) {
+            Ok(array) => array,
+            Err(_) => return ptr::null_mut(),
+        };
+        if env.set_long_array_region(&array, 0, &values).is_err() {
+            return ptr::null_mut();
+        }
+        array.into_raw()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        throw_exception(&mut env, "Current process credential query is unsupported");
+        ptr::null_mut()
+    }
+}
 
 // Read UTF-16 directly: native operations must never act on a lossy or NUL-truncated replacement path.
 fn native_path(env: &mut JNIEnv, path: &JString) -> Option<CString> {

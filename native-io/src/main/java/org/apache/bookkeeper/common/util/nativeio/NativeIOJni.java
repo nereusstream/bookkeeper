@@ -50,6 +50,8 @@ class NativeIOJni {
 
     static native int hasExtendedAcl(String path) throws NativeIOException;
 
+    static native long[] currentProcessCredentials() throws NativeIOException;
+
     static {
         NativeIOBootstrap.initializeJni();
     }

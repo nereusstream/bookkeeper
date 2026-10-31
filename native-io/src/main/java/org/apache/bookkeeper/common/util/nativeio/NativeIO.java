@@ -19,10 +19,36 @@
 
 package org.apache.bookkeeper.common.util.nativeio;
 
+import java.util.List;
+import java.util.TreeSet;
+
 /**
  * NativeIO API.
  */
 public interface NativeIO {
+
+    /** Read-only observations of this process; never proof of saved credentials or startup permission. */
+    record ProcessCredentials(long realUid, long effectiveUid, long realGid, long effectiveGid,
+                              List<Long> supplementaryGroups) {
+        public ProcessCredentials {
+            if (supplementaryGroups.size() > 64) {
+                throw new IllegalArgumentException("Current process has too many supplementary groups");
+            }
+            for (long value : new long[]{realUid, effectiveUid, realGid, effectiveGid}) {
+                if (value < 0 || value > 0xffff_ffffL) {
+                    throw new IllegalArgumentException("Invalid current process credential");
+                }
+            }
+            var groups = new TreeSet<Long>();
+            for (long group : supplementaryGroups) {
+                if (group < 0 || group > 0xffff_ffffL) {
+                    throw new IllegalArgumentException("Invalid current process supplementary group");
+                }
+                groups.add(group);
+            }
+            supplementaryGroups = List.copyOf(groups);
+        }
+    }
 
     // These constants are different per each OS, so the correct values are defined in JNI code
     int O_CREAT = 0x01;
@@ -83,5 +109,10 @@ public interface NativeIO {
      */
     default boolean hasExtendedAcl(String path) throws NativeIOException {
         throw new NativeIOException("Native ACL presence query is unsupported");
+    }
+
+    /** Direct getuid/geteuid/getgid/getegid/getgroups observations; no external PID or credential input. */
+    default ProcessCredentials currentProcessCredentials() throws NativeIOException {
+        throw new NativeIOException("Current process credential query is unsupported");
     }
 }

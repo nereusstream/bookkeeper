@@ -20,6 +20,8 @@
  */
 package org.apache.bookkeeper.common.util.nativeio;
 
+import java.util.ArrayList;
+
 /**
  * NativeIOImpl.
  */
@@ -101,6 +103,31 @@ public class NativeIOImpl implements NativeIO {
             return result == 1;
         } catch (LinkageError unavailable) {
             var failure = new NativeIOException("ACL presence query is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
+    public ProcessCredentials currentProcessCredentials() throws NativeIOException {
+        try {
+            long[] actual = NativeIOJni.currentProcessCredentials();
+            if (actual == null || actual.length < 4 || actual.length > 68) {
+                throw new NativeIOException("Unknown current process credential query outcome");
+            }
+            var groups = new ArrayList<Long>(actual.length - 4);
+            for (int i = 4; i < actual.length; i++) {
+                groups.add(actual[i]);
+            }
+            try {
+                return new ProcessCredentials(actual[0], actual[1], actual[2], actual[3], groups);
+            } catch (IllegalArgumentException invalid) {
+                var failure = new NativeIOException("Invalid native current process credentials");
+                failure.initCause(invalid);
+                throw failure;
+            }
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Current process credentials are unavailable in this JNI library");
             failure.initCause(unavailable);
             throw failure;
         }
