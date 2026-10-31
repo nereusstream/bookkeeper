@@ -24,7 +24,7 @@
 //! This library provides POSIX file I/O operations via JNI for high-performance direct I/O.
 //! It is a Rust implementation of the original C native_io_jni.c
 
-use jni::objects::{JClass, JString, JThrowable};
+use jni::objects::{JClass, JObject, JString, JThrowable};
 use jni::sys::{jint, jlong, jlongArray};
 use jni::JNIEnv;
 use std::ffi::{c_void, CString};
@@ -118,6 +118,287 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
         throw_exception(&mut env, "Current process credential query is unsupported");
         ptr::null_mut()
     }
+}
+
+/// Numeric Linux peer data only. The original channel owner excludes concurrent close and retains the channel.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_unixPeerCredentials(
+    mut env: JNIEnv,
+    _class: JClass,
+    _channel: JObject,
+) -> jlongArray {
+    #[cfg(target_os = "linux")]
+    {
+        if _channel.is_null() {
+            throw_exception_with_error_code(
+                &mut env,
+                "Original Unix channel is null",
+                libc::EINVAL,
+            );
+            return ptr::null_mut();
+        }
+        // This bridge is deliberately restricted to the approved JDK provider. No reflection override or fd input.
+        let actual = match env.get_object_class(&_channel) {
+            Ok(value) => value,
+            Err(_) => return ptr::null_mut(),
+        };
+        let expected = match env.find_class("sun/nio/ch/SocketChannelImpl") {
+            Ok(value) => value,
+            Err(_) => return ptr::null_mut(),
+        };
+        if !env.is_same_object(&actual, &expected).unwrap_or(false) {
+            throw_exception_with_error_code(
+                &mut env,
+                "Unsupported Unix channel provider",
+                libc::ENOTSUP,
+            );
+            return ptr::null_mut();
+        }
+        let loader = match env
+            .call_method(&actual, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+            .and_then(|v| v.l())
+        {
+            Ok(value) => value,
+            Err(_) => return ptr::null_mut(),
+        };
+        let module = match env
+            .call_method(&actual, "getModule", "()Ljava/lang/Module;", &[])
+            .and_then(|v| v.l())
+        {
+            Ok(value) => value,
+            Err(_) => return ptr::null_mut(),
+        };
+        let module_name = match env
+            .call_method(&module, "getName", "()Ljava/lang/String;", &[])
+            .and_then(|v| v.l())
+        {
+            Ok(value) => JString::from(value),
+            Err(_) => return ptr::null_mut(),
+        };
+        let java_base = match env.get_string(&module_name) {
+            Ok(value) => value.to_bytes() == b"java.base",
+            Err(_) => return ptr::null_mut(),
+        };
+        if !loader.is_null() || !java_base {
+            throw_exception_with_error_code(
+                &mut env,
+                "Unix channel must come from bootstrap java.base",
+                libc::ENOTSUP,
+            );
+            return ptr::null_mut();
+        }
+        let lock = match env
+            .get_field(&_channel, "stateLock", "Ljava/lang/Object;")
+            .and_then(|v| v.l())
+        {
+            Ok(value) => value,
+            Err(_) => return ptr::null_mut(),
+        };
+        if lock.is_null() {
+            throw_exception_with_error_code(
+                &mut env,
+                "Approved Unix channel state lock is unavailable",
+                libc::ENOTSUP,
+            );
+            return ptr::null_mut();
+        }
+        // Load the error class before taking the socket state lock; no business callback or I/O is performed inside.
+        if env
+            .find_class("org/apache/bookkeeper/common/util/nativeio/NativeIOException")
+            .is_err()
+        {
+            return ptr::null_mut();
+        }
+        let raw = env.get_raw();
+        // jni 0.21 lock_obj ignores MonitorEnter's status. Check it explicitly instead of assuming ownership.
+        let entered = unsafe { ((**raw).MonitorEnter.unwrap())(raw, lock.as_raw()) };
+        if entered != 0 {
+            if !env.exception_check().unwrap_or(true) {
+                throw_exception(&mut env, "Approved Unix channel monitor acquisition failed");
+            }
+            return ptr::null_mut();
+        }
+        let observed = if env.exception_check().unwrap_or(true) {
+            None
+        } else {
+            linux_unix_peer_locked(&mut env, &_channel)
+        };
+        // JNI permits MonitorExit with a pending exception; release even when a field or syscall read failed.
+        let exited = unsafe { ((**raw).MonitorExit.unwrap())(raw, lock.as_raw()) };
+        if exited != 0 || env.exception_check().unwrap_or(true) {
+            if !env.exception_check().unwrap_or(true) {
+                throw_exception(&mut env, "Approved Unix channel monitor release failed");
+            }
+            return ptr::null_mut();
+        }
+        let values = match observed {
+            Some(value) => value,
+            None => return ptr::null_mut(),
+        };
+        let array = match env.new_long_array(values.len() as jint) {
+            Ok(value) => value,
+            Err(_) => return ptr::null_mut(),
+        };
+        if env.set_long_array_region(&array, 0, &values).is_err() {
+            return ptr::null_mut();
+        }
+        array.into_raw()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Linux Unix peer credential query is unsupported",
+            libc::ENOTSUP,
+        );
+        ptr::null_mut()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_unix_peer_locked(env: &mut JNIEnv, channel: &JObject) -> Option<[jlong; 3]> {
+    let open = match env
+        .call_method(channel, "isOpen", "()Z", &[])
+        .and_then(|v| v.z())
+    {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    if !open {
+        throw_exception_with_error_code(env, "Original Unix channel is closed", libc::EBADF);
+        return None;
+    }
+    let connected = match env
+        .call_method(channel, "isConnected", "()Z", &[])
+        .and_then(|v| v.z())
+    {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    if !connected {
+        throw_exception_with_error_code(
+            env,
+            "Original Unix channel is not connected",
+            libc::ENOTCONN,
+        );
+        return None;
+    }
+    let descriptor = match env
+        .get_field(channel, "fd", "Ljava/io/FileDescriptor;")
+        .and_then(|v| v.l())
+    {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    if descriptor.is_null() {
+        throw_exception_with_error_code(
+            env,
+            "Original Unix descriptor object is unavailable",
+            libc::EBADF,
+        );
+        return None;
+    }
+    let fd = match env.get_field(&descriptor, "fd", "I").and_then(|v| v.i()) {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    if fd < 0 {
+        throw_exception_with_error_code(
+            env,
+            "Original Unix descriptor is unavailable",
+            libc::EBADF,
+        );
+        return None;
+    }
+    let mut domain: libc::c_int = 0;
+    let mut domain_length = std::mem::size_of_val(&domain) as libc::socklen_t;
+    let domain_result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_DOMAIN,
+            &mut domain as *mut _ as *mut c_void,
+            &mut domain_length,
+        )
+    };
+    if domain_result != 0 {
+        throw_exception_with_errno(env, "Original Unix socket domain query failed");
+        return None;
+    }
+    if domain_length as usize != std::mem::size_of_val(&domain) || domain != libc::AF_UNIX {
+        throw_exception_with_error_code(
+            env,
+            "Only Unix domain sockets have supported peer data",
+            libc::EAFNOSUPPORT,
+        );
+        return None;
+    }
+    let mut socket_type: libc::c_int = 0;
+    let mut type_length = std::mem::size_of_val(&socket_type) as libc::socklen_t;
+    let type_result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut socket_type as *mut _ as *mut c_void,
+            &mut type_length,
+        )
+    };
+    if type_result != 0 {
+        throw_exception_with_errno(env, "Original Unix socket type query failed");
+        return None;
+    }
+    if type_length as usize != std::mem::size_of_val(&socket_type)
+        || socket_type != libc::SOCK_STREAM
+    {
+        throw_exception_with_error_code(
+            env,
+            "Only Unix stream sockets have supported peer data",
+            libc::EAFNOSUPPORT,
+        );
+        return None;
+    }
+    let mut peer: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut length = std::mem::size_of_val(&peer) as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut peer as *mut _ as *mut c_void,
+            &mut length,
+        )
+    };
+    if result != 0 {
+        throw_exception_with_errno(env, "Linux Unix peer credential query failed");
+        return None;
+    }
+    let open_after = match env
+        .call_method(channel, "isOpen", "()Z", &[])
+        .and_then(|v| v.z())
+    {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    let fd_after = match env.get_field(&descriptor, "fd", "I").and_then(|v| v.i()) {
+        Ok(value) => value,
+        Err(_) => return None,
+    };
+    if !open_after
+        || fd != fd_after
+        || length as usize != std::mem::size_of_val(&peer)
+        || peer.pid <= 0
+        || peer.uid == u32::MAX
+        || peer.gid == u32::MAX
+    {
+        throw_exception_with_error_code(
+            env,
+            "Original Unix peer observation is unavailable or changed",
+            libc::EINVAL,
+        );
+        return None;
+    }
+    Some([peer.pid as jlong, peer.uid as jlong, peer.gid as jlong])
 }
 
 // Read UTF-16 directly: native operations must never act on a lossy or NUL-truncated replacement path.

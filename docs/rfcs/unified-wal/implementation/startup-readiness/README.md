@@ -720,6 +720,16 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## Linux 操作通道的只读 peer 凭据依赖
+
+2026-11-01在本地父`081e437f946435d748fc7a0e195ea90b8751d50c`上，规划会话冻结完整Unix交接首版仅支持受控Linux x86_64/systemd/统一cgroup v2/宿主namespace/专用静态旧UID/独占本地ext4；具体资格与取证顺序由execution-objective拥有，macOS完整资格为UNSUPPORTED。后续父描述文件使用UWCLX002/schema2，固定root UDS在同episode、资格建立后且child创建前绑定；专用Ctl只投递STOP或HANDOFF，ACCEPTED只表示受理。v1字节及普通关闭不升级资格；当前尚未实现v2装载、UDS/Ctl、固定隔离dropper或完整Linux资格生产者，不以新增native方法替代这些工作。
+
+本增量复用原native-io增加只读unixPeerCredentials(SocketChannel)，仅返回Linux连接建立时、调用方namespace内的PID/无符号UID/GID。JNI只接受bootstrap/java.base的精确SocketChannelImpl及固定字段签名；持匹配JDK的原stateLock覆盖fd提取、SO_DOMAIN/TYPE/PEERCRED及状态复核，检查MonitorEnter/Exit实际结果与所有内核返回长度，不导出/缓存/dup/关闭fd或改socket。原owner仍须串行化查询/关闭；原程序/JDK批准、路径保护、实际MainPID/出生/unit及episode由后续owner核验，数值观察不发行身份、操作或持续隔离资格。旧Java默认、新Java配旧JNI、非Linux与不支持输入均拒绝，无fallback。
+
+精确本机Amazon JDK21.0.10的SocketChannelImpl、FileDescriptor及ExtendedSocketOptions源码保留在进行中证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-isolation-evidence-081e437f`，核对实际stateLock覆盖close/pre-close及公共SO_PEERCRED无PID。macOS arm64的真实host构建与Linux x86_64交叉cargo check退出0；后者只证明编译，不是Linux运行、身份、关闭竞争或隔离阳性。首轮最小Java验证11项有1 error、1 Linux skip：fixture用socket路径出现代替bind完成，实际connect被拒绝；改为子进程bind返回后原pipe显式报告就绪，修正后11项为10通过、0失败/错误、1 Linux专属close/fd复用竞争skip。实际双JVM的Unix通道在本机明确拒绝peer能力后仍能双向传字节，TCP/closed/unconnected/null拒绝；旧精确真实JNI的独立JVM原currentProcessCredentials仍可用，新peer方法因缺符号拒绝。上述测试不能替代Linux双进程凭据和关闭竞争阳性。
+
+Java Spotless/Checkstyle退出0；整Rust文件rustfmt检查退出1，原HEAD独立检查也有既有漂移，因此只格式化新增函数，新增函数范围检查退出0，不顺带重排旧代码。最终host库与最终Linux交叉cargo check均退出0，最终11项回归仍为10通过/1 Linux skip，最终Java样式退出0；三次Java阶段各1399项输入逐项与原快照或父Git blob核对，无缺失/错配，最终源与实际native构建及最终样式一致。原失败/原编译绑定分别保留；RAT/TLA/性能本增量未运行，没有新的性能结论。完整父子qualified成功、Linux实际约束、retirement/权限交接/终态签发、Main/G1/full-bytes及完整16步与生产Gate保持OPEN，目标active，默认OFF/SYSTEM/PARK和disabled保持。 三个任务raw scope经两次独立lsof与原inode/哈希/归档硬链接核验后，仅移除六目录、21文件路径、859,407逻辑字节，原归档保留、regular-file数据块回收0；独立Cargo target按相同终态/源码/精确库检查清理，物理卷空间回收不作测量结论，共享Maven target与用户文件不清理。
+
 ## 受控历史 Classic child：历史资源图实施中
 
 2026-11-01父launcher包继续在本地`192e8c674129dc240f4b0ddf83504d10ba11f071`上实施；此前凭据及child生产消费者分别已本地提交`9652b1a0393f8855419bf01d38da486d4cdf9704`、`192e8c674129dc240f4b0ddf83504d10ba11f071`，未push。原entry部分证据已封存2708文件、42,878,138逻辑字节，manifest SHA256 `d54f337ef5322e9702c43247d95476d203fde196a9a45fa2981783c58d8ab5c5`，新consumer checkpoint `dd873bc2b2c957590b370e1c217465901c566605fbddd2f60f2ee3754278dfc8`；原native-only checkpoint未覆盖，旧阶段不移绑后续源码。

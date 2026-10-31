@@ -19,6 +19,7 @@
 
 package org.apache.bookkeeper.common.util.nativeio;
 
+import java.nio.channels.SocketChannel;
 import java.util.List;
 import java.util.TreeSet;
 
@@ -26,6 +27,16 @@ import java.util.TreeSet;
  * NativeIO API.
  */
 public interface NativeIO {
+
+    /** Connection-time Linux SO_PEERCRED data in the caller's namespaces, never service/operation qualification. */
+    record UnixPeerCredentials(long pid, long uid, long gid) {
+        public UnixPeerCredentials {
+            if (pid < 1 || pid > Integer.MAX_VALUE || uid < 0 || uid >= 0xffff_ffffL
+                    || gid < 0 || gid >= 0xffff_ffffL) {
+                throw new IllegalArgumentException("Invalid Linux Unix peer credentials");
+            }
+        }
+    }
 
     /** Read-only observations of this process; never proof of saved credentials or startup permission. */
     record ProcessCredentials(long realUid, long effectiveUid, long realGid, long effectiveGid,
@@ -114,5 +125,14 @@ public interface NativeIO {
     /** Direct getuid/geteuid/getgid/getegid/getgroups observations; no external PID or credential input. */
     default ProcessCredentials currentProcessCredentials() throws NativeIOException {
         throw new NativeIOException("Current process credential query is unsupported");
+    }
+
+    /**
+     * Read the connected Linux JDK Unix channel's numeric peer PID/UID/GID. The caller owns its open lifetime and
+     * excludes concurrent close. The approved JDK's stateLock also excludes close/pre-close during the query.
+     * No socket is opened, configured, consumed, duplicated or closed here; other JDKs are not implicitly supported.
+     */
+    default UnixPeerCredentials unixPeerCredentials(SocketChannel channel) throws NativeIOException {
+        throw new NativeIOException("Linux Unix peer credential query is unsupported");
     }
 }

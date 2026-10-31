@@ -132,4 +132,25 @@ public class NativeIOImpl implements NativeIO {
             throw failure;
         }
     }
+
+    @Override
+    public UnixPeerCredentials unixPeerCredentials(java.nio.channels.SocketChannel channel) throws NativeIOException {
+        try {
+            long[] observed = NativeIOJni.unixPeerCredentials(channel);
+            if (observed == null || observed.length != 3) {
+                throw new NativeIOException("Unknown native Linux Unix peer credential outcome");
+            }
+            try {
+                return new UnixPeerCredentials(observed[0], observed[1], observed[2]);
+            } catch (IllegalArgumentException invalid) {
+                var failure = new NativeIOException("Invalid native Linux Unix peer credentials");
+                failure.initCause(invalid);
+                throw failure;
+            }
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Linux Unix peer credentials are unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
 }

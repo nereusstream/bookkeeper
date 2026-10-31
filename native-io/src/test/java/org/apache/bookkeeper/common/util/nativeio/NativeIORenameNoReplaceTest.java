@@ -84,6 +84,7 @@ public class NativeIORenameNoReplaceTest {
         assertThrows(NativeIOException.class,
                 () -> new LegacyImplementation().hasExtendedAcl(source.toString()));
         assertThrows(NativeIOException.class, () -> new LegacyImplementation().currentProcessCredentials());
+        assertThrows(NativeIOException.class, () -> new LegacyImplementation().unixPeerCredentials(null));
         assertArrayEquals(new byte[]{7}, Files.readAllBytes(source));
         assertFalse(Files.exists(target));
     }
