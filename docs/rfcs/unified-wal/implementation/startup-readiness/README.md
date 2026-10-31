@@ -720,6 +720,18 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## Linux include component 的 C 字节匹配
+
+2026-11-01在父`228f9a12d27f796df908548e7004d4541e5b18f3`上增加包内SegmentClassicLinuxGlob，接原LinuxDirectoryObservation.matchingMembers。输入仍是原owner实际A/B观察及首次关闭后的不可变普通成员名单；筛选不查文件、不follow link、不批准候选。完整原名单保留，匹配名单按unsigned UTF8 bytes排序而非Java UTF-16顺序；不按inode/path去重，不合并多个include pattern。真实文件测试以U+E000和补充平面字符验证两种排序的差异，原dangling/unrelated成员仍仅为名称事实。
+
+按固定C LC_CTYPE/LC_COLLATE、空环境下的[glibc2.39 matcher](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/posix/fnmatch_loop.c)实现字节`*`/`?`、转义、初始dot限制、`!`/`^`否定、range、12种ASCII POSIX class及单字节collating/equivalence。相邻star没有递归目录语义，不展开brace/tilde/extmatch或case-fold；不读取JVM默认Locale/JNU改变规则。保留unterminated bracket的literal回退以及matched-prefix扫描与unknown class/无效collating等的定义差异，不预编译成Java字符集合或笼统拒绝malformed输入。原C-collate/C-collate-seq、fnmatch及limits源码独立保存，静态核对NRULES=0、256项collseqmb=0…255、CHARCLASS_NAME_MAX=2048，以及求值/已匹配后扫描的不同边界；这些不是vendor build或Linux运行证明。
+
+pattern/单成员最多4096 UTF8 bytes，成员事实最多262144/64MiB；字符数先验与严格编码检查先于分配字节图像，原始字节匹配拒绝NUL和slash。每次匹配/筛选和最终不可变结果构造均沿原绝对deadline，超时不返回NOMATCH；限制仍不是整个heap/RSS上界。首组两类45项通过，补最终deadline检查前后各次109项保持原source/class/XML绑定；最后冻结全部返回guard后，串行十类109项全部通过、0失败/错误/跳过，独立Spotless/Checkstyle退出0。纯语义例和实际目录消费均有覆盖，未执行Linux glibc2.39差分oracle，不以host libc近似替代。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-glob-evidence-228f9a12`保存四个原测试阶段（各1423项输入）与两份style原源，最终四个code与通过guarded test/style快照逐项相同；原RAT及cleanup的pre-guard回执独立保留，后续结果没有移绑。终态RAT退出1，原431项路径及父228f字节不变、本次无新增，扫描前排除用户PDF。四raw scope经各两次独立lsof及inode/SHA/归档硬链接核验后仅清理8目录、44文件路径、2,784,961逻辑字节，原证据保留、regular-file数据块回收0，共享target/精确JNI库未动；无Rust重建、模型或性能结论。
+
+matchingMembers只是普通物理成员筛选，不能当完整filesystem glob。后续原owner图仍须区分literal/magic路径及实际错误、正确处理DirectoryStream未返回的`.`/`..`候选（不伪装成新物理成员）、按每个pattern的完整逻辑pathname分别排序并保留原word顺序、相对include的逻辑基目录、上下文循环及已冻结的全部图级预算。上述完整图、新schema/provider原字串、候选/选择/诊断及qualified启动仍OPEN，Linux实际接受路径NOT_EXECUTED，完整16步active，默认OFF/SYSTEM/PARK及disabled保持。
+
 ## Linux conf 的原字节解析与原句柄输入
 
 2026-11-01在父`f672fd5b3904dc0b82aa891ee25e722c14190e09`上增加包内SegmentClassicLinuxConfiguration，并将LOADER_CONFIG接到原trust同一个SHA/metadata FileChannel及首次关闭；读取前按0…1MiB限制声明长度。只做positional读取、不移动调用方channel位置、不open/include/枚举目录或执行ldconfig。保留一份私有原bytes，先完整扫描验证，再由独立顺序cursor按需返回directive、原line/byte-column/include word序号和原行视图，不常驻大量短行对象。返回的bytes可修改副本不改变原图像；结果仍只是数据，不能产生Installed/START、文件批准或loader目录顺序。

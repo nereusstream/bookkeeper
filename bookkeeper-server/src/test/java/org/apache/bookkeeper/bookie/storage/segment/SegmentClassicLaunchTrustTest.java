@@ -135,6 +135,8 @@ public class SegmentClassicLaunchTrustTest {
         write(directory.resolve("aaa.so"), new byte[]{7});
         write(directory.resolve("公钥"), new byte[]{8});
         write(directory.resolve("x%#?.so"), new byte[]{9});
+        write(directory.resolve("\ue000"), new byte[]{10});
+        write(directory.resolve("😀"), new byte[]{11});
         Files.createDirectory(directory.resolve("subdir"));
         Files.createSymbolicLink(directory.resolve("dangling"), Path.of("not-present"));
         Path first = Files.createSymbolicLink(root.resolve("first"), Path.of("physical"));
@@ -154,9 +156,17 @@ public class SegmentClassicLaunchTrustTest {
             if (observed.path().entry().equals(missing)) {
                 assertEquals(missing, observed.path().absentAt());
                 assertTrue(observed.members().isEmpty());
+                assertTrue(observed.matchingMembers("*", SegmentClassicLinuxElfTest.deadline()).isEmpty());
             } else {
                 assertEquals(directory, observed.path().resolved());
-                assertEquals(List.of("aaa.so", "dangling", "subdir", "x%#?.so", "公钥"), observed.members());
+                assertEquals(List.of("aaa.so", "dangling", "subdir", "x%#?.so", "公钥", "😀", "\ue000"),
+                        observed.members());
+                assertEquals(List.of("aaa.so", "x%#?.so"),
+                        observed.matchingMembers("*.so", SegmentClassicLinuxElfTest.deadline()));
+                assertEquals(List.of("x%#?.so"),
+                        observed.matchingMembers("x%#\\?.so", SegmentClassicLinuxElfTest.deadline()));
+                assertEquals(List.of("aaa.so", "dangling", "subdir", "x%#?.so", "公钥", "\ue000", "😀"),
+                        observed.matchingMembers("*", SegmentClassicLinuxElfTest.deadline()));
                 assertThrows(UnsupportedOperationException.class, () -> observed.members().add("new"));
             }
         }

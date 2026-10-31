@@ -119,6 +119,11 @@ final class SegmentClassicLaunchTrust {
         LinuxDirectoryObservation {
             members = List.copyOf(members);
         }
+
+        /** Ordinary physical members only; the filesystem glob layer must also handle literal paths and dot entries. */
+        List<String> matchingMembers(String component, long deadline) throws IOException {
+            return SegmentClassicLinuxGlob.matchingMembers(members, component, deadline);
+        }
     }
 
     private static final class LoadingDirectoryBudget {
