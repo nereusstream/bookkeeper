@@ -31,7 +31,7 @@ import org.apache.bookkeeper.stats.NullStatsLogger;
 import org.apache.bookkeeper.stats.StatsLogger;
 
 /** Explicit, one-use local Classic episode. It owns no cluster registration or metadata authority. */
-public final class FreshClassicOwner {
+public final class FreshClassicOwner extends OwnedClassicLifecycle {
     public enum State { NEW, STARTING, RUNNING, CLOSING, DRAINED }
 
     public record Status(State state, int activeCalls, int pendingOperations, Throwable initializationFailure,
@@ -239,12 +239,14 @@ public final class FreshClassicOwner {
         }
     }
 
+    @Override
     void checkStarting() throws IOException {
         if (closing) {
             throw new IOException("Fresh close was requested during initialization");
         }
     }
 
+    @Override
     boolean isClosing() {
         return closing;
     }
@@ -267,6 +269,7 @@ public final class FreshClassicOwner {
         }
     }
 
+    @Override
     public void requestClose() {
         synchronized (gate) {
             closing = true;

@@ -39,6 +39,8 @@ public class BookieRequestHandler extends ChannelInboundHandlerAdapter {
 
     private final RequestProcessor requestProcessor;
     private final ChannelGroup allChannels;
+    private final ClassicRequestLifecycle classic;
+    private boolean classicPendingReleaseFailed;
 
     private ChannelHandlerContext ctx;
 
@@ -48,6 +50,7 @@ public class BookieRequestHandler extends ChannelInboundHandlerAdapter {
     BookieRequestHandler(ServerConfiguration conf, RequestProcessor processor, ChannelGroup allChannels) {
         this.requestProcessor = processor;
         this.allChannels = allChannels;
+        this.classic = processor instanceof BookieRequestProcessor concrete ? concrete.classic : null;
     }
 
     public ChannelHandlerContext ctx() {
@@ -69,6 +72,20 @@ public class BookieRequestHandler extends ChannelInboundHandlerAdapter {
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         log.info().attr("channel", ctx.channel()).log("Channels disconnected");
+        if (classic != null) {
+            synchronized (this) {
+                if (pendingSendResponses != null && !classicPendingReleaseFailed) {
+                    try {
+                        pendingSendResponses.release();
+                        pendingSendResponses = null;
+                    } catch (RuntimeException | Error failure) {
+                        classicPendingReleaseFailed = true;
+                        classic.failUnknown(failure);
+                        throw failure;
+                    }
+                }
+            }
+        }
     }
 
     @Override
@@ -97,6 +114,9 @@ public class BookieRequestHandler extends ChannelInboundHandlerAdapter {
     }
 
     public synchronized void prepareSendResponseV2(int rc, BookieProtocol.ParsedAddRequest req) {
+        if (classic != null && (classic.isClosing() || !ctx().channel().isActive() || classicPendingReleaseFailed)) {
+            return;
+        }
         if (pendingSendResponses == null) {
             pendingSendResponses = ctx().alloc().directBuffer(maxPendingResponsesSize);
         }
@@ -104,6 +124,24 @@ public class BookieRequestHandler extends ChannelInboundHandlerAdapter {
     }
 
     public synchronized void flushPendingResponse() {
+        if (classic != null) {
+            if (pendingSendResponses == null || classicPendingReleaseFailed) {
+                return;
+            }
+            try {
+                if (ctx().channel().isActive() && !classic.isClosing()) {
+                    classic.writeAndFlush(ctx().channel(), pendingSendResponses);
+                } else {
+                    pendingSendResponses.release();
+                }
+                pendingSendResponses = null;
+            } catch (RuntimeException | Error failure) {
+                classicPendingReleaseFailed = true;
+                classic.failUnknown(failure);
+                throw failure;
+            }
+            return;
+        }
         if (pendingSendResponses != null) {
             maxPendingResponsesSize = (int) Math.max(
                     maxPendingResponsesSize * 0.5 + 0.5 * pendingSendResponses.readableBytes(),

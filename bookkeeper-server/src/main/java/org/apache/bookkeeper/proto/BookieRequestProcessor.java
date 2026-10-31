@@ -34,7 +34,10 @@ import io.netty.handler.ssl.SslHandler;
 import io.netty.util.HashedWheelTimer;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.GenericFutureListener;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
@@ -81,12 +84,12 @@ public class BookieRequestProcessor implements RequestProcessor {
     /**
      * The threadpool used to execute all read entry requests issued to this server.
      */
-    private final OrderedExecutor readThreadPool;
+    private OrderedExecutor readThreadPool;
 
     /**
      * The threadpool used to execute all add entry requests issued to this server.
      */
-    private final OrderedExecutor writeThreadPool;
+    private OrderedExecutor writeThreadPool;
 
     /**
      * TLS management.
@@ -97,23 +100,23 @@ public class BookieRequestProcessor implements RequestProcessor {
      * The threadpool used to execute all long poll requests issued to this server
      * after they are done waiting.
      */
-    private final OrderedExecutor longPollThreadPool;
+    private OrderedExecutor longPollThreadPool;
 
     /**
      * The threadpool used to execute high priority requests.
      */
-    private final OrderedExecutor highPriorityThreadPool;
+    private OrderedExecutor highPriorityThreadPool;
 
     /**
      * The Timer used to time out requests for long polling.
      */
-    private final HashedWheelTimer requestTimer;
+    private HashedWheelTimer requestTimer;
 
     // Expose Stats
     private final BKStats bkStats = BKStats.getInstance();
     private final boolean statsEnabled;
 
-    private final RequestStats requestStats;
+    private RequestStats requestStats;
 
     final Semaphore addsSemaphore;
     final Semaphore readsSemaphore;
@@ -127,10 +130,23 @@ public class BookieRequestProcessor implements RequestProcessor {
     private final ByteBufAllocator allocator;
 
     private final boolean throttleReadResponses;
+    private final StatsLogger statsLogger;
+    final ClassicRequestLifecycle classic;
+    private boolean classicInitialized;
+    private boolean classicAttempted;
+    private boolean classicTimerStopped;
+    private final Set<OrderedExecutor> classicShutdowns = Collections.newSetFromMap(new IdentityHashMap<>());
 
     public BookieRequestProcessor(ServerConfiguration serverCfg, Bookie bookie, StatsLogger statsLogger,
                                   SecurityHandlerFactory shFactory, ByteBufAllocator allocator,
                                   ChannelGroup allChannels) throws SecurityException {
+        this(serverCfg, bookie, statsLogger, shFactory, allocator, allChannels, null);
+        initialize();
+    }
+
+    private BookieRequestProcessor(ServerConfiguration serverCfg, Bookie bookie, StatsLogger statsLogger,
+            SecurityHandlerFactory shFactory, ByteBufAllocator allocator, ChannelGroup allChannels,
+            ClassicRequestLifecycle classic) {
         this.serverCfg = serverCfg;
         this.allocator = allocator;
         this.allChannels = allChannels;
@@ -138,6 +154,64 @@ public class BookieRequestProcessor implements RequestProcessor {
         this.preserveMdcForTaskExecution = serverCfg.getPreserveMdcForTaskExecution();
         this.bookie = bookie;
         this.throttleReadResponses = serverCfg.isReadWorkerThreadsThrottlingEnabled();
+        this.shFactory = shFactory;
+        this.statsLogger = statsLogger;
+        this.classic = classic;
+        if (waitTimeoutOnBackpressureMillis > 0) {
+            blacklistedChannels = Optional.of(CacheBuilder.newBuilder()
+                    .expireAfterWrite(waitTimeoutOnBackpressureMillis, TimeUnit.MILLISECONDS)
+                    .build());
+        } else {
+            blacklistedChannels = Optional.empty();
+        }
+
+        if (serverCfg.getCloseChannelOnResponseTimeout()) {
+            onResponseTimeout = (ch) -> {
+                log.warn()
+                        .attr("channel", ch)
+                        .attr("timeoutMs", waitTimeoutOnBackpressureMillis)
+                        .log("closing channel because it was non-writable for too long");
+                ch.close();
+            };
+        } else {
+            // noop
+            onResponseTimeout = (ch) -> {};
+        }
+
+        // Expose Stats
+        this.statsEnabled = serverCfg.isStatisticsEnabled();
+
+        int maxAdds = serverCfg.getMaxAddsInProgressLimit();
+        addsSemaphore = maxAdds > 0 ? new Semaphore(maxAdds, true) : null;
+
+        int maxReads = serverCfg.getMaxReadsInProgressLimit();
+        readsSemaphore = maxReads > 0 ? new Semaphore(maxReads, true) : null;
+    }
+
+    static BookieRequestProcessor prepareForClassicChild(ServerConfiguration conf, Bookie bookie, StatsLogger stats,
+            ByteBufAllocator allocator, ChannelGroup channels, BookieServer owner) {
+        return new BookieRequestProcessor(conf, bookie, stats, null, allocator, channels,
+                new ClassicRequestLifecycle(owner));
+    }
+
+    void initializeForClassicChild() throws SecurityException {
+        if (classic == null || classicAttempted || classic.isClosing()) {
+            throw new IllegalStateException("Controlled processor initializes once after owner registration");
+        }
+        classicAttempted = true;
+        try {
+            initialize();
+            if (classic.isClosing()) {
+                throw new IllegalStateException("Controlled processor initialization was retired");
+            }
+            classicInitialized = true;
+        } catch (SecurityException | RuntimeException | Error failure) {
+            classic.failUnknown(failure);
+            throw failure;
+        }
+    }
+
+    private void initialize() throws SecurityException {
         this.readThreadPool = createExecutor(
                 this.serverCfg.getNumReadWorkerThreads(),
                 "BookieReadThreadPool",
@@ -164,46 +238,23 @@ public class BookieRequestProcessor implements RequestProcessor {
                 this.serverCfg.getNumHighPriorityWorkerThreads(),
                 "BookieHighPriorityThread",
                 OrderedExecutor.NO_TASK_LIMIT, statsLogger);
-        this.shFactory = shFactory;
         if (shFactory != null) {
             shFactory.init(NodeType.Server, serverCfg, allocator);
         }
 
+        if (classic != null) {
+            classic.acquiring("request timer construction");
+        }
+        var timerFactory = new ThreadFactoryBuilder().setNameFormat("BookieRequestTimer-%d").build();
         this.requestTimer = new HashedWheelTimer(
-                new ThreadFactoryBuilder().setNameFormat("BookieRequestTimer-%d").build(),
+                classic == null ? timerFactory : classic.trackThreads(timerFactory),
                 this.serverCfg.getRequestTimerTickDurationMs(),
                 TimeUnit.MILLISECONDS, this.serverCfg.getRequestTimerNumTicks());
 
-        if (waitTimeoutOnBackpressureMillis > 0) {
-            blacklistedChannels = Optional.of(CacheBuilder.newBuilder()
-                    .expireAfterWrite(waitTimeoutOnBackpressureMillis, TimeUnit.MILLISECONDS)
-                    .build());
-        } else {
-            blacklistedChannels = Optional.empty();
+        if (classic != null) {
+            classic.acquired();
         }
-
-        if (serverCfg.getCloseChannelOnResponseTimeout()) {
-            onResponseTimeout = (ch) -> {
-                log.warn()
-                        .attr("channel", ch)
-                        .attr("timeoutMs", waitTimeoutOnBackpressureMillis)
-                        .log("closing channel because it was non-writable for too long");
-                ch.close();
-            };
-        } else {
-            // noop
-            onResponseTimeout = (ch) -> {};
-        }
-
-        // Expose Stats
-        this.statsEnabled = serverCfg.isStatisticsEnabled();
         this.requestStats = new RequestStats(statsLogger);
-
-        int maxAdds = serverCfg.getMaxAddsInProgressLimit();
-        addsSemaphore = maxAdds > 0 ? new Semaphore(maxAdds, true) : null;
-
-        int maxReads = serverCfg.getMaxReadsInProgressLimit();
-        readsSemaphore = maxReads > 0 ? new Semaphore(maxReads, true) : null;
     }
 
     protected void onAddRequestStart(Channel channel) {
@@ -272,6 +323,9 @@ public class BookieRequestProcessor implements RequestProcessor {
 
     @Override
     public void close() {
+        if (classic != null) {
+            throw new IllegalStateException("Controlled processor requires actual external owner drain");
+        }
         log.info("Closing RequestProcessor");
         shutdownExecutor(writeThreadPool);
         shutdownExecutor(readThreadPool);
@@ -291,15 +345,22 @@ public class BookieRequestProcessor implements RequestProcessor {
         if (numThreads <= 0) {
             return null;
         } else {
-            return OrderedExecutor.newBuilder()
+            var builder = OrderedExecutor.newBuilder()
                     .numThreads(numThreads)
                     .name(nameFormat)
                     .traceTaskExecution(serverCfg.getEnableTaskExecutionStats())
                     .preserveMdcForTaskExecution(serverCfg.getPreserveMdcForTaskExecution())
                     .statsLogger(statsLogger)
                     .maxTasksInQueue(maxTasksInQueue)
-                    .enableThreadScopedMetrics(true)
-                    .build();
+                    .enableThreadScopedMetrics(true);
+            if (classic == null) {
+                return builder.build();
+            }
+            classic.acquiring(nameFormat);
+            builder.threadFactory(classic.trackThreads(new io.netty.util.concurrent.DefaultThreadFactory(nameFormat)));
+            var executor = builder.build();
+            classic.acquired();
+            return executor;
         }
     }
 
@@ -312,6 +373,59 @@ public class BookieRequestProcessor implements RequestProcessor {
 
     @Override
     public void processRequest(Object msg, BookieRequestHandler requestHandler) {
+        if (classic == null) {
+            processAcceptedRequest(msg, requestHandler);
+            return;
+        }
+        if (msg instanceof Request request && !validControlledRequest(request)) {
+            requestHandler.ctx().close();
+            return;
+        }
+        var call = classic.begin(msg, requestHandler.ctx().channel());
+        if (call == null) {
+            if (msg instanceof BookieProtocol.ParsedAddRequest add) {
+                add.release();
+                add.recycle();
+            } else if (msg instanceof BookieProtocol.Request legacy) {
+                legacy.recycle();
+            }
+            requestHandler.ctx().close();
+            return;
+        }
+        Throwable problem = null;
+        try {
+            processAcceptedRequest(msg, requestHandler);
+        } catch (RejectedExecutionException rejected) {
+            if (call.discardRejected()) {
+                return;
+            }
+            problem = rejected;
+            throw rejected;
+        } catch (RuntimeException | Error failure) {
+            problem = failure;
+            throw failure;
+        } finally {
+            classic.end(call, problem);
+        }
+    }
+
+    private static boolean validControlledRequest(Request request) {
+        if (!request.hasHeader()) {
+            return false;
+        }
+        return switch (request.getHeader().getOperation()) {
+            case ADD_ENTRY -> request.hasAddRequest();
+            case READ_ENTRY -> request.hasReadRequest();
+            case FORCE_LEDGER -> request.hasForceLedgerRequest();
+            case WRITE_LAC -> request.hasWriteLacRequest();
+            case READ_LAC -> request.hasReadLacRequest();
+            case GET_BOOKIE_INFO -> request.hasGetBookieInfoRequest();
+            case GET_LIST_OF_ENTRIES_OF_LEDGER -> request.hasGetListOfEntriesOfLedgerRequest();
+            default -> true;
+        };
+    }
+
+    private void processAcceptedRequest(Object msg, BookieRequestHandler requestHandler) {
         Channel channel = requestHandler.ctx().channel();
         // If we can decode this packet as a Request protobuf packet, process
         // it as a version 3 packet. Else, just use the old protocol.
@@ -425,9 +539,9 @@ public class BookieRequestProcessor implements RequestProcessor {
                                           final BookieRequestHandler requestHandler) {
         WriteLacProcessorV3 writeLac = new WriteLacProcessorV3(r, requestHandler, this);
         if (null == writeThreadPool) {
-            writeLac.run();
+            runClassicTask(writeLac);
         } else {
-            writeThreadPool.executeOrdered(r.getWriteLacRequest().getLedgerId(), writeLac);
+            executeClassicOrdered(writeThreadPool, r.getWriteLacRequest().getLedgerId(), writeLac);
         }
     }
 
@@ -435,9 +549,9 @@ public class BookieRequestProcessor implements RequestProcessor {
                                          final BookieRequestHandler requestHandler) {
         ReadLacProcessorV3 readLac = new ReadLacProcessorV3(r, requestHandler, this);
         if (null == readThreadPool) {
-            readLac.run();
+            runClassicTask(readLac);
         } else {
-            readThreadPool.executeOrdered(r.getReadLacRequest().getLedgerId(), readLac);
+            executeClassicOrdered(readThreadPool, r.getReadLacRequest().getLedgerId(), readLac);
         }
     }
 
@@ -452,10 +566,10 @@ public class BookieRequestProcessor implements RequestProcessor {
         }
 
         if (null == threadPool) {
-            write.run();
+            runClassicTask(write);
         } else {
             try {
-                threadPool.executeOrdered(r.getAddRequest().getLedgerId(), write);
+                executeClassicOrdered(threadPool, r.getAddRequest().getLedgerId(), write);
             } catch (RejectedExecutionException e) {
                 log.debug().attr("ledgerId", () -> r.getAddRequest().getLedgerId())
                         .attr("entryId", () -> r.getAddRequest().getEntryId())
@@ -485,10 +599,10 @@ public class BookieRequestProcessor implements RequestProcessor {
         }
 
         if (null == threadPool) {
-            forceLedger.run();
+            runClassicTask(forceLedger);
         } else {
             try {
-                threadPool.executeOrdered(r.getForceLedgerRequest().getLedgerId(), forceLedger);
+                executeClassicOrdered(threadPool, r.getForceLedgerRequest().getLedgerId(), forceLedger);
             } catch (RejectedExecutionException e) {
                 log.debug().attr("ledgerId", () -> r.getForceLedgerRequest().getLedgerId())
                         .log("Failed to process request to force ledger. Too many pending requests");
@@ -534,10 +648,10 @@ public class BookieRequestProcessor implements RequestProcessor {
         }
 
         if (null == threadPool) {
-            read.run();
+            runClassicTask(read);
         } else {
             try {
-                threadPool.executeOrdered(r.getReadRequest().getLedgerId(), read);
+                executeClassicOrdered(threadPool, r.getReadRequest().getLedgerId(), read);
             } catch (RejectedExecutionException e) {
                 log.debug().attr("ledgerId", () -> r.getReadRequest().getLedgerId())
                         .attr("entryId", () -> r.getReadRequest().getEntryId())
@@ -621,9 +735,9 @@ public class BookieRequestProcessor implements RequestProcessor {
                                                final BookieRequestHandler requestHandler) {
         GetBookieInfoProcessorV3 getBookieInfo = new GetBookieInfoProcessorV3(r, requestHandler, this);
         if (null == readThreadPool) {
-            getBookieInfo.run();
+            runClassicTask(getBookieInfo);
         } else {
-            readThreadPool.submit(getBookieInfo);
+            submitClassicTask(readThreadPool, getBookieInfo);
         }
     }
 
@@ -632,9 +746,9 @@ public class BookieRequestProcessor implements RequestProcessor {
         GetListOfEntriesOfLedgerProcessorV3 getListOfEntriesOfLedger =
                 new GetListOfEntriesOfLedgerProcessorV3(r, requestHandler, this);
         if (null == readThreadPool) {
-            getListOfEntriesOfLedger.run();
+            runClassicTask(getListOfEntriesOfLedger);
         } else {
-            readThreadPool.submit(getListOfEntriesOfLedger);
+            submitClassicTask(readThreadPool, getListOfEntriesOfLedger);
         }
     }
 
@@ -651,10 +765,10 @@ public class BookieRequestProcessor implements RequestProcessor {
         }
 
         if (null == threadPool) {
-            write.run();
+            runClassicTask(write);
         } else {
             try {
-                threadPool.executeOrdered(r.getLedgerId(), write);
+                executeClassicOrdered(threadPool, r.getLedgerId(), write);
             } catch (RejectedExecutionException e) {
                 log.debug()
                         .attr("ledgerId", r.ledgerId)
@@ -693,10 +807,10 @@ public class BookieRequestProcessor implements RequestProcessor {
         }
 
         if (null == threadPool) {
-            read.run();
+            runClassicTask(read);
         } else {
             try {
-                threadPool.executeOrdered(r.getLedgerId(), read);
+                executeClassicOrdered(threadPool, r.getLedgerId(), read);
             } catch (RejectedExecutionException e) {
                 log.debug()
                         .attr("ledgerId", r.ledgerId)
@@ -737,7 +851,86 @@ public class BookieRequestProcessor implements RequestProcessor {
         onResponseTimeout.accept(channel);
     }
 
-    private static void writeAndFlush(Channel channel, Object msg) {
-        NettyChannelUtil.writeAndFlushWithVoidPromise(channel, msg);
+    private void writeAndFlush(Channel channel, Object msg) {
+        try {
+            if (classic == null) {
+                NettyChannelUtil.writeAndFlushWithVoidPromise(channel, msg);
+            } else {
+                classic.writeAndFlush(channel, msg);
+            }
+        } finally {
+            if (classic != null && classic.current() != null) {
+                classic.current().complete();
+            }
+        }
+    }
+
+    private void runClassicTask(Runnable body) {
+        if (classic == null) {
+            body.run();
+        } else {
+            classic.task(body).run();
+        }
+    }
+
+    private void executeClassicOrdered(OrderedExecutor executor, long key, Runnable body) {
+        if (classic == null) {
+            executor.executeOrdered(key, body);
+            return;
+        }
+        var task = classic.task(body);
+        try {
+            executor.executeOrdered(key, task);
+        } catch (RejectedExecutionException rejected) {
+            task.rejected();
+            throw rejected;
+        } catch (RuntimeException | Error unknown) {
+            classic.failUnknown(unknown);
+            throw unknown;
+        }
+    }
+
+    private void submitClassicTask(OrderedExecutor executor, Runnable body) {
+        if (classic == null) {
+            executor.submit(body);
+            return;
+        }
+        var task = classic.task(body);
+        try {
+            executor.submit(task);
+        } catch (RejectedExecutionException rejected) {
+            task.rejected();
+            throw rejected;
+        } catch (RuntimeException | Error unknown) {
+            classic.failUnknown(unknown);
+            throw unknown;
+        }
+    }
+
+    boolean initializedForClassicChild() {
+        return classicInitialized && classic != null && !classic.isClosing();
+    }
+
+    boolean finishForClassicChild() throws InterruptedException {
+        if (classic == null || classic.isCurrentActivity()) {
+            throw new IllegalStateException("Controlled processor cannot await its own activity");
+        }
+        if (!classic.awaitRequests() || !classic.awaitOutputs()) {
+            return false;
+        }
+        for (OrderedExecutor executor : new OrderedExecutor[]{writeThreadPool, readThreadPool,
+                longPollThreadPool, highPriorityThreadPool}) {
+            if (executor == null) {
+                continue;
+            }
+            if (classicShutdowns.add(executor)) {
+                executor.shutdown();
+            }
+        }
+        if (requestTimer != null && !classicTimerStopped) {
+            classicTimerStopped = true;
+            requestTimer.stop();
+        }
+        return classic.joinThreads();
     }
 }

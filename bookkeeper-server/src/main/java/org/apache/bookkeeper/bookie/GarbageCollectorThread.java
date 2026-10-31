@@ -132,6 +132,7 @@ public class GarbageCollectorThread implements Runnable {
     final AtomicBoolean suspendMinorCompaction = new AtomicBoolean(false);
 
     final ScanAndCompareGarbageCollector garbageCollector;
+    private final ClassicGcMetadata ownedMetadata;
     final GarbageCleaner garbageCleaner;
 
     final ServerConfiguration conf;
@@ -171,6 +172,18 @@ public class GarbageCollectorThread implements Runnable {
         return new GarbageCollectorThread(conf, null, directories, storage, entryLogger, statsLogger, null, true);
     }
 
+    static GarbageCollectorThread forClassicHistory(ServerConfiguration conf, ClassicGcMetadata metadata,
+            LedgerDirsManager directories, CompactableLedgerStorage storage, EntryLogger logger, StatsLogger stats)
+            throws IOException {
+        Object cachePath = conf.getProperty("gcEntryLogMetadataCachePath");
+        if (conf.isGcEntryLogMetadataCacheEnabled() || cachePath != null && !"".equals(cachePath)) {
+            throw new IllegalArgumentException("Owned Classic GC requires the default in-memory metadata map");
+        }
+        java.util.Objects.requireNonNull(metadata, "metadata");
+        return new GarbageCollectorThread(conf, metadata.manager(), directories, storage, logger,
+                stats, null, true, metadata);
+    }
+
     /**
      * Create a garbage collector thread.
      *
@@ -197,6 +210,15 @@ public class GarbageCollectorThread implements Runnable {
                                    StatsLogger statsLogger,
                                    ScheduledExecutorService gcExecutor,
                                    boolean freshLifecycle) throws IOException {
+        this(conf, ledgerManager, ledgerDirsManager, ledgerStorage, entryLogger, statsLogger,
+                gcExecutor, freshLifecycle, null);
+    }
+
+    private GarbageCollectorThread(ServerConfiguration conf, LedgerManager ledgerManager,
+            LedgerDirsManager ledgerDirsManager, CompactableLedgerStorage ledgerStorage, EntryLogger entryLogger,
+            StatsLogger statsLogger, ScheduledExecutorService gcExecutor, boolean freshLifecycle,
+            ClassicGcMetadata ownedMetadata) throws IOException {
+        this.ownedMetadata = ownedMetadata;
         this.freshLifecycle = freshLifecycle;
         this.gcExecutor = freshLifecycle ? newFreshExecutor() : gcExecutor;
         this.conf = conf;
@@ -212,7 +234,9 @@ public class GarbageCollectorThread implements Runnable {
         this.totalEntryLogSize = 0L;
         this.entryLogCompactRatio = 0.0;
         this.currentEntryLogUsageBuckets = new int[ENTRY_LOG_USAGE_SEGMENT_COUNT];
-        this.garbageCollector = new ScanAndCompareGarbageCollector(ledgerManager, ledgerStorage, conf, statsLogger);
+        this.garbageCollector = ownedMetadata == null
+                ? new ScanAndCompareGarbageCollector(ledgerManager, ledgerStorage, conf, statsLogger)
+                : ScanAndCompareGarbageCollector.forClassicHistory(ownedMetadata, ledgerStorage, conf, statsLogger);
         this.gcStats = new GarbageCollectorStats(
             statsLogger,
             () -> numActiveEntryLogs,
@@ -350,7 +374,8 @@ public class GarbageCollectorThread implements Runnable {
     }
 
     boolean isCurrentExecutorThread() {
-        return Thread.currentThread() == freshExecutorThread;
+        return Thread.currentThread() == freshExecutorThread
+                || ownedMetadata != null && ownedMetadata.isCurrentActivity();
     }
 
     private EntryLogMetadataMap createEntryLogMetadataMap() throws IOException {
@@ -902,6 +927,13 @@ public class GarbageCollectorThread implements Runnable {
                 if (executorThread != null) {
                     executorThread.join();
                 }
+                if (ownedMetadata != null) {
+                    var result = ownedMetadata.closeAndDrain();
+                    if (!result.drained()) {
+                        throw new IOException("Original GC metadata reads or lock obligations remain owned",
+                                result.firstFailure());
+                    }
+                }
                 if (!freshMetadataClosed) {
                     entryLogMetaMap.close();
                     freshMetadataClosed = true;
@@ -918,7 +950,8 @@ public class GarbageCollectorThread implements Runnable {
             throw new IllegalStateException("Not a fresh GC owner");
         }
         Thread thread = freshExecutorThread;
-        return gcExecutor.isTerminated() && (thread == null || !thread.isAlive());
+        return gcExecutor.isTerminated() && (thread == null || !thread.isAlive())
+                && (ownedMetadata == null || ownedMetadata.state().drained());
     }
 
     /**

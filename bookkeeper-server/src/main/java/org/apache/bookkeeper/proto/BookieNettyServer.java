@@ -26,6 +26,7 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.channel.AdaptiveRecvByteBufAllocator;
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandler;
 import io.netty.channel.ChannelInboundHandlerAdapter;
@@ -94,29 +95,39 @@ class BookieNettyServer {
 
     final int maxFrameSize;
     final ServerConfiguration conf;
-    final EventLoopGroup eventLoopGroup;
-    final EventLoopGroup acceptorGroup;
-    final EventLoopGroup jvmEventLoopGroup;
+    EventLoopGroup eventLoopGroup;
+    EventLoopGroup acceptorGroup;
+    EventLoopGroup jvmEventLoopGroup;
     RequestProcessor requestProcessor;
     final AtomicBoolean isRunning = new AtomicBoolean(false);
     final AtomicBoolean isClosed = new AtomicBoolean(false);
     final Object suspensionLock = new Object();
     volatile boolean suspended = false;
     ChannelGroup allChannels;
-    final BookieSocketAddress bookieAddress;
-    final BookieId bookieId;
-    final InetSocketAddress bindAddress;
+    BookieSocketAddress bookieAddress;
+    BookieId bookieId;
+    InetSocketAddress bindAddress;
 
-    final BookieAuthProvider.Factory authProviderFactory;
+    BookieAuthProvider.Factory authProviderFactory;
 
     private final ByteBufAllocator allocator;
+    private final boolean controlled;
+    private final List<Thread> controlledThreads = new ArrayList<>();
+    private boolean controlledAttempted;
+    private boolean controlledInitialized;
+    private String controlledAcquiring;
+    private Throwable controlledInitializationFailure;
+    private Throwable controlledCloseFailure;
+    private ChannelFuture controlledBind;
+    private ChannelGroupFuture controlledChannelsClose;
+    private boolean controlledChannelsCloseAttempted;
+    private boolean controlledAcceptorCloseAttempted;
+    private boolean controlledIoCloseAttempted;
+    private boolean controlledAuthCloseAttempted;
 
     BookieNettyServer(ServerConfiguration conf, RequestProcessor processor, ByteBufAllocator allocator)
         throws IOException, KeeperException, InterruptedException, BookieException {
-        this.allocator = allocator;
-        this.maxFrameSize = conf.getNettyMaxFrameSizeBytes();
-        this.conf = conf;
-        this.requestProcessor = processor;
+        this(conf, processor, allocator, false);
         this.authProviderFactory = AuthProviderFactoryFactory.newBookieAuthProviderFactory(conf);
 
         if (!conf.isDisableServerSocketBind()) {
@@ -180,6 +191,183 @@ class BookieNettyServer {
             bindAddress = bookieAddress.getSocketAddress();
         }
         listenOn(bindAddress, bookieAddress);
+    }
+
+    private BookieNettyServer(ServerConfiguration conf, RequestProcessor processor, ByteBufAllocator allocator,
+            boolean controlled) {
+        this.allocator = allocator;
+        this.maxFrameSize = conf.getNettyMaxFrameSizeBytes();
+        this.conf = conf;
+        this.requestProcessor = processor;
+        this.controlled = controlled;
+    }
+
+    static BookieNettyServer prepareForClassicChild(ServerConfiguration conf, ByteBufAllocator allocator) {
+        return new BookieNettyServer(conf, null, allocator, true);
+    }
+
+    /** Called after the enclosing server retains this holder, never from a constructor. */
+    void initializeForClassicChild() throws IOException, KeeperException, InterruptedException, BookieException {
+        if (!controlled || controlledAttempted || isClosed.get()) {
+            throw new IllegalStateException("Controlled listener initializes once after its owner retains it");
+        }
+        controlledAttempted = true;
+        try {
+            String auth = conf.getBookieAuthProviderFactoryClass();
+            String tls = conf.getTLSProviderFactoryClass();
+            if (conf.isDisableServerSocketBind() || conf.isEnableLocalTransport() || conf.isBusyWaitEnabled()
+                    || auth != null && !auth.isBlank() || tls != null && !tls.isBlank()
+                    || conf.getServerNumIOThreads() <= 0 || conf.getServerNumAcceptorThreads() <= 0) {
+                throw new IOException("Controlled Classic listener requires fixed TCP workers and built-in auth");
+            }
+            bookieId = BookieImpl.getBookieId(conf);
+            bookieAddress = BookieImpl.getBookieAddress(conf);
+            bindAddress = conf.getListeningInterface() == null ? new InetSocketAddress(conf.getBookiePort())
+                    : bookieAddress.getSocketAddress();
+            controlledAcquiring = "built-in authentication factory";
+            authProviderFactory = AuthProviderFactoryFactory.newBookieAuthProviderFactory(conf);
+            controlledAcquiring = "TCP IO event loops";
+            eventLoopGroup = EventLoopUtil.getServerEventLoopGroup(conf, controlledThreadFactory("bookie-io"));
+            controlledAcquiring = "TCP acceptor event loops";
+            acceptorGroup = EventLoopUtil.getServerAcceptorGroup(conf, controlledThreadFactory("bookie-acceptor"));
+            controlledAcquiring = null;
+            allChannels = new CleanupChannelGroup(eventLoopGroup);
+            listenOn(bindAddress, bookieAddress);
+            controlledInitialized = true;
+        } catch (IOException | InterruptedException | RuntimeException | Error problem) {
+            controlledInitializationFailure = problem;
+            if (problem instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            throw problem;
+        }
+    }
+
+    private DefaultThreadFactory controlledThreadFactory(String name) {
+        return new DefaultThreadFactory(name) {
+            @Override
+            protected Thread newThread(Runnable body, String threadName) {
+                Thread thread = super.newThread(ThreadRegistry.registerThread(body, "bookie-id"), threadName);
+                synchronized (controlledThreads) {
+                    controlledThreads.add(thread);
+                }
+                return thread;
+            }
+        };
+    }
+
+    boolean isBoundForClassicChild() {
+        return controlled && controlledInitialized && controlledBind != null && controlledBind.isSuccess()
+                && controlledBind.channel().isActive() && !isClosed.get();
+    }
+
+    boolean isCurrentThreadForClassicChild() {
+        synchronized (controlledThreads) {
+            return controlledThreads.contains(Thread.currentThread());
+        }
+    }
+
+    void activateForClassicChild(BookieRequestProcessor processor) {
+        if (!controlled || !isBoundForClassicChild() || requestProcessor != processor
+                || !processor.initializedForClassicChild()) {
+            throw new IllegalStateException("Controlled TCP activation requires its original initialized processor");
+        }
+        isRunning.set(true);
+    }
+
+    void submitRetirementForClassicChild() throws InterruptedException {
+        if (!controlled || isCurrentThreadForClassicChild()) {
+            throw new IllegalStateException("Controlled TCP retirement requires its external owner");
+        }
+        isRunning.set(false);
+        isClosed.set(true);
+        if (controlledBind != null) {
+            controlledBind.await();
+        }
+        if (allChannels != null && !controlledChannelsCloseAttempted) {
+            controlledChannelsCloseAttempted = true;
+            try {
+                controlledChannelsClose = allChannels.close();
+            } catch (RuntimeException | Error problem) {
+                rememberControlledCloseFailure(problem);
+            }
+        }
+    }
+
+    boolean awaitConnectionsForClassicChild() throws InterruptedException {
+        if (controlledChannelsClose != null) {
+            controlledChannelsClose.await();
+            if (!controlledChannelsClose.isSuccess()) {
+                rememberControlledCloseFailure(controlledChannelsClose.cause());
+            }
+        }
+        return controlledCloseFailure == null;
+    }
+
+    /** Listener-stage drain only. The enclosing server must retire its processor before closing these loops. */
+    boolean closeAndDrainForClassicChild() throws InterruptedException {
+        if (!controlled || isCurrentThreadForClassicChild()) {
+            throw new IllegalStateException("Controlled TCP drain requires the original external owner");
+        }
+        submitRetirementForClassicChild();
+        awaitConnectionsForClassicChild();
+        if (acceptorGroup != null && !controlledAcceptorCloseAttempted) {
+            controlledAcceptorCloseAttempted = true;
+            try {
+                acceptorGroup.shutdownGracefully(0, Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+            } catch (RuntimeException | Error problem) {
+                rememberControlledCloseFailure(problem);
+            }
+        }
+        if (eventLoopGroup != null && !controlledIoCloseAttempted) {
+            controlledIoCloseAttempted = true;
+            try {
+                eventLoopGroup.shutdownGracefully(0, Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+            } catch (RuntimeException | Error problem) {
+                rememberControlledCloseFailure(problem);
+            }
+        }
+        for (EventLoopGroup group : new EventLoopGroup[]{acceptorGroup, eventLoopGroup}) {
+            if (group != null) {
+                if (!group.isShuttingDown()) {
+                    return false;
+                }
+                group.terminationFuture().await();
+                if (!group.terminationFuture().isSuccess()) {
+                    rememberControlledCloseFailure(group.terminationFuture().cause());
+                }
+            }
+        }
+        if (controlledAcquiring == null) {
+            List<Thread> threads;
+            synchronized (controlledThreads) {
+                threads = List.copyOf(controlledThreads);
+            }
+            for (Thread thread : threads) {
+                thread.join();
+            }
+        }
+        // Without a constructor result, its original acquisition remains unknown even if a fixture cleans it.
+        if (authProviderFactory != null && !controlledAuthCloseAttempted) {
+            controlledAuthCloseAttempted = true;
+            try {
+                authProviderFactory.close();
+            } catch (RuntimeException | Error problem) {
+                rememberControlledCloseFailure(problem);
+            }
+        }
+        return controlledAcquiring == null && controlledCloseFailure == null;
+    }
+
+    private void rememberControlledCloseFailure(Throwable problem) {
+        if (controlledCloseFailure == null) {
+            controlledCloseFailure = problem == null ? new IOException("TCP close has no successful result") : problem;
+        }
+    }
+
+    Throwable failureForClassicChild() {
+        return controlledCloseFailure != null ? controlledCloseFailure
+                : controlledAcquiring != null ? controlledInitializationFailure : null;
     }
 
     public BookieNettyServer setRequestProcessor(RequestProcessor processor) {
@@ -364,6 +552,9 @@ class BookieNettyServer {
             bootstrap.childHandler(new ChannelInitializer<SocketChannel>() {
                 @Override
                 protected void initChannel(SocketChannel ch) throws Exception {
+                    if (controlled) {
+                        allChannels.add(ch);
+                    }
                     synchronized (suspensionLock) {
                         while (suspended) {
                             suspensionLock.wait();
@@ -373,6 +564,10 @@ class BookieNettyServer {
                     BookieSideConnectionPeerContextHandler contextHandler =
                         new BookieSideConnectionPeerContextHandler();
                     ChannelPipeline pipeline = ch.pipeline();
+                    if (controlled && requestProcessor instanceof BookieRequestProcessor processor
+                            && processor.classic != null) {
+                        pipeline.addFirst("classic-owned-output", processor.classic.outputHandler());
+                    }
 
                     pipeline.addLast(CONSOLIDATION_HANDLER_NAME, new FlushConsolidationHandler(1024, true));
 
@@ -396,7 +591,17 @@ class BookieNettyServer {
 
             // Bind and start to accept incoming connections
             log.info().attr("address", address).log("Binding bookie-rpc endpoint");
-            Channel listen = bootstrap.bind(address.getAddress(), address.getPort()).sync().channel();
+            final Channel listen;
+            if (controlled) {
+                controlledAcquiring = "TCP bind submission";
+                controlledBind = bootstrap.bind(address.getAddress(), address.getPort());
+                controlledAcquiring = null;
+                allChannels.add(controlledBind.channel());
+                controlledBind.sync();
+                listen = controlledBind.channel();
+            } else {
+                listen = bootstrap.bind(address.getAddress(), address.getPort()).sync().channel();
+            }
 
             if (listen.localAddress() instanceof InetSocketAddress) {
                 if (conf.getBookiePort() == 0) {
@@ -459,10 +664,16 @@ class BookieNettyServer {
     }
 
     void start() throws InterruptedException {
+        if (controlled) {
+            throw new IllegalStateException("Controlled TCP activation belongs to its complete child graph");
+        }
         isRunning.set(true);
     }
 
     void shutdown() {
+        if (controlled) {
+            throw new IllegalStateException("Controlled TCP requires actual owner drain");
+        }
         log.info("Shutting down BookieNettyServer");
         isRunning.set(false);
 

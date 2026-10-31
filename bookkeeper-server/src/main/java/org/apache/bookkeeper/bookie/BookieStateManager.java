@@ -32,8 +32,11 @@ import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.UnknownHostException;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
@@ -45,6 +48,7 @@ import lombok.CustomLog;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.BookieServiceInfo;
 import org.apache.bookkeeper.discover.RegistrationManager;
+import org.apache.bookkeeper.discover.ZKRegistrationManager;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.stats.Gauge;
 import org.apache.bookkeeper.stats.NullStatsLogger;
@@ -86,6 +90,18 @@ public class BookieStateManager implements StateManager {
     private final Supplier<BookieId> bookieIdSupplier;
     private ShutdownHandler shutdownHandler;
     private final RegistrationManager rm;
+    private final OwnedClassicLifecycle controlledOwner;
+    private final Object controlledGate = new Object();
+    private final Map<Thread, Integer> controlledActivities = new HashMap<>();
+    private boolean controlledInitializationAttempted;
+    private boolean controlledInitialized;
+    private boolean controlledRegistrationAttempted;
+    private boolean controlledRegistrationEnabled;
+    private boolean controlledRegistrationReadOnly;
+    private boolean controlledClosing;
+    private long controlledSession;
+    private long controlledBirth;
+    private volatile Throwable controlledFailure;
     // Expose Stats
     @StatsDoc(
         name = SERVER_STATUS,
@@ -123,17 +139,16 @@ public class BookieStateManager implements StateManager {
                               List<File> statusDirs,
                               Supplier<BookieId> bookieIdSupplier,
                               Supplier<BookieServiceInfo> bookieServiceInfoProvider) throws IOException {
+        this(conf, rm, statusDirs, bookieIdSupplier, bookieServiceInfoProvider, null);
+        initialize(statsLogger);
+    }
+
+    private BookieStateManager(ServerConfiguration conf, RegistrationManager rm, List<File> statusDirs,
+            Supplier<BookieId> bookieIdSupplier, Supplier<BookieServiceInfo> bookieServiceInfoProvider,
+            OwnedClassicLifecycle controlledOwner) {
         this.conf = conf;
         this.rm = rm;
-        if (this.rm != null) {
-            rm.addRegistrationListener(() -> {
-                log.info("Trying to re-register the bookie");
-                forceToUnregistered();
-                // schedule a re-register operation
-                registerBookie(false);
-            });
-        }
-
+        this.controlledOwner = controlledOwner;
         this.statusDirs = statusDirs;
         // ZK ephemeral node for this Bookie.
         this.bookieIdSupplier = bookieIdSupplier;
@@ -156,7 +171,6 @@ public class BookieStateManager implements StateManager {
                 }
             }
         };
-        statsLogger.registerGauge(SERVER_STATUS, serverStatusGauge);
         this.serverSanityGauge = new Gauge<Number>() {
             @Override
             public Number getDefaultValue() {
@@ -168,6 +182,53 @@ public class BookieStateManager implements StateManager {
                 return sanityPassed.get();
             }
         };
+    }
+
+    static BookieStateManager forClassicChild(ServerConfiguration conf, RegistrationManager registration,
+            LedgerDirsManager directories, Supplier<BookieServiceInfo> info, OwnedClassicLifecycle owner)
+            throws IOException {
+        if (!(registration instanceof ZKRegistrationManager)) {
+            throw new IOException("Controlled Classic requires its actual ZK registration manager");
+        }
+        return new BookieStateManager(conf, registration, directories.getAllLedgerDirs(), () -> {
+            try {
+                return BookieImpl.getBookieId(conf);
+            } catch (UnknownHostException problem) {
+                throw new UncheckedIOException(problem);
+            }
+        }, info, java.util.Objects.requireNonNull(owner, "owner"));
+    }
+
+    void initializeForClassicChild(StatsLogger stats) throws IOException {
+        synchronized (controlledGate) {
+            if (controlledOwner == null || controlledInitializationAttempted || controlledClosing) {
+                throw new IOException("Controlled state manager initializes once after owner registration");
+            }
+            controlledInitializationAttempted = true;
+        }
+        controlledOwner.checkStarting();
+        if (conf.isSanityCheckMetricsEnabled() || conf.isPersistBookieStatusEnabled()) {
+            throw new IOException("Controlled Classic excludes sanity network probes and persistent BookieStatus");
+        }
+        initialize(stats);
+        synchronized (controlledGate) {
+            controlledOwner.checkStarting();
+            controlledInitialized = true;
+        }
+    }
+
+    private void initialize(StatsLogger statsLogger) throws IOException {
+        if (controlledOwner != null) {
+            controlledSession = ((ZKRegistrationManager) rm)
+                    .addClassicChildRegistrationListener(this::controlledSessionExpired);
+        } else if (rm != null) {
+            rm.addRegistrationListener(() -> {
+                log.info("Trying to re-register the bookie");
+                forceToUnregistered();
+                registerBookie(false);
+            });
+        }
+        statsLogger.registerGauge(SERVER_STATUS, serverStatusGauge);
         if (conf.isSanityCheckMetricsEnabled()) {
             statsLogger.registerGauge(SERVER_SANITY, serverSanityGauge);
             stateService.scheduleAtFixedRate(() -> {
@@ -264,14 +325,20 @@ public class BookieStateManager implements StateManager {
 
     @Override
     public void close() {
+        if (controlledOwner != null) {
+            synchronized (controlledGate) {
+                controlledClosing = true;
+                controlledRegistrationEnabled = false;
+            }
+        }
         this.running = false;
         stateService.shutdown();
     }
 
     /** Fresh owner only: shutdown request and actual task termination are separate lifecycle facts. */
     void closeForFresh() throws InterruptedException {
-        if (Thread.currentThread() == stateServiceThread) {
-            throw new IllegalStateException("State manager cannot wait for its own executor");
+        if (isCurrentExecutorThread()) {
+            throw new IllegalStateException("State manager cannot wait for its own executor or callback");
         }
         close();
         try {
@@ -281,6 +348,11 @@ public class BookieStateManager implements StateManager {
             if (stateServiceThread != null) {
                 stateServiceThread.join();
             }
+            synchronized (controlledGate) {
+                while (!controlledActivities.isEmpty()) {
+                    controlledGate.wait();
+                }
+            }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw interrupted;
@@ -288,7 +360,10 @@ public class BookieStateManager implements StateManager {
     }
 
     boolean isCurrentExecutorThread() {
-        return Thread.currentThread() == stateServiceThread;
+        synchronized (controlledGate) {
+            return Thread.currentThread() == stateServiceThread
+                    || controlledActivities.containsKey(Thread.currentThread());
+        }
     }
 
     private ScheduledExecutorService newStateService() {
@@ -302,6 +377,10 @@ public class BookieStateManager implements StateManager {
 
     @Override
     public Future<Void> registerBookie(final boolean throwException) {
+        if (controlledOwner != null) {
+            return CompletableFuture.failedFuture(new IOException(
+                    "Controlled Classic initial registration belongs to its bound network resource graph"));
+        }
         return stateService.submit(new Callable<Void>() {
             @Override
             public Void call() throws IOException {
@@ -323,6 +402,9 @@ public class BookieStateManager implements StateManager {
 
     @Override
     public Future<Void> transitionToWritableMode(boolean isManuallyModify) {
+        if (controlledModeRequested(false, isManuallyModify)) {
+            return CompletableFuture.completedFuture(null);
+        }
         return stateService.submit(new Callable<Void>() {
             @Override
             public Void call() throws Exception{
@@ -334,6 +416,9 @@ public class BookieStateManager implements StateManager {
 
     @Override
     public Future<Void> transitionToReadOnlyMode(boolean isManuallyModify) {
+        if (controlledModeRequested(true, isManuallyModify)) {
+            return CompletableFuture.completedFuture(null);
+        }
         return stateService.submit(new Callable<Void>() {
             @Override
             public Void call() throws Exception{
@@ -348,6 +433,24 @@ public class BookieStateManager implements StateManager {
     }
 
     private void doRegisterBookie(boolean isReadOnly) throws IOException {
+        if (controlledOwner != null) {
+            beginControlledRegistration();
+            try {
+                long birth = ((ZKRegistrationManager) rm).registerClassicChildBookie(bookieIdSupplier.get(),
+                        isReadOnly, bookieServiceInfoProvider.get(), controlledSession);
+                synchronized (controlledGate) {
+                    requireControlledRegistration();
+                    controlledBirth = birth;
+                    rmRegistered.set(true);
+                }
+            } catch (IOException | RuntimeException | Error problem) {
+                failControlledRegistration(problem);
+                throw problem;
+            } finally {
+                endControlledActivity();
+            }
+            return;
+        }
         if (isRegistrationManagerDisabled()) {
             // registration manager is null, means not register itself to metadata store.
             log.info("null registration manager while do register");
@@ -387,6 +490,10 @@ public class BookieStateManager implements StateManager {
             bookieStatus.writeToDirectories(statusDirs);
         }
         // change zookeeper state only when using zookeeper
+        if (controlledOwner != null) {
+            controlledModeChanged();
+            return;
+        }
         if (isRegistrationManagerDisabled()) {
             return;
         }
@@ -433,6 +540,10 @@ public class BookieStateManager implements StateManager {
             this.bookieStatus.writeToDirectories(statusDirs);
         }
         // change zookeeper state only when using zookeeper
+        if (controlledOwner != null) {
+            controlledModeChanged();
+            return;
+        }
         if (isRegistrationManagerDisabled()) {
             return;
         }
@@ -444,6 +555,144 @@ public class BookieStateManager implements StateManager {
             return;
         }
     }
+    /** Invoked only by the bound bridge after its real listener has bound. No retry after any result. */
+    Future<Void> registerAfterBindForClassicChild() throws IOException {
+        synchronized (controlledGate) {
+            if (controlledOwner == null || !controlledInitialized || controlledRegistrationAttempted
+                    || controlledClosing || controlledOwner.isClosing() || controlledFailure != null || shuttingdown) {
+                throw new IOException("Controlled Classic registration cannot start in this lifecycle");
+            }
+            controlledRegistrationAttempted = true;
+            controlledRegistrationEnabled = true;
+            controlledRegistrationReadOnly = isReadOnly();
+        }
+        try {
+            return stateService.submit(() -> {
+                doRegisterBookie(controlledRegistrationReadOnly);
+                return null;
+            });
+        } catch (RuntimeException | Error problem) {
+            failControlledRegistration(problem);
+            throw problem;
+        }
+    }
+
+    void requireCurrentRegistrationForClassicChild() throws IOException {
+        beginControlledRegistration();
+        try {
+            if (controlledBirth == 0 || !rmRegistered.get()) {
+                throw new IOException("Controlled Classic initial registration has not completed");
+            }
+            ((ZKRegistrationManager) rm).checkClassicChildRegistration(bookieIdSupplier.get(),
+                    controlledRegistrationReadOnly,
+                    controlledSession, controlledBirth);
+            synchronized (controlledGate) {
+                requireControlledRegistration();
+            }
+        } catch (IOException | RuntimeException | Error problem) {
+            failControlledRegistration(problem);
+            throw problem;
+        } finally {
+            endControlledActivity();
+        }
+    }
+
+    ClassicChildResources.ServiceEpisode serviceEpisodeForClassicChild() throws IOException {
+        requireCurrentRegistrationForClassicChild();
+        synchronized (controlledGate) {
+            requireControlledRegistration();
+            return new ClassicChildResources.ServiceEpisode(controlledSession, controlledBirth,
+                    controlledRegistrationReadOnly);
+        }
+    }
+
+    private void requireControlledRegistration() throws IOException {
+        if (controlledOwner == null || !controlledRegistrationEnabled || controlledClosing
+                || controlledOwner.isClosing() || controlledFailure != null || shuttingdown
+                || isReadOnly() != controlledRegistrationReadOnly) {
+            throw new IOException("Controlled Classic registration is not admitted", controlledFailure);
+        }
+    }
+
+    private void beginControlledRegistration() throws IOException {
+        synchronized (controlledGate) {
+            requireControlledRegistration();
+            enterControlledActivity();
+        }
+    }
+
+    private void enterControlledActivity() {
+        controlledActivities.merge(Thread.currentThread(), 1, Integer::sum);
+    }
+
+    private void endControlledActivity() {
+        synchronized (controlledGate) {
+            Thread current = Thread.currentThread();
+            int remaining = controlledActivities.get(current) - 1;
+            if (remaining == 0) {
+                controlledActivities.remove(current);
+            } else {
+                controlledActivities.put(current, remaining);
+            }
+            controlledGate.notifyAll();
+        }
+    }
+
+    private void controlledSessionExpired() {
+        synchronized (controlledGate) {
+            enterControlledActivity();
+        }
+        try {
+            // Only a request. The original external owner worker drains accepted I/O and metadata.
+            failControlledRegistration(new IOException("SESSION_EXPIRED: controlled Classic episode cannot resume"));
+        } finally {
+            endControlledActivity();
+        }
+    }
+
+    private void failControlledRegistration(Throwable problem) {
+        synchronized (controlledGate) {
+            if (controlledFailure == null) {
+                controlledFailure = problem;
+            }
+            controlledRegistrationEnabled = false;
+            rmRegistered.set(false);
+            controlledOwner.requestClose();
+        }
+    }
+
+    private void controlledModeChanged() {
+        synchronized (controlledGate) {
+            if (controlledRegistrationAttempted && isReadOnly() != controlledRegistrationReadOnly) {
+                failControlledRegistration(new IOException(
+                        "Controlled Classic registered mode changed; the original episode must stop"));
+            }
+        }
+    }
+
+    private boolean controlledModeRequested(boolean readOnly, boolean manuallyModified) {
+        if (controlledOwner == null) {
+            return false;
+        }
+        synchronized (controlledGate) {
+            if (controlledClosing || controlledOwner.isClosing() || controlledFailure != null) {
+                return true;
+            }
+            boolean canChange = readOnly || !forceReadOnly.get()
+                    && (manuallyModified || !bookieStatus.isManuallyModifiedToReadOnly());
+            if (controlledRegistrationAttempted && canChange && readOnly != controlledRegistrationReadOnly) {
+                failControlledRegistration(new IOException(
+                        "Controlled Classic registered mode change requested; the original episode must stop"));
+                return true;
+            }
+            return false;
+        }
+    }
+
+    Throwable failureForClassicChild() {
+        return controlledFailure;
+    }
+
     @Override
     public void setShutdownHandler(ShutdownHandler handler){
         shutdownHandler = handler;

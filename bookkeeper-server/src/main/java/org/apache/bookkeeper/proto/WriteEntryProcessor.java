@@ -136,7 +136,10 @@ class WriteEntryProcessor extends PacketProcessorBase<ParsedAddRequest> implemen
         }
 
         requestHandler.prepareSendResponseV2(rc, request);
-        requestProcessor.onAddRequestFinish();
+        finishAddRequest();
+        if (controlledCall != null) {
+            controlledCall.complete();
+        }
 
         request.recycle();
         recycle();

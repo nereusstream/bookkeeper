@@ -562,6 +562,9 @@ public class BookieImpl implements Bookie {
         JournalScanner scanner = new JournalScanner() {
             @Override
             public void process(int journalVersion, long offset, ByteBuffer recBuff) throws IOException {
+                if (fresh != null && fresh.historical) {
+                    validateHistoricalJournalRecord(recBuff);
+                }
                 long ledgerId = recBuff.getLong();
                 long entryId = recBuff.getLong();
                 try {
@@ -600,6 +603,19 @@ public class BookieImpl implements Bookie {
                     } else if (entryId == METAENTRY_ID_LEDGER_EXPLICITLAC) {
                         if (journalVersion >= JournalChannel.V6) {
                             int explicitLacBufLength = recBuff.getInt();
+                            if (fresh != null && fresh.historical) {
+                                ByteBuf explicitLacBuf = Unpooled.wrappedBuffer(recBuff.slice());
+                                try {
+                                    byte[] key = masterKeyCache.get(ledgerId);
+                                    if (key == null) {
+                                        key = ledgerStorage.readMasterKey(ledgerId);
+                                    }
+                                    handles.getHandle(ledgerId, key, true).setExplicitLac(explicitLacBuf);
+                                } finally {
+                                    explicitLacBuf.release();
+                                }
+                                return;
+                            }
                             ByteBuf explicitLacBuf = Unpooled.buffer(explicitLacBufLength);
                             byte[] explicitLacBufArray = new byte[explicitLacBufLength];
                             recBuff.get(explicitLacBufArray);
@@ -636,7 +652,16 @@ public class BookieImpl implements Bookie {
                         LedgerDescriptor handle = handles.getHandle(ledgerId, key, true);
 
                         recBuff.rewind();
-                        handle.addEntry(Unpooled.wrappedBuffer(recBuff));
+                        ByteBuf replayed = Unpooled.wrappedBuffer(recBuff);
+                        if (fresh != null && fresh.historical) {
+                            try {
+                                handle.addEntry(replayed);
+                            } finally {
+                                replayed.release();
+                            }
+                        } else {
+                            handle.addEntry(replayed);
+                        }
                     }
                 } catch (NoLedgerException nsle) {
                     log.debug()
@@ -655,6 +680,31 @@ public class BookieImpl implements Bookie {
         log.info().attr("elapsedMs", elapsedTs).log("Finished replaying journal");
     }
 
+    /** V6 owned-history payloads are checked before allocating a key/LAC or changing a handle/cache. */
+    private static void validateHistoricalJournalRecord(ByteBuffer record) throws IOException {
+        int start = record.position();
+        int size = record.remaining();
+        if (size < 16 || record.getLong(start) < 0) {
+            throw new IOException("Historical Journal record lacks its bounded ledger/entry header");
+        }
+        long entry = record.getLong(start + 8);
+        if (entry == METAENTRY_ID_LEDGER_KEY || entry == METAENTRY_ID_LEDGER_EXPLICITLAC) {
+            if (size < 20) {
+                throw new IOException("Historical Journal metadata lacks its length field");
+            }
+            int length = record.getInt(start + 16);
+            if (length < 0 || length != size - 20 || entry == METAENTRY_ID_LEDGER_EXPLICITLAC && length < 16) {
+                throw new IOException("Historical Journal metadata length differs from its bounded payload");
+            }
+        } else if (entry == METAENTRY_ID_FENCE_KEY) {
+            if (size != 16) {
+                throw new IOException("Historical Journal fence has an unexpected payload");
+            }
+        } else if (entry < 0 || size < 24) {
+            throw new IOException("Unknown or incomplete historical Journal entry payload");
+        }
+    }
+
     /**
      * Replay journal files and updates journal's in-memory lastLogMark object.
      *
@@ -664,8 +714,7 @@ public class BookieImpl implements Bookie {
      */
     private void replay(Journal journal, JournalScanner scanner) throws IOException {
         final LogMark markedLog = journal.getLastLogMark().getCurMark();
-        List<Long> logs = Journal.listJournalIds(journal.getJournalDirectory(), journalId ->
-            journalId >= markedLog.getLogFileId());
+        List<Long> logs = journal.journalIdsForRecovery(markedLog.getLogFileId());
         // last log mark may be missed due to no sync up before
         // validate filtered log ids only when we have markedLogId
         if (markedLog.getLogFileId() > 0) {
@@ -1367,7 +1416,8 @@ public class BookieImpl implements Bookie {
     }
 
     private static final class FreshState {
-        final FreshClassicOwner owner;
+        final OwnedClassicLifecycle owner;
+        final boolean historical;
         final Object gate = new Object();
         final Object closeLock = new Object();
         final Map<Thread, Integer> calls = new HashMap<>();
@@ -1379,13 +1429,15 @@ public class BookieImpl implements Bookie {
         volatile Throwable observationFailure;
         volatile Throwable operationFailure;
         volatile Throwable releaseFailure;
+        volatile BookieStateManager historicalState;
         boolean initialized;
         volatile boolean drained;
         boolean running;
         boolean closing;
 
-        FreshState(FreshClassicOwner owner) {
+        FreshState(OwnedClassicLifecycle owner, boolean historical) {
             this.owner = owner;
+            this.historical = historical;
         }
     }
 
@@ -1443,13 +1495,21 @@ public class BookieImpl implements Bookie {
         }
     }
 
+    static BookieRequestHandler responseHandlerForOwnedContext(Object context) {
+        Object original = context instanceof BookieImpl.FreshCall call ? call.context : context;
+        return original instanceof BookieRequestHandler handler ? handler : null;
+    }
+
     record FreshDrainResult(boolean drained, Throwable closeFailure) { }
 
-    private BookieImpl(ServerConfiguration conf, StatsLogger stats, FreshClassicOwner owner) {
+    private BookieImpl(ServerConfiguration conf, StatsLogger stats, OwnedClassicLifecycle owner,
+                      RegistrationManager registration, boolean historical) {
         this.conf = conf;
         this.statsLogger = stats;
-        registrationManager = null;
-        bookieServiceInfoProvider = BookieServiceInfo.NO_INFO;
+        registrationManager = registration;
+        bookieServiceInfoProvider = historical
+                ? () -> new org.apache.bookkeeper.proto.SimpleBookieServiceInfoProvider(conf).get()
+                : BookieServiceInfo.NO_INFO;
         entryLogPerLedgerEnabled = false;
         writeDataToJournal = true;
         journalDirectories = new ArrayList<>();
@@ -1457,15 +1517,34 @@ public class BookieImpl implements Bookie {
             journalDirectories.add(getCurrentDirectory(directory));
         }
         journals = new ArrayList<>();
-        fresh = new FreshState(owner);
+        fresh = new FreshState(owner, historical);
     }
 
     static BookieImpl forFresh(ServerConfiguration conf, StatsLogger stats, FreshClassicOwner owner) {
-        return new BookieImpl(conf, stats, owner);
+        return new BookieImpl(conf, stats, owner, null, false);
+    }
+
+    static BookieImpl forClassicChild(ServerConfiguration conf, StatsLogger stats, ClassicChildResources owner,
+            RegistrationManager registration) {
+        return new BookieImpl(conf, stats, owner, registration, true);
     }
 
     void initializeForFresh(FreshClassicOwner.Permit permit) throws IOException, InterruptedException, BookieException {
         permit.consume(this);
+        initializeOwnedClassic(null);
+    }
+
+    void initializeForClassicChild(ClassicChildResources.Permit permit, ClassicGcMetadata metadata)
+            throws IOException, InterruptedException, BookieException {
+        permit.consume(this);
+        initializeOwnedClassic(java.util.Objects.requireNonNull(metadata, "metadata"));
+    }
+
+    private void initializeOwnedClassic(ClassicGcMetadata metadata)
+            throws IOException, InterruptedException, BookieException {
+        if (fresh == null || fresh.historical != (metadata != null)) {
+            throw new IllegalStateException("Owned Classic initializer does not match its private startup permit");
+        }
         fresh.owner.checkStarting();
         DiskChecker checker = BookieResources.createDiskChecker(conf);
         ledgerDirsManager = LedgerDirsManager.forFresh(conf, conf.getLedgerDirs(), checker,
@@ -1479,7 +1558,15 @@ public class BookieImpl implements Bookie {
         checkIfDirsOnSameDiskPartition(allLedgerDirectories);
         checkIfDirsOnSameDiskPartition(journalDirectories);
         fresh.owner.checkStarting();
-        stateManager = initializeStateManager();
+        if (fresh.historical) {
+            var state = BookieStateManager.forClassicChild(conf, registrationManager, ledgerDirsManager,
+                    bookieServiceInfoProvider, fresh.owner);
+            stateManager = state;
+            fresh.historicalState = state;
+            state.initializeForClassicChild(statsLogger);
+        } else {
+            stateManager = initializeStateManager();
+        }
         fresh.owner.checkStarting();
         stateManager.setShutdownHandler(this::triggerBookieShutdown);
         List<LedgerDirsManager> managers = new ArrayList<>();
@@ -1497,23 +1584,37 @@ public class BookieImpl implements Bookie {
         }
         for (int i = 0; i < journalDirectories.size(); i++) {
             fresh.owner.checkStarting();
-            Journal journal = Journal.forFresh(i, journalDirectories.get(i), conf, ledgerDirsManager,
-                    statsLogger.scope(JOURNAL_SCOPE), allocator,
-                    () -> triggerBookieShutdown(ExitCode.BOOKIE_EXCEPTION));
+            Journal journal = fresh.historical
+                    ? Journal.forClassicHistory(i, journalDirectories.get(i), conf, ledgerDirsManager,
+                            statsLogger.scope(JOURNAL_SCOPE), allocator,
+                            () -> triggerBookieShutdown(ExitCode.BOOKIE_EXCEPTION))
+                    : Journal.forFresh(i, journalDirectories.get(i), conf, ledgerDirsManager,
+                            statsLogger.scope(JOURNAL_SCOPE), allocator,
+                            () -> triggerBookieShutdown(ExitCode.BOOKIE_EXCEPTION));
             synchronized (fresh.gate) {
                 journals.add(journal);
             }
             fresh.owner.checkStarting();
-            journal.initializeForFresh();
+            if (fresh.historical) {
+                journal.initializeForClassicHistory();
+            } else {
+                journal.initializeForFresh();
+            }
         }
         fresh.owner.checkStarting();
         var checkpoints = new CheckpointSourceList(journals);
-        ledgerStorage = InterleavedLedgerStorage.forFresh();
+        ledgerStorage = fresh.historical ? InterleavedLedgerStorage.forClassicHistory()
+                : InterleavedLedgerStorage.forFresh();
         ledgerStorage.setCheckpointSource(checkpoints);
         ledgerStorage.setCheckpointer(Checkpointer.NULL);
         fresh.owner.checkStarting();
-        ((InterleavedLedgerStorage) ledgerStorage).initializeForFresh(conf, ledgerDirsManager, indexDirsManager,
-                statsLogger, allocator);
+        if (fresh.historical) {
+            ((InterleavedLedgerStorage) ledgerStorage).initializeForClassicHistory(conf, metadata, ledgerDirsManager,
+                    indexDirsManager, statsLogger, allocator);
+        } else {
+            ((InterleavedLedgerStorage) ledgerStorage).initializeForFresh(conf, ledgerDirsManager, indexDirsManager,
+                    statsLogger, allocator);
+        }
         fresh.owner.checkStarting();
         syncThread = SyncThread.forFresh(conf, getLedgerDirsListener(), ledgerStorage, checkpoints, statsLogger);
         fresh.owner.checkStarting();
@@ -1889,6 +1990,7 @@ public class BookieImpl implements Bookie {
         }
         return dirsMonitor != null && dirsMonitor.isCurrentExecutorThread()
                 || stateManager != null && ((BookieStateManager) stateManager).isCurrentExecutorThread()
+                || fresh.historicalState != null && fresh.historicalState.isCurrentExecutorThread()
                 || syncThread != null && syncThread.isCurrentExecutorThread()
                 || ledgerStorage != null && ((InterleavedLedgerStorage) ledgerStorage)
                         .isCurrentResourceActivityForFresh()
@@ -1904,7 +2006,8 @@ public class BookieImpl implements Bookie {
     }
 
     Throwable operationFailureForFresh() {
-        return fresh.operationFailure;
+        return fresh.operationFailure != null ? fresh.operationFailure
+                : fresh.historicalState != null ? fresh.historicalState.failureForClassicChild() : null;
     }
 
     Throwable observationFailureForFresh() {
@@ -1918,6 +2021,16 @@ public class BookieImpl implements Bookie {
     }
 
     FreshDrainResult closeForFresh() throws IOException, InterruptedException {
+        return closeOwnedClassic(null);
+    }
+
+    FreshDrainResult closeForClassicChild(org.apache.bookkeeper.proto.BookieServer network)
+            throws IOException, InterruptedException {
+        return closeOwnedClassic(java.util.Objects.requireNonNull(network, "network"));
+    }
+
+    private FreshDrainResult closeOwnedClassic(org.apache.bookkeeper.proto.BookieServer network)
+            throws IOException, InterruptedException {
         if (fresh == null || isCurrentResourceActivityForFresh()) {
             throw new IllegalStateException("Fresh Bookie drain requires its external owner worker");
         }
@@ -1960,6 +2073,9 @@ public class BookieImpl implements Bookie {
                     while (fresh.pendingOperations != 0) {
                         fresh.gate.wait();
                     }
+                }
+                if (network != null && !network.awaitRequestsForClassicChild()) {
+                    return new FreshDrainResult(false, network.closeFailureForClassicChild());
                 }
                 if (ledgerStorage != null) {
                     var maintenance = ((InterleavedLedgerStorage) ledgerStorage).quiesceMaintenanceForFresh();

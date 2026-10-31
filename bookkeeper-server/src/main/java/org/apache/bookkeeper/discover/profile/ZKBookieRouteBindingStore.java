@@ -16,6 +16,7 @@
  */
 package org.apache.bookkeeper.discover.profile;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
@@ -48,6 +49,139 @@ import org.apache.zookeeper.data.Id;
 
 /** Fixed native namespace on the existing metadata connection; cold operations only, never an Add-path store. */
 public final class ZKBookieRouteBindingStore {
+    /** Fresh original values only, not a future common binding, launch permit or isolation proof. */
+    public record ClassicLaunchSnapshot(String ledgersRoot, BookieId bookie, String clusterId,
+            long clusterBirthZxid, BookieRouteBinding.SourceCookie cookieIdentity, byte[] cookieBytes) {
+        public ClassicLaunchSnapshot {
+            cookieBytes = cookieBytes.clone();
+        }
+
+        @Override
+        public byte[] cookieBytes() {
+            return cookieBytes.clone();
+        }
+    }
+
+    public record ClassicLaunchDrain(boolean drained, int pendingCallbacks, Throwable firstReadFailure) { }
+
+    /** Reads on this exact manager client/namespace; the enclosing episode still owns the client. */
+    public final class ClassicLaunchSources {
+        private final BookieId bookie;
+        private final long readTimeoutNanos;
+        private final ProfileZKReadClient.Pending pending = new ProfileZKReadClient.Pending();
+        private final ProfileZKReadClient reader = new ProfileZKReadClient(zk, pending);
+        private boolean closing;
+        private Thread readingThread;
+        private Throwable firstReadFailure;
+
+        private ClassicLaunchSources(BookieId bookie, Duration timeout) {
+            this.bookie = Objects.requireNonNull(bookie, "bookie");
+            path(bookie);
+            if (timeout.isNegative() || timeout.isZero() || timeout.compareTo(Duration.ofMinutes(1)) > 0) {
+                throw new IllegalArgumentException("Bounded Classic launch read timeout required");
+            }
+            readTimeoutNanos = timeout.toNanos();
+        }
+
+        /** Every invocation rechecks native absence and original source bytes; never provisions or registers. */
+        public synchronized ClassicLaunchSnapshot read() throws IOException {
+            return read(0, 0, false);
+        }
+
+        /** Final cold observation after this raw session registered; no registration or permission is issued. */
+        public synchronized ClassicLaunchSnapshot readForServing(long session, long birth, boolean readOnly)
+                throws IOException {
+            if (session == 0 || birth <= 0 || zk.getClass() != ZooKeeper.class
+                    || zk.getSessionId() != session || !zk.getState().isAlive()) {
+                throw new IOException("Original raw Classic registration session is unavailable");
+            }
+            return read(session, birth, readOnly);
+        }
+
+        private ClassicLaunchSnapshot read(long session, long birth, boolean readOnly) throws IOException {
+            if (closing || readingThread != null || firstReadFailure != null) {
+                throw new IOException("Classic launch sources are closing or failed", firstReadFailure);
+            }
+            readingThread = Thread.currentThread();
+            try {
+                long deadline = System.nanoTime() + readTimeoutNanos;
+                requireAbsent(deadline);
+                var cluster = reader.get(instancePath, deadline);
+                if (cluster.code() != Code.OK.intValue() || cluster.stat() == null
+                        || cluster.stat().getEphemeralOwner() != 0 || cluster.stat().getVersion() != 0
+                        || cluster.stat().getCzxid() <= 0 || cluster.bytes() == null
+                        || cluster.bytes().length < 1 || cluster.bytes().length > 1024) {
+                    throw new IOException("Original Classic cluster source is missing, invalid or unavailable");
+                }
+                String clusterId = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT)
+                        .decode(ByteBuffer.wrap(cluster.bytes())).toString();
+                if (clusterId.isBlank() || clusterId.equals("null") || clusterId.indexOf(0) >= 0) {
+                    throw new IOException("Original Classic cluster identity is invalid");
+                }
+                var cookie = reader.get(cookieRoot + "/" + bookie, deadline);
+                if (cookie.code() != Code.OK.intValue() || cookie.stat() == null
+                        || cookie.stat().getEphemeralOwner() != 0 || cookie.stat().getCzxid() <= 0
+                        || cookie.bytes() == null || cookie.bytes().length < 1
+                        || cookie.bytes().length > MAX_COOKIE_BYTES) {
+                    throw new IOException("Original Classic Cookie is missing, invalid or unavailable");
+                }
+                var source = new BookieRouteBinding.SourceCookie(cookie.stat().getCzxid(), cookie.stat().getVersion(),
+                        sha256(cookie.bytes()));
+                String prefix = ledgersRoot.equals("/") ? "" : ledgersRoot;
+                List<String> registrations = List.of(prefix + "/available/" + bookie,
+                        prefix + "/available/readonly/" + bookie);
+                for (int i = 0; i < registrations.size(); i++) {
+                    var result = reader.exists(registrations.get(i), deadline);
+                    if (session != 0 && i == (readOnly ? 1 : 0)) {
+                        if (result.code() != Code.OK.intValue() || result.stat() == null
+                                || result.stat().getEphemeralOwner() != session || result.stat().getCzxid() != birth
+                                || result.stat().getVersion() != 0 || zk.getSessionId() != session
+                                || !zk.getState().isAlive()) {
+                            throw new IOException("Classic service registration is not its original session/birth");
+                        }
+                    } else if (result.code() != Code.NONODE.intValue()) {
+                        throw new IOException("Classic launch other registration absence is not established");
+                    }
+                }
+                requireAbsent(deadline);
+                return new ClassicLaunchSnapshot(ledgersRoot, bookie, clusterId, cluster.stat().getCzxid(),
+                        source, cookie.bytes());
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                var failure = new IOException("Classic launch source read interrupted", interrupted);
+                firstReadFailure = failure;
+                throw failure;
+            } catch (TimeoutException unavailable) {
+                var failure = new IOException("Classic launch source deadline elapsed", unavailable);
+                firstReadFailure = failure;
+                throw failure;
+            } catch (IOException | RuntimeException | Error failure) {
+                firstReadFailure = failure;
+                throw failure;
+            } finally {
+                readingThread = null;
+            }
+        }
+
+        private void requireAbsent(long deadline) throws IOException {
+            var nativeRead = ZKBookieRouteBindingStore.this.read(bookie, deadline, reader);
+            if (nativeRead.status() != ReadStatus.ABSENT) {
+                throw new IOException("Classic launch requires native ABSENT: " + nativeRead.status());
+            }
+        }
+
+        /** Actual submitted callbacks remain owned after a caller timeout/interruption or unknown submission. */
+        public synchronized ClassicLaunchDrain closeAndDrain() {
+            if (readingThread == Thread.currentThread()) {
+                throw new IllegalStateException("Classic launch source reader cannot drain itself");
+            }
+            closing = true;
+            int remaining = pending.stop();
+            return new ClassicLaunchDrain(remaining == 0, remaining, firstReadFailure);
+        }
+    }
+
     private static final long MAGIC = 0x555742524e303031L; // UWBRN001
     private static final int MAX_COOKIE_BYTES = 1024 * 1024;
     private final ZooKeeper zk;
@@ -86,6 +220,11 @@ public final class ZKBookieRouteBindingStore {
 
     public ReadResult read(BookieId bookie) {
         return read(bookie, System.nanoTime() + timeoutNanos, reads);
+    }
+
+    /** Heap-only preparation, bound to this store's actual source client and fixed native namespace. */
+    public ClassicLaunchSources borrowClassicLaunchSources(BookieId bookie, Duration timeout) {
+        return new ClassicLaunchSources(bookie, timeout);
     }
 
     ReadResult read(BookieId bookie, long deadline, ProfileZKReadClient reader) {

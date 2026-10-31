@@ -87,7 +87,7 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
             new ConcurrentHashMap<Long, Set<LedgerMetadataListener>>();
     // we use this to prevent long stack chains from building up in callbacks
     protected ScheduledExecutorService scheduler;
-    private volatile Thread schedulerThread;
+    private final java.util.List<Thread> schedulerThreads = new java.util.ArrayList<>();
 
     /**
      * ReadLedgerMetadataTask class.
@@ -192,7 +192,10 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
         var threadFactory = new DefaultThreadFactory("ZkLedgerManagerScheduler");
         this.scheduler = Executors.newSingleThreadScheduledExecutor(task -> {
             Thread thread = threadFactory.newThread(task);
-            schedulerThread = thread;
+            synchronized (schedulerThreads) {
+                schedulerThreads.removeIf(old -> old.getState() == Thread.State.TERMINATED);
+                schedulerThreads.add(thread);
+            }
             return thread;
         });
         log.debug().attr("ledgerRootPath", ledgerRootPath).log("Using AbstractZkLedgerManager");
@@ -735,15 +738,42 @@ public abstract class AbstractZkLedgerManager implements LedgerManager, Watcher 
         if (timeout.isNegative() || timeout.isZero()) {
             throw new IllegalArgumentException("Positive metadata scheduler drain timeout required");
         }
+        long deadline = System.nanoTime() + timeout.toNanos();
         requireExternalDrainCaller();
         scheduler.shutdown();
-        return scheduler.awaitTermination(timeout.toNanos(), TimeUnit.NANOSECONDS);
+        return awaitSchedulerTermination(deadline);
+    }
+
+    /** Exact scheduler and all its actual worker threads, including a replaced worker's final return. */
+    protected final boolean awaitSchedulerTermination(long deadline) throws InterruptedException {
+        if (!scheduler.awaitTermination(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS)) {
+            return false;
+        }
+        java.util.List<Thread> original;
+        synchronized (schedulerThreads) {
+            original = java.util.List.copyOf(schedulerThreads);
+        }
+        for (Thread thread : original) {
+            if (thread.isAlive()) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    return false;
+                }
+                TimeUnit.NANOSECONDS.timedJoin(thread, remaining);
+                if (thread.isAlive()) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /** Validate an explicit owner drain before it retires any resources used by this scheduler. */
     public void requireExternalDrainCaller() {
-        if (Thread.currentThread() == schedulerThread) {
-            throw new IllegalStateException("Metadata scheduler cannot await its own termination");
+        synchronized (schedulerThreads) {
+            if (schedulerThreads.contains(Thread.currentThread())) {
+                throw new IllegalStateException("Metadata scheduler cannot await its own termination");
+            }
         }
     }
 }

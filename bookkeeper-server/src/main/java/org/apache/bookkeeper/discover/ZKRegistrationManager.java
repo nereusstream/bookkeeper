@@ -113,6 +113,11 @@ public class ZKRegistrationManager implements RegistrationManager {
     private final int zkTimeoutMs;
     private final ZKBookieRouteBindingStore routeBindings;
     private final List<RegistrationListener> listeners = new ArrayList<>();
+    private final Object classicSessionGate = new Object();
+    private final List<RegistrationListener> classicChildListeners = new ArrayList<>();
+    private final long classicSessionId;
+    private boolean classicSessionExpired;
+    private boolean classicRegistrationAttempted;
 
     public ZKRegistrationManager(ServerConfiguration conf,
                                  ZooKeeper zk) {
@@ -124,6 +129,7 @@ public class ZKRegistrationManager implements RegistrationManager {
                                  String ledgersRootPath) {
         this.conf = conf;
         this.zk = zk;
+        this.classicSessionId = zk.getSessionId();
         this.zkAcls = ZkUtils.getACLs(conf);
         this.ledgersRootPath = ledgersRootPath;
         this.cookiePath = ledgersRootPath + "/" + COOKIE_NODE;
@@ -139,16 +145,101 @@ public class ZKRegistrationManager implements RegistrationManager {
             zkAcls);
 
         this.zk.register(event -> {
-            if (!zkRegManagerInitialized) {
-                // do nothing until first registration
-                return;
-            }
             // Check for expired connection.
             if (event.getType().equals(EventType.None)
                 && event.getState().equals(KeeperState.Expired)) {
-                listeners.forEach(RegistrationListener::onRegistrationExpired);
+                List<RegistrationListener> controlled;
+                synchronized (classicSessionGate) {
+                    classicSessionExpired = true;
+                    controlled = List.copyOf(classicChildListeners);
+                }
+                controlled.forEach(RegistrationListener::onRegistrationExpired);
+                if (zkRegManagerInitialized) {
+                    listeners.forEach(RegistrationListener::onRegistrationExpired);
+                }
             }
         });
+    }
+
+    /** Observe this original session even before its first registration. Never permits replacement sessions. */
+    public final long addClassicChildRegistrationListener(RegistrationListener listener) throws IOException {
+        synchronized (classicSessionGate) {
+            requireClassicSession(classicSessionId);
+            classicChildListeners.add(java.util.Objects.requireNonNull(listener, "listener"));
+            return classicSessionId;
+        }
+    }
+
+    private void requireClassicSession(long expected) throws IOException {
+        synchronized (classicSessionGate) {
+            if (zk.getClass() != ZooKeeper.class) {
+                throw new IOException(
+                        "Controlled Classic requires one raw ZooKeeper session without retry/replacement");
+            }
+            if (expected == 0 || expected != classicSessionId || classicSessionExpired
+                    || zk.getSessionId() != expected || !zk.getState().isAlive()) {
+                throw new IOException("Controlled Classic original session is unavailable or expired");
+            }
+        }
+    }
+
+    /** One create-only service publication. A failed/unknown result is never retried or cleaned by path. */
+    public final long registerClassicChildBookie(BookieId bookie, boolean readOnly, BookieServiceInfo info,
+            long expectedSession) throws IOException {
+        synchronized (classicSessionGate) {
+            requireClassicSession(expectedSession);
+            if (classicRegistrationAttempted) {
+                throw new IOException("Controlled Classic registration is one-use");
+            }
+            classicRegistrationAttempted = true;
+        }
+        String writable = bookieRegistrationPath + "/" + bookie;
+        String readonly = bookieReadonlyRegistrationPath + "/" + bookie;
+        try {
+            if (zk.exists(writable, false) != null || zk.exists(readonly, false) != null) {
+                throw new IOException("Controlled Classic requires both original registration paths absent");
+            }
+            if (readOnly && zk.exists(bookieReadonlyRegistrationPath, false) == null) {
+                try {
+                    zk.create(bookieReadonlyRegistrationPath, EMPTY_BYTE_ARRAY, zkAcls, CreateMode.PERSISTENT);
+                } catch (NodeExistsException raced) {
+                    // Shared container, never an individual service registration.
+                }
+            }
+            requireClassicSession(expectedSession);
+            zk.create(readOnly ? readonly : writable, serializeBookieServiceInfo(info), zkAcls, CreateMode.EPHEMERAL);
+            return checkClassicChildRegistration(bookie, readOnly, expectedSession, 0);
+        } catch (KeeperException problem) {
+            throw new IOException(
+                    "Controlled Classic registration did not establish its original publication", problem);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Controlled Classic registration interrupted; actual outcome remains unknown",
+                    interrupted);
+        }
+    }
+
+    /** Fresh observation only. The caller still proves listener, Bookie, START and the rest of its episode. */
+    public final long checkClassicChildRegistration(BookieId bookie, boolean readOnly, long expectedSession,
+            long expectedBirth) throws IOException {
+        requireClassicSession(expectedSession);
+        String target = (readOnly ? bookieReadonlyRegistrationPath : bookieRegistrationPath) + "/" + bookie;
+        String other = (readOnly ? bookieRegistrationPath : bookieReadonlyRegistrationPath) + "/" + bookie;
+        try {
+            Stat current = zk.exists(target, false);
+            if (current == null || current.getEphemeralOwner() != expectedSession || current.getCzxid() <= 0
+                    || current.getVersion() != 0 || expectedBirth != 0 && expectedBirth != current.getCzxid()
+                    || zk.exists(other, false) != null) {
+                throw new IOException("Controlled Classic registration is not its sole original session/birth");
+            }
+            requireClassicSession(expectedSession);
+            return current.getCzxid();
+        } catch (KeeperException problem) {
+            throw new IOException("Controlled Classic registration could not be observed", problem);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Controlled Classic registration observation interrupted", interrupted);
+        }
     }
 
     @Override
@@ -175,6 +266,12 @@ public class ZKRegistrationManager implements RegistrationManager {
     public final ZKProfileStartupRequirementsStore.ClassicBootstrapSources borrowClassicBootstrapSources(
             ZKProfileStartupRequirementsStore requirements, BookieId bookieId, Duration timeout) {
         return requirements.borrowClassicBootstrapSources(zk, routeBindings, ledgersRootPath, bookieId, timeout);
+    }
+
+    /** Original pre-commissioning Classic sources on this manager's exact native client and namespace. */
+    public final ZKBookieRouteBindingStore.ClassicLaunchSources borrowClassicLaunchSources(
+            BookieId bookieId, Duration timeout) {
+        return routeBindings.borrowClassicLaunchSources(bookieId, timeout);
     }
 
     @Override

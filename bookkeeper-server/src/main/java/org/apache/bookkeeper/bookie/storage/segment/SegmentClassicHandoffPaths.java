@@ -82,6 +82,10 @@ final class SegmentClassicHandoffPaths {
     }
 
     Identity identity(Path path) throws IOException {
+        return fileIdentity(path);
+    }
+
+    static Identity fileIdentity(Path path) throws IOException {
         if (!path.equals(path.toRealPath())) {
             throw new IOException("Handoff path must contain no symbolic aliases");
         }

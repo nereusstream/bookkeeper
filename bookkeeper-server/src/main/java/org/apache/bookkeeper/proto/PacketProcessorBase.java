@@ -37,11 +37,13 @@ abstract class PacketProcessorBase<T extends Request> implements Runnable {
     BookieRequestHandler requestHandler;
     BookieRequestProcessor requestProcessor;
     long enqueueNanos;
+    ClassicRequestLifecycle.Call controlledCall;
 
     protected void init(T request, BookieRequestHandler requestHandler, BookieRequestProcessor requestProcessor) {
         this.request = request;
         this.requestHandler = requestHandler;
         this.requestProcessor = requestProcessor;
+        this.controlledCall = requestProcessor.classic == null ? null : requestProcessor.classic.current();
         this.enqueueNanos = MathUtils.nowInNano();
     }
 
@@ -49,6 +51,7 @@ abstract class PacketProcessorBase<T extends Request> implements Runnable {
         request = null;
         requestHandler = null;
         requestProcessor = null;
+        controlledCall = null;
         enqueueNanos = -1;
     }
 
@@ -67,7 +70,7 @@ abstract class PacketProcessorBase<T extends Request> implements Runnable {
 
     protected void sendWriteReqResponse(int rc, Object response, OpStatsLogger statsLogger) {
         sendResponse(rc, response, statsLogger);
-        requestProcessor.onAddRequestFinish();
+        finishAddRequest();
     }
 
     protected void sendReadReqResponse(int rc, Object response, OpStatsLogger statsLogger, boolean throttle) {
@@ -76,10 +79,21 @@ abstract class PacketProcessorBase<T extends Request> implements Runnable {
         } else {
             sendResponse(rc, response, statsLogger);
         }
-        requestProcessor.onReadRequestFinish();
+        finishReadRequest();
     }
 
     protected void sendResponse(int rc, Object response, OpStatsLogger statsLogger) {
+        var original = controlledCall;
+        try {
+            sendResponseUntracked(rc, response, statsLogger);
+        } finally {
+            if (original != null) {
+                original.complete();
+            }
+        }
+    }
+
+    private void sendResponseUntracked(int rc, Object response, OpStatsLogger statsLogger) {
         final long writeNanos = MathUtils.nowInNano();
         final long timeOut = requestProcessor.getWaitTimeoutOnBackpressureMillis();
 
@@ -128,7 +142,11 @@ abstract class PacketProcessorBase<T extends Request> implements Runnable {
                     log.debug().exception(future.cause()).log("Netty channel write exception");
                 }
             });
-            channel.writeAndFlush(response, promise);
+            if (controlledCall == null) {
+                channel.writeAndFlush(response, promise);
+            } else {
+                requestProcessor.classic.writeAndFlush(channel, response, promise);
+            }
         } else {
             if (response instanceof BookieProtocol.Response) {
                 ((BookieProtocol.Response) response).release();
@@ -151,9 +169,21 @@ abstract class PacketProcessorBase<T extends Request> implements Runnable {
      * and avoiding using too much memory when handling read-requests.
      */
     protected void sendResponseAndWait(int rc, Object response, OpStatsLogger statsLogger) {
+        var original = controlledCall;
+        try {
+            sendResponseAndWaitUntracked(rc, response, statsLogger);
+        } finally {
+            if (original != null) {
+                original.complete();
+            }
+        }
+    }
+
+    private void sendResponseAndWaitUntracked(int rc, Object response, OpStatsLogger statsLogger) {
         try {
             Channel channel = requestHandler.ctx().channel();
-            ChannelFuture future = channel.writeAndFlush(response);
+            ChannelFuture future = controlledCall == null ? channel.writeAndFlush(response)
+                    : requestProcessor.classic.writeAndFlush(channel, response);
             if (!channel.eventLoop().inEventLoop()) {
                 future.get();
             }
@@ -184,17 +214,47 @@ abstract class PacketProcessorBase<T extends Request> implements Runnable {
                          ResponseBuilder.buildErrorResponse(BookieProtocol.EBADVERSION, request),
                          requestProcessor.getRequestStats().getReadRequestStats());
             if (request instanceof BookieProtocol.ReadRequest) {
-                requestProcessor.onReadRequestFinish();
+                finishReadRequest();
             }
             if (request instanceof BookieProtocol.ParsedAddRequest) {
                 ((BookieProtocol.ParsedAddRequest) request).release();
                 request.recycle();
-                requestProcessor.onAddRequestFinish();
+                finishAddRequest();
             }
             return;
         }
         processPacket();
     }
+
+    protected final void finishAddRequest() {
+        if (controlledCall == null || controlledCall.finishRequestOnce()) {
+            requestProcessor.onAddRequestFinish();
+        }
+    }
+
+    protected final void finishReadRequest() {
+        if (controlledCall == null || controlledCall.finishRequestOnce()) {
+            requestProcessor.onReadRequestFinish();
+        }
+    }
+
+    void discardForClassicChild() {
+        var original = controlledCall;
+        if (original == null) {
+            throw new IllegalStateException("Only a bound controlled request can be discarded");
+        }
+        if (request instanceof BookieProtocol.ParsedAddRequest add) {
+            add.release();
+            add.recycle();
+            finishAddRequest();
+        } else if (request instanceof BookieProtocol.ReadRequest) {
+            finishReadRequest();
+        }
+        recycle();
+        original.complete();
+    }
+
+    abstract void recycle();
 
     protected abstract void processPacket();
 }

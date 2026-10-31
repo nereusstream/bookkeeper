@@ -117,7 +117,7 @@ class ReadEntryProcessorV3 extends PacketProcessorBaseV3 {
                             .log("Fence request encountered exception");
                     sendFenceResponse(readResponseBuilder, entryBody, false, startTimeSw);
                 }
-            }, fenceThreadPool);
+            }, controlledCall == null ? fenceThreadPool : controlledCall.callbackExecutor(fenceThreadPool));
         } else {
             boolean success = false;
             try {
@@ -272,7 +272,10 @@ class ReadEntryProcessorV3 extends PacketProcessorBaseV3 {
         if (!requestHandler.ctx().channel().isOpen()) {
             log.debug().attr("channel", () -> requestHandler.ctx().channel())
                     .log("Dropping read request for closed channel");
-            requestProcessor.onReadRequestFinish();
+            finishReadRequest();
+            if (controlledCall != null) {
+                controlledCall.complete();
+            }
             return;
         }
 
@@ -342,7 +345,7 @@ class ReadEntryProcessorV3 extends PacketProcessorBaseV3 {
         response.setStatus(readResponse.getStatus());
         response.setReadResponse().copyFrom(readResponse);
         sendResponse(response.getStatus(), response, reqStats);
-        requestProcessor.onReadRequestFinish();
+        finishReadRequest();
     }
 
     //

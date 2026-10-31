@@ -30,6 +30,12 @@ import io.netty.buffer.ByteBuf;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
@@ -43,6 +49,7 @@ import org.apache.bookkeeper.bookie.FileInfoBackingCache.CachedFileInfo;
 import org.apache.bookkeeper.bookie.LedgerDirsManager.NoWritableLedgerDirException;
 import org.apache.bookkeeper.bookie.stats.IndexPersistenceMgrStats;
 import org.apache.bookkeeper.common.util.Watcher;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.stats.StatsLogger;
 import org.apache.bookkeeper.util.SnapshotMap;
@@ -86,6 +93,8 @@ public class IndexPersistenceMgr {
 
     private final IndexPersistenceMgrStats persistenceMgrStats;
     private final boolean freshLifecycle;
+    private final ClassicHistoryFiles history;
+    private Thread freshInitializingThread;
     private final Object freshAdmission = new Object();
     private boolean freshInitAttempted;
     private boolean freshInitializing;
@@ -110,10 +119,23 @@ public class IndexPersistenceMgr {
         return new IndexPersistenceMgr(pageSize, entriesPerPage, conf, activeLedgers, directories, statsLogger, true);
     }
 
+    static IndexPersistenceMgr forClassicHistory(int pageSize, int entriesPerPage, ServerConfiguration conf,
+            SnapshotMap<Long, Boolean> activeLedgers, LedgerDirsManager directories, StatsLogger stats)
+            throws IOException {
+        return new IndexPersistenceMgr(pageSize, entriesPerPage, conf, activeLedgers, directories, stats, true, true);
+    }
+
     private IndexPersistenceMgr(int pageSize, int entriesPerPage, ServerConfiguration conf,
             SnapshotMap<Long, Boolean> activeLedgers, LedgerDirsManager ledgerDirsManager,
             StatsLogger statsLogger, boolean freshLifecycle) throws IOException {
+        this(pageSize, entriesPerPage, conf, activeLedgers, ledgerDirsManager, statsLogger, freshLifecycle, false);
+    }
+
+    private IndexPersistenceMgr(int pageSize, int entriesPerPage, ServerConfiguration conf,
+            SnapshotMap<Long, Boolean> activeLedgers, LedgerDirsManager ledgerDirsManager,
+            StatsLogger statsLogger, boolean freshLifecycle, boolean historical) throws IOException {
         this.freshLifecycle = freshLifecycle;
+        history = historical ? new ClassicHistoryFiles() : null;
         this.openFileLimit = conf.getOpenFileLimit();
         this.activeLedgers = activeLedgers;
         this.ledgerDirsManager = ledgerDirsManager;
@@ -127,8 +149,11 @@ public class IndexPersistenceMgr {
 
         // build the file info cache
         int concurrencyLevel = Math.max(1, Math.max(conf.getNumAddWorkerThreads(), conf.getNumReadWorkerThreads()));
-        fileInfoBackingCache = new FileInfoBackingCache(this::createFileInfoBackingFile,
-                conf.getFileInfoFormatVersionToWrite(), freshLifecycle);
+        fileInfoBackingCache = historical
+                ? FileInfoBackingCache.forClassicHistory(this::createFileInfoBackingFile,
+                        conf.getFileInfoFormatVersionToWrite())
+                : new FileInfoBackingCache(this::createFileInfoBackingFile,
+                        conf.getFileInfoFormatVersionToWrite(), freshLifecycle);
         RemovalListener<Long, CachedFileInfo> fileInfoEvictionListener = this::handleLedgerEviction;
         writeFileInfoCache = buildCache(
             concurrencyLevel,
@@ -394,15 +419,30 @@ public class IndexPersistenceMgr {
     }
 
     void initializeForFresh() throws IOException {
+        initializeOwned(false);
+    }
+
+    void initializeForClassicHistory() throws IOException {
+        initializeOwned(true);
+    }
+
+    private void initializeOwned(boolean historical) throws IOException {
         synchronized (freshAdmission) {
-            if (!freshLifecycle || freshInitAttempted || freshClosing) {
+            if (!freshLifecycle || historical != (history != null) || freshInitAttempted || freshClosing) {
                 throw new IllegalStateException("Fresh index initialization is one-use");
             }
             freshInitAttempted = true;
             freshInitializing = true;
+            freshInitializingThread = Thread.currentThread();
         }
         try {
-            getActiveLedgers();
+            if (history == null) {
+                getActiveLedgers();
+            } else {
+                // Validate every candidate before any .rloc mutation. The second pass restores the legacy layout.
+                scanHistoricalIndexes(false);
+                scanHistoricalIndexes(true);
+            }
             synchronized (freshAdmission) {
                 freshInitialized = true;
             }
@@ -412,8 +452,117 @@ public class IndexPersistenceMgr {
         } finally {
             synchronized (freshAdmission) {
                 freshInitializing = false;
+                freshInitializingThread = null;
                 freshAdmission.notifyAll();
             }
+        }
+    }
+
+    private static boolean historicalDirectory(Path path) throws IOException {
+        var attributes = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        if (attributes.isSymbolicLink()) {
+            throw new IOException("Historical index directory has an unresolved link: " + path);
+        }
+        return attributes.isDirectory();
+    }
+
+    private void scanHistoricalIndexes(boolean recover) throws IOException {
+        for (File root : ledgerDirsManager.getAllLedgerDirs()) {
+            try (var grandparents = history.openDirectory(root.toPath())) {
+                for (Path grandparent : grandparents.listing) {
+                    if (!historicalDirectory(grandparent)) {
+                        continue;
+                    }
+                    try (var parents = history.openDirectory(grandparent)) {
+                        for (Path parent : parents.listing) {
+                            if (!historicalDirectory(parent)) {
+                                continue;
+                            }
+                            if (recover) {
+                                recoverHistoricalParent(root.toPath(), parent);
+                            }
+                            try (var indexes = history.openDirectory(parent)) {
+                                for (Path index : indexes.listing) {
+                                    String name = index.getFileName().toString();
+                                    if (name.endsWith(IDX) || name.endsWith(RLOC)) {
+                                        historicalIndex(root.toPath(), index, false);
+                                        if (recover) {
+                                            long ledger = Long.parseLong(name.substring(0, name.length() - 4), 16);
+                                            activeLedgers.put(ledger, true);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void recoverHistoricalParent(Path root, Path parent) throws IOException {
+        while (true) {
+            Path candidate = null;
+            try (var indexes = history.openDirectory(parent)) {
+                for (Path index : indexes.listing) {
+                    if (index.getFileName().toString().endsWith(RLOC)) {
+                        candidate = index;
+                        break;
+                    }
+                }
+            }
+            if (candidate == null) {
+                return;
+            }
+            // Close this leaf's iterator before changing its entries. Never act on a stale directory snapshot.
+            historicalIndex(root, candidate, true);
+        }
+    }
+
+    private List<Path> historicalCandidates(long ledger, String suffix) throws IOException {
+        List<Path> found = new ArrayList<>();
+        for (File root : ledgerDirsManager.getAllLedgerDirs()) {
+            Path path = root.toPath().resolve(getLedgerName(ledger) + suffix);
+            try {
+                ClassicHistoryFiles.fileIdentity(path);
+                found.add(path);
+            } catch (NoSuchFileException absent) {
+                // Only absent names are omitted. Permission/read/close/format errors never become absence.
+            }
+        }
+        return found;
+    }
+
+    private void historicalIndex(Path root, Path index, boolean recover) throws IOException {
+        String name = index.getFileName().toString();
+        boolean relocation = name.endsWith(IDX + RLOC);
+        long ledger;
+        try {
+            ledger = Long.parseLong(name.substring(0, name.length() - (relocation ? 9 : 4)), 16);
+        } catch (IndexOutOfBoundsException | NumberFormatException malformed) {
+            throw new IOException("Invalid historical index name: " + index, malformed);
+        }
+        Path destination = root.resolve(getLedgerName(ledger));
+        if (ledger < 0 || !index.equals(relocation ? Path.of(destination + RLOC) : destination)) {
+            throw new IOException("Historical index is not in its canonical ledger path: " + index);
+        }
+        var header = history.readPrefix(index, (int) FileInfo.START_OF_DATA);
+        FileInfo.requireHistoricalHeader(header.bytes(), header.fileSize());
+        var originals = historicalCandidates(ledger, "");
+        var pending = historicalCandidates(ledger, RLOC);
+        if (originals.size() > 1 || originals.isEmpty() && pending.size() > 1) {
+            throw new IOException("Historical index has ambiguous authoritative copies: " + ledger);
+        }
+        if (recover) {
+            if (relocation) {
+                if (originals.isEmpty()) {
+                    new NativeIOImpl().renameNoReplace(index.toString(), destination.toString());
+                } else {
+                    Files.delete(index);
+                }
+                history.syncDirectory(index.getParent());
+            }
+            activeLedgers.put(ledger, true);
         }
     }
 
@@ -470,7 +619,8 @@ public class IndexPersistenceMgr {
 
     boolean isCurrentResourceActivityForFresh() {
         synchronized (freshAdmission) {
-            return freshGetThreads.containsKey(Thread.currentThread())
+            return freshInitializingThread == Thread.currentThread()
+                    || freshGetThreads.containsKey(Thread.currentThread())
                     || fileInfoBackingCache.isCurrentRetirementThread();
         }
     }
@@ -483,9 +633,11 @@ public class IndexPersistenceMgr {
         writeFileInfoCache.cleanUp();
         readFileInfoCache.cleanUp();
         var result = fileInfoBackingCache.closeForFresh();
-        return new FileInfoBackingCache.FreshDrainResult(result.drained(),
+        var scans = history == null ? null : history.closeAndDrain();
+        return new FileInfoBackingCache.FreshDrainResult(result.drained() && (scans == null || scans.drained()),
                 freshInitializationFailure != null ? freshInitializationFailure : result.operationFailure(),
-                result.flushFailure(), result.closeFailure());
+                result.flushFailure(), result.closeFailure() != null ? result.closeFailure()
+                        : scans == null ? null : scans.closeFailure());
     }
 
     Long getLastAddConfirmed(long ledgerId) throws IOException {

@@ -32,6 +32,8 @@ import java.util.NavigableSet;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -73,6 +75,7 @@ import org.apache.commons.configuration2.ex.ConfigurationException;
 public class ScanAndCompareGarbageCollector implements GarbageCollector {
 
     private final LedgerManager ledgerManager;
+    private final ClassicGcMetadata ownedMetadata;
     private final CompactableLedgerStorage ledgerStorage;
     private final ServerConfiguration conf;
     private final BookieId selfBookieAddress;
@@ -87,6 +90,17 @@ public class ScanAndCompareGarbageCollector implements GarbageCollector {
 
     public ScanAndCompareGarbageCollector(LedgerManager ledgerManager, CompactableLedgerStorage ledgerStorage,
             ServerConfiguration conf, StatsLogger statsLogger) throws IOException {
+        this(ledgerManager, ledgerStorage, conf, statsLogger, null);
+    }
+
+    static ScanAndCompareGarbageCollector forClassicHistory(ClassicGcMetadata metadata,
+            CompactableLedgerStorage storage, ServerConfiguration conf, StatsLogger stats) throws IOException {
+        return new ScanAndCompareGarbageCollector(metadata.manager(), storage, conf, stats, metadata);
+    }
+
+    private ScanAndCompareGarbageCollector(LedgerManager ledgerManager, CompactableLedgerStorage ledgerStorage,
+            ServerConfiguration conf, StatsLogger statsLogger, ClassicGcMetadata ownedMetadata) throws IOException {
+        this.ownedMetadata = ownedMetadata;
         this.ledgerManager = ledgerManager;
         this.ledgerStorage = ledgerStorage;
         this.conf = conf;
@@ -185,7 +199,7 @@ public class ScanAndCompareGarbageCollector implements GarbageCollector {
                             int rc = BKException.Code.OK;
                             try {
                                 gcMetadataOpRateLimiter.acquire();
-                                metadata = result(ledgerManager.readLedgerMetadata(bkLid), zkOpTimeoutMs,
+                                metadata = result(readMetadata(bkLid), zkOpTimeoutMs,
                                         TimeUnit.MILLISECONDS);
                             } catch (BKException | TimeoutException e) {
                                 if (e instanceof BKException) {
@@ -232,27 +246,35 @@ public class ScanAndCompareGarbageCollector implements GarbageCollector {
 
     private Set<Long> removeOverReplicatedledgers(Set<Long> bkActiveledgers, final GarbageCleaner garbageCleaner)
             throws Exception {
-        final Set<Long> overReplicatedLedgers = Sets.newHashSet();
-        final Semaphore semaphore = new Semaphore(this.maxConcurrentRequests);
-        final CountDownLatch latch = new CountDownLatch(bkActiveledgers.size());
-        // instantiate zookeeper client to initialize ledger manager
-
+        if (ownedMetadata != null) {
+            return removeOverReplicatedLedgersWith(bkActiveledgers, garbageCleaner, null);
+        }
         @Cleanup
         MetadataBookieDriver metadataDriver = instantiateMetadataDriver(conf, statsLogger);
-
         @Cleanup
         LedgerManagerFactory lmf = metadataDriver.getLedgerManagerFactory();
-
         @Cleanup
         LedgerUnderreplicationManager lum = lmf.newLedgerUnderreplicationManager();
+        return removeOverReplicatedLedgersWith(bkActiveledgers, garbageCleaner, lum);
+    }
 
+    private CompletableFuture<Versioned<LedgerMetadata>> readMetadata(long ledger) {
+        return ownedMetadata == null ? ledgerManager.readLedgerMetadata(ledger) : ownedMetadata.read(ledger);
+    }
+
+    private Set<Long> removeOverReplicatedLedgersWith(Set<Long> bkActiveledgers, GarbageCleaner garbageCleaner,
+            LedgerUnderreplicationManager lum) throws Exception {
+        final Set<Long> overReplicatedLedgers = ownedMetadata == null
+                ? Sets.newHashSet() : ConcurrentHashMap.newKeySet();
+        final Semaphore semaphore = new Semaphore(this.maxConcurrentRequests);
+        final CountDownLatch latch = new CountDownLatch(bkActiveledgers.size());
         for (final Long ledgerId : bkActiveledgers) {
             try {
                 // check ledger ensembles before creating lock nodes.
                 // this is to reduce the number of lock node creations and deletions in ZK.
                 // the ensemble check is done again after the lock node is created.
                 gcMetadataOpRateLimiter.acquire();
-                Versioned<LedgerMetadata> preCheckMetadata = ledgerManager.readLedgerMetadata(ledgerId).get();
+                Versioned<LedgerMetadata> preCheckMetadata = readMetadata(ledgerId).get();
                 if (!isNotBookieIncludedInLedgerEnsembles(preCheckMetadata)) {
                     latch.countDown();
                     continue;
@@ -269,19 +291,28 @@ public class ScanAndCompareGarbageCollector implements GarbageCollector {
                 continue;
             }
 
+            ClassicGcMetadata.Lock acquired = null;
+            boolean handingOff = false;
             try {
                 // check if the ledger is being replicated already by the replication worker
-                if (lum.isLedgerBeingReplicated(ledgerId)) {
+                if (ownedMetadata == null ? lum.isLedgerBeingReplicated(ledgerId)
+                        : ownedMetadata.isBeingReplicated(ledgerId)) {
                     latch.countDown();
                     continue;
                 }
                 // we try to acquire the underreplicated ledger lock to not let the bookie replicate the ledger that is
                 // already being checked for deletion, since that might change the ledger ensemble to include the
                 // current bookie again and, in that case, we cannot remove the ledger from local storage
-                lum.acquireUnderreplicatedLedger(ledgerId);
+                if (ownedMetadata == null) {
+                    lum.acquireUnderreplicatedLedger(ledgerId);
+                } else {
+                    acquired = ownedMetadata.acquire(ledgerId);
+                }
                 semaphore.acquire();
                 gcMetadataOpRateLimiter.acquire();
-                ledgerManager.readLedgerMetadata(ledgerId)
+                final ClassicGcMetadata.Lock captured = acquired;
+                handingOff = true;
+                readMetadata(ledgerId)
                     .whenComplete((metadata, exception) -> {
                             try {
                                 if (exception == null) {
@@ -299,20 +330,53 @@ public class ScanAndCompareGarbageCollector implements GarbageCollector {
                                             .exceptionMessage(exception)
                                             .log("Failed to get metadata for ledger");
                                 }
+                            } catch (Throwable failure) {
+                                if (ownedMetadata != null) {
+                                    ownedMetadata.failed(failure);
+                                }
+                                log.warn().exception(failure).attr("ledgerId", ledgerId)
+                                        .log("GC metadata completion failed");
                             } finally {
-                                semaphore.release();
-                                latch.countDown();
                                 try {
-                                    lum.releaseUnderreplicatedLedger(ledgerId);
+                                    if (ownedMetadata == null) {
+                                        lum.releaseUnderreplicatedLedger(ledgerId);
+                                    } else {
+                                        ownedMetadata.release(captured);
+                                    }
                                 } catch (Throwable t) {
+                                    if (ownedMetadata != null) {
+                                        ownedMetadata.failed(t);
+                                    }
                                     log.error()
                                             .exception(t)
                                             .attr("ledgerId", ledgerId)
                                             .log("Exception when removing underreplicated lock for ledger");
+                                } finally {
+                                    // The permit and latch cover the actual cleanup body, including lock release.
+                                    semaphore.release();
+                                    latch.countDown();
                                 }
                             }
                         });
             } catch (Throwable t) {
+                if (ownedMetadata != null) {
+                    if (acquired != null && !handingOff) {
+                        try {
+                            ownedMetadata.release(acquired);
+                        } catch (Exception releaseFailure) {
+                            t.addSuppressed(releaseFailure);
+                        }
+                    } else if (acquired != null) {
+                        ownedMetadata.retainUnknown(acquired, t);
+                    }
+                    if (!ClassicGcMetadata.occupied(t)) {
+                        ownedMetadata.failed(t);
+                    }
+                    if (t instanceof Error error) {
+                        throw error;
+                    }
+                    throw new IOException("Owned GC metadata task did not complete", t);
+                }
                 log.error()
                         .exception(t)
                         .log("Exception when iterating through the ledgers to check for over-replication");

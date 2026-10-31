@@ -184,7 +184,7 @@ class WriteEntryProcessorV3 extends PacketProcessorBaseV3 {
     @Override
     protected void sendResponse(StatusCode code, Object response, OpStatsLogger statsLogger) {
         super.sendResponse(code, response, statsLogger);
-        requestProcessor.onAddRequestFinish();
+        finishAddRequest();
     }
 
     /**

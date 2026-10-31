@@ -39,16 +39,28 @@ public abstract class PacketProcessorBaseV3 implements Runnable {
     final BookieRequestHandler requestHandler;
     final BookieRequestProcessor requestProcessor;
     final long enqueueNanos;
+    final ClassicRequestLifecycle.Call controlledCall;
 
     public PacketProcessorBaseV3(Request request, BookieRequestHandler requestHandler,
                                  BookieRequestProcessor requestProcessor) {
         this.request = request;
         this.requestHandler = requestHandler;
         this.requestProcessor = requestProcessor;
+        this.controlledCall = requestProcessor.classic == null ? null : requestProcessor.classic.current();
         this.enqueueNanos = MathUtils.nowInNano();
     }
 
     protected void sendResponse(StatusCode code, Object response, OpStatsLogger statsLogger) {
+        try {
+            sendResponseUntracked(code, response, statsLogger);
+        } finally {
+            if (controlledCall != null) {
+                controlledCall.complete();
+            }
+        }
+    }
+
+    private void sendResponseUntracked(StatusCode code, Object response, OpStatsLogger statsLogger) {
         final long writeNanos = MathUtils.nowInNano();
 
         Channel channel = requestHandler.ctx().channel();
@@ -87,7 +99,9 @@ public abstract class PacketProcessorBaseV3 implements Runnable {
             }
         }
         if (channel.isActive()) {
-            channel.writeAndFlush(response).addListener(new ChannelFutureListener() {
+            ChannelFuture output = controlledCall == null ? channel.writeAndFlush(response)
+                    : requestProcessor.classic.writeAndFlush(channel, response);
+            output.addListener(new ChannelFutureListener() {
                 @Override
                 public void operationComplete(ChannelFuture future) throws Exception {
                     long writeElapsedNanos = MathUtils.elapsedNanos(writeNanos);
@@ -109,6 +123,30 @@ public abstract class PacketProcessorBaseV3 implements Runnable {
             log.debug().attr("channel", channel)
                     .log("Netty channel is inactive, hence bypassing netty channel writeAndFlush during sendResponse");
         }
+    }
+
+    protected final void finishAddRequest() {
+        if (controlledCall == null || controlledCall.finishRequestOnce()) {
+            requestProcessor.onAddRequestFinish();
+        }
+    }
+
+    protected final void finishReadRequest() {
+        if (controlledCall == null || controlledCall.finishRequestOnce()) {
+            requestProcessor.onReadRequestFinish();
+        }
+    }
+
+    void discardForClassicChild() {
+        if (controlledCall == null) {
+            throw new IllegalStateException("Only a bound controlled request can be discarded");
+        }
+        if (request.getHeader().getOperation() == OperationType.ADD_ENTRY) {
+            finishAddRequest();
+        } else if (request.getHeader().getOperation() == OperationType.READ_ENTRY) {
+            finishReadRequest();
+        }
+        controlledCall.complete();
     }
 
     protected boolean isVersionCompatible() {

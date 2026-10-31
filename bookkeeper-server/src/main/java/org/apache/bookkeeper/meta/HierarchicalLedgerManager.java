@@ -123,6 +123,37 @@ class HierarchicalLedgerManager extends AbstractHierarchicalLedgerManager {
     }
 
     @Override
+    public void requireExternalDrainCaller() {
+        super.requireExternalDrainCaller();
+        if (legacyLM != null) {
+            legacyLM.requireExternalDrainCaller();
+        }
+        if (longLM != null) {
+            longLM.requireExternalDrainCaller();
+        }
+    }
+
+    @Override
+    public boolean closeAndAwaitTermination(java.time.Duration timeout) throws InterruptedException {
+        if (timeout.isNegative() || timeout.isZero()) {
+            throw new IllegalArgumentException("Positive metadata scheduler drain timeout required");
+        }
+        long deadline = System.nanoTime() + timeout.toNanos();
+        requireExternalDrainCaller();
+        scheduler.shutdown();
+        if (legacyLM != null) {
+            legacyLM.scheduler.shutdown();
+        }
+        if (longLM != null) {
+            longLM.scheduler.shutdown();
+        }
+        boolean own = awaitSchedulerTermination(deadline);
+        boolean legacy = legacyLM == null || legacyLM.awaitSchedulerTermination(deadline);
+        boolean longer = longLM == null || longLM.awaitSchedulerTermination(deadline);
+        return own && legacy && longer;
+    }
+
+    @Override
     public void close() {
         super.close();
         if (legacyLM != null) {

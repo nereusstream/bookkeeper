@@ -61,7 +61,10 @@ class ReadEntryProcessor extends PacketProcessorBase<ReadRequest> {
         if (!requestHandler.ctx().channel().isOpen()) {
             log.debug().attr("channel", () -> requestHandler.ctx().channel())
                     .log("Dropping read request for closed channel");
-            requestProcessor.onReadRequestFinish();
+            finishReadRequest();
+            if (controlledCall != null) {
+                controlledCall.complete();
+            }
             recycle();
             return;
         }
@@ -184,7 +187,7 @@ class ReadEntryProcessor extends PacketProcessorBase<ReadRequest> {
                     // if failed to fence, fail the read request to make it retry.
                     sendResponse(data, BookieProtocol.EIO, startTimeNanos);
                 }
-            }, fenceThreadPool);
+            }, controlledCall == null ? fenceThreadPool : controlledCall.callbackExecutor(fenceThreadPool));
         } else {
             try {
                 Boolean fenced = fenceResult.get(1000, TimeUnit.MILLISECONDS);

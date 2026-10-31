@@ -23,6 +23,8 @@ package org.apache.bookkeeper.test;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.spy;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
@@ -47,6 +49,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.bookkeeper.bookie.BookieImpl;
 import org.apache.bookkeeper.bookie.MockUncleanShutdownDetection;
 import org.apache.bookkeeper.bookie.TestBookieImpl;
 import org.apache.bookkeeper.client.BKException;
@@ -59,6 +62,8 @@ import org.apache.bookkeeper.common.util.OrderedExecutor;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.conf.TestBKConfiguration;
+import org.apache.bookkeeper.discover.BookieRouteBinding;
+import org.apache.bookkeeper.meta.NullMetadataBookieDriver;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.net.BookieSocketAddress;
 import org.apache.bookkeeper.proto.BookieClient;
@@ -111,8 +116,14 @@ public class BookieClientTest {
             .setLedgerDirNames(new String[] { tmpDir.getPath() })
             .setMetadataServiceUri(null);
 
+        // Explicit isolated no-common-binding fixture, never production native absence authority.
+        var registration = spy(new NullMetadataBookieDriver().createRegistrationManager());
+        doReturn(BookieRouteBinding.ReadResult.status(BookieRouteBinding.ReadStatus.ABSENT,
+                "isolated ordinary Classic TCP fixture")).when(registration)
+                .readBookieRouteBinding(BookieImpl.getBookieId(conf));
         bs = new BookieServer(
-                conf, new TestBookieImpl(conf),
+                conf, new TestBookieImpl(new TestBookieImpl.ResourceBuilder(conf)
+                        .withRegistrationManager(registration).build()),
                 NullStatsLogger.INSTANCE, UnpooledByteBufAllocator.DEFAULT,
                 new MockUncleanShutdownDetection());
         bs.start();
@@ -127,11 +138,19 @@ public class BookieClientTest {
 
     @After
     public void tearDown() throws Exception {
-        scheduler.shutdown();
-        bs.shutdown();
+        if (scheduler != null) {
+            scheduler.shutdown();
+        }
+        if (bs != null) {
+            bs.shutdown();
+        }
         recursiveDelete(tmpDir);
-        eventLoopGroup.shutdownGracefully();
-        executor.shutdown();
+        if (eventLoopGroup != null) {
+            eventLoopGroup.shutdownGracefully();
+        }
+        if (executor != null) {
+            executor.shutdown();
+        }
     }
 
     private static void recursiveDelete(File dir) {

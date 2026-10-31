@@ -121,6 +121,8 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
     private OpStatsLogger pageScanStats;
     private Counter retryCounter;
     private final boolean freshLifecycle;
+    private final boolean historical;
+    private ClassicGcMetadata historicalMetadata;
     private final Object freshLifecycleLock = new Object();
     private final Object freshCloseLock = new Object();
     private boolean freshInitAttempted;
@@ -145,6 +147,11 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
     }
 
     private InterleavedLedgerStorage(boolean freshLifecycle) {
+        this(freshLifecycle, false);
+    }
+
+    private InterleavedLedgerStorage(boolean freshLifecycle, boolean historical) {
+        this.historical = historical;
         this.freshLifecycle = freshLifecycle;
         activeLedgers = new SnapshotMap<>();
     }
@@ -153,28 +160,63 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
         return new InterleavedLedgerStorage(true);
     }
 
+    static InterleavedLedgerStorage forClassicHistory() {
+        return new InterleavedLedgerStorage(true, true);
+    }
+
     void initializeForFresh(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
             LedgerDirsManager indexDirsManager, StatsLogger statsLogger, ByteBufAllocator allocator)
             throws IOException {
+        initializeOwned(conf, ledgerDirsManager, indexDirsManager, statsLogger, allocator, null);
+    }
+
+    void initializeForClassicHistory(ServerConfiguration conf, ClassicGcMetadata metadata,
+            LedgerDirsManager ledgerDirsManager, LedgerDirsManager indexDirsManager, StatsLogger stats,
+            ByteBufAllocator allocator) throws IOException {
+        initializeOwned(conf, ledgerDirsManager, indexDirsManager, stats, allocator,
+                java.util.Objects.requireNonNull(metadata, "metadata"));
+    }
+
+    private void initializeOwned(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
+            LedgerDirsManager indexDirsManager, StatsLogger statsLogger, ByteBufAllocator allocator,
+            ClassicGcMetadata metadata) throws IOException {
         synchronized (freshLifecycleLock) {
-            if (!freshLifecycle || freshInitAttempted || freshClosing) {
+            if (!freshLifecycle || historical != (metadata != null) || freshInitAttempted || freshClosing) {
                 throw new IllegalStateException("Fresh Interleaved initialization is one-use");
             }
             freshInitAttempted = true;
             freshInitializing = true;
             freshInitializingThread = Thread.currentThread();
+            historicalMetadata = metadata;
         }
         try {
+            Object cachePath = conf.getProperty("gcEntryLogMetadataCachePath");
+            if (historical && (conf.getFileInfoFormatVersionToWrite() != 1 || conf.isEntryLogPerLedgerEnabled()
+                    || conf.isGcEntryLogMetadataCacheEnabled() || cachePath != null && !"".equals(cachePath))) {
+                throw new IllegalArgumentException("Historical owned storage requires V1, single log and in-memory GC");
+            }
             checkNotNull(checkpointSource, "invalid null checkpoint source");
             checkNotNull(checkpointer, "invalid null checkpointer");
-            entryLogger = DefaultEntryLogger.forFresh(conf, ledgerDirsManager, this,
-                    statsLogger.scope(ENTRYLOGGER_SCOPE), allocator);
-            entryLogger.initializeForFresh();
-            ledgerCache = LedgerCacheImpl.forFresh(conf, activeLedgers,
-                    indexDirsManager == null ? ledgerDirsManager : indexDirsManager, statsLogger);
-            ((LedgerCacheImpl) ledgerCache).initializeForFresh();
-            gcThread = GarbageCollectorThread.forFresh(
-                    conf, ledgerDirsManager, this, entryLogger, statsLogger.scope("gc"));
+            entryLogger = historical
+                    ? DefaultEntryLogger.forClassicHistory(conf, ledgerDirsManager, this,
+                            statsLogger.scope(ENTRYLOGGER_SCOPE), allocator)
+                    : DefaultEntryLogger.forFresh(conf, ledgerDirsManager, this,
+                            statsLogger.scope(ENTRYLOGGER_SCOPE), allocator);
+            if (historical) {
+                entryLogger.initializeForClassicHistory();
+                ledgerCache = LedgerCacheImpl.forClassicHistory(conf, activeLedgers,
+                        indexDirsManager == null ? ledgerDirsManager : indexDirsManager, statsLogger);
+                ((LedgerCacheImpl) ledgerCache).initializeForClassicHistory();
+                gcThread = GarbageCollectorThread.forClassicHistory(
+                        conf, metadata, ledgerDirsManager, this, entryLogger, statsLogger.scope("gc"));
+            } else {
+                entryLogger.initializeForFresh();
+                ledgerCache = LedgerCacheImpl.forFresh(conf, activeLedgers,
+                        indexDirsManager == null ? ledgerDirsManager : indexDirsManager, statsLogger);
+                ((LedgerCacheImpl) ledgerCache).initializeForFresh();
+                gcThread = GarbageCollectorThread.forFresh(
+                        conf, ledgerDirsManager, this, entryLogger, statsLogger.scope("gc"));
+            }
             ledgerDirsManager.addLedgerDirsListener(getLedgerDirsListener());
             initializeStats(statsLogger);
             synchronized (freshLifecycleLock) {
@@ -466,6 +508,18 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
                     rememberFreshOperationFailure(gcFailure);
                 }
             }
+            if (historicalMetadata != null) {
+                try {
+                    var drained = historicalMetadata.closeAndDrain();
+                    rememberFreshOperationFailure(drained.firstFailure());
+                    if (!drained.drained() && failure == null) {
+                        failure = new IOException("Historical GC metadata obligations remain", drained.firstFailure());
+                    }
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw interrupted;
+                }
+            }
             return new FreshMaintenanceResult(gcThread == null || gcThread.freshUsersTerminated(), failure);
         }
     }
@@ -473,6 +527,7 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
     boolean isCurrentResourceActivityForFresh() {
         synchronized (freshLifecycleLock) {
             return Thread.currentThread() == freshInitializingThread
+                    || historicalMetadata != null && historicalMetadata.isCurrentActivity()
                     || gcThread != null && gcThread.isCurrentExecutorThread()
                     || ledgerCache != null && ((LedgerCacheImpl) ledgerCache).getIndexPersistenceManager()
                             .isCurrentResourceActivityForFresh()

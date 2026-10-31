@@ -722,7 +722,69 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 ## 受控历史 Classic child：历史资源图实施中
 
+2026-11-01当前entry增量（在父`f1005222da0fea6ebe5683d14b9d67d060faf98d`上完成以下局部验证）已有生产`ControlledClassicMain`与`SegmentClassicChild`消费者。create仅分配heap；固定Main先将普通stdout转stderr，原协议直接使用FileDescriptor输出并观察真实I/O错误。原owner按纯JDK preload、受控JNI、固定trust/program/config、实际Process/空环境/凭据、唯一原raw ZK与native ABSENT/Cookie/cluster完整scope核验，再生成真实challenge并验证一次性签名START；只有原worker可发行私有构造的StartContext。它绑定原桥、唯一Bookie、冻结配置及同一metadata，并在任何Classic存储副作用前消费；fixture、解析值及Installed不能生成上下文。历史replay/严格flush、实际bind和本session registration之后，重新核验原scope、实际session/czxid/mode及凭据，才开放准入并发送READY。
+
+Main的被动await消费者已实现：只等待原episode与实际线程退出，超时继续同次观察，内部callback/reader/worker自等待拒绝。STOP允许终止已获START但尚未READY的初始化；控制EOF/坏帧保留原失败并退休准入。唯一worker沿原桥实际关闭业务/网络/metadata，保留构造未决和首次关闭失败；只在已验证START且组件确实终结时发送有界结果，再关闭stdout、等原reader实际结束并关闭输入。父必须在结果/EOF/坏帧/期限后先关闭原stdin写端，再waitFor；child不以异步close(System.in)、daemon、取消或System.exit制造完成。原raw ZK关闭按当前3.9.5实现等待原send/event线程；最后再观察组件失败，避免STOP/组件排空后的Expired被抹掉。组件结果仍不是签名DRAINED。
+
+metadata选择已按规划裁决限制：只读现存LAYOUT，原始类名/URI/type在任何可能加载自定义类的getter或反射前检查，仅精确内建Flat、Hierarchical、LegacyHierarchical、LongHierarchical四种factory。LAYOUT v1只接受flat与hierarchical（映射当前Hierarchical），v2接受四种完整类名；manager version均为1。URI zk/zk+null推断现存布局，zk+flat/hierarchical/longhierarchical必须与其相符，不新增zk+legacyhierarchical。显式选择器须全部一致，class-check bypass即使false也拒绝；缺失/未知/变化布局不写入或迁移。factory在initialize前登记，关闭只尝试一次并保留原失败。Hierarchical自身及legacy/long两个子manager的三组scheduler均shutdown、实际等待并join原线程，三组内部线程均禁止自排空。
+
+最终`child-entry-final-related`实际14类92项全部通过（0失败/错误/跳过），声明1390项输入；含ClassicChildResources 24、历史Journal 8、Fresh owner 16、Main/pipe 6、配置 6、Profile owned-resource 3、真实ZK源 7、Hierarchical实际scheduler 2、driver 1、原long-poll/packet 17及普通Classic SDK 2项。真实资源覆盖仍由包内fixture消费，生产Main实际进程仅验证未安装recipe的启动失败：stdout先EOF，父未关闭stdin时原reader使进程保持存活，父关闭写端后无需STOP即实际失败退出。其后只改该测试加入5字节半帧，`child-entry-main-partial-header`6项与最终Spotless/Checkstyle退出0；声明1389项输入，生产源码与92项阶段逐项一致。半帧/碎片与头部字节测试不提供有效START或fixture context，不将92项移绑后改测试。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-child-entry-evidence-f1005222`保留各阶段原输入/源码/class/实际日志/XML。首轮Main测试真实失败于输入线程未保持存活；后续独立实际pipe诊断在本机JDK 21.0.10-amzn复现FileInputStream.readNBytes因尝试seek而抛Illegal seek，生产reader改为有界read循环后通过。首轮子进程stderr未独立归档，诊断是另次执行，不冒充该原stderr。metadata阶段首轮为错误枚举引用导致编译失败、零测试；样式首轮七项失败，各自保留，后续修正。编译失败class库存可能陈旧，不证明执行；早期runner的scope描述仍是当时模板文本，实际覆盖按逐阶段命令/快照/XML及本段界定，不改写旧inputs。原native7项和旧库probe亦保持自己的来源绑定。
+
+本entry八个Maven raw scope在两次独立lsof与原身份/字节/归档硬链接核验后，仅删除16目录、52文件路径、6,134,956逻辑字节；归档硬链接、失败源码/class/日志/XML均保留，regular-file数据块回收0，共享target与用户文件未清理。
+
+固定系统安装、专用旧UID与受保护exec降权程序、完整真实签名START→READY→STOP成功链、父launcher签发及Unix资格仍NOT_EXECUTED；本增量没有安装系统材料、补账号、放宽生产trust或跳过START。当前只闭合了生产消费者代码及上述局部行为，完整child包与issuer/bootstrap、Main/G1/full-bytes/16步及生产Gate保持OPEN。本增量RAT/TLA/性能未重跑；下列历史阶段保留原范围，不能把旧PASS提升为完整成功链。
+
+2026-10-31历史processor增量（父`f1005222da0fea6ebe5683d14b9d67d060faf98d`上的未提交WIP）已在原桥实际bind与原raw ZK session create-only注册后开放包内组件SERVING，复用原V2/V3 request processor、OrderedExecutor、timer、协议encoder及Netty图。此组件状态不等于生产READY；包内启动夹具不能发行StartContext。每个已接收请求在分发前登记，初始队列、fence continuation及long-poll deferred callback在提交前登记调用体；拒绝和关闭按原具体packet释放，V2关闭channel早退也完成原read计数和请求终态。普通Classic与原Fresh维持各自入口和权限。
+
+关闭先退休准入/监听、原连接及watch，保留callback/输出执行器；原Bookie完成Journal quiesce和实际回调后，等待已接收请求、连接pipeline与输出实际终结，再停止维护、finalSync/关闭文件，最后关闭processor/timer、join原实际线程、终结Netty图。输出在producer向event loop提交前登记，内部promise不可取消；结果回原loop排队退役，使Netty失败通知后的原write-task清理先完成，编码后的真实引用还由head handler保留至原完成。连接关闭、caller观察取消、handler移除均不单独证明输出已归还；非I/O异常保留未知输出和失败。未知部分executor构造不伪造close，也不阻止已知线程/存储/监听继续关闭，组件仍CLOSING。实际线程join不依赖当前SingleThreadExecutor反向的awaitTermination返回值，未修改该普通公共组件。
+
+真实V2 SDK反例暴露受控FreshCall包装使Journal看不到原BookieRequestHandler：DATA已提交，但批量Add响应未flush。owned分支现于原callback清空context前取得真实handler，继续原ForceWrite批次flush，不增加逐entry flush。原首轮测试被关闭轮询掩盖为60秒超时；改为实际线程join后的同用例明确报Add超时后的NotEnoughBookies，保留两轮失败，修正后同源码测试的V2/V3写入、读取、关闭原session及新metadata episode重启读取均通过。另两项真实SDK测试分别挂起尚未提交native的响应，证明channel关闭/取消尝试后仍须实际释放引用；及观察实际已注册long-poll watch在60秒请求期限前由关闭真实取消。部分构造注入包装实际executor创建，fixture虽关闭丢返回的实例，child仍保留原unknown/cause，已知前缀实际终结且不发布registration；不把fixture清理冒充owner观测。
+
+最终八类62项全部通过（0失败/错误/跳过），包括19项当前资源/受控SDK、16项Fresh、两项普通Classic SDK及原packet/long-poll/历史Journal回归；Spotless/Checkstyle退出0。证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-child-processor-evidence-f1005222`按阶段保存原输入/源码/class/日志/XML，最终1384项输入；首个1372→1380声明数harness拒绝及误选不存在的ReadEntryProcessorV3Test均未运行Maven。部分构造测试首轮编译失败、随后关闭后再取fixture Bookie导致观察失败，均不改绑为通过；样式首轮五项失败后修正。编译失败阶段的class库存可能陈旧，不证明测试执行。该processor增量未重跑RAT/TLA/性能；当时没有生产START/外层/Main/控制通道，完整child成功与系统固定安装/专用旧UID/exec降权资格仍NOT_EXECUTED，完整包、Main/G1/full-bytes/16步及生产Gate保持OPEN。以下历史各增量保存原范围与绑定，不用旧PASS替代最新证据。
+
+processor增量的十个Maven raw scope经两次独立lsof及原身份/哈希/归档硬链接核验，仅删除20个目录、54个文件路径、1,280,665,078逻辑字节；原失败大日志/XML及其他归档保留，regular-file数据块回收0，共享target和用户PDF未触碰。归档时57个代码路径及最终1384项输入与实际通过源码匹配；后续native凭据增量另行绑定，不移绑这62项，目录仍不代表完整child验收。
+
+Main等待接口补充冻结为唯一被动`Status awaitTermination(Duration) throws InterruptedException, TimeoutException`：只等原episode、不启动/请求关闭/取消/创建线程；closeAndAwait先请求关闭再复用，start在READY或启动失败后返回。零期限立即检查，负值/期限换算溢出拒绝；允许多个外部等待者和终结后重复观察。原reader/worker及阻碍排空的内部callback只能requestClose、不得自等待；worker finally通知仍须原线程实际退出检查。超时/中断不修改owner或中断实际I/O，Main继续等待同episode，不据此System.exit或构造服务寿命上限；返回实际终结的失败状态不等于组件成功排空或DRAINED许可。
+
+凭据不采用UnixSystem：其账号默认GID可能不等于进程实际GID。已在原native-io增加无外部PID/凭据参数、无修改能力的窄查询，直接getuid/geteuid/getgid/getegid/getgroups，组原始上限64，返回不可变且按集合规范化的观测。两次UID/GID读不一致拒绝；旧JNI缺符号、读取失败或超限均拒绝，不回退用户字符串/环境/账号库。生产消费者必须在受控库及原材料核验后、HELLO和StartContext消费前，核对real/effective UID均为recipe旧UID、real/effective GID均为primary GID，并精确比较原补充组集合，不补/删primary GID。saved credentials及完整不可恢复降权仍需受保护exec-dropper/父Process资格，观测值本身不发行许可。
+
+当前macOS Rust库实际构建及Spotless/Checkstyle均退出0；两次native定向均运行7项，首轮1项失败于macOS `id -G`列出的账号组超出实际getgroups集合。修正为私有临时目录中独立编译/执行的POSIX小程序，直接比较四项ID与全部原getgroups结果，保留有效id UID/GID断言及不可变/规范化验证，7项全部通过（0失败/错误/跳过）。与原真实JNI库`42a00ac97c6877074fed27e2f0ad276c25cc55e17d93fb3b0d4096e873f0ea35`运行独立JVM，原native open/close仍成功，新凭据查询以UnsatisfiedLinkError为cause的NativeIOException拒绝，未回退。证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-child-entry-evidence-f1005222`仍作为完整entry接线包的进行中目录，分别保存原源码/输入/class/构建与测试日志/XML及旧库probe；最后1385项输入。两个raw scope经两次独立lsof与原身份/哈希/硬链接核验，仅删除4目录、12文件路径、544,946逻辑字节，归档硬链接保留、数据块回收0；另在保留实际库、原源码/lock/命令/终态日志后，核验并删除自有Cargo中间树43目录、170文件路径、42,823,316逻辑字节，物理回收未测量。共享target/registry及用户文件未清理。未安装/替换系统库，Linux凭据实际验证与qualified成功尚未执行；当时未接线的生产Main/StartContext/被动等待消费者现见上文entry进度，前述62项不移绑新native。RAT/TLA/性能未重跑，完整child及整体Gate继续OPEN。
+
+控制传输裁决已补齐（当前Main消费者见上文）：原ProcessBuilder的stdin/stdout仅供固定launcher/child；Main在日志和业务类初始化前保留可观察真实I/O异常的协议输出，将普通System.out/日志转stderr。父禁止合并stderr/stdout，须持续消费或定向受控日志；批准JVM参数不得向协议stdout输出诊断。帧固定16-byte大端头为`magic:u32=0x55574343, version:u16=1, type:u16, flags:u32=0, payloadLength:u32`，先验证头再分配有界body，不重同步或兼容混入的裸HELLO/START。
+
+| type | 方向 | payload |
+|---|---|---|
+| 1 HELLO | child→parent | 原样完整UWCLH001，最多512 bytes |
+| 2 START | parent→child | 原样完整UWCLA001，最多4096 bytes |
+| 3 READY | child→parent | episode UUID16 + session8 + registration czxid8 + mode1 + reserved7，共40 bytes |
+| 4 STOP | parent→child | episode UUID，共16 bytes |
+| 5 COMPONENTS_TERMINAL | child→parent | episode UUID16 + result:u32 + reserved:u32，共24 bytes |
+
+mode为1=WRITABLE/2=READONLY，reserved均零；result为0=组件实际终结且截至报告无episode失败，1=组件实际终结但episode已失败。每种帧最多一次，原episode/方向/状态/长度严格校验；原HELLO/START字节与签名域、Main/argv不变。READY事实由父独立核对，组件结果不发行签名DRAINED，也不提升Profile稳定wire兼容承诺。单一reader收START及同episode STOP，STOP可在初始化/READY前终止启动；原worker唯一发送HELLO/READY/结果，无EXIT往返。
+
+父完整flush STOP后立即关闭child-stdin写端。child本地请求关闭/启动失败先退休准入并drain业务，不等待阻塞reader；只有START已验证且组件实际终结才可报告原episode的结果，尚无START不伪造episode。随后关闭协议stdout，再等reader；父收到组件结果/stdout EOF/坏帧或启动期限到达，先停止发送并关闭写端，再等Process，不能先waitFor。预期EOF只结束已关闭child的接收，不抹掉原失败；运行/等待START时非预期EOF是控制丢失。不能假定异步关闭/中断System.in可可靠唤醒阻塞读；父端不合作/端点泄漏/原reader或worker未退出仍CLOSING/超时，不能用daemon、Future cancel、System.exit或kill宣称排空。即使发出result=0，后续控制关闭失败仍使child失败，父不得签发正常DRAINED。后续用批准JDK及真实Process验证无STOP启动失败/本地关闭/半帧/父退出和held输出/reader；这些传输证据仍不替代固定安装、专用UID及qualified child验收。
+
 规划会话2026-10-31已裁定先完成真实有历史Classic child的启动、registration、服务与实际排空，再接launcher签名/Unix资格及共同bootstrap恢复桥；配置与关闭顺序已同步execution-objective。历史资源和网络episode可分两个必要提交推进，局部factory或文件测试不代表整个child完成。Fresh的空根、NO_CLUSTER_AUTHORITY及不注册边界保持，历史child需独立真实native ABSENT/既有Cookie与完整根/metadata/固定launcher上下文，Common bootstrap另需已验证交接及PREPARED/ENABLED；资源实现复用不共享权限。
+
+完整接线包的最新公开面为`ControlledClassicMain`、`SegmentClassicChild`和`ClassicChildResources`。外层仅公开heap-only create(recipeId)和生命周期；其私有发行的嵌套StartContext绑定原owner/桥/唯一Bookie/冻结配置/实际metadata，在START核验后、任何Classic副作用前一次消费。外层持控制通道与metadata及唯一关闭worker，桥持存储/GC/StateManager/TCP图；prepare只返回heap holder，各内部部分构造也先登记再初始化。READY要求实际listener、Bookie和本session registration及最终episode核验全部成立。STOP后reader退出接收、worker实际drain业务/网络/metadata，再发有界组件结果、关闭控制pipe及线程并终结；组件结果不是签名DRAINED，父仍必须等原Process正常退出，EOF/坏帧保持失败。fixture仅直接测试包内资源，不构造生产StartContext或提升临时材料资格；生产入口及其完整消费者是本包验收点，外部系统安装/专用UID/exec前提缺失时qualified成功明确NOT_EXECUTED。
+
+父`f1005222da0fea6ebe5683d14b9d67d060faf98d`上的装配WIP已在包内直接消费历史资源图：原ZK native ABSENT、现存完整根及远程/本地Cookie核验后，使用真实LedgerManager/LUM接历史Journal/Interleaved/GC，replay及严格初始flush后才开放fixture存储准入；Cookie不补建/修复，Fresh仍拒绝历史根。共享生命周期基类仅传递关闭请求，不共享启动许可。历史replay新增有界header/metadata长度、fence及未知特殊entry拒绝，并在使用完真实恢复ByteBuf后释放。Cookie open已开始但没有返回handle的确定反例原先错误报告组件DRAINED；修正保留原acquisition失败及未决资源，重复观察仍CLOSING、不伪造首次关闭结果。
+
+该反例原单项失败、初轮两类19项通过、修正及replay用例后的两类21项通过各自保留原源码/输入/class/日志/XML；最终相关八类97项全部通过，0失败/错误/跳过，Spotless/Checkstyle退出0。覆盖真实私有文件/ZK、存储Add/force/重启读取、Cookie字节/inode保持、借用metadata未被关闭及原Fresh/历史Journal/index/logger/GC相关回归。证据位于`/Users/liusinan/.codex/artifacts/unified-wal/classic-child-assembly-evidence-f1005222`，各阶段1370项输入分别绑定，不移绑旧PASS；本增量RAT未重跑。归档核验发现runner未复制FreshClassicOwner的WIP源码，但四次原inputs都已声明相同SHA；从仍完全匹配该原SHA的当前文件单独恢复，原inputs及阶段快照均未改写。两次独立lsof及硬链接/身份/哈希核验后，仅清理四个raw scope的八目录、25文件路径、2,479,084逻辑字节，归档硬链接保留，regular-file数据块回收0。当前仅包内storage fixture装配，尚无生产StartContext/外层/Main、TCP/registration及控制通道，桥的组件DRAINED不是qualified child或签名终态。本块保持未提交WIP，完整child/issuer/Unix/bootstrap及整体Gate继续OPEN。
+
+后续受控注册增量已直接接入该历史Bookie装配：StateManager改为包内heap holder，先由Bookie登记，再初始化统计与真实RM事件；首次注册机会之前所有模式变化只更新本地状态，普通registerBookie入口不能绕过受控桥。实际网络阶段将消费一次机会并冻结模式，从排队起异模式请求立即fail-stop，不等原注册任务执行完；同模式重复通知保持合法。受控ZKRegistrationManager观察原session（包括尚无首次registration时的Expired），只做一次原session create，不调用普通切换中的path delete；成功核验原session/czxid及另一模式absence，失败/未知不重试或采用后来可见的node。Bookie保留原StateManager失败来源，组件已排空但外层metadata尚未关闭时确认Expired，仍保留SESSION_EXPIRED；已STOP也不能抹掉失败。
+
+规划会话同时冻结受控metadata不得跨session重试。实现选用同一个实际raw ZooKeeper原连接，ZKMetadataBookieDriver仅借用它做heap装配、按有效URI取得原namespace，不预建readonly容器、layout或新连接；受控driver不能换回普通initialize或创建第二个RM。受控RM拒绝ZooKeeperClient及其他subclass，从实际调用源消除自动重建session/应用create重试；普通Classic/Fresh继续各自原合同。原session关闭完成ephemeral清理，不按路径删除可能已属于另一session的节点。当前没有生产StartContext/外层/Main及实际TCP bind，这些真实注册仅由包内资源fixture直接验证，不能将名为registerAfterBind的包内调用当作实际bind或READY。
+
+原真实ZK反例确定失败于“storage-only图的模式切换发布服务registration”，保留原单项failure。修正后两类22项、早期retryable-client图三类28项、改为raw-session图三类28项、create终态三类31项分别保存原源码；早期28项不证明禁止跨session重试。最终六类40项全部通过（0失败/错误/跳过），覆盖原Fresh/StateManager/driver、普通RM与原启动源，实际raw-session读写/readonly首次create、同模式重复、首次注册前及组件drain后实际Expired、无新session、实际create成功后注入丢返回或挂起原调用体、在途异模式/Expired与关闭超时、迟到返回拒绝和另一session重建同路径仍保留。两项故障注入只包裹真实ZK调用，不伪造ZK成功，也不称协议级网络丢包。样式首轮四项失败（两行长度/两处import顺序），修正后Spotless/Checkstyle退出0；本增量RAT未重跑，无TLA/性能或qualified子进程验收。证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-child-lifecycle-evidence-f1005222`各阶段绑定1370项输入；copied runner中“无registration”旧描述由核验记录按实际suite纠正，原inputs不改写。各原源码/父Git blob/实际XML核验后，两次独立lsof及硬链接/身份/哈希检查仅清理六个raw scope的十二目录、36文件路径、4,554,381逻辑字节，归档硬链接保留，regular-file数据块回收0；共享target及用户文件未清理。当前全为未提交WIP，下一步继续生产TCP/START/控制通道与整图实际终结，完整child/issuer/Unix/bootstrap、Main/G1/full-bytes及生产Gate仍OPEN。
+
+后续listener阶段已由原ClassicChildResources直接持有：BookieServer及Netty先返回heap holder再登记/初始化，auth/IO/acceptor构造与原bind future均留在原owner；未返回group的部分构造失败保留原acquisition未知及cause，已知前缀继续关闭，不重试或补称DRAINED。实际accepted channel在pipeline构造前登记，listener也纳入原ChannelGroup；close等待原bind/首次channel关闭结果、event loop终结及原实际线程join。普通构造与start/shutdown路径保持，受控holder拒绝误走普通启动/10ms关闭；该已封存阶段不含processor、不开放业务，真实已bind只投影组件TCP_BOUND，既不发布registration也不是READY。listener-only drain明确拒绝带processor的图，以下processor增量另行接线和验证完整资源关闭。
+
+该listener阶段最终三类32项通过（0失败/错误/跳过），其中14项历史资源/注册/listener、16项原Fresh及两项普通Classic客户端真实TCP Add/read/NoSuchLedger。新增验证包含真实私有loopback绑定与关闭后端口重新绑定、激活前拒绝（EOF或SO_LINGER允许的RST，超时/应用数据仍失败）、实际owned event loop自await在退休前拒绝、真实占用端口的bind失败及未知acceptor构造返回在fixture实际清理后仍CLOSING。两项普通SDK只证明普通路径，使用显式隔离无共同绑定的Null-metadata夹具；不是经受控processor的请求或生产native ABSENT。该32项不包含后续processor证据，不能移绑当前源码；生产START/外层/Main/控制通道及qualified child仍未完成，整体Gate继续OPEN，修改保持未提交WIP。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-child-tcp-evidence-f1005222`分别保存：首轮主源码checked-catch编译失败/零测试；修正后30项中一项TCP reset观察错误；接受合法关闭后32项中两项旧普通客户端夹具被UNSUPPORTED启动检查拒绝（含原teardown次生NPE）。随后仅该夹具显式声明隔离无共同绑定并处理setup未完成的清理，生产拒绝与原客户端断言保持。早期32项的BookieClientTest未列入原1370输入或class-prefix库存；在下一次编译前单独保留父HEAD源码及仍在target的失败class作恢复证据，明确不是原声明输入，不把失败移绑为通过。新增其声明后runner先因1370→1371计数拒绝、未启动Maven，原harness失败单独保留；最终两轮32项分别绑定1371输入。样式首轮一项nested-import顺序失败，修正后的Spotless/Checkstyle与最终源码32项均通过，本增量RAT未重跑，不提升兼容/模型/性能或完整child Gate。两次独立lsof及birth/owner/inode/空目录复查，仅rmdir删除与两次失败setup时间和数量完全对应的两个自有空根；原源码/class/日志/XML及用户文件保留。五个Maven raw scope在两次独立lsof及硬链接/身份/哈希复查后仅删除十目录、26文件路径、3,478,639逻辑字节；归档硬链接保留，regular-file数据块回收0，共享target未清理。
 
 当前在父源码`f2df1313cdb7fa82d58d56dc7e557112b6901ce8`上接历史Journal资源。包内ClassicJournalRecovery在取得任何fd/目录前由Journal保留，仅读现存单链接普通文件、有界V6记录与每Journal的lastMark副本；沿原最大有效cut及缺失副本零贡献语义，存在但长度/位置无效或不可读的副本拒绝，不吞错。原record loop由普通和owned路径共享，padding与未完成尾部保持原语义，owned路径额外限V6及配置中的frame/alignment上界。目录/读取fd记录首次实际close，未决close保留原资源且不重试；不创建缺失txn、truncate、force或改写旧历史。不同包内factory只选择资源初始化路径，不发行启动许可；原Fresh initializer仍拒绝历史，不能用调用另一个initializer放宽它。实际replay在writer启动前作为原Journal活动登记，close等待其调用体/扫描callback及文件实际终结；writer启动与replay互斥，caller timeout不取消实际I/O。
 
@@ -767,3 +829,54 @@ ZKRegistrationManager新增heap-only借用启动源reader，绑定本manager实�
 进行中的证据为`/Users/liusinan/.codex/artifacts/unified-wal/classic-launch-trust-evidence-f2df1313`，各实际源码/class、日志/XML及首次失败分别保存。native首轮声明1355项源码/资源，后续trust各阶段及native最终声明1358项；旧1354/41项与1349/95项checkpoint不覆盖、不移绑。native只读能力是单独可提交的必要依赖；其提交不交付仍在worktree中的历史资源/trust完整child，也不关闭Main/G1/full-bytes/生产Gate。
 
 全部阶段终态及原source/父Git blob绑定核验后，两次独立lsof与硬链接/身份/哈希检查只移除本次五个raw scope的十目录、27文件路径、1,862,403逻辑字节，归档硬链接保留、regular-file数据块回收0。另核验独立Rust target无人使用及170文件原身份/哈希后移除其43目录、42,821,909逻辑字节；精确host库、所有原build源码/日志（含101）、命令、class与测试证据保留，不宣称实际卷空间回收数。共享Maven target、用户PDF和其他任务路径未触碰。
+
+native前置依赖已本地提交`2658747716c369722e3ad2348a49e96a97e4ce2f`，仅六项native代码与两项既有文档，未push；历史资源图、codec/ZK源/trust owner仍为未提交WIP。原阶段source map仍绑定父`f2df1313`，没有追认该提交交付完整child。规划会话随后冻结固定program/conf的完整装载边界，详见execution-objective：特别是解析前禁include/插值/System/Environment源、固定实际动态默认，以及首次JNI前的可信预装基线及program/hash核验。该阶段的production trust I/O尚使用普通NativeIO装载backend，材料测试不能证明早期启动链；后续一次性装载依赖已新增production前置拒绝，完整受控main与可消费START上下文仍未接线。
+
+在等待该裁决期间补上独立的本地Cookie读取：ClassicHistoryFiles.readCookie复用原owned fd/首次关闭和现有Cookie parser，读取现存current/VERSION，最多1MiB并拒绝坏UTF8；不补建、修复、改写或推断metadata/完整根资格。新增两项真实文件验证包含原字节/inode保持、缺失/超界/坏编码拒绝，以及首次native close失败不返回解析值且持续non-drained。首次九项中新增两项在parser前因夹具未指定BookieId、默认loopback禁止而error；只给各隔离夹具指定明确测试BookieId，生产网络规则不改，修正后该类九项全部通过，0失败/错误/跳过。原九项失败与修正后的源码/class/日志独立保留，不能据此提升真实ZK/Cookie来源或完整child Gate。证据阶段位于`/Users/liusinan/.codex/artifacts/unified-wal/classic-child-inputs-evidence-26587477`，仍处于实施中。
+
+Cookie两个阶段各声明1358项源码/资源；原source/父`2658747716` Git blob与各自class/XML核验后，初轮及最终Java样式均退出0。两次独立lsof及硬链接/身份/哈希检查仅清理两个raw scope的四目录、八文件路径、716,752逻辑字节；归档硬链接保留，regular-file数据块回收0。未重跑旧95/41/32/native12项来追认新源码，当前RAT未重跑；完整历史Bookie、程序/配置装载及JNI启动基线、真实Process握手与各整体Gate继续OPEN。
+
+
+固定program的数据校验继续在同一WIP推进：UWCLP001/schema1/flags0声明有界OS/arch/JDK、固定child主类、绝对Java/JNI、完整有序普通JAR classpath、固定允许集合的JVM参数，以及受保护文件的角色/长度/SHA256。独立Python向量684字节；程序身份按独立域覆盖完整原字节。trust owner以64KiB工作区流式核对全部文件并枚举完整JDK树，拒绝未声明文件、别名/链接、可替换父链或ACL；实际JarFile检查manifest Class-Path与JAR index，防止隐式依赖。一次调用只使用caller给定的同一deadline，不逐文件重置；timeout不取消实际I/O或证明关闭。目录/JAR/manifest流在实际打开前登记，首次close失败不重试；JDK ZIP构造失败可能吞掉底层close异常，因此无返回handle的构造失败保留unknown资源而不报告drained。正常JarFile.close只证明本owner释放引用，完整JVM文件终结仍须实际进程正常退出。
+
+最终SegmentClassicLaunchProgramTest与SegmentClassicLaunchTrustTest两类19项全部通过（0失败/错误/跳过），初轮18项属于增加deadline用例之前的独立源码绑定；两次Java样式均退出0。测试使用真实临时文件、JAR与合成JDK形状的文件树，覆盖文件字节/顺序、未声明文件、JAR隐式依赖、参数/环境注入、过期deadline、首次native/iterator close失败、未知ZIP构造关闭，以及实际open调用体挂起时外部close等待；没有启动该合成JDK或加载其JNI，不证明实际程序/运行时、生产Installed资格、START或完整child。当前阶段1361项源码/资源及31项代码路径仍未提交，原18项/19项source/class/XML在classic-child-inputs-evidence-26587477分别保存，不覆盖Cookie checkpoint。配置清洁装载、首次JNI前可信路径、实际Process/challenge与Bookie/网络完整资源图继续OPEN，目标active且各整体Gate不提升。
+
+
+program两次测试的原输入/source/class/XML核验后，两次独立lsof与硬链接/身份/哈希检查仅清理对应两个raw scope的四目录、十文件路径、797,881逻辑字节；归档硬链接保留，regular-file数据块回收0。program-worktree-checkpoint保留当时1361项源码/资源、十项既有文档及216项相关class，后续配置修改不覆盖该checkpoint。
+
+同一父`2658747716`上的SegmentClassicLaunchConfiguration随后接入固定trust owner的`<recipeId>.conf`读取：原owned fd/父链/ACL/单链接/替换/首次关闭语义保持，输入1..256KiB、最多4096个逻辑属性；含凭据文件拒绝other权限，production另要求recipe中旧UID预期组可读，完整组成员/权限隔离仍须外部Unix资格。解析直接复用Commons 2.12 PropertiesReader的转义/续行及原逗号列表转换，不经过include/URL装载器；解析前关闭includes/插值，原文本及解码后的key/value显式拒绝`${`，包括转义/续行构造，include/includeOptional大小写与转义形式均拒绝。新ServerConfiguration明确移除全部非内存继承配置并安装空interpolator，再载入本次属性，不先展开系统/环境或读第二配置文件。
+
+固定有效值使用实际getter校验并写回typed snapshot：IO、add/read/long-poll/high-priority/Journal callback线程、allocator并发、Journal内存、Interleaved pageLimit、BookieId、数值广告地址与非零固定端口、完整三类有序绝对根以及有效metadata URI；不依赖parent CPU、JVM direct-memory、DNS或旧root/zkServers别名补值。其他常量默认由批准program版本约束，整份剩余属性也进入摘要，没有只hash几个开关。最终快照包含不可变排序map及不可变有序list，不暴露可修改ServerConfiguration。它仍是数据；实际资源图消费同一快照的接线及历史运行策略校验尚未完成，不能据此取得START。
+
+规范摘要域为`BookKeeper/ControlledClassicConfiguration/v1\0`，覆盖UWCLC001、u16 schema1/flags0、u32属性数；key按Java UTF16 code-unit词典序排列并以u32 UTF8长度编码，value带明确tag：1/string、2/boolean、3/i32、4/i64、5/有限f64、6/有序扁平list（u32数量及逐项scalar）；不支持对象/嵌套list/非法UTF8/NUL/非有限值均拒绝，规范流最多1MiB。原properties产生string/list，显式有效字段经实际getter转换为对应数值类型。独立Python 170字节向量覆盖非ASCII键及类型/列表顺序，SHA256为`954c53da6c0c7c1368be118c6a693a0df2235c1ffc8a91bc880c20a5e76d5d71`，没有以toString替代编码。
+
+首轮配置/trust两类16项有一项实际失败：空journalDirectories触发旧getter回退默认目录，使新入口接受不完整根；未发生目录I/O。修正为先验证原始列表再调用getter，原断言保留，16项全部通过。配置/程序/trust/启动codec四类首轮34项通过；随后沿实际Interleaved调用补齐pageLimit的显式固定，最终同四类34项全部通过（0失败/错误/跳过），两次样式退出0。覆盖实际固定conf读取与原字节后改、整个map摘要/列表顺序/typed编码、include/插值/坏输入/缺动态值/旧别名拒绝、首次native close失败持续non-drained，以及两个独立真实JVM在静态系统属性继承关闭/开启时得出相同冻结结果。两个JVM仅运行配置probe，不是受控child或START/registration验收。原失败、16项修正、前后34项各自保存1363项输入与实际source/class/XML，不移绑旧PASS；配置阶段证据仍位于classic-child-inputs-evidence-26587477，RAT未重跑、未提交，完整16步目标active且Main/G1/full-bytes/生产Gate保持OPEN。
+
+
+规划会话随后裁定首次JNI装载采用固定安装库及普通/受控共用的一次性状态，限定同一system/application ClassLoader装载域；普通已开始不能补升，受控重入/竞争失败不得因load迟到返回补发成功。早期纯JDK preload只核对外部可信预装基线，原deadline/首次读取关闭保持；同一库装载后仍须核对同一份recipe/program、ACL/身份与完整配置，再继续metadata/实际Process及START。库层不授Installed/启动/排空资格，不fallback、不重置、不持锁跨I/O或load；精确边界已同步execution-objective。该裁决记录时尚未实现；下节记录后续独立装载原语与production前置拒绝，完整早期启动链仍OPEN。配置四阶段原source/父Git blob及各class/XML核验后，两次独立lsof与硬链接/身份/哈希检查仅清理四个raw scope的八目录、24文件路径、1,782,323逻辑字节；归档硬链接保留，regular-file数据块回收0。配置checkpoint保留1363项源码/资源、十项当时文档及220项相关class；共享target与用户原文件未清理。
+
+
+## 受控 JNI 的一次性装载依赖
+
+父源码`2658747716c369722e3ad2348a49e96a97e4ce2f`上，native-io新增NativeIOBootstrap，公开受控入口只接期望长度、复制的SHA256及原本地deadline，不接路径/loader/backend/回调；生产只选既定固定UID0系统安装库。原-D/env覆盖即使同路径也拒绝，无候选搜索/解压/fallback。纯JDK检查完整POSIX父链、现存单链接普通文件/UID/mode/长度，64KiB工作区逐块hash，原fd首次close成功后才System.load；保留原inode/时间/父链，装载后及生产结果读取时再核对，不能以同字节替换接受新inode。这些POSIX/hash事实依赖外部可信预装JDK/固定child/ACL JNI，不替代首次装载前的部署信任或后置ACL证明。
+
+NativeIOJni静态块现在与受控入口共用一次性状态：普通先开始不能补升；受控期间并发/重入/普通JNI初始化令原尝试失败，原调用体继续实际终结，load迟到返回不补成功。状态锁不跨I/O、System.load或等待自身类初始化；仅支持helper/Impl/Jni同一内置JDKAppClassLoader域，其他loader副本不能重置资格，不称任意JVM全局native证明。原ordinary属性/env/JAR候选及异常行为沿原选择器保留；受控已装载后JNI复用原库，不再读取ordinary覆盖。各阶段沿同一deadline，过期或首次关闭/读取/装载失败保留原cause及实际loadEntered/loadReturned事实，无卸载、重试、强行中断或DRAINED；库层不自行退出JVM。失败首次close的原handle保持保留，不因测试手工清理而改为成功。
+
+返回Library仅为原库数据，fixture路径仅包内测试使用，标记不能取得production controlledLibrary结果。production trust准备现已在材料I/O前拒绝普通/未决/fixture装载；program核验同时比较实际原库的固定路径、长度/SHA与原文件/父链身份。它仍不发行实际程序/JVM/Process/START资格：纯JDK的固定recipe/program preload及与后置同份材料的关联、早期JVM参数检查、实际Main/Process/challenge/metadata/控制通道、一次性context与完整历史Bookie仍须接线。
+
+NativeIOBootstrapTest首轮四项、18个独立JVM通过；其后补原库身份留存/同字节替换与实际坏库load失败，四类28项通过，Bootstrap类为19个独立JVM。最终native四类28项与configuration/program/trust/启动codec四类35项合计八类63项全部通过，0失败/错误/跳过，包含production材料入口拒绝普通backend。独立JVM覆盖普通成功/失败、其他loader副本、真实hash/长度/别名/原fd替换/读取/首次close失败、受控一次真实装载与JNI复用、真实挂起I/O期间的并发及普通初始化、load重入/超期返回和实际UnsatisfiedLinkError；JDK17/21的测试permission hook只用于拦截真实I/O边界，不增加生产验证回调或reset。测试使用macOS arm64/APFS上的真实库副本及当前host JNI，均不安装系统信任材料、不变更账号或发行Installed/START；Linux实际运行/跨编译仍NOT_EXECUTED。Java样式实际退出0；终态独立RAT实际退出1，431未批准路径及全部字节与父HEAD一致、无新增，扫描前排除受保护PDF，不称CI全绿。没有新增TLA语义或重绑旧模型，也没有性能结论。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/native-bootstrap-evidence-26587477`保留三次原源码/class/1365项输入/XML及命令、style/RAT、native组件清单与提交后字节核验；首轮四项与28项不追认最终源码。原三个raw scope在两次独立lsof与硬链接/身份/哈希检查后仅删除六目录、22文件路径、1,076,251逻辑字节，归档硬链接保留、regular-file数据块回收0，共享target与用户文件未清理。必要native依赖本地提交`f1005222da0fea6ebe5683d14b9d67d060faf98d`仅包含Bootstrap/Jni/Test三项Java路径，父为2658747716、未push；原测试仍绑定其执行时的父HEAD加WIP，提交后仅核验三文件及全部1365源码/80相关class字节一致，不改写原PASS。其余历史资源图、codec/ZK源/program/config及trust server修改保持未提交WIP。完整16步目标active，Main/G1/full-bytes/Unix/bootstrap/生产Gate继续OPEN，默认OFF/SYSTEM/PARK及disabled保持。
+
+
+## 固定程序材料的纯 JDK preload
+
+父源码`f1005222da0fea6ebe5683d14b9d67d060faf98d`上的WIP新增包内SegmentClassicLaunchPreload。prepare只冻结固定recipeId、本JVM原deadline及系统根；initialize在任何native-io调用前，通过可信JDK读取固定公共`.recipe`/`.program`，保留原fd前即登记owner，验证现存普通文件、UID0/单链接/NOFOLLOW及完整POSIX父链、上界/长度与读后身份。复用现有纯数据codec，检查recipeId及program完整原字节摘要；production在文件读取前拒绝已禁环境/ordinary native覆盖及不支持的实际JVM参数，随后核对program平台、固定JNI引用和实际参数相等。没有把POSIX或同目录hash当ACL/安装信任：JDK、固定child、ACL JNI仍依赖外部可信预装基线，实际classpath/主入口/JDK/Process完整资格仍待接线。
+
+初始化所有检查完成后才可取得program数据。生产load只能由同一原owner使用声明的长度/SHA及原deadline调用NativeIOBootstrap一次；原材料前后核对、首次close或native失败均不换材料、不续期限/重试。production trust准备改为消费该preload owner的同次native结果并一次借用，去掉独立recipeId绕过早期原材料的准备路径。后置recipe/program读取逐项比较原bytes、原inode/父链，program/config验证结束再次检查原身份，并要求调用方保留完全相同的deadline。preload与trust的资源归属分开，外层先关闭trust再关闭借用的preload；关闭或过期的preload不能继续取得材料。initializer/load/采用/比对/终检的实际调用体均受同一owner保护，外部close等待实际返回，自排空和重入拒绝；timeout观察不取消底层I/O。
+
+纯JDK fd首次close失败保留原handle/错误且不重试；open已开始但未返回handle时不编造native close结果。preload的drain只描述本组件调用/读取，失败的native bootstrap保持未决，不能据此发行整个child的DRAINED。fixture只读临时树，可返回data及供同份后置I/O验证；即使UID参数为0也不能load生产库或取得Installed/START。没有新增公开配置/签发接口、主类stub、外部安装或账号/系统权限修改。
+
+首轮因新增测试错误继承final FaultChannel而testCompile退出1，零测试执行，原源码/日志及当时target class库存保留，库存不当作新编译或测试通过；改用现有Mockito包裹真实通道后，三类30项全部通过。随后补齐元数据调用体的自排空/重入拒绝与验证结束的原身份复查，最终preload/program/trust/configuration/启动codec五类43项全部通过，0失败/错误/跳过。包含真实临时文件/首次关闭失败/未知open返回、同字节inode替换、同一fd读回字节不符、实际open挂起时外部close等待，以及真实临时文件/JAR和合成JDK形状的program与同份conf/相同deadline接续。独立真实JVM以不可用ordinary native路径成功完成早期fixture读取，随后改回实际JNI并成功执行ACL查询，确认preload未提前初始化native-io；该probe不运行受控Main或发行资格。样式首次一行121字符退出1，换行后Spotless/Checkstyle退出0；RAT本增量未重跑，未把前轮63项或RAT移绑本轮源码。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-preload-evidence-f1005222`保存每阶段1367项原源码/资源输入、source/class/实际XML/日志/命令及样式失败；复制runner中的旧scope描述在核验记录中按实际suite纠正，原inputs不改写。三个raw scope经原输入/父Git blob、两次独立lsof及硬链接/身份/哈希核验后，仅清理六目录、17文件路径、1,295,273逻辑字节，归档硬链接保留，regular-file数据块回收0；前轮sealed native证据330文件checksum再次核验一致，共享target和用户文件未清理。当前preload及其server接线仍为未提交WIP，HEAD保持f1005222da、未push。系统UID0固定安装的成功入口、真实Main/实际JVM/Process/challenge/控制通道与一次性START、完整历史Bookie/registration/网络排空、issuer/Unix及共同bootstrap仍OPEN；完整16步目标active，Main/G1/full-bytes/生产Gate和默认OFF/SYSTEM/PARK及disabled保持。

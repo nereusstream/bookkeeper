@@ -43,6 +43,7 @@ class FileInfoBackingCache {
     final FileLoader fileLoader;
     final int fileInfoVersionToWrite;
     private final boolean freshLifecycle;
+    private final boolean historical;
     private final Object freshCloseLock = new Object();
     private final Condition freshProgress = lock.writeLock().newCondition();
     private boolean freshClosing;
@@ -58,7 +59,17 @@ class FileInfoBackingCache {
         this(fileLoader, fileInfoVersionToWrite, false);
     }
 
+    static FileInfoBackingCache forClassicHistory(FileLoader loader, int version) {
+        return new FileInfoBackingCache(loader, version, true, true);
+    }
+
     FileInfoBackingCache(FileLoader fileLoader, int fileInfoVersionToWrite, boolean freshLifecycle) {
+        this(fileLoader, fileInfoVersionToWrite, freshLifecycle, false);
+    }
+
+    private FileInfoBackingCache(FileLoader fileLoader, int fileInfoVersionToWrite, boolean freshLifecycle,
+            boolean historical) {
+        this.historical = historical;
         this.fileLoader = fileLoader;
         this.fileInfoVersionToWrite = fileInfoVersionToWrite;
         this.freshLifecycle = freshLifecycle;
@@ -358,7 +369,7 @@ class FileInfoBackingCache {
         final AtomicInteger refCount;
 
         CachedFileInfo(long ledgerId, File lf, byte[] masterKey) throws IOException {
-            super(lf, masterKey, fileInfoVersionToWrite, freshLifecycle);
+            super(lf, masterKey, fileInfoVersionToWrite, freshLifecycle, historical);
             this.ledgerId = ledgerId;
             this.refCount = new AtomicInteger(0);
         }

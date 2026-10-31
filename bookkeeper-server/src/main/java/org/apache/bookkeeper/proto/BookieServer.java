@@ -68,10 +68,19 @@ public class BookieServer {
     int exitCode = ExitCode.OK;
 
     // request processor
-    private final RequestProcessor requestProcessor;
+    private RequestProcessor requestProcessor;
 
     // Expose Stats
     private final StatsLogger statsLogger;
+    private final boolean controlled;
+    private final ByteBufAllocator controlledAllocator;
+    private final Object controlledGate = new Object();
+    private final Object controlledCloseLock = new Object();
+    private boolean controlledListenerAttempted;
+    private boolean controlledProcessorAttempted;
+    private boolean controlledInitializing;
+    private Thread controlledInitializer;
+    private volatile boolean controlledClosing;
 
     // Exception handler
     private volatile UncaughtExceptionHandler uncaughtExceptionHandler = null;
@@ -84,6 +93,8 @@ public class BookieServer {
             throws IOException, KeeperException, InterruptedException,
             BookieException, UnavailableException, CompatibilityException, SecurityException {
         this.conf = conf;
+        this.controlled = false;
+        this.controlledAllocator = null;
         validateUser(conf);
         log.info()
                 .attr("overrides", overriddenConfig(conf))
@@ -102,6 +113,198 @@ public class BookieServer {
         this.requestProcessor = new BookieRequestProcessor(conf, bookie,
                 statsLogger.scope(SERVER_SCOPE), shFactory, allocator, nettyServer.allChannels);
         this.nettyServer.setRequestProcessor(this.requestProcessor);
+    }
+
+    private BookieServer(ServerConfiguration conf, Bookie bookie, StatsLogger stats, ByteBufAllocator allocator) {
+        this.conf = conf;
+        this.bookie = bookie;
+        this.statsLogger = stats;
+        this.controlledAllocator = allocator;
+        this.controlled = true;
+    }
+
+    /** Heap-only controlled holder. The owning bridge retains it before any listener resource is acquired. */
+    public static BookieServer prepareForClassicChild(ServerConfiguration conf, Bookie bookie,
+            StatsLogger stats, ByteBufAllocator allocator) {
+        return new BookieServer(conf, bookie, stats, allocator);
+    }
+
+    /** Listener stage only; no processor, activation, registration, READY or additional Bookie start. */
+    public void initializeListenerForClassicChild()
+            throws IOException, KeeperException, InterruptedException, BookieException {
+        synchronized (controlledGate) {
+            if (!controlled || controlledListenerAttempted || controlledClosing) {
+                throw new IOException("Controlled listener initializes only once in its original server holder");
+            }
+            controlledListenerAttempted = true;
+            controlledInitializing = true;
+            controlledInitializer = Thread.currentThread();
+        }
+        try {
+            validateUser(conf);
+            nettyServer = BookieNettyServer.prepareForClassicChild(conf, controlledAllocator);
+            if (controlledClosing) {
+                throw new IOException("Controlled listener initialization was retired");
+            }
+            nettyServer.initializeForClassicChild();
+            if (controlledClosing) {
+                throw new IOException("Controlled listener bind returned after retirement");
+            }
+        } finally {
+            synchronized (controlledGate) {
+                controlledInitializing = false;
+                controlledInitializer = null;
+                controlledGate.notifyAll();
+            }
+        }
+    }
+
+    public void initializeProcessorForClassicChild() throws SecurityException, IOException {
+        synchronized (controlledGate) {
+            if (!controlled || controlledProcessorAttempted || controlledInitializing || controlledClosing
+                    || !isListenerBoundForClassicChild()) {
+                throw new IOException("Controlled processor requires its one actual bound listener");
+            }
+            controlledProcessorAttempted = true;
+            controlledInitializing = true;
+            controlledInitializer = Thread.currentThread();
+        }
+        try {
+            var processor = BookieRequestProcessor.prepareForClassicChild(conf, bookie, statsLogger,
+                    controlledAllocator, nettyServer.allChannels, this);
+            requestProcessor = processor;
+            nettyServer.setRequestProcessor(processor);
+            processor.initializeForClassicChild();
+            if (controlledClosing) {
+                throw new IOException("Controlled processor initialization was retired");
+            }
+        } finally {
+            synchronized (controlledGate) {
+                controlledInitializing = false;
+                controlledInitializer = null;
+                controlledGate.notifyAll();
+            }
+        }
+    }
+
+    public void activateForClassicChild() throws IOException {
+        synchronized (controlledGate) {
+            if (!controlled || controlledClosing || controlledInitializing || !bookie.isRunning()
+                    || !(requestProcessor instanceof BookieRequestProcessor processor)
+                    || !processor.initializedForClassicChild() || !isListenerBoundForClassicChild()) {
+                throw new IOException("Controlled activation lacks its actual Bookie, listener or processor");
+            }
+            nettyServer.activateForClassicChild(processor);
+            running = true;
+        }
+    }
+
+    public boolean isClosingForClassicChild() {
+        return controlledClosing;
+    }
+
+    public void retireForClassicChild() throws InterruptedException {
+        synchronized (controlledGate) {
+            if (!controlled || isCurrentThreadForClassicChild()) {
+                throw new IllegalStateException("Controlled server cannot retire from its own activity");
+            }
+            requestCloseForClassicChild();
+            while (controlledInitializing) {
+                controlledGate.wait();
+            }
+        }
+        if (nettyServer != null) {
+            nettyServer.submitRetirementForClassicChild();
+        }
+        if (requestProcessor instanceof BookieRequestProcessor processor && processor.classic != null) {
+            processor.classic.retireAdmission();
+        }
+    }
+
+    /** Called after the original Bookie Journal callbacks, before maintenance/final flush/file close. */
+    public boolean awaitRequestsForClassicChild() throws InterruptedException {
+        if (!controlled || isCurrentThreadForClassicChild()) {
+            throw new IllegalStateException("Controlled request drain requires the external Bookie owner");
+        }
+        if (nettyServer != null && !nettyServer.awaitConnectionsForClassicChild()) {
+            return false;
+        }
+        return !(requestProcessor instanceof BookieRequestProcessor processor)
+                || processor.classic.awaitRequests() && processor.classic.awaitOutputs();
+    }
+
+    /** Only after actual storage drain; callbacks/output executors stay alive until that boundary. */
+    public boolean finishNetworkForClassicChild() throws InterruptedException {
+        if (!controlled || isCurrentThreadForClassicChild()) {
+            throw new IllegalStateException("Controlled network cannot await itself");
+        }
+        synchronized (controlledCloseLock) {
+            boolean complete = !(requestProcessor instanceof BookieRequestProcessor processor)
+                    || processor.finishForClassicChild();
+            complete = (nettyServer == null || nettyServer.closeAndDrainForClassicChild()) && complete;
+            if (complete) {
+                running = false;
+            }
+            return complete;
+        }
+    }
+
+    public Throwable operationFailureForClassicChild() {
+        return requestProcessor instanceof BookieRequestProcessor processor && processor.classic != null
+                ? processor.classic.operationFailure() : null;
+    }
+
+    public Throwable closeFailureForClassicChild() {
+        var processorFailure = requestProcessor instanceof BookieRequestProcessor processor && processor.classic != null
+                ? processor.classic.closeFailure() : null;
+        return processorFailure != null ? processorFailure : listenerCloseFailureForClassicChild();
+    }
+
+    public boolean isListenerBoundForClassicChild() {
+        return controlled && !controlledClosing && nettyServer != null && nettyServer.isBoundForClassicChild();
+    }
+
+    public boolean isCurrentThreadForClassicChild() {
+        synchronized (controlledGate) {
+            return controlledInitializer == Thread.currentThread()
+                    || nettyServer != null && nettyServer.isCurrentThreadForClassicChild()
+                    || requestProcessor instanceof BookieRequestProcessor processor && processor.classic != null
+                            && processor.classic.isCurrentActivity();
+        }
+    }
+
+    public void requestCloseForClassicChild() {
+        controlledClosing = true;
+        if (requestProcessor instanceof BookieRequestProcessor processor && processor.classic != null) {
+            processor.classic.requestClose();
+        }
+    }
+
+    public boolean closeListenerAndAwaitForClassicChild() throws InterruptedException {
+        synchronized (controlledGate) {
+            if (!controlled || isCurrentThreadForClassicChild()) {
+                throw new IllegalStateException("Controlled listener cannot wait for its own activity");
+            }
+            controlledClosing = true;
+            while (controlledInitializing) {
+                controlledGate.wait();
+            }
+        }
+        synchronized (controlledCloseLock) {
+            if (requestProcessor != null) {
+                throw new IllegalStateException("Drain the complete owned processor before retiring its TCP loops");
+            }
+            try {
+                return nettyServer == null || nettyServer.closeAndDrainForClassicChild();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw interrupted;
+            }
+        }
+    }
+
+    public Throwable listenerCloseFailureForClassicChild() {
+        return nettyServer == null ? null : nettyServer.failureForClassicChild();
     }
 
     @VisibleForTesting
@@ -128,6 +331,9 @@ public class BookieServer {
     }
 
     public void start() throws InterruptedException, IOException {
+        if (controlled) {
+            throw new IllegalStateException("Controlled service activation requires its complete bound child graph");
+        }
         this.bookie.start();
 
         // fail fast, when bookie startup is not successful
@@ -187,6 +393,9 @@ public class BookieServer {
     }
 
     public synchronized void shutdown() {
+        if (controlled) {
+            throw new IllegalStateException("Controlled server requires actual external owner drain");
+        }
         log.info("Shutting down BookieServer");
         this.nettyServer.shutdown();
         if (!running) {

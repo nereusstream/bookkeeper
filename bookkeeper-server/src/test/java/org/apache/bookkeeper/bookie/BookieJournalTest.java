@@ -22,12 +22,14 @@ package org.apache.bookkeeper.bookie;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -47,6 +49,8 @@ import org.apache.bookkeeper.client.ClientUtil;
 import org.apache.bookkeeper.client.LedgerHandle;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.conf.TestBKConfiguration;
+import org.apache.bookkeeper.discover.BookieRouteBinding;
+import org.apache.bookkeeper.meta.NullMetadataBookieDriver;
 import org.apache.bookkeeper.util.IOUtils;
 import org.apache.commons.io.FileUtils;
 import org.junit.After;
@@ -511,7 +515,7 @@ public class BookieJournalTest {
 
         Bookie b = null;
         try {
-            b = new TestBookieImpl(conf);
+            b = legacyBookie(conf);
             fail("Shouldn't have been able to start without admin");
         } catch (Throwable t) {
             // correct behaviour
@@ -544,7 +548,7 @@ public class BookieJournalTest {
             .setLedgerDirNames(new String[] { ledgerDir.getPath() })
             .setMetadataServiceUri(null);
 
-        Bookie b = new TestBookieImpl(conf);
+        Bookie b = legacyBookie(conf);
     }
 
     /**
@@ -566,7 +570,7 @@ public class BookieJournalTest {
             .setLedgerDirNames(new String[] { ledgerDir.getPath() })
             .setMetadataServiceUri(null);
 
-        Bookie b = new TestBookieImpl(conf);
+        Bookie b = legacyBookie(conf);
     }
 
     /**
@@ -595,7 +599,7 @@ public class BookieJournalTest {
 
         Bookie b = null;
         try {
-            b = new TestBookieImpl(conf);
+            b = legacyBookie(conf);
         } catch (Throwable t) {
             // correct behaviour
         }
@@ -702,8 +706,19 @@ public class BookieJournalTest {
         }
     }
 
+    /** Isolated legacy parser fixtures explicitly have no common binding, not a production startup authority. */
+    private TestBookieImpl legacyBookie(ServerConfiguration conf) throws Exception {
+        assertNull(conf.getMetadataServiceUri());
+        var registration = spy(new NullMetadataBookieDriver().createRegistrationManager());
+        doReturn(BookieRouteBinding.ReadResult.status(BookieRouteBinding.ReadStatus.ABSENT,
+                "isolated legacy Journal fixture")).when(registration)
+                .readBookieRouteBinding(BookieImpl.getBookieId(conf));
+        return new TestBookieImpl(new TestBookieImpl.ResourceBuilder(conf)
+                .withRegistrationManager(registration).build());
+    }
+
     private BookieImpl createBookieAndReadJournal(ServerConfiguration conf) throws Exception {
-        BookieImpl b = new TestBookieImpl(conf);
+        BookieImpl b = legacyBookie(conf);
         for (Journal journal : b.journals) {
             LastLogMark lastLogMark = journal.getLastLogMark().markLog();
             b.readJournal();
@@ -738,7 +753,7 @@ public class BookieJournalTest {
         conf.setJournalDirName(journalDir.getPath())
                 .setLedgerDirNames(new String[] { ledgerDir.getPath() });
 
-        BookieImpl b = new TestBookieImpl(conf);
+        BookieImpl b = legacyBookie(conf);
         b.readJournal();
         b.ledgerStorage.flush();
         b.readEntry(1, 80);
@@ -783,13 +798,13 @@ public class BookieJournalTest {
 
         if (truncateMasterKey) {
             try {
-                BookieImpl b = new TestBookieImpl(conf);
+                BookieImpl b = legacyBookie(conf);
                 b.readJournal();
                 fail("Should not reach here!");
             } catch (IOException ie) {
             }
         } else {
-            BookieImpl b = new TestBookieImpl(conf);
+            BookieImpl b = legacyBookie(conf);
             b.readJournal();
             b.readEntry(1, 100);
             try {
@@ -839,7 +854,7 @@ public class BookieJournalTest {
             .setLedgerDirNames(new String[] { ledgerDir.getPath() })
             .setMetadataServiceUri(null);
 
-        BookieImpl b = new TestBookieImpl(conf);
+        BookieImpl b = legacyBookie(conf);
         b.readJournal();
         b.readEntry(1, 100);
         try {
@@ -878,7 +893,7 @@ public class BookieJournalTest {
                 .thenReturn(fileChannelProvider);
         doReturn(bookieFileChannel).when(fileChannelProvider).open(any(), any());
 
-        BookieImpl b = new TestBookieImpl(conf);
+        BookieImpl b = legacyBookie(conf);
 
         for (Journal journal : b.journals) {
             List<Long> journalIds = journal.listJournalIds(journal.getJournalDirectory(), null);
@@ -924,7 +939,7 @@ public class BookieJournalTest {
 
         Journal.JournalScanner journalScanner = new DummyJournalScan();
 
-        BookieImpl b = new TestBookieImpl(conf);
+        BookieImpl b = legacyBookie(conf);
 
         for (Journal journal : b.journals) {
             List<Long> journalIds = Journal.listJournalIds(journal.getJournalDirectory(), null);
@@ -946,7 +961,7 @@ public class BookieJournalTest {
 
         journalScanner = new DummyJournalScan();
 
-        b = new TestBookieImpl(conf);
+        b = legacyBookie(conf);
 
         for (Journal journal : b.journals) {
             List<Long> journalIds = Journal.listJournalIds(journal.getJournalDirectory(), null);

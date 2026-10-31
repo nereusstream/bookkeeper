@@ -33,6 +33,7 @@ import java.io.RandomAccessFile;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.LinkOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
@@ -105,6 +106,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
 
     private boolean deleted;
     private final FreshState fresh;
+    private final boolean historical;
 
     record FreshCloseResult(boolean drained, Throwable operationFailure,
                             Throwable flushFailure, Throwable closeFailure) { }
@@ -167,10 +169,20 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
         return new FileInfo(lf, masterKey, fileInfoVersionToWrite, true);
     }
 
+    static FileInfo forClassicHistory(File file, byte[] masterKey, int version) throws IOException {
+        return new FileInfo(file, masterKey, version, true, true);
+    }
+
     FileInfo(File lf, byte[] masterKey, int fileInfoVersionToWrite, boolean freshLifecycle) throws IOException {
+        this(lf, masterKey, fileInfoVersionToWrite, freshLifecycle, false);
+    }
+
+    FileInfo(File lf, byte[] masterKey, int fileInfoVersionToWrite, boolean freshLifecycle, boolean historical)
+            throws IOException {
         super(WATCHER_RECYCLER);
 
         fresh = freshLifecycle ? new FreshState() : null;
+        this.historical = historical;
         this.lf = lf;
         this.masterKey = masterKey;
         mode = "rw";
@@ -290,7 +302,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
                 return;
             }
 
-            fc = openIndexFile(lf);
+            fc = openIndexFile(lf, false);
             size = fc.size();
             sizeSinceLastWrite = size;
 
@@ -302,6 +314,9 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
                 }
             }
             bb.flip();
+            if (historical) {
+                requireHistoricalHeader(bb.duplicate(), size);
+            }
             if (bb.getInt() != SIGNATURE) {
                 throw new IOException("Missing ledger signature while reading header for " + lf);
             }
@@ -326,6 +341,9 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
                 if (explicitLacBufLength == 0) {
                     explicitLac = null;
                 } else if (explicitLacBufLength >= DigestManager.LAC_METADATA_LENGTH) {
+                    if (fresh != null && explicitLacBufLength > bb.remaining()) {
+                        throw new IOException("Explicit LAC exceeds the owned index header at " + lf);
+                    }
                     if (explicitLac == null) {
                         explicitLac = ByteBuffer.allocate(explicitLacBufLength);
                     }
@@ -389,7 +407,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
             if (create) {
                 // delayed the creation of parents directories
                 checkParents(lf);
-                fc = openIndexFile(lf);
+                fc = openIndexFile(lf, true);
                 size = fc.size();
                 if (size == 0) {
                     writeHeader();
@@ -742,7 +760,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
             }
         }
         // copy contents from old.idx to new.idx.rloc
-        FileChannel newFc = openIndexFile(rlocFile);
+        FileChannel newFc = openIndexFile(rlocFile, false);
         try {
             long written = 0;
             while (written < size) {
@@ -793,7 +811,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
                     .log("Failed to rename file");
             throw new IOException("Failed to rename " + rlocFile + " to " + newFile);
         }
-        fc = openIndexFile(newFile);
+        fc = openIndexFile(newFile, false);
         lf = newFile;
         deleted = false;
     }
@@ -850,7 +868,7 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
                 try {
                     if (fc == null && (!lf.exists() || needFlushHeader)) {
                         checkParents(lf);
-                        fc = openIndexFile(lf);
+                        fc = openIndexFile(lf, !lf.exists());
                         size = fc.size();
                         if (size == 0) {
                             needFlushHeader = true;
@@ -914,15 +932,44 @@ class FileInfo extends Watchable<LastAddConfirmedUpdateNotification> {
         isClosed = true;
     }
 
-    private FileChannel openIndexFile(File file) throws IOException {
+    /** Bounded V1 validation before historical index recovery can mutate a relocation candidate. */
+    static void requireHistoricalHeader(ByteBuffer source, long fileSize) throws IOException {
+        ByteBuffer bytes = source.duplicate();
+        if (fileSize < START_OF_DATA || (fileSize - START_OF_DATA) % Long.BYTES != 0
+                || bytes.remaining() != START_OF_DATA || bytes.getInt() != SIGNATURE || bytes.getInt() != V1) {
+            throw new IOException("Controlled Classic history requires a complete V1 index");
+        }
+        int keyLength = bytes.getInt();
+        if (keyLength < 0 || keyLength > bytes.remaining() - 8) {
+            throw new IOException("Historical index master key exceeds its header");
+        }
+        bytes.position(bytes.position() + keyLength + 4);
+        int lacLength = bytes.getInt();
+        if (lacLength != 0 && (lacLength < DigestManager.LAC_METADATA_LENGTH || lacLength > bytes.remaining())) {
+            throw new IOException("Historical index explicit LAC exceeds its header");
+        }
+    }
+
+    private FileChannel openIndexFile(File file, boolean create) throws IOException {
         if (fresh == null) {
             return new RandomAccessFile(file, mode).getChannel();
         }
         FreshChannel resource = new FreshChannel();
         fresh.channels.add(resource);
         try {
-            resource.channel = FileChannel.open(file.toPath(), StandardOpenOption.CREATE,
-                    StandardOpenOption.READ, StandardOpenOption.WRITE);
+            if (historical) {
+                if (create) {
+                    resource.channel = FileChannel.open(file.toPath(), StandardOpenOption.CREATE_NEW,
+                            StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+                } else {
+                    ClassicHistoryFiles.fileIdentity(file.toPath());
+                    resource.channel = FileChannel.open(file.toPath(), StandardOpenOption.READ,
+                            StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+                }
+            } else {
+                resource.channel = FileChannel.open(file.toPath(), StandardOpenOption.CREATE,
+                        StandardOpenOption.READ, StandardOpenOption.WRITE);
+            }
             return resource.channel;
         } catch (Throwable failure) {
             fresh.channels.remove(resource); // No channel was returned; there is no acquired handle.

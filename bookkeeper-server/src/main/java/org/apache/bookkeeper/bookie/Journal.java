@@ -82,6 +82,7 @@ public class Journal implements CheckpointSource {
 
     private BookieCriticalThread thread;
     private final FreshState fresh;
+    private final ClassicJournalRecovery history;
 
     private static final class FreshState {
         final Object gate = new Object();
@@ -544,9 +545,9 @@ public class Journal implements CheckpointSource {
                 for (int i = 0; i < size; i++) {
                     QueueEntry qe = forceWriteWaiters.set(i, null);
                     if (qe != null) {
-                        if (qe.getCtx() instanceof BookieRequestHandler
-                                && qe.entryId != BookieImpl.METAENTRY_ID_FORCE_LEDGER) {
-                            writeHandlers.add((BookieRequestHandler) qe.getCtx());
+                        BookieRequestHandler handler = BookieImpl.responseHandlerForOwnedContext(qe.getCtx());
+                        if (handler != null && qe.entryId != BookieImpl.METAENTRY_ID_FORCE_LEDGER) {
+                            writeHandlers.add(handler);
                         }
                         qe.run();
                     }
@@ -969,6 +970,20 @@ public class Journal implements CheckpointSource {
         return journal;
     }
 
+    /** Owned resources only; the enclosing controlled episode must establish its own startup context. */
+    static Journal forClassicHistory(int journalIndex, File directory, ServerConfiguration configuration,
+            LedgerDirsManager directories, StatsLogger stats, ByteBufAllocator allocator,
+            JournalAliveListener listener) {
+        validateFreshConfiguration(configuration);
+        if (configuration.isSkipReplayJournalInvalidRecord()) {
+            throw new IllegalArgumentException("Controlled Classic history cannot skip invalid Journal records");
+        }
+        Journal journal = new Journal(
+                journalIndex, directory, configuration, directories, stats, allocator, true, true);
+        journal.journalAliveListener = listener;
+        return journal;
+    }
+
     static void validateFreshConfiguration(ServerConfiguration configuration) {
         Object provider = configuration.getProperty("journalChannelProvider");
         if (configuration.isBusyWaitEnabled() || !configuration.getJournalSyncData()
@@ -1010,6 +1025,12 @@ public class Journal implements CheckpointSource {
     private Journal(int journalIndex, File journalDirectory, ServerConfiguration conf,
             LedgerDirsManager ledgerDirsManager, StatsLogger statsLogger,
             ByteBufAllocator allocator, boolean freshLifecycle) {
+        this(journalIndex, journalDirectory, conf, ledgerDirsManager, statsLogger, allocator, freshLifecycle, false);
+    }
+
+    private Journal(int journalIndex, File journalDirectory, ServerConfiguration conf,
+            LedgerDirsManager ledgerDirsManager, StatsLogger statsLogger,
+            ByteBufAllocator allocator, boolean freshLifecycle, boolean historicalLifecycle) {
         fresh = freshLifecycle ? new FreshState() : null;
         this.allocator = allocator;
 
@@ -1056,6 +1077,9 @@ public class Journal implements CheckpointSource {
         } else {
             lastMarkFileName = LAST_MARK_DEFAULT_NAME + "." + journalIndex;
         }
+        history = historicalLifecycle ? new ClassicJournalRecovery(journalDirectory.toPath(),
+                ledgerDirsManager.getAllLedgerDirs().stream().map(File::toPath).toList(), lastMarkFileName,
+                conf.getNettyMaxFrameSizeBytes(), journalAlignmentSize) : null;
         if (fresh == null) {
             lastLogMark.readLog();
         }
@@ -1079,8 +1103,16 @@ public class Journal implements CheckpointSource {
     }
 
     void initializeForFresh() throws IOException {
-        if (fresh == null) {
-            throw new IllegalStateException("Not a fresh Journal owner");
+        initializeOwnedJournal(false);
+    }
+
+    void initializeForClassicHistory() throws IOException {
+        initializeOwnedJournal(true);
+    }
+
+    private void initializeOwnedJournal(boolean historical) throws IOException {
+        if (fresh == null || historical != (history != null)) {
+            throw new IllegalStateException("Journal initializer does not match its original owned context");
         }
         synchronized (fresh.gate) {
             if (fresh.initAttempted || fresh.closing) {
@@ -1094,16 +1126,20 @@ public class Journal implements CheckpointSource {
             if (!Files.isDirectory(journalDirectory.toPath())) {
                 throw new IOException("Fresh Journal needs an existing current directory");
             }
-            fresh.listing = Files.newDirectoryStream(journalDirectory.toPath());
-            try {
-                if (fresh.listing.iterator().hasNext()) {
-                    throw new IOException("Fresh Journal current directory contains history");
+            if (history == null) {
+                fresh.listing = Files.newDirectoryStream(journalDirectory.toPath());
+                try {
+                    if (fresh.listing.iterator().hasNext()) {
+                        throw new IOException("Fresh Journal current directory contains history");
+                    }
+                } finally {
+                    closeFreshListing();
                 }
-            } finally {
-                closeFreshListing();
-            }
-            if (fresh.listingCloseFailure != null) {
-                throw freshIo("Fresh Journal directory listing did not close", fresh.listingCloseFailure);
+                if (fresh.listingCloseFailure != null) {
+                    throw freshIo("Fresh Journal directory listing did not close", fresh.listingCloseFailure);
+                }
+            } else {
+                history.ids(0);
             }
             fresh.markDirectories = List.copyOf(ledgerDirsManager.getAllLedgerDirs());
             if (fresh.markDirectories.isEmpty()) {
@@ -1111,9 +1147,15 @@ public class Journal implements CheckpointSource {
             }
             for (File directory : fresh.markDirectories) {
                 if (!Files.isDirectory(directory.toPath())
-                        || Files.exists(directory.toPath().resolve(lastMarkFileName))) {
+                        || history == null && Files.exists(directory.toPath().resolve(lastMarkFileName))) {
                     throw new IOException("Fresh Journal lastMark directories are missing or contain history");
                 }
+            }
+            if (history != null) {
+                var observed = history.marks();
+                lastLogMark.setCurLogMark(observed.logId(), observed.offset());
+                lastPersistedMark.setLogMark(observed.logId(), observed.offset());
+                fresh.markFiles.addAll(observed.existing());
             }
             synchronized (fresh.gate) {
                 fresh.initialized = !fresh.closing;
@@ -1347,7 +1389,15 @@ public class Journal implements CheckpointSource {
     public long scanJournal(long journalId, long journalPos, JournalScanner scanner, boolean skipInvalidRecord)
         throws IOException {
         if (fresh != null) {
-            throw new IOException("Fresh Journal has no historical scan/recovery entry");
+            if (history == null || skipInvalidRecord) {
+                throw new IOException("This owned Journal does not admit the requested historical scan");
+            }
+            beginHistoricalRead();
+            try {
+                return history.scan(journalId, journalPos, scanner);
+            } finally {
+                endHistoricalRead();
+            }
         }
         JournalChannel recLog;
         if (journalPos <= 0) {
@@ -1359,58 +1409,7 @@ public class Journal implements CheckpointSource {
         }
         int journalVersion = recLog.getFormatVersion();
         try {
-            ByteBuffer lenBuff = ByteBuffer.allocate(4);
-            ByteBuffer recBuff = ByteBuffer.allocate(64 * 1024);
-            while (true) {
-                // entry start offset
-                long offset = recLog.fc.position();
-                // start reading entry
-                lenBuff.clear();
-                fullRead(recLog, lenBuff);
-                if (lenBuff.remaining() != 0) {
-                    break;
-                }
-                lenBuff.flip();
-                int len = lenBuff.getInt();
-                if (len == 0) {
-                    break;
-                }
-                boolean isPaddingRecord = false;
-                if (len < 0) {
-                    if (len == PADDING_MASK && journalVersion >= JournalChannel.V5) {
-                        // skip padding bytes
-                        lenBuff.clear();
-                        fullRead(recLog, lenBuff);
-                        if (lenBuff.remaining() != 0) {
-                            break;
-                        }
-                        lenBuff.flip();
-                        len = lenBuff.getInt();
-                        if (len == 0) {
-                            continue;
-                        }
-                        isPaddingRecord = true;
-                    } else {
-                        log.error().attr("len", len).log("Invalid record found with negative length");
-                        throw new IOException("Invalid record found with negative length " + len);
-                    }
-                }
-                recBuff.clear();
-                if (recBuff.remaining() < len) {
-                    recBuff = ByteBuffer.allocate(len);
-                }
-                recBuff.limit(len);
-                if (fullRead(recLog, recBuff) != len) {
-                    // This seems scary, but it just means that this is where we
-                    // left off writing
-                    break;
-                }
-                recBuff.flip();
-                if (!isPaddingRecord) {
-                    scanner.process(journalVersion, offset, recBuff);
-                }
-            }
-            return recLog.fc.position();
+            return scanRecords(recLog.fc, journalVersion, scanner, 0, 0);
         } catch (IOException e) {
             if (skipInvalidRecord) {
                 log.warn("Failed to parse journal file, and skipInvalidRecord is true, skip this journal file reply");
@@ -1420,6 +1419,101 @@ public class Journal implements CheckpointSource {
             return recLog.fc.position();
         } finally {
             recLog.close();
+        }
+    }
+
+    /** The legacy record loop; bounded owned recovery uses the same padding and partial-tail semantics. */
+    static long scanRecords(FileChannel channel, int journalVersion, JournalScanner scanner,
+            int maximumRecord, int alignment) throws IOException {
+        ByteBuffer lenBuff = ByteBuffer.allocate(4);
+        ByteBuffer recBuff = ByteBuffer.allocate(64 * 1024);
+        while (true) {
+            // entry start offset
+            long offset = channel.position();
+            // start reading entry
+            lenBuff.clear();
+            fullRead(channel, lenBuff);
+            if (lenBuff.remaining() != 0) {
+                break;
+            }
+            lenBuff.flip();
+            int len = lenBuff.getInt();
+            if (len == 0) {
+                break;
+            }
+            boolean isPaddingRecord = false;
+            if (len < 0) {
+                if (len == PADDING_MASK && journalVersion >= JournalChannel.V5) {
+                    // skip padding bytes
+                    lenBuff.clear();
+                    fullRead(channel, lenBuff);
+                    if (lenBuff.remaining() != 0) {
+                        break;
+                    }
+                    lenBuff.flip();
+                    len = lenBuff.getInt();
+                    if (len == 0) {
+                        continue;
+                    }
+                    isPaddingRecord = true;
+                } else {
+                    log.error().attr("len", len).log("Invalid record found with negative length");
+                    throw new IOException("Invalid record found with negative length " + len);
+                }
+            }
+            if (maximumRecord > 0 && (isPaddingRecord ? len < 0 || len > alignment
+                    : len < 16 || len > maximumRecord)) {
+                throw new IOException("Historical Journal record exceeds its supported bounds: " + len);
+            }
+            recBuff.clear();
+            if (recBuff.remaining() < len) {
+                recBuff = ByteBuffer.allocate(len);
+            }
+            recBuff.limit(len);
+            if (fullRead(channel, recBuff) != len) {
+                // This seems scary, but it just means that this is where we
+                // left off writing
+                break;
+            }
+            recBuff.flip();
+            if (!isPaddingRecord) {
+                scanner.process(journalVersion, offset, recBuff);
+            }
+        }
+        return channel.position();
+    }
+
+    private void beginHistoricalRead() throws IOException {
+        synchronized (fresh.gate) {
+            if (!fresh.initialized || fresh.started || fresh.closing) {
+                throw new IOException("Historical Journal replay is only admitted before its writer starts");
+            }
+            Thread current = Thread.currentThread();
+            fresh.producerThreads.put(current, fresh.producerThreads.getOrDefault(current, 0) + 1);
+            fresh.producers++;
+        }
+    }
+
+    private void endHistoricalRead() {
+        synchronized (fresh.gate) {
+            decrementFreshThread(fresh.producerThreads);
+            fresh.producers--;
+            fresh.gate.notifyAll();
+        }
+    }
+
+    List<Long> journalIdsForRecovery(long minimum) throws IOException {
+        if (history == null) {
+            if (fresh != null) {
+                throw new IOException("Fresh Journal has no historical recovery context");
+            }
+            return listJournalIds(journalDirectory, id -> id >= minimum);
+        }
+        beginHistoricalRead();
+        try {
+            return history.ids(minimum);
+        } finally {
+            endHistoricalRead();
         }
     }
 
@@ -1879,7 +1973,7 @@ public class Journal implements CheckpointSource {
         Stopwatch journalFlushWatcher = Stopwatch.createUnstarted();
         long batchSize = 0;
         try {
-            List<Long> journalIds = listJournalIds(journalDirectory, null);
+            List<Long> journalIds = history == null ? listJournalIds(journalDirectory, null) : history.ids(0);
             // Should not use MathUtils.now(), which use System.nanoTime() and
             // could only be used to measure elapsed time.
             // http://docs.oracle.com/javase/1.5.0/docs/api/java/lang/System.html#nanoTime%28%29
@@ -2208,7 +2302,7 @@ public class Journal implements CheckpointSource {
         }
     }
 
-    private static int fullRead(JournalChannel fc, ByteBuffer bb) throws IOException {
+    private static int fullRead(FileChannel fc, ByteBuffer bb) throws IOException {
         int total = 0;
         while (bb.remaining() > 0) {
             int rc = fc.read(bb);
@@ -2262,7 +2356,8 @@ public class Journal implements CheckpointSource {
     public synchronized void start() {
         if (fresh != null) {
             synchronized (fresh.gate) {
-                if (!fresh.initialized || fresh.started || fresh.closing) {
+                if (!fresh.initialized || fresh.started || fresh.closing
+                        || history != null && (fresh.producers != 0 || !history.healthy())) {
                     throw new IllegalStateException("Fresh Journal is not ready or is closing");
                 }
                 thread = new BookieCriticalThread(() -> run(), journalThreadName + "-" + conf.getBookiePort());
@@ -2467,6 +2562,15 @@ public class Journal implements CheckpointSource {
                     }
                 }
                 closeFreshListing();
+                if (history != null) {
+                    var recovered = history.closeAndDrain();
+                    if (fresh.operationFailure == null) {
+                        fresh.operationFailure = recovered.readFailure();
+                    }
+                    if (fresh.closeFailure == null) {
+                        fresh.closeFailure = recovered.closeFailure();
+                    }
+                }
                 if (fresh.channels.isEmpty() && fresh.markWrites.isEmpty() && !fresh.providerClosed) {
                     try {
                         fileChannelProvider.close();

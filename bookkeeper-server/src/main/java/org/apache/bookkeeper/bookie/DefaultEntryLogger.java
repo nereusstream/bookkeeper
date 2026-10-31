@@ -362,6 +362,7 @@ public class DefaultEntryLogger implements EntryLogger {
     EntryLoggerAllocator entryLoggerAllocator;
     private EntryLogManager entryLogManager;
     private final boolean freshLifecycle;
+    private final ClassicHistoryFiles history;
     private final StatsLogger freshInitializationStats;
     private final Object freshCloseLock;
     private final Object freshReadGate;
@@ -481,10 +482,25 @@ public class DefaultEntryLogger implements EntryLogger {
         return new DefaultEntryLogger(conf, directories, listener, stats, allocator, true);
     }
 
+    static DefaultEntryLogger forClassicHistory(ServerConfiguration conf, LedgerDirsManager directories,
+            EntryLogListener listener, StatsLogger stats, ByteBufAllocator allocator) throws IOException {
+        if (conf.isEntryLogPerLedgerEnabled()) {
+            throw new IllegalArgumentException("Controlled Classic history requires a single entry-log manager");
+        }
+        return new DefaultEntryLogger(conf, directories, listener, stats, allocator, true, true);
+    }
+
     private DefaultEntryLogger(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
             EntryLogListener listener, StatsLogger statsLogger, ByteBufAllocator allocator,
             boolean freshLifecycle) throws IOException {
+        this(conf, ledgerDirsManager, listener, statsLogger, allocator, freshLifecycle, false);
+    }
+
+    private DefaultEntryLogger(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
+            EntryLogListener listener, StatsLogger statsLogger, ByteBufAllocator allocator,
+            boolean freshLifecycle, boolean historical) throws IOException {
         this.freshLifecycle = freshLifecycle;
+        history = historical ? new ClassicHistoryFiles() : null;
         freshInitializationStats = freshLifecycle ? statsLogger : null;
         freshCloseLock = freshLifecycle ? new Object() : null;
         freshReadGate = freshLifecycle ? new Object() : null;
@@ -508,8 +524,16 @@ public class DefaultEntryLogger implements EntryLogger {
     }
 
     void initializeForFresh() throws IOException {
-        if (!freshLifecycle) {
-            throw new IllegalStateException("Fresh initialization requires an explicit fresh entry logger");
+        initializeOwned(false);
+    }
+
+    void initializeForClassicHistory() throws IOException {
+        initializeOwned(true);
+    }
+
+    private void initializeOwned(boolean historical) throws IOException {
+        if (!freshLifecycle || historical != (history != null)) {
+            throw new IllegalStateException("Entry-log initializer does not match its original owned context");
         }
         synchronized (freshCloseLock) {
             if (freshClosing || freshInitializeStarted) {
@@ -531,8 +555,8 @@ public class DefaultEntryLogger implements EntryLogger {
     }
 
     private void checkFreshInitializationContinues() throws IOException {
-        if (freshLifecycle && freshClosing) {
-            throw new IOException("Fresh entry logger closed during initialization");
+        if (freshLifecycle && (freshClosing || history != null && !history.healthy())) {
+            throw new IOException("Owned entry logger closed or lost a native reader during initialization");
         }
     }
 
@@ -552,6 +576,10 @@ public class DefaultEntryLogger implements EntryLogger {
             if (!dir.exists()) {
                 throw new FileNotFoundException(
                         "Entry log directory '" + dir + "' does not exist");
+            }
+            if (history != null) {
+                logId = Math.max(logId, historicalLogId(dir));
+                continue;
             }
             if (freshLifecycle) {
                 String[] members = dir.list();
@@ -594,6 +622,53 @@ public class DefaultEntryLogger implements EntryLogger {
             this.entryLogManager = new EntryLogManagerForSingleEntryLog(conf, ledgerDirsManager, entryLoggerAllocator,
                     listeners, recentlyCreatedEntryLogsStatus);
         }
+    }
+
+    /** Same lastId hint and largest-gap selection, with explicit directory/read native close results. */
+    private long historicalLogId(File directory) throws IOException {
+        List<Integer> ids = new ArrayList<>();
+        long largestRegular = INVALID_LID;
+        try (var read = history.openDirectory(directory.toPath())) {
+            for (var path : read.listing) {
+                String name = path.getFileName().toString();
+                var regular = LedgerDirUtil.FILE_PATTERN.matcher(name);
+                var compacted = LedgerDirUtil.COMPACTED_FILE_PATTERN.matcher(name);
+                boolean isRegular = regular.matches();
+                if (!isRegular && !compacted.matches()) {
+                    continue;
+                }
+                ClassicHistoryFiles.fileIdentity(path);
+                String hex = isRegular ? regular.group(1) : compacted.group(1);
+                try {
+                    ids.add(Integer.parseUnsignedInt(hex, 16));
+                    if (isRegular) {
+                        largestRegular = Math.max(largestRegular, Long.parseLong(hex, 16));
+                    }
+                } catch (NumberFormatException invalid) {
+                    throw new IOException("Historical entry-log file ID is invalid: " + path, invalid);
+                }
+            }
+        }
+        long hint = INVALID_LID;
+        var lastId = directory.toPath().resolve("lastId");
+        java.nio.file.attribute.BasicFileAttributes hintIdentity;
+        try {
+            hintIdentity = ClassicHistoryFiles.fileIdentity(lastId);
+        } catch (java.nio.file.NoSuchFileException absentHint) {
+            hintIdentity = null;
+        }
+        if (hintIdentity != null && hintIdentity.size() <= 64) {
+            byte[] bytes = history.read(lastId, 0, 64);
+            String line = new String(bytes, UTF_8).split("\\R", 2)[0];
+            try {
+                hint = Long.parseLong(line, 16);
+            } catch (NumberFormatException invalidHint) {
+                // lastId is a hint. As in the legacy path, a malformed hint falls back to actual files.
+            }
+        }
+        long fromHintOrFiles = hint > 0 ? hint : largestRegular;
+        long fromGap = ids.isEmpty() ? INVALID_LID : LedgerDirUtil.findLargestGap(ids).getLeft() - 1L;
+        return Math.max(fromHintOrFiles, fromGap);
     }
 
     EntryLogManager getEntryLogManager() {
@@ -1764,8 +1839,13 @@ public class DefaultEntryLogger implements EntryLogger {
                     closeFailure = mergeFreshFailure(closeFailure, failure);
                 }
             }
+            var historyResult = history == null ? null : history.closeAndDrain();
+            if (historyResult != null) {
+                closeFailure = mergeFreshFailure(closeFailure, historyResult.closeFailure());
+            }
             synchronized (freshReadGate) {
-                boolean drained = (allocation == null || allocation.drained()) && (manager == null || manager.drained())
+                boolean drained = (historyResult == null || historyResult.drained())
+                        && (allocation == null || allocation.drained()) && (manager == null || manager.drained())
                         && compactionLogChannel == null && freshReadChannels.isEmpty() && freshPendingReads.isEmpty()
                         && freshCompactionSizeFailure == null;
                 if (drained) {

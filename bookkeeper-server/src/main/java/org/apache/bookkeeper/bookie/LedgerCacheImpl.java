@@ -62,13 +62,26 @@ public class LedgerCacheImpl implements LedgerCache {
         return new LedgerCacheImpl(conf, activeLedgers, directories, statsLogger, true);
     }
 
+    static LedgerCacheImpl forClassicHistory(ServerConfiguration conf, SnapshotMap<Long, Boolean> activeLedgers,
+            LedgerDirsManager directories, StatsLogger stats) throws IOException {
+        return new LedgerCacheImpl(conf, activeLedgers, directories, stats, true, true);
+    }
+
     private LedgerCacheImpl(ServerConfiguration conf, SnapshotMap<Long, Boolean> activeLedgers,
             LedgerDirsManager ledgerDirsManager, StatsLogger statsLogger, boolean freshLifecycle) throws IOException {
+        this(conf, activeLedgers, ledgerDirsManager, statsLogger, freshLifecycle, false);
+    }
+
+    private LedgerCacheImpl(ServerConfiguration conf, SnapshotMap<Long, Boolean> activeLedgers,
+            LedgerDirsManager ledgerDirsManager, StatsLogger statsLogger, boolean freshLifecycle, boolean historical)
+            throws IOException {
         this.freshLifecycle = freshLifecycle;
         this.pageSize = conf.getPageSize();
         this.entriesPerPage = pageSize / 8;
-        this.indexPersistenceManager = freshLifecycle
-                ? IndexPersistenceMgr.forFresh(
+        this.indexPersistenceManager = historical
+                ? IndexPersistenceMgr.forClassicHistory(
+                        pageSize, entriesPerPage, conf, activeLedgers, ledgerDirsManager, statsLogger)
+                : freshLifecycle ? IndexPersistenceMgr.forFresh(
                         pageSize, entriesPerPage, conf, activeLedgers, ledgerDirsManager, statsLogger)
                 : new IndexPersistenceMgr(
                         pageSize, entriesPerPage, conf, activeLedgers, ledgerDirsManager, statsLogger);
@@ -78,6 +91,10 @@ public class LedgerCacheImpl implements LedgerCache {
 
     void initializeForFresh() throws IOException {
         indexPersistenceManager.initializeForFresh();
+    }
+
+    void initializeForClassicHistory() throws IOException {
+        indexPersistenceManager.initializeForClassicHistory();
     }
 
     FileInfoBackingCache.FreshDrainResult closeForFresh() throws InterruptedException {
