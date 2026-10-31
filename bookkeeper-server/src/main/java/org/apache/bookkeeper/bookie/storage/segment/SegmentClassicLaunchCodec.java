@@ -159,6 +159,17 @@ final class SegmentClassicLaunchCodec {
         }
     }
 
+    /** Canonical data only, without a signature. The original launcher alone owns signing authority. */
+    static byte[] encodeUnsignedStart(Start start) {
+        ByteBuffer b = header(MAX_START_BYTES - SIGNATURE_BYTES, START_MAGIC);
+        b.put(start.signerKeyId().value()).putInt(1);
+        putHello(b, start.hello());
+        b.putLong(start.launcherEpisode().getMostSignificantBits())
+                .putLong(start.launcherEpisode().getLeastSignificantBits());
+        b.putInt(12, b.position() - START_HEADER_BYTES);
+        return Arrays.copyOf(b.array(), b.position());
+    }
+
     /** No signing API. Trust and current process/source checks belong to the retained fixed launcher/child. */
     static Start verifyStart(byte[] encoded, SegmentClassicHandoff.Digest signer, PublicKey trustedKey,
                              Hello expected) throws IOException {

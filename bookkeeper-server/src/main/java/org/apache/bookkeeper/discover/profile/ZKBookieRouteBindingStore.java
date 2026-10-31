@@ -85,7 +85,7 @@ public final class ZKBookieRouteBindingStore {
 
         /** Every invocation rechecks native absence and original source bytes; never provisions or registers. */
         public synchronized ClassicLaunchSnapshot read() throws IOException {
-            return read(0, 0, false);
+            return read(0, 0, false, 0, true);
         }
 
         /** Final cold observation after this raw session registered; no registration or permission is issued. */
@@ -95,17 +95,40 @@ public final class ZKBookieRouteBindingStore {
                     || zk.getSessionId() != session || !zk.getState().isAlive()) {
                 throw new IOException("Original raw Classic registration session is unavailable");
             }
-            return read(session, birth, readOnly);
+            return read(session, birth, readOnly, session, true);
         }
 
-        private ClassicLaunchSnapshot read(long session, long birth, boolean readOnly) throws IOException {
+        /** Independent raw observer of the child's advertised registration. Data only, never a launch permit. */
+        public synchronized ClassicLaunchSnapshot readForObservedRegistration(long session, long birth,
+                boolean readOnly) throws IOException {
+            long observer = zk.getSessionId();
+            if (session == 0 || birth <= 0 || zk.getClass() != ZooKeeper.class || observer == 0
+                    || observer == session || !zk.getState().isAlive()) {
+                throw new IOException("Independent original raw registration observer is unavailable");
+            }
+            return read(session, birth, readOnly, observer, true);
+        }
+
+        /** Post-exit source/registration data only. Existing commissioning is allowed, never adopted or modified. */
+        public synchronized ClassicLaunchSnapshot readAfterServiceStopped() throws IOException {
+            if (zk.getClass() != ZooKeeper.class || zk.getSessionId() == 0 || !zk.getState().isAlive()) {
+                throw new IOException("Original raw stopped-service observer is unavailable");
+            }
+            return read(0, 0, false, 0, false);
+        }
+
+        private ClassicLaunchSnapshot read(long session, long birth, boolean readOnly, long observerSession,
+                boolean nativeAbsent)
+                throws IOException {
             if (closing || readingThread != null || firstReadFailure != null) {
                 throw new IOException("Classic launch sources are closing or failed", firstReadFailure);
             }
             readingThread = Thread.currentThread();
             try {
                 long deadline = System.nanoTime() + readTimeoutNanos;
-                requireAbsent(deadline);
+                if (nativeAbsent) {
+                    requireAbsent(deadline);
+                }
                 var cluster = reader.get(instancePath, deadline);
                 if (cluster.code() != Code.OK.intValue() || cluster.stat() == null
                         || cluster.stat().getEphemeralOwner() != 0 || cluster.stat().getVersion() != 0
@@ -136,7 +159,7 @@ public final class ZKBookieRouteBindingStore {
                     if (session != 0 && i == (readOnly ? 1 : 0)) {
                         if (result.code() != Code.OK.intValue() || result.stat() == null
                                 || result.stat().getEphemeralOwner() != session || result.stat().getCzxid() != birth
-                                || result.stat().getVersion() != 0 || zk.getSessionId() != session
+                                || result.stat().getVersion() != 0 || zk.getSessionId() != observerSession
                                 || !zk.getState().isAlive()) {
                             throw new IOException("Classic service registration is not its original session/birth");
                         }
@@ -144,7 +167,9 @@ public final class ZKBookieRouteBindingStore {
                         throw new IOException("Classic launch other registration absence is not established");
                     }
                 }
-                requireAbsent(deadline);
+                if (nativeAbsent) {
+                    requireAbsent(deadline);
+                }
                 return new ClassicLaunchSnapshot(ledgersRoot, bookie, clusterId, cluster.stat().getCzxid(),
                         source, cookie.bytes());
             } catch (InterruptedException interrupted) {

@@ -136,6 +136,32 @@ public class SegmentClassicChildTest {
         assertThrows(IOException.class, () -> truncated.read(SegmentClassicChild.Control.START));
     }
 
+    @Test
+    public void parentCanReceiveReadyOrEarlyTerminalAndRequiresTheOriginalOutputEof() throws Exception {
+        for (boolean ready : List.of(false, true)) {
+            var bytes = new ByteArrayOutputStream();
+            var writer = new SegmentClassicChild.Control(new ByteArrayInputStream(new byte[0]), bytes);
+            if (ready) {
+                writer.write(SegmentClassicChild.Control.READY, new byte[40]);
+            }
+            writer.write(SegmentClassicChild.Control.COMPONENTS_TERMINAL, new byte[24]);
+            var reader = new SegmentClassicChild.Control(new ByteArrayInputStream(bytes.toByteArray()),
+                    new ByteArrayOutputStream());
+            var first = reader.readFrame(SegmentClassicChild.Control.READY,
+                    SegmentClassicChild.Control.COMPONENTS_TERMINAL);
+            assertEquals(ready ? SegmentClassicChild.Control.READY : SegmentClassicChild.Control.COMPONENTS_TERMINAL,
+                    first.type());
+            if (ready) {
+                assertEquals(SegmentClassicChild.Control.COMPONENTS_TERMINAL,
+                        reader.readFrame(SegmentClassicChild.Control.COMPONENTS_TERMINAL).type());
+            }
+            reader.requireOutputEof();
+        }
+        var trailing = new SegmentClassicChild.Control(new ByteArrayInputStream(new byte[]{1}),
+                new ByteArrayOutputStream());
+        assertThrows(IOException.class, trailing::requireOutputEof);
+    }
+
     @Test(timeout = 10000)
     public void waitingBeforeStartAndMultipleObserversReturnOnlyTheActualFailedEpisode() throws Exception {
         var owner = SegmentClassicChild.create("not-the-fixed-main");

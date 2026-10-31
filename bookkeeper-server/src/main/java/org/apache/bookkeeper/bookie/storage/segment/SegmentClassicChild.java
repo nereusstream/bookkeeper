@@ -175,6 +175,8 @@ public final class SegmentClassicChild {
         private boolean inputAcquiring;
         private Throwable closeFailure;
 
+        record Frame(int type, byte[] payload) { }
+
         void open() throws IOException {
             outputAcquiring = true;
             output = new FileOutputStream(FileDescriptor.out);
@@ -187,11 +189,22 @@ public final class SegmentClassicChild {
         Control() { }
 
         Control(InputStream input, OutputStream output) {
-            this.input = Objects.requireNonNull(input, "input");
-            this.output = Objects.requireNonNull(output, "output");
+            attach(input, output);
+        }
+
+        void attach(InputStream originalInput, OutputStream originalOutput) {
+            if (input != null || output != null || inputCloseAttempted || outputCloseAttempted) {
+                throw new IllegalStateException("Original controlled pipe attaches once");
+            }
+            input = Objects.requireNonNull(originalInput, "input");
+            output = Objects.requireNonNull(originalOutput, "output");
         }
 
         byte[] read(int expected) throws IOException {
+            return readFrame(expected).payload();
+        }
+
+        Frame readFrame(int... expected) throws IOException {
             byte[] header = readFully(16);
             ByteBuffer h = ByteBuffer.wrap(header);
             int magic = h.getInt();
@@ -199,12 +212,26 @@ public final class SegmentClassicChild {
             int type = Short.toUnsignedInt(h.getShort());
             int flags = h.getInt();
             int size = h.getInt();
-            if (magic != MAGIC || version != 1 || type != expected || flags != 0
+            boolean accepted = false;
+            for (int candidate : expected) {
+                accepted |= candidate == type;
+            }
+            if (magic != MAGIC || version != 1 || !accepted || flags != 0
                     || (received & (1 << type)) != 0 || !validSize(type, size)) {
                 throw new IOException("Invalid or out-of-order controlled Classic pipe header");
             }
             received |= 1 << type;
-            return readFully(size);
+            return new Frame(type, readFully(size));
+        }
+
+        void requireOutputEof() throws IOException {
+            if (input.read() != -1) {
+                throw new IOException("Unexpected bytes after the controlled terminal frame");
+            }
+        }
+
+        Throwable closeFailure() {
+            return closeFailure;
         }
 
         private byte[] readFully(int length) throws IOException {
@@ -531,7 +558,7 @@ public final class SegmentClassicChild {
         var store = new ZKBookieRouteBindingStore(metadata, uri.getPath(), ZkUtils.getACLs(configuration),
                 remaining());
         sources = store.borrowClassicLaunchSources(BookieImpl.getBookieId(configuration), remaining());
-        var original = originalScope(sources.read());
+        var original = originalScope(configuration, sources.read());
         if (!original.identity().equals(material.recipe().originalScope())) {
             throw new IOException("Current original Classic source differs from the installed recipe");
         }
@@ -553,7 +580,7 @@ public final class SegmentClassicChild {
         var verified = SegmentClassicLaunchCodec.verifyStart(packet, material.recipe().signerKeyId(),
                 material.publicKey(), hello);
         requireCredentials(material.recipe());
-        if (!originalScope(sources.read()).identity().equals(hello.originalScope())) {
+        if (!originalScope(configuration, sources.read()).identity().equals(hello.originalScope())) {
             throw new IOException("Classic source changed before START consumption");
         }
         synchronized (gate) {
@@ -593,7 +620,8 @@ public final class SegmentClassicChild {
         checkStarting();
         resources.prepareNetwork();
         var serving = resources.registrationEpisode();
-        if (!originalScope(sources.readForServing(serving.session(), serving.birth(), serving.readOnly()))
+        if (!originalScope(configuration,
+                sources.readForServing(serving.session(), serving.birth(), serving.readOnly()))
                 .identity().equals(hello.originalScope())) {
             throw new IOException("Original Classic source changed before READY");
         }
@@ -615,7 +643,7 @@ public final class SegmentClassicChild {
         }
     }
 
-    private SegmentClassicLaunchCodec.OriginalScope originalScope(
+    static SegmentClassicLaunchCodec.OriginalScope originalScope(ServerConfiguration configuration,
             ZKBookieRouteBindingStore.ClassicLaunchSnapshot snapshot) {
         var roots = new TreeMap<String, EnumSet<SegmentArenaManifest.ClassicRole>>();
         List<File[]> directories = List.of(configuration.getJournalDirs(), configuration.getLedgerDirs(),

@@ -87,6 +87,143 @@ public class SegmentClassicLaunchTrustTest {
         return SegmentClassicLaunchTrust.forMaterialIoTests(root, "classic-1", uid);
     }
 
+    private Path launcherDirectory() throws Exception {
+        Path directory = Files.createDirectory(root.resolve("launcher"));
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
+        return directory;
+    }
+
+    @Test
+    public void parentOnlyMaterialLeavesRemainPrivateAndCannotProduceInstalledProvenance() throws Exception {
+        Path directory = launcherDirectory();
+        byte[] descriptor = new byte[32];
+        byte[] privateKey = new byte[48];
+        Path input = directory.resolve("classic-1.launcher");
+        Path secret = directory.resolve("issuer-1.pk8");
+        Files.write(input, descriptor);
+        Files.write(secret, privateKey);
+        Files.setPosixFilePermissions(input, PosixFilePermissions.fromString("rw-------"));
+        Files.setPosixFilePermissions(secret, PosixFilePermissions.fromString("rw-------"));
+        var owner = owner();
+        owner.initialize();
+        assertThrows(IOException.class, owner::readLauncherPrivateKey);
+        assertArrayEquals(descriptor, owner.readLauncherDescriptor());
+        assertArrayEquals(privateKey, owner.readLauncherPrivateKey());
+        assertThrows(IOException.class, owner::readLauncherDescriptor);
+        assertThrows(IOException.class, owner::readLauncherPrivateKey);
+        assertThrows(IOException.class, owner::installed);
+        assertTrue(owner.closeAndDrain().drained());
+        assertArrayEquals(privateKey, Files.readAllBytes(secret));
+    }
+
+    @Test
+    public void parentPrivateDirectoryAndFilePermissionsDoNotInheritTheChildPublicReadPolicy() throws Exception {
+        Path directory = launcherDirectory();
+        Path input = directory.resolve("classic-1.launcher");
+        write(input, new byte[32]); // Public-readable is valid for child public files, but never parent files.
+        var publicFile = owner();
+        publicFile.initialize();
+        assertThrows(IOException.class, publicFile::readLauncherDescriptor);
+        assertTrue(publicFile.closeAndDrain().drained());
+        assertTrue(publicFile.closeAndDrain().launcherFailure() instanceof IOException);
+        Files.setPosixFilePermissions(input, PosixFilePermissions.fromString("rw-------"));
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwxr-x---"));
+        var readableDirectory = owner();
+        readableDirectory.initialize();
+        assertThrows(IOException.class, readableDirectory::readLauncherDescriptor);
+        assertTrue(readableDirectory.closeAndDrain().drained());
+        assertEquals("rwxr-x---", PosixFilePermissions.toString(Files.getPosixFilePermissions(directory)));
+    }
+
+    @Test
+    public void privateKeyFirstCloseFailureRetainsTheOriginalHandleAndDoesNotRetry() throws Exception {
+        Path directory = launcherDirectory();
+        Path input = directory.resolve("classic-1.launcher");
+        Path secret = directory.resolve("issuer-1.pk8");
+        for (Path path : new Path[]{input, secret}) {
+            Files.write(path, new byte[path.equals(secret) ? 48 : 32]);
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"));
+        }
+        var owner = owner();
+        owner.initialize();
+        owner.readLauncherDescriptor();
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        IOException failure = new IOException("private key first native close");
+        try (var opens = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && secret.equals(invocation.getArgument(0))) {
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                fault.closeFailure = failure;
+                captured.set(fault);
+                return fault;
+            }
+            return actual;
+        })) {
+            assertSame(failure, assertThrows(IOException.class, owner::readLauncherPrivateKey));
+        }
+        try {
+            assertThrows(IOException.class, owner::readLauncherPrivateKey);
+            assertFalse(owner.closeAndDrain().drained());
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+            assertSame(failure, owner.closeAndDrain().files().closeFailure());
+            assertEquals(1, captured.get().closes.get());
+            assertTrue(captured.get().actual.isOpen());
+        } finally {
+            captured.get().actual.close();
+        }
+        assertFalse(owner.closeAndDrain().drained());
+    }
+
+    @Test
+    public void dropperFileHashAndExactNativeHeadersRejectScriptsClassFilesAndWrongArchitectures() throws Exception {
+        Path executable = root.resolve("exec-dropper");
+        for (String os : java.util.List.of("linux", "macos")) {
+            for (int variant = 0; variant < 5; variant++) {
+                byte[] bytes = new byte[32];
+                ByteBuffer little = ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+                if (os.equals("linux")) {
+                    ByteBuffer.wrap(bytes).putInt(0x7f454c46);
+                    bytes[4] = 2;
+                    bytes[5] = 1;
+                    bytes[6] = 1;
+                    little.putShort(16, (short) 3).putShort(18, (short) (variant == 2 ? 62 : 183));
+                    little.putLong(24, variant == 3 ? 0 : 1);
+                } else {
+                    little.putInt(0, 0xfeedfacf).putInt(4, variant == 2 ? 0x01000007 : 0x0100000c);
+                    little.putInt(12, variant == 3 ? 6 : 2);
+                }
+                if (variant == 1) {
+                    ByteBuffer.wrap(bytes).putInt(0xcafebabe); // Java class prefix is not a supported exec binary.
+                } else if (variant == 4) {
+                    ByteBuffer.wrap(bytes).put("#!/bin/sh\n".getBytes(StandardCharsets.US_ASCII));
+                }
+                Files.write(executable, bytes);
+                Files.setPosixFilePermissions(executable, PosixFilePermissions.fromString("rwxr-xr-x"));
+                var owner = owner();
+                owner.initialize();
+                var parsed = owner.parsed();
+                Path directory = root.getParent().resolve("supervisor");
+                var descriptor = new SegmentClassicLauncherInputs("classic-1", parsed.recipeIdentity(),
+                        parsed.recipe().signerKeyId(),
+                        SegmentClassicLauncherInputs.parentProgramIdentity(parsed.recipe().program()), os, "aarch64",
+                        new SegmentClassicLaunchProgram.File(executable, SegmentClassicLaunchProgram.NATIVE,
+                                bytes.length, SegmentClassicHandoff.digest(bytes)), directory, 501,
+                        root.resolve("manifest"), directory.resolve("proof"), directory.resolve("policy"),
+                        directory.resolve("aes"));
+                if (variant == 0) {
+                    owner.verifyLauncherDropper(descriptor, System.nanoTime() + TimeUnit.MINUTES.toNanos(1));
+                } else {
+                    assertThrows(IOException.class, () -> owner.verifyLauncherDropper(descriptor,
+                            System.nanoTime() + TimeUnit.MINUTES.toNanos(1)));
+                }
+                assertThrows(IOException.class, owner::installed);
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+        // These are synthetic header files and real reads, never executed or qualified droppers.
+    }
+
     private void rejected() throws Exception {
         var owner = owner();
         try {

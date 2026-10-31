@@ -50,7 +50,7 @@ import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOBootstrap;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 
-/** Owned installed public trust I/O. Does not verify the running program or issue startup authority. */
+/** Owned fixed trust I/O. Parent-private reads do not verify a running issuer or issue startup authority. */
 final class SegmentClassicLaunchTrust {
     private static final long MAGIC = 0x5557434c52303031L; // UWCLR001
     static final int MAX_RECIPE_BYTES = 4096;
@@ -108,7 +108,7 @@ final class SegmentClassicLaunchTrust {
 
     record Drain(boolean drained, Throwable initializationFailure, SegmentOwnedFiles.Result files,
                  int retainedAuxiliaryReads, Throwable auxiliaryCloseFailure, Throwable programFailure,
-                 Throwable configurationFailure) { }
+                 Throwable configurationFailure, Throwable launcherFailure) { }
 
     private static final class AuxiliaryRead {
         AutoCloseable resource;
@@ -135,6 +135,9 @@ final class SegmentClassicLaunchTrust {
     private Throwable programFailure;
     private boolean configurationAttempted;
     private Throwable configurationFailure;
+    private boolean launcherDescriptorAttempted;
+    private boolean launcherKeyAttempted;
+    private Throwable launcherFailure;
     private Throwable auxiliaryCloseFailure;
     private final List<AuxiliaryRead> auxiliaryReads = new ArrayList<>();
 
@@ -308,12 +311,106 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Fixed parent-only leaf; these bytes are not installed issuer provenance or a Process observation. */
+    synchronized byte[] readLauncherDescriptor() throws IOException {
+        requireReady();
+        if (launcherDescriptorAttempted) {
+            throw new IOException("Original launcher descriptor read is one-use");
+        }
+        launcherDescriptorAttempted = true;
+        return readLauncherPrivate(recipeId + ".launcher", 16, SegmentClassicLauncherInputs.MAX_BYTES);
+    }
+
+    /** Key name is anchored by the original recipe, never by a command or a received packet. */
+    synchronized byte[] readLauncherPrivateKey() throws IOException {
+        requireReady();
+        if (!launcherDescriptorAttempted || launcherKeyAttempted) {
+            throw new IOException("Original launcher key follows its descriptor and is one-use");
+        }
+        launcherKeyAttempted = true;
+        return readLauncherPrivate(parsed.recipe().keyName() + ".pk8", 48, 48);
+    }
+
+    synchronized void verifyLauncherDropper(SegmentClassicLauncherInputs input, long deadlineNanos)
+            throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadlineNanos);
+            input.requireRecipe(parsed);
+            var file = input.dropper();
+            Identity original = checked(file.path());
+            if ((original.mode() & 0111) == 0) {
+                throw new IOException("Approved exec-dropper is not executable");
+            }
+            hashProgramFile(file, deadlineNanos);
+            byte[] header = new byte[32];
+            try (FileChannel channel = SegmentOwnedFiles.open(files, file.path(), StandardOpenOption.READ,
+                    LinkOption.NOFOLLOW_LINKS)) {
+                SegmentFileIo.readFully(channel, ByteBuffer.wrap(header), 0);
+            }
+            int magic = ByteBuffer.wrap(header).getInt();
+            ByteBuffer nativeHeader = ByteBuffer.wrap(header).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            boolean nativeExecutable;
+            if (input.os().equals("linux")) {
+                int kind = Short.toUnsignedInt(nativeHeader.getShort(16));
+                int machine = input.architecture().equals("x86_64") ? 62 : 183;
+                nativeExecutable = magic == 0x7f454c46 && header[4] == 2 && header[5] == 1 && header[6] == 1
+                        && (kind == 2 || kind == 3) && Short.toUnsignedInt(nativeHeader.getShort(18)) == machine
+                        && nativeHeader.getLong(24) != 0;
+            } else {
+                int machine = input.architecture().equals("x86_64") ? 0x01000007 : 0x0100000c;
+                nativeExecutable = magic == 0xcffaedfe && nativeHeader.getInt(4) == machine
+                        && nativeHeader.getInt(12) == 2;
+            }
+            if (!nativeExecutable) {
+                throw new IOException("Approved exec-dropper requires a thin native executable of its exact platform");
+            }
+            if (!original.equals(checked(file.path()))) {
+                throw new IOException("Approved exec-dropper changed during verification");
+            }
+            files.requireHealthy();
+        } catch (IOException | RuntimeException | Error problem) {
+            launcherFailure = problem;
+            throw problem;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private byte[] readLauncherPrivate(String leaf, int minimum, int maximum) throws IOException {
+        initializingThread = Thread.currentThread();
+        try {
+            Path directory = root.resolve("launcher");
+            Identity parent = checked(directory);
+            if (!parent.directory() || parent.uid() != ownerUid || (parent.mode() & 07777) != 0700) {
+                throw new IOException("Launcher material directory must be private to its fixed owner");
+            }
+            Path path = directory.resolve(leaf);
+            Identity original = checked(path);
+            if (original.uid() != ownerUid || (original.mode() & 07777) != 0600) {
+                throw new IOException("Launcher descriptor and key require exact private file permissions");
+            }
+            byte[] bytes = read(path, minimum, maximum);
+            if (!original.equals(checked(path)) || !parent.equals(checked(directory))) {
+                throw new IOException("Original private launcher material changed during its read");
+            }
+            return bytes;
+        } catch (IOException | RuntimeException | Error problem) {
+            launcherFailure = problem;
+            throw problem;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
     private void requireReady() throws IOException {
         if (parsed == null || closing || initializationFailure != null || programFailure != null
-                || configurationFailure != null) {
+                || configurationFailure != null || launcherFailure != null) {
             throw new IOException("Installed Classic trust is not ready or is closing",
                     initializationFailure != null ? initializationFailure
-                            : programFailure != null ? programFailure : configurationFailure);
+                            : programFailure != null ? programFailure
+                            : configurationFailure != null ? configurationFailure : launcherFailure);
         }
         files.requireHealthy();
         if (preload != null) {
@@ -341,7 +438,7 @@ final class SegmentClassicLaunchTrust {
         }
         var result = files.drain();
         return new Drain(result.drained() && auxiliaryReads.isEmpty(), initializationFailure, result,
-                auxiliaryReads.size(), auxiliaryCloseFailure, programFailure, configurationFailure);
+                auxiliaryReads.size(), auxiliaryCloseFailure, programFailure, configurationFailure, launcherFailure);
     }
 
     private void hashProgramFile(SegmentClassicLaunchProgram.File file, long deadlineNanos) throws IOException {

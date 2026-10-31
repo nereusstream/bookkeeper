@@ -88,6 +88,11 @@ public class SegmentClassicLaunchCodecTest {
         assertArrayEquals(h, SegmentClassicLaunchCodec.encodeHello(hello()));
         assertEquals(hello(), SegmentClassicLaunchCodec.decodeHello(h));
         assertArrayEquals(s, resign(s));
+        byte[] unsigned = SegmentClassicLaunchCodec.encodeUnsignedStart(
+                new SegmentClassicLaunchCodec.Start(digest(9), hello(), new UUID(0, 7)));
+        assertArrayEquals(Arrays.copyOf(s, s.length - 64), unsigned);
+        assertThrows(IOException.class,
+                () -> SegmentClassicLaunchCodec.verifyStart(unsigned, digest(9), publicKey(), hello()));
         assertEquals(new SegmentClassicLaunchCodec.Start(digest(9), hello(), new UUID(0, 7)),
                 SegmentClassicLaunchCodec.verifyStart(s, digest(9), publicKey(), hello()));
     }

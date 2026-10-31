@@ -46,6 +46,7 @@ import org.apache.bookkeeper.versioning.Version;
 import org.apache.bookkeeper.versioning.Versioned;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.ZooKeeper;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -89,6 +90,52 @@ public class ZKClassicLaunchSourcesTest extends ProfileZKTestBase {
                 new StorageIncarnation(incarnation), new UUID(0, 9), new ManifestIdentity(manifest),
                 "/launch-fixture/control", actual.cookieIdentity(), BookieRouteBinding.Phase.PREPARED,
                 Optional.empty());
+    }
+
+    @Test(timeout = 30000)
+    public void independentRawObserverChecksAnotherSessionsExactRegistrationWithoutAdoptingIt() throws Exception {
+        var connected = new CountDownLatch(1);
+        try (var observer = new ZooKeeper(cluster.getZooKeeperConnectString(), 10000, event -> {
+            if (event.getState() == org.apache.zookeeper.Watcher.Event.KeeperState.SyncConnected) {
+                connected.countDown();
+            }
+        })) {
+            assertTrue(connected.await(10, TimeUnit.SECONDS));
+            assertNotEquals(first.getSessionId(), observer.getSessionId());
+            var store = new ZKBookieRouteBindingStore(observer, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    Duration.ofSeconds(5));
+            var owner = store.borrowClassicLaunchSources(TARGET, Duration.ofSeconds(5));
+            var original = owner.read();
+            String path = ROOT + "/available/" + TARGET;
+            first.create(path, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
+            long birth = first.exists(path, false).getCzxid();
+            var observed = owner.readForObservedRegistration(first.getSessionId(), birth, false);
+            assertEquals(original.cookieIdentity(), observed.cookieIdentity());
+            assertEquals(original.clusterBirthZxid(), observed.clusterBirthZxid());
+            assertThrows(IOException.class, () -> owner.readForServing(first.getSessionId(), birth, false));
+            assertThrows(IOException.class,
+                    () -> owner.readForObservedRegistration(observer.getSessionId(), birth, false));
+            assertEquals(first.getSessionId(), observer.exists(path, false).getEphemeralOwner());
+            drained(owner);
+            var wrong = store.borrowClassicLaunchSources(TARGET, Duration.ofSeconds(5));
+            assertThrows(IOException.class,
+                    () -> wrong.readForObservedRegistration(first.getSessionId(), birth + 1, false));
+            drained(wrong);
+            assertEquals(birth, first.exists(path, false).getCzxid());
+            var stillRunning = store.borrowClassicLaunchSources(TARGET, Duration.ofSeconds(5));
+            assertThrows(IOException.class, stillRunning::readAfterServiceStopped);
+            drained(stillRunning);
+            first.delete(path, 0);
+            assertEquals(BookieRouteBinding.WriteStatus.APPLIED,
+                    manager.prepareBookieRouteBinding(prepared(original)).status());
+            var stopped = store.borrowClassicLaunchSources(TARGET, Duration.ofSeconds(5));
+            assertEquals(original.cookieIdentity(), stopped.readAfterServiceStopped().cookieIdentity());
+            drained(stopped);
+            var newLaunch = store.borrowClassicLaunchSources(TARGET, Duration.ofSeconds(5));
+            assertThrows(IOException.class, newLaunch::read);
+            drained(newLaunch);
+            assertEquals(BookieRouteBinding.ReadStatus.FOUND, manager.readBookieRouteBinding(TARGET).status());
+        }
     }
 
     @Test
