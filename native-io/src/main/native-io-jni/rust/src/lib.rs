@@ -82,10 +82,10 @@ fn throw_exception(env: &mut JNIEnv, message: &str) {
 // JNI exported functions
 // ============================================================================
 
-// Read UTF-16 directly: the usual lossy JavaStr conversion must never rename a different path.
-fn rename_path(env: &mut JNIEnv, path: &JString) -> Option<CString> {
+// Read UTF-16 directly: native operations must never act on a lossy or NUL-truncated replacement path.
+fn native_path(env: &mut JNIEnv, path: &JString) -> Option<CString> {
     if path.is_null() {
-        throw_exception_with_error_code(env, "Null atomic rename path", libc::EINVAL);
+        throw_exception_with_error_code(env, "Null native path", libc::EINVAL);
         return None;
     }
     let units = unsafe {
@@ -105,18 +105,14 @@ fn rename_path(env: &mut JNIEnv, path: &JString) -> Option<CString> {
     let value = match String::from_utf16(&units) {
         Ok(value) => value,
         Err(_) => {
-            throw_exception_with_error_code(
-                env,
-                "Invalid atomic rename path encoding",
-                libc::EINVAL,
-            );
+            throw_exception_with_error_code(env, "Invalid native path encoding", libc::EINVAL);
             return None;
         }
     };
     match CString::new(value) {
         Ok(value) => Some(value),
         Err(_) => {
-            throw_exception_with_error_code(env, "NUL in atomic rename path", libc::EINVAL);
+            throw_exception_with_error_code(env, "NUL in native path", libc::EINVAL);
             None
         }
     }
@@ -130,11 +126,11 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     source: JString,
     target: JString,
 ) -> jint {
-    let source = match rename_path(&mut env, &source) {
+    let source = match native_path(&mut env, &source) {
         Some(path) => path,
         None => return -1,
     };
-    let target = match rename_path(&mut env, &target) {
+    let target = match native_path(&mut env, &target) {
         Some(path) => path,
         None => return -1,
     };
@@ -168,6 +164,153 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
             return -1;
         }
         0
+    }
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn filesec_init() -> *mut c_void;
+    fn filesec_free(security: *mut c_void);
+    fn filesec_query_property(
+        security: *mut c_void,
+        property: libc::c_int,
+        valid: *mut libc::c_int,
+    ) -> libc::c_int;
+    // Match the SDK's inode64 struct stat ABI, also used by libc::stat on macOS.
+    #[cfg_attr(target_arch = "x86_64", link_name = "lstatx_np$INODE64")]
+    #[cfg_attr(not(target_arch = "x86_64"), link_name = "lstatx_np")]
+    fn acl_lstat(
+        path: *const libc::c_char,
+        stat: *mut libc::stat,
+        security: *mut c_void,
+    ) -> libc::c_int;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn acl_presence(path: &CString) -> Result<bool, libc::c_int> {
+    let errno = || {
+        std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO)
+    };
+    let mut before: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::lstat(path.as_ptr(), &mut before) } != 0 {
+        return Err(errno());
+    }
+    let kind = before.st_mode & libc::S_IFMT;
+    if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+        return Err(libc::EINVAL);
+    }
+    let mut filesystem: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(path.as_ptr(), &mut filesystem) } != 0 {
+        return Err(errno());
+    }
+    #[cfg(target_os = "linux")]
+    let present = {
+        // These local filesystems expose access/default POSIX ACLs through the named xattrs.
+        // In particular, never infer NFSv4/SMB/FUSE permissions from absent POSIX ACL attributes.
+        if !matches!(
+            filesystem.f_type as u64,
+            0xef53 | 0x58465342 | 0x9123683e | 0x01021994
+        ) {
+            return Err(libc::EOPNOTSUPP);
+        }
+        let mut present = false;
+        for name in [
+            b"system.posix_acl_access\0".as_slice(),
+            b"system.posix_acl_default\0".as_slice(),
+        ] {
+            let result =
+                unsafe { libc::lgetxattr(path.as_ptr(), name.as_ptr().cast(), ptr::null_mut(), 0) };
+            if result >= 0 {
+                present = true;
+            } else if errno() != libc::ENODATA {
+                return Err(errno());
+            }
+        }
+        present
+    };
+    #[cfg(target_os = "macos")]
+    let present = {
+        let name = unsafe { std::ffi::CStr::from_ptr(filesystem.f_fstypename.as_ptr()) }.to_bytes();
+        if filesystem.f_flags & libc::MNT_LOCAL as u32 == 0 || (name != b"apfs" && name != b"hfs") {
+            return Err(libc::EOPNOTSUPP);
+        }
+        let security = unsafe { filesec_init() };
+        if security.is_null() {
+            return Err(libc::ENOMEM);
+        }
+        let mut observed: libc::stat = unsafe { std::mem::zeroed() };
+        let mut present = -1;
+        let result = if unsafe { acl_lstat(path.as_ptr(), &mut observed, security) } != 0 {
+            Err(errno())
+        } else if observed.st_dev != before.st_dev
+            || observed.st_ino != before.st_ino
+            || observed.st_mode != before.st_mode
+        {
+            Err(libc::EAGAIN)
+        } else if unsafe { filesec_query_property(security, 5, &mut present) } != 0 {
+            // FILESEC_ACL
+            Err(errno())
+        } else if present < 0 {
+            Err(libc::EIO)
+        } else {
+            Ok(present != 0)
+        };
+        // filesec owns its ACL allocation. No descriptor is opened or handed to Java.
+        unsafe { filesec_free(security) };
+        result?
+    };
+    let mut after: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::lstat(path.as_ptr(), &mut after) } != 0 {
+        return Err(errno());
+    }
+    if before.st_dev != after.st_dev
+        || before.st_ino != after.st_ino
+        || before.st_mode != after.st_mode
+        || before.st_uid != after.st_uid
+        || before.st_gid != after.st_gid
+        || before.st_ctime != after.st_ctime
+        || before.st_ctime_nsec != after.st_ctime_nsec
+    {
+        return Err(libc::EAGAIN);
+    }
+    Ok(present)
+}
+
+/// Read-only ACL presence, not Unix trust. Unsupported or unreadable is never converted to absence.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_hasExtendedAcl(
+    mut env: JNIEnv,
+    _class: JClass,
+    path: JString,
+) -> jint {
+    let path = match native_path(&mut env, &path) {
+        Some(path) => path,
+        None => return -1,
+    };
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    match acl_presence(&path) {
+        Ok(present) => {
+            if present {
+                1
+            } else {
+                0
+            }
+        }
+        Err(errno) => {
+            throw_exception_with_error_code(&mut env, "Native ACL presence query failed", errno);
+            -1
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Native ACL presence query unsupported",
+            libc::ENOSYS,
+        );
+        -1
     }
 }
 

@@ -90,4 +90,19 @@ public class NativeIOImpl implements NativeIO {
             throw failure;
         }
     }
+
+    @Override
+    public boolean hasExtendedAcl(String path) throws NativeIOException {
+        try {
+            int result = NativeIOJni.hasExtendedAcl(path);
+            if (result != 0 && result != 1) {
+                throw new NativeIOException("Unknown native ACL query outcome");
+            }
+            return result == 1;
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("ACL presence query is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
 }

@@ -81,6 +81,8 @@ public class NativeIORenameNoReplaceTest {
         var failure = assertThrows(NativeIOException.class,
                 () -> new LegacyImplementation().renameNoReplace(source.toString(), target.toString()));
         assertEquals(-1, failure.getErrno());
+        assertThrows(NativeIOException.class,
+                () -> new LegacyImplementation().hasExtendedAcl(source.toString()));
         assertArrayEquals(new byte[]{7}, Files.readAllBytes(source));
         assertFalse(Files.exists(target));
     }

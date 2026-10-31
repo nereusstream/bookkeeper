@@ -75,4 +75,13 @@ public interface NativeIO {
     default int renameNoReplace(String source, String target) throws NativeIOException {
         throw new NativeIOException("Atomic rename without replacement is unsupported");
     }
+
+    /**
+     * Query additional ACL presence on an existing regular file or directory on a supported local filesystem.
+     * This does not establish path ownership, parent safety or access authority. Symbolic links, unknown
+     * filesystems and unavailable ACL queries are errors, never an absent ACL. Does not change permissions.
+     */
+    default boolean hasExtendedAcl(String path) throws NativeIOException {
+        throw new NativeIOException("Native ACL presence query is unsupported");
+    }
 }

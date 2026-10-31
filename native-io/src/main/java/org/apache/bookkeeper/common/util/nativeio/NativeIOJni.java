@@ -52,6 +52,8 @@ class NativeIOJni {
 
     static native int renameNoReplace(String source, String target) throws NativeIOException;
 
+    static native int hasExtendedAcl(String path) throws NativeIOException;
+
     static {
         String explicitPath = NativeIOLibraryPath.configuredLibraryPath();
         if (explicitPath != null) {
