@@ -720,6 +720,18 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## Linux conf 的原字节解析与原句柄输入
+
+2026-11-01在父`f672fd5b3904dc0b82aa891ee25e722c14190e09`上增加包内SegmentClassicLinuxConfiguration，并将LOADER_CONFIG接到原trust同一个SHA/metadata FileChannel及首次关闭；读取前按0…1MiB限制声明长度。只做positional读取、不移动调用方channel位置、不open/include/枚举目录或执行ldconfig。保留一份私有原bytes，先完整扫描验证，再由独立顺序cursor按需返回directive、原line/byte-column/include word序号和原行视图，不常驻大量短行对象。返回的bytes可修改副本不改变原图像；结果仍只是数据，不能产生Installed/START、文件批准或loader目录顺序。
+
+按[glibc2.39解析规则](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/ldconfig.c)处理C空白、首个`#`及大小写：include只认精确小写加space/Tab，按space/Tab拆每个pattern，不解释引号或反斜线；CRLF的CR仍可留在pattern末尾。目录行先去尾部C空白、再去尾部slash，不normalize dot/dotdot、不展开变量/tilde、不剥BOM；仅slash的空结果忽略。ignored hwcap按ASCII不区分大小写识别，保留raw字段。有效目录/pattern要求严格UTF8且最多4096字节，无关注释和ignored hwcap允许非UTF8 raw bytes；按规划裁决，任意位置出现NUL（包括注释）明确Unsupported，完整原bytes仍读取/hash，不按C字符串前缀放行。
+
+独立242-byte固定向量SHA-256为`feabdd5dd6b447e4fd716c4b9ab4983d2c331b7b4d5a9fd95dd646f6e80958df`，原Python byte literal可复现；不是发行版conf或实际ldconfig。真实临时文件覆盖1MiB恰好524288个有效短行及一条长raw注释、4096-byte有效token/超限、空配置、期限/零进展/短读/长度变化、原位置不动，以及NUL/坏有效UTF8的拒绝。原owner验证只返回一份实际FileChannel身份且已关闭，不查include目标；原metadata read＋首次close故障用例复用于cache/config两角色，两个失败均保留且不补认drained。首轮两类46项有一夹具把Java open的两个重载调用算为两次资源获取，修为核对原返回channel身份及实际关闭后46项通过；再运行最终串行九类104项全部通过、0失败/错误/跳过，独立Spotless/Checkstyle退出0。原失败及各阶段源码/class/XML分别保留，不移绑旧PASS。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-conf-evidence-f672fd5b`保存三阶段各1421项输入与原快照/父Git字节的逐项核验，最终五个代码/资源与通过test/style快照相同。RAT退出1，原431项路径及父f672字节不变、本次无新增，扫描前排除用户PDF。三raw scope经两次独立lsof及inode/SHA/归档硬链接核验后只清理6目录、22文件路径、1,580,849逻辑字节；原证据保留、regular-file数据块回收0，共享target/精确JNI库未动。本轮没有Rust重建、模型或性能结论，Linux实际接受路径NOT_EXECUTED。
+
+后续include/glob图仍须接原owner，不能由这个parser宣布完整conf闭合。规划已冻结每遍累计16MiB（重复include每次按完整长度计费）、65536次文件展开、65536次pattern求值、32个同时活动上下文（根计入）；A/B各自计费但共享原绝对deadline，目录总成员/名称字节预算继续。循环key须包含实际文件身份和逻辑include基目录/解析上下文，不能仅按同inode重现拒绝；非活动栈重复访问允许，无法证明上下文重复时靠深度/总展开上限终止。任何预算错误都不产生部分图、零匹配或absence成功。完整展开、C locale glob、这些图级计数、新schema/provider原字串、候选/选择/诊断及qualified启动仍OPEN，完整16步active，默认OFF/SYSTEM/PARK和disabled保持。
+
 ## Linux alias 的逐组件解析修复
 
 2026-11-01在父`3cdcfd3fc80ecd856b09fa72f4997756e498f8dc`上修正声明resolver和原trust owner提前normalize的问题：相对target从原链接物理父目录开始，绝对target从根开始；按原顺序展开每个组件，前置链接解析后才处理后续`.`/`..`，保留尾随`/`的目录要求。实际owner观察所有经过的目录、链接及其原始target bytes，包括后来被`..`消去的组件；中间普通文件、缺失、未知链接或权限/ACL失败不再被词法消去。新组件在相关I/O前还须与原字符串形成的UTF8 file:///路径字节等价，避免JNU替换后自洽。原父链保护、lstat/readlink/JNI身份、deadline、A/B观察及原关闭合同保持；最终显式加载叶仍不接受根目录，ALIAS叶只观察而不跟随。

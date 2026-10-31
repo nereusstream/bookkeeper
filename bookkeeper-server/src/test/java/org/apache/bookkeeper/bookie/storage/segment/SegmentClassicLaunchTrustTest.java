@@ -659,6 +659,65 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void loaderConfigurationUsesItsOriginalHashHandleWithoutLookingUpTheIncludePatterns() throws Exception {
+        byte[] bytes = SegmentClassicLinuxConfigurationTest.vector();
+        var file = linuxFile(root.resolve("loader.conf"), SegmentClassicLinuxDeployment.Role.LOADER_CONFIG, bytes);
+        var owner = owner();
+        owner.initialize();
+        var channels = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<FileChannel, Boolean>());
+        try (var calls = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open")) {
+                assertEquals(file.path(), invocation.getArgument(0));
+            }
+            Object actual = invocation.callRealMethod();
+            if (actual instanceof FileChannel channel) {
+                channels.add(channel);
+            }
+            return actual;
+        })) {
+            var observed = owner.verifyLinuxFile(file, SegmentClassicLinuxElfTest.deadline());
+            assertArrayEquals(bytes, observed.configuration().bytes());
+            assertEquals(null, observed.elf());
+            assertEquals(null, observed.cache());
+            assertEquals(1, channels.size());
+            assertFalse(channels.iterator().next().isOpen());
+            assertEquals("/lib", observed.configuration().cursor(SegmentClassicLinuxElfTest.deadline())
+                    .next().value().utf8());
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        var nul = linuxFile(file.path(), file.role(), new byte[]{'#', 0});
+        var rejected = owner();
+        rejected.initialize();
+        try {
+            var failure = assertThrows(SegmentClassicLinuxConfiguration.Unsupported.class,
+                    () -> rejected.verifyLinuxFile(nul, SegmentClassicLinuxElfTest.deadline()));
+            assertSame(failure, rejected.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(rejected.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void loaderConfigurationOverLimitRejectsBeforeAnyTargetFileIo() throws Exception {
+        var input = new SegmentClassicLinuxDeployment.File(root.resolve("not-opened"),
+                SegmentClassicLinuxDeployment.Role.LOADER_CONFIG, SegmentClassicLinuxConfiguration.MAX_BYTES + 1,
+                SegmentClassicHandoff.digest(new byte[0]));
+        var owner = owner();
+        owner.initialize();
+        try (var calls = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Oversized configuration reached file I/O");
+        })) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.verifyLinuxFile(input, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("configuration length"));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
     public void loaderCacheUsesTheSameOriginalHashHandleAndCannotPromoteItsParsedBytes() throws Exception {
         var cache = linuxFile(root.resolve("loader.cache"), SegmentClassicLinuxDeployment.Role.LOADER_CACHE,
                 SegmentClassicLinuxCacheTest.vector());
@@ -698,43 +757,47 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
-    public void loaderCacheMetadataReadAndFirstCloseFailuresKeepBothOriginalResults() throws Exception {
+    public void loaderMetadataReadAndFirstCloseFailuresKeepBothOriginalResults() throws Exception {
         var cache = linuxFile(root.resolve("loader.cache"), SegmentClassicLinuxDeployment.Role.LOADER_CACHE,
                 SegmentClassicLinuxCacheTest.vector());
-        var owner = owner();
-        owner.initialize();
-        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
-        IOException readFailure = new IOException("cache original positional read");
-        IOException closeFailure = new IOException("cache original native first close");
-        try (var calls = mockStatic(FileChannel.class, invocation -> {
-            Object actual = invocation.callRealMethod();
-            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
-                    && cache.path().equals(invocation.getArgument(0))) {
-                var fault = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
-                fault.closeFailure = closeFailure;
-                captured.set(fault);
-                doAnswer(call -> {
-                    throw readFailure;
-                }).when(fault).read(any(ByteBuffer.class), anyLong());
-                return fault;
+        var configuration = linuxFile(root.resolve("loader.conf"), SegmentClassicLinuxDeployment.Role.LOADER_CONFIG,
+                SegmentClassicLinuxConfigurationTest.vector());
+        for (var file : List.of(cache, configuration)) {
+            var owner = owner();
+            owner.initialize();
+            var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+            IOException readFailure = new IOException("original metadata positional read");
+            IOException closeFailure = new IOException("original metadata native first close");
+            try (var calls = mockStatic(FileChannel.class, invocation -> {
+                Object actual = invocation.callRealMethod();
+                if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                        && file.path().equals(invocation.getArgument(0))) {
+                    var fault = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
+                    fault.closeFailure = closeFailure;
+                    captured.set(fault);
+                    doAnswer(call -> {
+                        throw readFailure;
+                    }).when(fault).read(any(ByteBuffer.class), anyLong());
+                    return fault;
+                }
+                return actual;
+            })) {
+                assertSame(readFailure, assertThrows(IOException.class,
+                        () -> owner.verifyLinuxFile(file, SegmentClassicLinuxElfTest.deadline())));
             }
-            return actual;
-        })) {
-            assertSame(readFailure, assertThrows(IOException.class,
-                    () -> owner.verifyLinuxFile(cache, SegmentClassicLinuxElfTest.deadline())));
+            try {
+                var drain = owner.closeAndDrain();
+                assertFalse(drain.drained());
+                assertSame(readFailure, drain.launcherFailure());
+                assertSame(closeFailure, drain.files().closeFailure());
+                assertTrue(Arrays.asList(readFailure.getSuppressed()).contains(closeFailure));
+                assertEquals(1, captured.get().closes.get());
+                assertTrue(captured.get().actual.isOpen());
+            } finally {
+                captured.get().actual.close();
+            }
+            assertFalse(owner.closeAndDrain().drained());
         }
-        try {
-            var drain = owner.closeAndDrain();
-            assertFalse(drain.drained());
-            assertSame(readFailure, drain.launcherFailure());
-            assertSame(closeFailure, drain.files().closeFailure());
-            assertTrue(Arrays.asList(readFailure.getSuppressed()).contains(closeFailure));
-            assertEquals(1, captured.get().closes.get());
-            assertTrue(captured.get().actual.isOpen());
-        } finally {
-            captured.get().actual.close();
-        }
-        assertFalse(owner.closeAndDrain().drained());
     }
 
     @Test
@@ -764,6 +827,7 @@ public class SegmentClassicLaunchTrustTest {
         owner.initialize();
         var config = owner.verifyLinuxFile(empty, SegmentClassicLinuxElfTest.deadline());
         assertEquals(0, config.identity().size());
+        assertEquals(null, config.configuration().cursor(SegmentClassicLinuxElfTest.deadline()).next());
         assertEquals(null, config.elf());
         var image = owner.verifyLinuxFile(library, SegmentClassicLinuxElfTest.deadline());
         assertEquals(Arrays.asList("libz.so.1", "liba.so.2"), image.elf().needed());
