@@ -1012,3 +1012,6 @@ CLIENT-1/2是单独列出的Classic修复计划，不纳入Wave 0历史scope/rec
 
 
 2026-10-31接续[固定交接的原子不覆盖改名](startup-readiness/README.md#固定交接的原子不覆盖改名)：既有native-io增加窄renameNoReplace及旧实现默认拒绝，Linux/macOS使用原生不覆盖操作，无move/hardlink fallback；完整发布仍须owned write/force/首次close成功与目录同步。successor只验证原final，不promote temp；rename后dirsync失败不得回滚或重签。实际原语验证由canonical拥有，owned publisher/issuer/Unix隔离/完整bootstrap仍OPEN，目标active，Main/G1/full-bytes/生产Gate及默认OFF/SYSTEM/PARK和disabled保持。
+
+
+2026-10-31接续[retirement 与 proof 的 owned 文件发布](startup-readiness/README.md#retirement-与-proof-的-owned-文件发布)：包内文件子owner借用原supervisor guard，按owned write/force/首次close成功→原子改名→final身份/bytes复核→目录同步及实际close发布，不覆盖/删除/回滚；原owner资格绑定实际自建intent inode，successor只核验续用原final，不promote已签名temp。首次错误与真实资源drain分开，close未决不发布、不释放借用guard；实际验证由canonical拥有。此子项不发行session或旧服务authority，完整launcher/loader/Unix与离线bootstrap仍OPEN，目标active，Main/G1/full-bytes/生产Gate及默认OFF/SYSTEM/PARK和disabled保持。

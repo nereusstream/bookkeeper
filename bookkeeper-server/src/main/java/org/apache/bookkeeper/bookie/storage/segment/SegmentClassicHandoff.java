@@ -43,6 +43,18 @@ import org.apache.bookkeeper.net.BookieId;
 
 /** Fixed handoff bytes only. Signature verification is not current isolation, commissioning or a bootstrap session. */
 final class SegmentClassicHandoff {
+    /** Fixed supervisor identity is independent of a later commissioning operation and process episode. */
+    record SupervisorScope(String clusterId, long clusterBirthZxid, BookieId bookieId) {
+        SupervisorScope {
+            textBytes(clusterId, 1024);
+            Objects.requireNonNull(bookieId, "bookieId");
+            textBytes(bookieId.toString(), 255);
+            if (clusterBirthZxid <= 0) {
+                throw new IllegalArgumentException("Original native cluster birth required");
+            }
+        }
+    }
+
     static final int MAX_BYTES = 65536;
     static final int HEADER_BYTES = 48;
     static final int SIGNATURE_BYTES = 64;

@@ -461,3 +461,6 @@ metadata ABA最终补验还原原bytes/version/guard内容，仅birth改变仍�
 
 
 2026-10-31接续[Classic bootstrap 的真实冷读与借用回调排空](startup-readiness/README.md#classic-bootstrap-的真实冷读与借用回调排空)：显式native manager桥按真实相同client/固定namespace借用冷读owner，重新读取原native/cluster/Cookie及commissioned requirements并核对共同incarnation/完整manifest与两类registration缺席；超时/中断后仍保留实际回调，首次错误与真实drain分开，未决不关闭caller资源。验证与原始来源由canonical拥有。只返回冷读数据，不发行session；完整loader/launcher/UID隔离、公开bootstrap及Classic恢复封口仍OPEN，完整目标active，Main/G1/full-bytes/生产Gate和默认OFF/SYSTEM/PARK及disabled保持。
+
+
+2026-10-31接续[retirement 与 proof 的 owned 文件发布](startup-readiness/README.md#retirement-与-proof-的-owned-文件发布)：包内文件子owner借用原supervisor guard，按owned write/force/首次close成功→原子改名→final身份/bytes复核→目录同步及实际close发布，不覆盖/删除/回滚；原owner资格绑定实际自建intent inode，successor只核验续用原final，不promote已签名temp。首次错误与真实资源drain分开，close未决不发布、不释放借用guard；实际验证由canonical拥有。此子项不发行session或旧服务authority，完整launcher/loader/Unix与离线bootstrap仍OPEN，目标active，Main/G1/full-bytes/生产Gate及默认OFF/SYSTEM/PARK和disabled保持。

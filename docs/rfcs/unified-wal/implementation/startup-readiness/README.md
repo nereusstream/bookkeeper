@@ -700,3 +700,22 @@ successor恢复规则已由指定规划会话收紧：只有temp，即使完整�
 本次仅实际验证macOS/APFS；Linux运行及交叉编译、跨文件系统的真实调用仍NOT_EXECUTED，不从源码分支或一般errno处理推定通过。RAT实际退出1，431条既有未批准路径及字节与父提交/前次封存相同，无新增或解决；PDF扫描前排除，不宣称全量CI通过。完整owned temp→force/首次close→rename→dirsync发布图、目录同步/关闭失败、successor恢复同步、实际issuer/Unix隔离与离线bootstrap继续OPEN。
 
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/atomic-publication-evidence-facda20f`保留原版/新JNI库、源、命令、实际日志/XML、导出对照、运行时来源与兼容probe。最终声明1340项源码/资源及十项文档输入，本次Maven实际来源清单同为1340项，相关class快照78项。实际终态与两次独立lsof及硬链接/字节/身份核对后，仅移除本次两个raw scope的四个目录、13个文件路径，共897,482逻辑字节；归档硬链接保留，regular-file数据块回收0。另核对两个固定JNI库与实际构建输出完全相同且独立保留后，清理本次两处私有Rust target的86目录、340文件、85,641,851逻辑字节；原库/新库、锁定依赖、源码/日志/指纹及测试证据保留，不将路径逻辑字节当作卷空间回收量。用户PDF、默认目录及其他任务产物未触碰。
+
+
+## retirement 与 proof 的 owned 文件发布
+
+2026-10-31在父源码`6e0909af442c35452c6c569693715f249c2922c4`上，实现包内SegmentClassicHandoffPublication文件资源子owner。构造只冻结固定supervisor scope/材料引用、外部UID与公钥/KeyId、原guard owner及I/O配置；initialize才检查实际issuer UID、规范私有目录/父链及同scope原guard确实持有，guard须属于目标UID。子owner不再取第二个guard、不创建缺失目录/guard，parent从旧服务启动起持原guard，须在全部实际使用者结束及本子owner排空后才释放。原guard新增requireHeld只作实际资源/固定路径检查，不发行metadata或旧服务authority。
+
+retire将原完整operation/members固定为同一规范字节；proof只接受外部已签名且与该retirement逐项匹配的原packet，包内writer没有私钥或sign-facts入口。新文件按同目录唯一candidate、owned CREATE_NEW/WRITE→完整write→仅对本owner新文件设置目标UID→force→首次native close明确成功→原子renameNoReplace→owned final有界重读/身份比较与首次close→目录force及首次close完成。每步复核目录/父链和原guard；不truncate/替换/delete已有final，不回滚或换packet重签。成功文件退役fd不累计；失败/挂起fd保留首次实际结果，签名通过不能掩盖close失败。目标UID设置只作用于本owner新建candidate，既有材料/guard/final不修改。
+
+受保护文件集合为CREATE_NEW＋WRITE增加原子新inode路径：先登记再open，只有原子新建有效时不预读不存在路径作inode别名比较，选项在打开前冻结；READ忽略CREATE_NEW时仍执行原保护检查，既有alias不能被打开后关闭而释放POSIX guard。此变化沿原SegmentOwnedFiles，不增线程/队列/后端。读取与发布共用原Unix路径身份检查，SegmentClassicHandoffPaths仅消除这两条路径的实质重复；原reader的key清零、native close与owned终态合同保持。
+
+只有该owner实际创建的原intent final与其candidate inode一致且目录同步完成后，才允许其写入新的已签proof；successor看到既有intent只可复用原proof final，不能因caller传入合法签名packet而新发。恢复从原final有界读取/验签/原retirement匹配并完成目录恢复同步，不枚举或promote orphan candidate。file force失败不重开未知candidate；rename结果未决不再改名，只在原final出现且与本owner原candidate同inode/同bytes时解析；dirsync失败保留原final，可对同原packet做安全同步重试，首次错误独立保留，不追认原调用成功。首次native close失败则资源图sticky/non-drained，不能由重试同步变成成功。实际I/O未返回时close等待，实际操作线程拒绝自排空或重入；close不释放借用guard。
+
+首组publication/files共14项通过。增加独立JVM的guard仍持有检查及实际UID probe入口后，最终执行publication九项、owned files五项、guard十项、materials八项、codec八项、owned Bookie control九项及既有真实SDK/服务/重启/handoff三个方法：七类52项，0失败/错误/跳过。新覆盖包括文件/目录force失败、原final安全同步重试、实际rename已执行但结果丢失、首次native close失败仍non-drained、实际I/O未返回时外部close等待、caller timeout不终止实际操作、冲突final不变、signed orphan不采用，以及proof file-force前与rename后目录force前的真实子进程cut；不把文件I/O进程cut当作旧服务正常排空或真实掉电。样式首次实际退出1（import顺序与长注释），修正后退出0；早期14项与最终52项分别保留原源码/class绑定。
+
+另以三个真实JVM分别执行UID 501准备、UID 0发布、UID 501读取/恢复原proof，全部退出0；guard/retirement/proof均属501、0600、单链接。probe使用测试签名和合成operation/members，只验证新建文件归属及目标UID实际读取，不证明旧UID进程/fd退出、完整Unix隔离、metadata资格或可采用session。三次调用后的附加检查起初误把fixture父目录当作私有regular file，修正为实际materials子目录后复核原运行与文件，未重跑发布。RAT实际退出1，原431项未批准路径及父Git blob字节不变，扫描前排除用户PDF；Linux、完整launcher/Unix和离线bootstrap验收仍NOT_EXECUTED/OPEN，不宣称全量CI通过。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/owned-publication-evidence-6e0909af`保留各阶段原来源、命令、日志/XML、UID probe与首次失败；本次复用父里程碑封存的精确host JNI库，SHA-256为`619efd63ed22a72536e00d791d679aa6559edc7fdfa68621df50850bc7e5b7a2`，没有重建或改变native源码。最终声明1343项源码/资源、十项文档输入及93项相关class；Maven实际输入同为1343项。实际终态、归档硬链接/字节/身份及两次独立lsof核验后，仅移除本次两个raw scope的四目录、15文件路径、1,129,414逻辑字节；归档硬链接保留，regular-file数据块回收0。UID probe三份材料保留作原始证据，用户PDF、默认目录和其他任务产物未触碰。
+
+本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。

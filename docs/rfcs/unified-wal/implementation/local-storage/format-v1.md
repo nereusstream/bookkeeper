@@ -383,3 +383,6 @@ proof payload依次为operation、u16成员数及带权限的成员数组、u32�
 
 
 原子发布沿用既有临时字节与final文件，不新增proof/native编码。只使用native-io窄renameNoReplace：Linux renameat2(RENAME_NOREPLACE)，macOS renamex_np(RENAME_EXCL)；temp与final同一受保护目录并持原supervisor guard，不用hardlink或可能覆盖的move。写入、force、首次native close成功后才改名，再目录同步及真实资源终结。successor仅核验同操作原final；临时文件无论是否完整/已签名都不自动promote或补签。rename后dirsync失败保留原失败和final，不回滚/重签；重启后final确实存在且所有原scope/物理/签名/retirement/当前metadata/Unix条件通过时，可完成恢复同步后复用，不追认原调用成功。final缺失/损坏/冲突拒绝。当前原语及未完成的publisher接合边界见[固定交接的原子不覆盖改名](../startup-readiness/README.md#固定交接的原子不覆盖改名)。
+
+
+当前owned文件publisher使用同目录唯一`.handoff-candidate-<UUID>`作为本owner候选名；此名不产生新的supervisor scope/op/episode，也不是successor输入，恢复不枚举或promote它。候选与final沿既有retirement/proof规范字节；guard仍按cluster birth＋Bookie固定。原owner将候选完整写入、仅为该新文件设置已冻结目标UID、force并确认首次native close后，调用renameNoReplace，再复核原final inode/bytes及完成目录同步/close。只可安全重做目录同步，不覆盖/删除/回滚原final；已有final续用必须保持原packet/signature。实际实现与资源边界见[retirement 与 proof 的 owned 文件发布](../startup-readiness/README.md#retirement-与-proof-的-owned-文件发布)。

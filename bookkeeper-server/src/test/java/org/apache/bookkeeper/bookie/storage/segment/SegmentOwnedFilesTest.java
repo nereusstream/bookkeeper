@@ -17,6 +17,7 @@
 package org.apache.bookkeeper.bookie.storage.segment;
 
 import static org.awaitility.Awaitility.await;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -34,6 +35,7 @@ import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
@@ -46,6 +48,55 @@ import org.junit.rules.TemporaryFolder;
 public class SegmentOwnedFilesTest {
     @Rule
     public final TemporaryFolder temporary = new TemporaryFolder();
+
+    @Test
+    public void atomicNewWritesWorkButReadOnlyCreateNewStillRejectsProtectedInodes() throws Exception {
+        Path root = temporary.newFolder().toPath().toRealPath();
+        Path path = Files.createFile(root.resolve("guard"));
+        var guard = SegmentDataFileLock.existingControlOwner(path);
+        guard.initialize();
+        var files = new SegmentOwnedFiles(java.util.List.of(path));
+        try {
+            for (boolean setOptions : new boolean[]{false, true}) {
+                Path fresh = root.resolve("new-" + setOptions);
+                try (FileChannel channel = setOptions
+                        ? SegmentOwnedFiles.open(files, fresh,
+                                Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE))
+                        : SegmentOwnedFiles.open(files, fresh,
+                                StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+                    channel.write(ByteBuffer.wrap(new byte[]{7}));
+                }
+                assertArrayEquals(new byte[]{7}, Files.readAllBytes(fresh));
+            }
+            assertThrows(IOException.class, () -> SegmentOwnedFiles.open(files, path,
+                    StandardOpenOption.READ, StandardOpenOption.CREATE_NEW));
+            assertThrows(IOException.class, () -> SegmentOwnedFiles.open(files, path,
+                    Set.of(StandardOpenOption.READ, StandardOpenOption.CREATE_NEW)));
+            assertThrows(IOException.class, () -> SegmentOwnedFiles.open(files, path,
+                    StandardOpenOption.WRITE, StandardOpenOption.CREATE_NEW));
+            assertTrue(guard.lock().isValid());
+            assertTrue(files.drain().drained());
+            var probe = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-cp", System.getProperty("java.class.path"),
+                    SegmentOwnedBookieControlLogTest.GuardProbe.class.getName(), path.toString())
+                    .redirectErrorStream(true).start();
+            try {
+                assertTrue(probe.waitFor(10, TimeUnit.SECONDS));
+                String output = new String(probe.getInputStream().readAllBytes(),
+                        java.nio.charset.StandardCharsets.UTF_8).trim();
+                assertEquals(output, 0, probe.exitValue());
+                assertEquals("HELD", output);
+            } finally {
+                if (probe.isAlive()) {
+                    probe.destroyForcibly();
+                    assertTrue(probe.waitFor(5, TimeUnit.SECONDS));
+                }
+            }
+        } finally {
+            files.drain();
+            guard.close();
+        }
+    }
 
     @Test
     public void successfulTemporaryFilesRetireImmediatelyAndOldAliasesStayClosed() throws Exception {

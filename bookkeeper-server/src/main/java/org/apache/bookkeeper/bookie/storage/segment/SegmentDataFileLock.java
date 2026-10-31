@@ -159,6 +159,14 @@ final class SegmentDataFileLock implements AutoCloseable {
         return lock;
     }
 
+    /** Borrowers keep this original owner until all their actual users have terminated. */
+    synchronized void requireHeld(Path expected) throws IOException {
+        if (closing || !registered || scope == null || !scope.equals(expected)
+                || lock == null || !lock.isValid() || channel == null || !channel.isOpen()) {
+            throw new IOException("Original supervisor guard is not held for the expected scope");
+        }
+    }
+
     synchronized DrainResult drainResult() {
         boolean drained = closing && initializingThread == null && closingThread == null
                 && (lock == null || releaseReturned && releaseFailure == null)

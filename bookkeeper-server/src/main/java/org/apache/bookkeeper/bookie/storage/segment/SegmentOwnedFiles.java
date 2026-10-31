@@ -31,6 +31,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileAttribute;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -60,7 +61,12 @@ final class SegmentOwnedFiles {
         this.protectedLocks = List.copyOf(protectedLocks);
     }
 
-    private void requireDistinctFromLocks(Path path) throws IOException {
+    private void requireDistinctFromLocks(Path path, boolean creatingNew) throws IOException {
+        // With WRITE, CREATE_NEW atomically creates a new inode or fails without opening an existing inode.
+        // READ alone ignores CREATE_NEW and still needs the alias check.
+        if (creatingNew) {
+            return;
+        }
         for (Path lock : protectedLocks) {
             if (Files.isSameFile(path, lock)) {
                 throw new IOException("Checked file aliases a protected lock: " + path);
@@ -72,10 +78,13 @@ final class SegmentOwnedFiles {
         if (owner == null) {
             return FileChannel.open(path, options);
         }
+        OpenOption[] stable = options.clone();
+        var selected = Arrays.asList(stable);
         Entry entry = owner.begin(path);
         try {
-            owner.requireDistinctFromLocks(path);
-            entry.resource = FileChannel.open(path, options);
+            owner.requireDistinctFromLocks(path, selected.contains(StandardOpenOption.CREATE_NEW)
+                    && selected.contains(StandardOpenOption.WRITE));
+            entry.resource = FileChannel.open(path, stable);
             entry.wrapper = owner.new Channel(entry);
             return entry.wrapper;
         } finally {
@@ -88,10 +97,12 @@ final class SegmentOwnedFiles {
         if (owner == null) {
             return FileChannel.open(path, options, attributes);
         }
+        var stable = Set.copyOf(options);
         Entry entry = owner.begin(path);
         try {
-            owner.requireDistinctFromLocks(path);
-            entry.resource = FileChannel.open(path, options, attributes);
+            owner.requireDistinctFromLocks(path, stable.contains(StandardOpenOption.CREATE_NEW)
+                    && stable.contains(StandardOpenOption.WRITE));
+            entry.resource = FileChannel.open(path, stable, attributes);
             entry.wrapper = owner.new Channel(entry);
             return entry.wrapper;
         } finally {

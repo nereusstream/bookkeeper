@@ -22,20 +22,17 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.nio.file.attribute.FileTime;
 import java.security.PublicKey;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
-import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicHandoffPaths.Identity;
 import org.apache.bookkeeper.discover.BookieRouteBinding;
 
 /** Owned material I/O and signed-scope comparison only. Does not establish current native/Unix adoption authority. */
@@ -77,13 +74,6 @@ final class SegmentClassicHandoffMaterials {
     record Result(boolean drained, Throwable initializationFailure, SegmentOwnedFiles.Result files,
                   SegmentDataFileLock.DrainResult guard) { }
 
-    private record Identity(long device, long inode, long uid, long gid, int mode, long links,
-                            long size, FileTime modified, FileTime changed, boolean directory) {
-        private Identity parent() {
-            return new Identity(device, inode, uid, gid, mode, 0, 0, null, null, directory);
-        }
-    }
-
     private final References references;
     private final Expected expected;
     private final SegmentArenaManifest manifest;
@@ -91,6 +81,7 @@ final class SegmentClassicHandoffMaterials {
     private final Path intentPath;
     private final SegmentDataFileLock guard;
     private final SegmentOwnedFiles files;
+    private final SegmentClassicHandoffPaths paths;
     private boolean attempted;
     private boolean closing;
     private Thread initializingThread;
@@ -118,10 +109,16 @@ final class SegmentClassicHandoffMaterials {
             excluded.add(arena.directory().resolve("arena-control.lock"));
         }
         files = new SegmentOwnedFiles(excluded);
+        paths = new SegmentClassicHandoffPaths(expected.oldUid(), expected.targetUid(), expected.materialOwnerUid());
     }
 
     /** The path is fixed by cluster birth and Bookie, never by attempt PID, episode or bindingId. */
     static String scopeName(BookieRouteBinding binding) {
+        return scopeName(new SegmentClassicHandoff.SupervisorScope(
+                binding.clusterId(), binding.clusterBirthZxid(), binding.bookieId()));
+    }
+
+    static String scopeName(SegmentClassicHandoff.SupervisorScope binding) {
         byte[] cluster = binding.clusterId().getBytes(StandardCharsets.UTF_8);
         byte[] bookie = binding.bookieId().toString().getBytes(StandardCharsets.UTF_8);
         ByteBuffer bytes = ByteBuffer.allocate(16 + cluster.length + bookie.length)
@@ -142,12 +139,12 @@ final class SegmentClassicHandoffMaterials {
             if (new UnixSystem().getUid() != expected.targetUid()) {
                 throw new IOException("Handoff material reader is not the expected actual target UID");
             }
-            requireDirectory(references.directory());
-            Identity guardIdentity = privateFile(guardPath, 0, SegmentClassicHandoff.MAX_BYTES);
-            var guardParents = parents(guardPath);
+            paths.requireDirectory(references.directory());
+            Identity guardIdentity = paths.privateFile(guardPath, 0, SegmentClassicHandoff.MAX_BYTES);
+            var guardParents = paths.parents(guardPath);
             guard.initialize();
-            if (!guardIdentity.equals(privateFile(guardPath, 0, SegmentClassicHandoff.MAX_BYTES))
-                    || !guardParents.equals(parents(guardPath))) {
+            if (!guardIdentity.equals(paths.privateFile(guardPath, 0, SegmentClassicHandoff.MAX_BYTES))
+                    || !guardParents.equals(paths.parents(guardPath))) {
                 throw new IOException("Handoff supervisor identity changed during acquisition");
             }
             var proof = SegmentClassicHandoff.verify(read(references.proof(), 112, SegmentClassicHandoff.MAX_BYTES),
@@ -193,8 +190,8 @@ final class SegmentClassicHandoffMaterials {
     private byte[] read(Path path, int minimum, int maximum) throws IOException {
         byte[] bytes = null;
         try {
-            Identity before = privateFile(path, minimum, maximum);
-            var beforeParents = parents(path);
+            Identity before = paths.privateFile(path, minimum, maximum);
+            var beforeParents = paths.parents(path);
             try (FileChannel channel = SegmentOwnedFiles.open(files, path, StandardOpenOption.READ,
                     LinkOption.NOFOLLOW_LINKS)) {
                 long length = channel.size();
@@ -207,7 +204,8 @@ final class SegmentClassicHandoffMaterials {
                     throw new IOException("Handoff material length changed during read");
                 }
             }
-            if (!before.equals(privateFile(path, minimum, maximum)) || !beforeParents.equals(parents(path))) {
+            if (!before.equals(paths.privateFile(path, minimum, maximum))
+                    || !beforeParents.equals(paths.parents(path))) {
                 throw new IOException("Handoff material identity or parent chain changed during read");
             }
             files.requireHealthy();
@@ -218,67 +216,6 @@ final class SegmentClassicHandoffMaterials {
             }
             throw failure;
         }
-    }
-
-    private Identity privateFile(Path path, int minimum, int maximum) throws IOException {
-        Identity identity = identity(path);
-        if (identity.directory() || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
-                || identity.links() != 1 || (identity.mode() & 077) != 0 || (identity.mode() & 0400) == 0
-                || !trustedOwner(identity.uid()) || identity.size() < minimum || identity.size() > maximum) {
-            throw new IOException("Handoff material must be a private, singly linked regular file: " + path);
-        }
-        return identity;
-    }
-
-    private void requireDirectory(Path path) throws IOException {
-        Identity identity = identity(path);
-        if (!identity.directory() || !trustedOwner(identity.uid()) || (identity.mode() & 077) != 0) {
-            throw new IOException("Handoff supervisor directory must be private to its trusted owner");
-        }
-        parents(path);
-    }
-
-    private List<Identity> parents(Path file) throws IOException {
-        var identities = new ArrayList<Identity>();
-        Identity child = Files.exists(file, LinkOption.NOFOLLOW_LINKS) ? identity(file) : null;
-        for (Path parent = file.getParent(); parent != null; parent = parent.getParent()) {
-            Identity identity = identity(parent);
-            if (!identity.directory() || !trustedOwner(identity.uid())) {
-                throw new IOException("Handoff parent chain is not an existing trusted directory");
-            }
-            if ((identity.mode() & 022) != 0 && ((identity.mode() & 01000) == 0 || child == null
-                    || child.uid() == expected.oldUid() || identity.uid() == expected.oldUid())) {
-                throw new IOException("Handoff parent permits replacing the protected path");
-            }
-            identities.add(identity.parent());
-            child = identity;
-        }
-        return List.copyOf(identities);
-    }
-
-    private Identity identity(Path path) throws IOException {
-        if (!path.equals(path.toRealPath())) {
-            throw new IOException("Handoff path must contain no symbolic aliases");
-        }
-        try {
-            Map<String, Object> attributes = Files.readAttributes(path, "unix:*", LinkOption.NOFOLLOW_LINKS);
-            return new Identity(((Number) attributes.get("dev")).longValue(),
-                    ((Number) attributes.get("ino")).longValue(), unsigned(attributes.get("uid")),
-                    unsigned(attributes.get("gid")), ((Number) attributes.get("mode")).intValue(),
-                    ((Number) attributes.get("nlink")).longValue(), ((Number) attributes.get("size")).longValue(),
-                    (FileTime) attributes.get("lastModifiedTime"), (FileTime) attributes.get("ctime"),
-                    Boolean.TRUE.equals(attributes.get("isDirectory")));
-        } catch (UnsupportedOperationException unsupported) {
-            throw new IOException("Native Unix file identity is required for handoff material I/O", unsupported);
-        }
-    }
-
-    private boolean trustedOwner(long uid) {
-        return uid == 0 || uid == expected.targetUid() || uid == expected.materialOwnerUid();
-    }
-
-    private static long unsigned(Object uid) {
-        return uid instanceof Integer value ? Integer.toUnsignedLong(value) : ((Number) uid).longValue();
     }
 
     private static Path path(Path path) {
