@@ -645,3 +645,22 @@ packet复用原PREPARED native binding及SourceIdentity，绑定原cluster/Booki
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/classic-handoff-codec-evidence-967ef3de`保留各阶段源码、实际日志/XML/class及两次独立向量生成脚本/输入/签名/回执。固定key为公开RFC测试材料，OpenSSL只用于向量生成，不增加运行或Maven依赖。最终声明1326项源码/资源及十项文档输入，native runner实际1299项，相关class快照67项；其他输入逐项对父Git blob核对。实际终态和两次独立lsof检查后，仅移除本次三个raw scope的六个目录、14个文件路径，共1,647,820逻辑字节；归档硬链接与必要向量生成材料保留，regular-file数据块回收为0。PDF、默认目录与其他任务产物未触碰。完整材料owner/loader、真实issuer/旧进程及两UID验收、公共bootstrap/Classic恢复桥和封口继续OPEN。
 
 提交前审计首轮因本次审计脚本参数替换把已保存的清理字节数误写为6,779,573而退出1；依据原cleanup-result中的实际1,647,820修正参数，保留原脚本/日志/退出码后重新核对最终index、源码/文档/class及精确patch。该审计错误未修改产品源码或测试断言，不作为产品RED；最终提交以成功审计结果为准。
+
+
+## 交接材料 I/O owner 与 supervisor 终态
+
+2026-10-31在父源码`b10a7547b245009ef678e2d8bd29252de676937c`上，新增包内SegmentClassicHandoffMaterials资源子owner。构造只冻结显式引用、外部期望scope/公钥与完整manifest；initialize才检查实际目标UID、规范Unix路径与受保护材料，并取得已有supervisor guard。proof、exact policy、固定retirement intent和独立原始32-byte AES key均有界只读，不创建、修复或覆盖材料。签名与原intent完整摘要/operation/物理成员、原native PREPARED语义及requirements来源、部署/program/UID/key/policy逐项匹配；ENABLED只允许同原birth及PREPARED投影的数据比较，实际现存seal和当前metadata必须由外层另验。
+
+supervisor文件名按clusterId、原cluster birth和Bookie固定，绑定UUID、episode、PID及尝试次数不改变名字；准确编码见[受控 Classic 交接材料 v1](../local-storage/format-v1.md#受控-classic-交接材料-v1)。本子owner只打开已有guard/intent，固定部署目录及launcher的create-only发布仍须接线。材料要求单硬链接普通文件、受信任owner及私有mode；逐层检查规范父路径、device/inode/owner/mode，并比较读取前后的叶子身份/长度/mtime/ctime和父身份。sticky公共父目录仅按实际owner保护判定。拒绝符号别名、与共同manifest全部guard的inode别名、缺失、超界和读取期间替换，不依据文件自报owner或任意true回调放行。
+
+实际文件打开前先登记owner，原生fd打开后立即归属既有SegmentOwnedFiles；每次读均等待真实close返回，失败抹除暂存字节，原始AES输入在成功和失败路径均清零。首次native close失败不能由后续close重试覆盖，也不能发布key或释放supervisor。初始化与外部关闭串行；实际初始化线程不可排空自身，外部close须等待读取真实返回。只有所有材料fd及guard均真实终结才报告本子owner drained；原初始化错误独立保留，外层仍须先终结其全部key/scope使用者。
+
+此处只返回包内材料数据，不发行可采用session、旧服务DRAINED、readiness或registration。NIO Unix属性与实际当前UID不证明旧UID专用/无提权、其他进程和已有fd终结、ACL有效权限或持续不可替换性；真实issuer/launcher、Unix完整核验、当前native/Cookie/requirements冷读、公开bootstrap及Classic恢复/封口继续OPEN。测试使用签名fixture和真实文件/子JVM锁，仅验证资源与材料行为，不把fixture中的成功标记当作真实交接。完整16步目标active，Main/G1/full-bytes/生产Gate不提升，默认OFF/SYSTEM/PARK及disabled保持。
+
+
+首轮材料I/O八项通过；随后在同一期望scope拒绝测试中加入实际目标UID不匹配的先行拒绝及子JVM确认guard未占用。最终执行`scripts/unified-wal/run-local-storage-tests.sh 'SegmentClassicHandoffMaterialsTest,SegmentClassicHandoffTest,SegmentOwnedFilesTest,SegmentOwnedBookieControlLogTest,SegmentDataFileLockTest,ZKProfileStartupRequirementsStoreTest,ZKProfileEphemeralRegistrationStoreTest,SegmentProfileInitialSocketClientTest#ownedProfileServiceRejectsRequirementsBeforeStorageOpenAndCleansBindFailure+ownedProfileServicePublishesBoundEndpointSupportsSdkAndRetainsDrainAcrossRestart+deleteHandoffEffectiveAllRealTargetsRejoinG2AndKeepOldEventsWithNewJournalData'`：八类72项全通过（材料8、codec 8、owned files 4、Bookie control owner 9、原生锁10、requirements 11、ephemeral 19、实际SDK/服务/重启与handoff 3），0失败/错误/跳过。材料测试覆盖真实只读文件与子JVM guard竞争、缺失不补建、超长/错误权限、符号/硬链接、原生路径替换、错误AES/intent/原birth/program、原始AES缓冲清零、首次native close失败仍保留guard，以及实际初始化未返回时外部close等待；首次关闭失败仅用故障channel注入，实际fd和guard排空边界仍被独立观察。未用此测试代替实际旧服务发行者或两UID/ACL/fd隔离。
+
+
+首次style实际退出1，原因是新文件的六处超长行和一个未使用import；修正后最终spotless/checkstyle退出0，最终源码72项回归重新执行并通过。首轮8项、加入实际UID拒绝后的72项，以及格式修正后的最终72项分别保存原源码/日志/XML/class，不将较早PASS移绑最终字节。独立RAT实际退出1，431条未批准路径集合及各项字节与父提交/前次封存相同，没有新增或解决；受保护PDF在扫描前排除，不宣称全量CI通过。
+
+证据目录`/Users/liusinan/.codex/artifacts/unified-wal/handoff-material-io-evidence-b10a7547`保留上述原阶段及首次style失败、最终style成功和RAT终态。最终声明1328项源码/资源及十项文档输入，native runner实际1301项，相关class快照89项；其他源码逐项对父Git blob核对。实际终态、全部归档硬链接/内容/身份核对及两次独立lsof检查后，仅移除本次三个raw scope的六个目录、26个文件路径，共2,773,421逻辑字节；归档硬链接保留，regular-file数据块回收为0。用户PDF、默认目录与其他任务产物未触碰。本增量是材料I/O资源依赖，不关闭真实issuer、完整loader/Unix隔离或离线bootstrap验收。

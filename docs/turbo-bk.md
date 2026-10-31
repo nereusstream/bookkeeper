@@ -1057,3 +1057,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-31接续[固定 Classic 交接 codec 与精确材料绑定](rfcs/unified-wal/implementation/startup-readiness/README.md#固定-classic-交接-codec-与精确材料绑定)：固定64KiB Ed25519 proof、exact-scope policy、retirement编码/摘要及独立AES key identity已接包内纯codec，按完整manifest角色/索引匹配成员，并绑定实际close与独立Unix隔离回执。原commissioned generations与当前assignment overlay分离；字节/验证由canonical与format-v1拥有。只返回数据，不发行adoptable session；真实launcher/retirement guard/材料owner-loader/UID-fd-ACL及当前native核验、完整bootstrap仍OPEN，目标active，Main/G1/full-bytes/生产Gate及默认OFF/SYSTEM/PARK和disabled保持。
+
+
+2026-10-31接续[交接材料 I/O owner 与 supervisor 终态](rfcs/unified-wal/implementation/startup-readiness/README.md#交接材料-io-owner-与-supervisor-终态)：包内材料子owner先登记后打开已有固定supervisor及proof/policy/retirement/AES输入，有界读取、验签/原scope匹配、检查原生路径身份及替换；所有fd首次close成功后才可释放guard，失败保留真实终态并清零原始key缓冲。验证由canonical拥有。仅返回数据，不发行session；真实launcher/UID-fd-ACL与当前metadata核验、公开bootstrap/Classic恢复封口仍OPEN，完整目标active，Main/G1/full-bytes/生产Gate及默认OFF/SYSTEM/PARK和disabled保持。

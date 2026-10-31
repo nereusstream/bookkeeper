@@ -377,3 +377,6 @@ operation依次包含：u32 purpose=1；部署身份文本（1..1024字节）；
 proof payload依次为operation、u16成员数及带权限的成员数组、u32实际drain结果=1、u32正常exitCode=0、终结控制sequence:i64、退出epochSecond:i64与nano:u32、实际关闭回执摘要[32]、u32完整Unix隔离结果=1、独立Unix验证回执摘要[32]、原retirement intent摘要[32]。时间只作审计，nano必须0..999999999。intent绑定同operation及同物理成员identity，关闭/权限回执均须由固定实际适配器产生；uid/gid/mode或结果常量本身不替代真实证据。
 
 三个独立向量位于`bookkeeper-server/src/test/resources/unified-wal-segment/classic-handoff-{proof,policy,retirement}-v1.hex`。固定测试key来自[RFC 8032 §7.1 test 1](https://www.rfc-editor.org/rfc/rfc8032.html#section-7.1)，仅为公开测试材料；独立Python struct/hashlib按本节顺序编码，OpenSSL Ed25519签名及验签后，Java与JCA重现相同字节/签名。JCA算法名依据[Java 21 Signature标准名称](https://docs.oracle.com/en/java/javase/21/docs/specs/security/standard-names.html#signature-algorithms)。固定测试数据不证明真实旧服务episode、UID隔离或可采用session。
+
+
+材料读取子owner采用的已有supervisor文件名为`scope-<hex>.lock`，对应intent为同stem加`.retirement`。hex是以下字节的SHA-256小写十六进制：ASCII `BookKeeper/CommonClassicSupervisor/v1\0`（实际末尾NUL）、clusterId的u32 UTF-8字节长度及原字节、原clusterBirthZxid:i64、BookieId的u32 UTF-8字节长度及原字节。所有整数big-endian；同cluster出生与Bookie的binding/episode/PID变化不改变名称。外部部署必须固定同一受保护supervisor目录，不能为重试换目录。loader子owner不创建这些文件；launcher的create-only intent、完整写入/force/真实close/不可覆盖发布与目录同步尚待实现。属性检查及fd/guard终态的当前边界由[交接材料 I/O owner 与 supervisor 终态](../startup-readiness/README.md#交接材料-io-owner-与-supervisor-终态)拥有。
