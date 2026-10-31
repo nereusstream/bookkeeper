@@ -100,9 +100,15 @@ final class SegmentControlCheckpoint {
     }
 
     static void write(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentControlFormat.Owner owner,
-                      Reference reference,
-                      Snapshot snapshot, SegmentFileIo io) throws IOException {
-        try (FileChannel file = FileChannel.open(path(config, owner, reference.slot()), StandardOpenOption.CREATE,
+                      Reference reference, Snapshot snapshot, SegmentFileIo io) throws IOException {
+        write(config, identity, owner, reference, snapshot, io, null);
+    }
+
+    static void write(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentControlFormat.Owner owner,
+                      Reference reference, Snapshot snapshot, SegmentFileIo io, SegmentOwnedFiles files)
+            throws IOException {
+        try (FileChannel file = SegmentOwnedFiles.open(files, path(config, owner, reference.slot()),
+                StandardOpenOption.CREATE,
                 StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING,
                 LinkOption.NOFOLLOW_LINKS)) {
             io.writeFully(file, identity.encode(config, fileId(owner, reference.slot())), 0);
@@ -121,12 +127,19 @@ final class SegmentControlCheckpoint {
             }
             io.force(file, true);
         }
-        IsolatedSegmentFiles.syncDirectory(config.directory());
+        SegmentOwnedFiles.syncDirectory(files, config.directory());
     }
 
     static void verify(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentControlFormat.Owner owner,
                        Reference reference, Snapshot expected, long maxLogBytes) throws IOException {
-        read(config, identity, owner, reference, maxLogBytes, Objects.requireNonNull(expected, "expected"), null);
+        verify(config, identity, owner, reference, expected, maxLogBytes, null);
+    }
+
+    static void verify(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentControlFormat.Owner owner,
+                       Reference reference, Snapshot expected, long maxLogBytes, SegmentOwnedFiles files)
+            throws IOException {
+        read(config, identity, owner, reference, maxLogBytes,
+                Objects.requireNonNull(expected, "expected"), null, files);
     }
 
     @FunctionalInterface
@@ -138,22 +151,34 @@ final class SegmentControlCheckpoint {
     static void replayRecords(IsolatedSegmentConfig config, SegmentFileHeader identity,
                               SegmentControlFormat.Owner owner, Reference reference, long maxLogBytes,
                               RecordReplay replay) throws IOException {
-        read(config, identity, owner, reference, maxLogBytes, null, Objects.requireNonNull(replay, "replay"));
+        replayRecords(config, identity, owner, reference, maxLogBytes, replay, null);
+    }
+
+    static void replayRecords(IsolatedSegmentConfig config, SegmentFileHeader identity,
+                              SegmentControlFormat.Owner owner, Reference reference, long maxLogBytes,
+                              RecordReplay replay, SegmentOwnedFiles files) throws IOException {
+        read(config, identity, owner, reference, maxLogBytes, null, Objects.requireNonNull(replay, "replay"), files);
     }
 
     static Snapshot read(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentControlFormat.Owner owner,
                          Reference reference, long maxLogBytes) throws IOException {
-        return read(config, identity, owner, reference, maxLogBytes, null, null);
+        return read(config, identity, owner, reference, maxLogBytes, null);
+    }
+
+    static Snapshot read(IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentControlFormat.Owner owner,
+                         Reference reference, long maxLogBytes, SegmentOwnedFiles files) throws IOException {
+        return read(config, identity, owner, reference, maxLogBytes, null, null, files);
     }
 
     /** Retained reads own records; verification and replay consume scratch before reuse. */
     private static Snapshot read(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                  SegmentControlFormat.Owner owner, Reference reference, long maxLogBytes,
-                                 Snapshot expected, RecordReplay replay) throws IOException {
+                                 Snapshot expected, RecordReplay replay, SegmentOwnedFiles files) throws IOException {
         if (reference.payloadBytes() - maxLogBytes > maxLogBytes) {
             throw new IOException("Control checkpoint exceeds its control-state budget");
         }
-        try (FileChannel file = FileChannel.open(path(config, owner, reference.slot()), StandardOpenOption.READ,
+        try (FileChannel file = SegmentOwnedFiles.open(files, path(config, owner, reference.slot()),
+                StandardOpenOption.READ,
                 LinkOption.NOFOLLOW_LINKS)) {
             if (file.size() != 4224L + reference.payloadBytes()) {
                 throw new IOException("Incomplete or extra Control checkpoint bytes");
@@ -232,7 +257,13 @@ final class SegmentControlCheckpoint {
 
     static void publish(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner,
                         Reference reference, SegmentFileIo io) throws IOException {
-        try (FileChannel file = FileChannel.open(superblock(config, reference.slot()), StandardOpenOption.READ,
+        publish(config, owner, reference, io, null);
+    }
+
+    static void publish(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner,
+                        Reference reference, SegmentFileIo io, SegmentOwnedFiles files) throws IOException {
+        try (FileChannel file = SegmentOwnedFiles.open(files, superblock(config, reference.slot()),
+                StandardOpenOption.READ,
                 StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
             io.writeFully(file, envelope(4096, publicationMagic(owner), reference), publicationOffset(owner));
             // The other owner's page may already exist; never truncate it during this publication.
@@ -242,7 +273,12 @@ final class SegmentControlCheckpoint {
 
     static Reference publication(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner, int slot)
             throws IOException {
-        try (FileChannel file = FileChannel.open(superblock(config, slot), StandardOpenOption.READ,
+        return publication(config, owner, slot, null);
+    }
+
+    static Reference publication(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner, int slot,
+            SegmentOwnedFiles files) throws IOException {
+        try (FileChannel file = SegmentOwnedFiles.open(files, superblock(config, slot), StandardOpenOption.READ,
                 LinkOption.NOFOLLOW_LINKS)) {
             if (file.size() < publicationOffset(owner) + 4096 || file.size() > 12288) {
                 throw new IOException("No complete Control checkpoint publication");
@@ -263,7 +299,11 @@ final class SegmentControlCheckpoint {
     }
 
     static void syncPublication(IsolatedSegmentConfig config, int slot) throws IOException {
-        try (FileChannel file = FileChannel.open(superblock(config, slot), StandardOpenOption.READ,
+        syncPublication(config, slot, null);
+    }
+
+    static void syncPublication(IsolatedSegmentConfig config, int slot, SegmentOwnedFiles files) throws IOException {
+        try (FileChannel file = SegmentOwnedFiles.open(files, superblock(config, slot), StandardOpenOption.READ,
                 StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
             file.force(true);
         }

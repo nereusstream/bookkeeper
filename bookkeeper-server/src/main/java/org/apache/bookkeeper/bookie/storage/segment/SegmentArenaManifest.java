@@ -269,6 +269,11 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
 
     /** Verify the original complete manifest before returning any parsed routing data. Does not create paths. */
     static SegmentArenaManifest read(Path file, ManifestIdentity commissioned) throws IOException {
+        return read(file, commissioned, null);
+    }
+
+    static SegmentArenaManifest read(Path file, ManifestIdentity commissioned, SegmentOwnedFiles files)
+            throws IOException {
         Objects.requireNonNull(commissioned, "commissioned manifest identity");
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Arena manifest must be an existing regular file");
@@ -282,7 +287,8 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
             throw new IOException("Arena manifest must be private to its protected service credential");
         }
         ByteBuffer bytes;
-        try (FileChannel input = FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+        try (FileChannel input = SegmentOwnedFiles.open(files, file, StandardOpenOption.READ,
+                LinkOption.NOFOLLOW_LINKS)) {
             long length = input.size();
             if (length < 52 || length > MAX_BYTES) {
                 throw new IOException("Arena manifest length is outside its fixed bounds");

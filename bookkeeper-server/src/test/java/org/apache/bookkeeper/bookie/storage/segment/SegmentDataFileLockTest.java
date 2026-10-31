@@ -363,6 +363,8 @@ public class SegmentDataFileLockTest {
         IOException closeFailure;
         IOException lockFailure;
         Runnable beforeLock;
+        Runnable beforeForce;
+        Runnable beforeClose;
 
         FaultChannel(FileChannel actual) {
             this.actual = actual;
@@ -371,6 +373,9 @@ public class SegmentDataFileLockTest {
         @Override
         protected void implCloseChannel() throws IOException {
             closes.incrementAndGet();
+            if (beforeClose != null) {
+                beforeClose.run();
+            }
             if (closeFailure != null) {
                 throw closeFailure;
             }
@@ -432,6 +437,9 @@ public class SegmentDataFileLockTest {
 
         @Override
         public void force(boolean metadata) throws IOException {
+            if (beforeForce != null) {
+                beforeForce.run();
+            }
             actual.force(metadata);
         }
 

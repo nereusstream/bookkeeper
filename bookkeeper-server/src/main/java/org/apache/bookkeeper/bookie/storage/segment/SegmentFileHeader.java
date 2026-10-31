@@ -87,6 +87,10 @@ record SegmentFileHeader(StorageIncarnation incarnation, UUID arenaId, BookieId 
     }
 
     void requireStoredManifest(IsolatedSegmentConfig config, int fileId) throws IOException {
+        requireStoredManifest(config, fileId, null);
+    }
+
+    void requireStoredManifest(IsolatedSegmentConfig config, int fileId, SegmentOwnedFiles files) throws IOException {
         if (manifest == null) {
             return;
         }
@@ -96,7 +100,7 @@ record SegmentFileHeader(StorageIncarnation incarnation, UUID arenaId, BookieId 
         Path root = config.directory();
         Path existing = Files.exists(root, LinkOption.NOFOLLOW_LINKS) ? root : root.getParent();
         if (!existing.equals(existing.toRealPath())
-                || !manifest.equals(SegmentArenaManifest.read(manifest.path(), manifest.identity()))) {
+                || !manifest.equals(SegmentArenaManifest.read(manifest.path(), manifest.identity(), files))) {
             throw new IOException("Stored complete Arena manifest or canonical member root does not match");
         }
     }

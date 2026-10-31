@@ -78,7 +78,12 @@ final class SegmentControlRotation {
 
     static Root publication(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner, int slot)
             throws IOException {
-        try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, slot),
+        return publication(config, owner, slot, null);
+    }
+
+    static Root publication(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner, int slot,
+            SegmentOwnedFiles files) throws IOException {
+        try (FileChannel file = SegmentOwnedFiles.open(files, SegmentControlCheckpoint.superblock(config, slot),
                 StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
             ByteBuffer page = ByteBuffer.allocate(4096);
             SegmentFileIo.readFully(file, page, publicationOffset(owner));
@@ -89,19 +94,25 @@ final class SegmentControlRotation {
     }
 
     static void publish(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner,
-                        SegmentControlCheckpoint.Reference reference,
-                        Root root, SegmentFileIo io) throws IOException {
+                        SegmentControlCheckpoint.Reference reference, Root root, SegmentFileIo io) throws IOException {
+        publish(config, owner, reference, root, io, null);
+    }
+
+    static void publish(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner,
+                        SegmentControlCheckpoint.Reference reference, Root root, SegmentFileIo io,
+                        SegmentOwnedFiles files) throws IOException {
         ByteBuffer page = ByteBuffer.allocate(4096).putLong(publicationMagic(owner)).putInt(1).putInt(64)
                 .put(reference.encode());
         extension(page, owner, root);
         checksum(page);
-        try (FileChannel file = FileChannel.open(SegmentControlCheckpoint.superblock(config, reference.slot()),
+        try (FileChannel file = SegmentOwnedFiles.open(files,
+                SegmentControlCheckpoint.superblock(config, reference.slot()),
                 StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
             io.writeFully(file, page.clear(), publicationOffset(owner));
             io.force(file, true);
         }
         if (!reference.equals(SegmentControlCheckpoint.publication(config, owner,
-                reference.slot())) || !root.equals(publication(config, owner, reference.slot()))) {
+                reference.slot(), files)) || !root.equals(publication(config, owner, reference.slot(), files))) {
             throw new IOException("Control rotation publication verification failed");
         }
     }

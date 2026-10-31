@@ -1045,3 +1045,6 @@ Segment production candidate 的最低 Gate：
 
 
 2026-10-31接续[共同根锁的首次结果与获取 owner](rfcs/unified-wal/implementation/local-storage/README.md#共同根锁的首次结果与获取-owner)：共享SegmentDataFileLock统一保留首次release/close结果，ACTIVE持有实际失败owner，共同根先登记再取得资源；部分获取失败和重复异常聚合沿同一进度。实际验证与证据由该节拥有。下一块继续完整共同已有Classic离线导入、严格恢复/flush/seal与native ENABLED核验，之后才接运行期异步claim。此根资源子项不证明control/完整owner已排空，不提升Main/G1/full-bytes或16步Gate，持续目标active，默认OFF/SYSTEM/PARK与disabled保持。
+
+
+2026-10-31接续[既有 Bookie control 的文件 owner 与 guard 终结](rfcs/unified-wal/implementation/local-storage/README.md#既有-bookie-control-的文件-owner-与-guard-终结)：显式包内control子owner先登记后打开已有图，manifest/header/checkpoint/rotation临时及常驻fd共用首次关闭结果；所有文件实际排空后才释放control guard，原操作异常与资源终态分离。实际验证由该节拥有。本子项不发行外部authority或完整导入许可；公开SegmentClassicBootstrap、固定可信交接loader、完整Arena核验/Classic恢复桥及离线封口仍OPEN，完整目标active，Main/G1/full-bytes与16步Gate不提升，默认OFF/SYSTEM/PARK及disabled保持。

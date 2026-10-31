@@ -641,6 +641,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private FileChannel channel;
     private final FileChannel originalChannel;
     private final SegmentDataFileLock writerLock;
+    private final SegmentOwnedFiles ownedFiles;
     private SegmentControlRotation.Root rotationRoot;
     private Thread rotating;
     private Generation physicalGeneration = LOG_GENERATION;
@@ -724,6 +725,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
                                     long maxLogBytes, SegmentFileIo io, SecretKey key,
                                     ProfileDescriptorValidator descriptorValidator,
                                     FileChannel channel, SegmentDataFileLock writerLock, RouteBinding routeBinding) {
+        this(config, identity, maxLogBytes, io, key, descriptorValidator, channel, writerLock, routeBinding, null);
+    }
+
+    private SegmentBookieControlLog(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SegmentFileIo io, SecretKey key, ProfileDescriptorValidator descriptorValidator,
+            FileChannel channel, SegmentDataFileLock writerLock, RouteBinding routeBinding,
+            SegmentOwnedFiles ownedFiles) {
+        this.ownedFiles = ownedFiles;
         this.config = config;
         this.identity = identity;
         this.maxLogBytes = maxLogBytes;
@@ -734,6 +743,134 @@ final class SegmentBookieControlLog implements AutoCloseable {
         this.originalChannel = channel;
         this.writerLock = writerLock;
         this.routeBinding = routeBinding;
+    }
+
+    record OwnedResult(boolean drained, Throwable initializationFailure, Throwable lifecycleFailure,
+                       SegmentOwnedFiles.Result files, SegmentDataFileLock.DrainResult guard) { }
+
+    static Owned ownedExisting(IsolatedSegmentConfig config, SegmentArenaManifest manifest,
+            ManifestIdentity commissioned, long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator,
+            SegmentFileIo io, RouteBinding routeBinding) throws IOException {
+        return new Owned(config, manifest, commissioned, maxLogBytes, key, validator, io, routeBinding);
+    }
+
+    /** Existing formatted control only. The outer bootstrap owner retains this child before initialize(). */
+    static final class Owned {
+        private final IsolatedSegmentConfig config;
+        private final SegmentFileHeader identity;
+        private final long maxLogBytes;
+        private final SecretKey key;
+        private final ProfileDescriptorValidator validator;
+        private final SegmentFileIo io;
+        private final RouteBinding routeBinding;
+        private final SegmentOwnedFiles files = new SegmentOwnedFiles();
+        private final SegmentDataFileLock guard;
+        private boolean attempted;
+        private boolean initialized;
+        private boolean closing;
+        private Thread initializingThread;
+        private Thread closingThread;
+        private Throwable initializationFailure;
+        private Throwable lifecycleFailure;
+        private SegmentBookieControlLog log;
+
+        private Owned(IsolatedSegmentConfig config, SegmentArenaManifest manifest, ManifestIdentity commissioned,
+                long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator, SegmentFileIo io,
+                RouteBinding routeBinding) throws IOException {
+            this.config = Objects.requireNonNull(config, "config");
+            this.identity = SegmentFileHeader.forBookie(Objects.requireNonNull(manifest, "manifest"));
+            this.key = Objects.requireNonNull(key, "key");
+            this.validator = Objects.requireNonNull(validator, "validator");
+            this.io = Objects.requireNonNull(io, "io");
+            this.maxLogBytes = maxLogBytes;
+            this.routeBinding = Objects.requireNonNull(routeBinding, "routeBinding");
+            requireRouteBinding(identity, routeBinding);
+            if (!manifest.identity().equals(commissioned) || !identity.matchesManifestScope(config)
+                    || maxLogBytes < FIRST_RECORD + 2048) {
+                throw new IOException("Complete commissioned common Bookie control scope required");
+            }
+            guard = SegmentDataFileLock.existingControlOwner(config.directory().resolve("bookie-control.lock"));
+        }
+
+        synchronized void initialize() throws IOException {
+            if (attempted || closing) {
+                throw new IOException("Owned Bookie control initialization is one-use");
+            }
+            attempted = true;
+            initializingThread = Thread.currentThread();
+            try {
+                guard.initialize();
+                identity.requireStoredManifest(config, -3, files);
+                FileChannel original = SegmentOwnedFiles.open(files, config.directory().resolve("bookie-control"),
+                        StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+                log = new SegmentBookieControlLog(config, identity, maxLogBytes, io, key, validator,
+                        original, guard, routeBinding, files);
+                log.validateStorageFiles();
+                log.recover();
+                files.requireHealthy();
+                initialized = true;
+            } catch (IOException | RuntimeException | Error failure) {
+                initializationFailure = failure;
+                throw failure;
+            } finally {
+                initializingThread = null;
+            }
+        }
+
+        synchronized SegmentBookieControlLog log() throws IOException {
+            if (!initialized || closing || !files.healthy()) {
+                throw new IOException("Owned Bookie control is not available", initializationFailure);
+            }
+            return log;
+        }
+
+        /** Actual control users must have returned; this method never interrupts or cancels them. */
+        synchronized OwnedResult closeAndDrain() throws InterruptedException {
+            if (initializingThread == Thread.currentThread() || closingThread == Thread.currentThread()) {
+                throw new IllegalStateException("Owned Bookie control activity cannot drain itself");
+            }
+            closing = true;
+            closingThread = Thread.currentThread();
+            try {
+                if (log != null) {
+                    try {
+                        log.retireOwned();
+                    } catch (Throwable failure) {
+                        retainLifecycleFailure(failure);
+                        return new OwnedResult(false, initializationFailure, lifecycleFailure,
+                                files.result(), guard.drainResult());
+                    }
+                }
+                SegmentOwnedFiles.Result fileResult = files.drain();
+                if (fileResult.drained()) {
+                    try {
+                        guard.close();
+                    } catch (Throwable ignored) {
+                        // The guard owns both first release results; a retry cannot erase them.
+                    }
+                }
+                SegmentDataFileLock.DrainResult guardResult = guard.drainResult();
+                boolean drained = fileResult.drained() && guardResult.drained();
+                if (drained && log != null) {
+                    try {
+                        log.releaseClosedState();
+                        log = null;
+                    } catch (Throwable failure) {
+                        retainLifecycleFailure(failure);
+                        drained = false;
+                    }
+                }
+                return new OwnedResult(drained, initializationFailure, lifecycleFailure, fileResult, guardResult);
+            } finally {
+                closingThread = null;
+            }
+        }
+
+        private void retainLifecycleFailure(Throwable failure) {
+            if (lifecycleFailure == null) {
+                lifecycleFailure = failure;
+            }
+        }
     }
 
     /** Typed history/index and temporary-state envelope, independently of the retained wire byte count. */
@@ -1003,7 +1140,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     synchronized RouteState routeState(long ledgerId) {
-        if (closed || failed || routeBinding != null && bootstrapComplete == null) {
+        if (closed || failed || ownedFiles != null && !ownedFiles.healthy()
+                || routeBinding != null && bootstrapComplete == null) {
             return RouteState.UNAVAILABLE;
         }
         if (classicRoutes.containsKey(ledgerId)) {
@@ -1020,7 +1158,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     synchronized boolean bootstrapComplete() {
-        return !closed && !failed && routeBinding != null && bootstrapComplete != null;
+        return !closed && !failed && (ownedFiles == null || ownedFiles.healthy())
+                && routeBinding != null && bootstrapComplete != null;
     }
 
     synchronized Optional<BookieRouteBinding.BootstrapSeal> bootstrapSeal() {
@@ -1337,19 +1476,20 @@ final class SegmentBookieControlLog implements AutoCloseable {
             SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.reference(
                     generation, slot, snapshot, maxLogBytes);
             SegmentControlCheckpoint.write(config, identity, SegmentControlFormat.Owner.BOOKIE,
-                    reference, snapshot, checkpointIo);
+                    reference, snapshot, checkpointIo, ownedFiles);
             SegmentControlCheckpoint.verify(config, identity, SegmentControlFormat.Owner.BOOKIE,
-                    reference, snapshot, maxLogBytes);
+                    reference, snapshot, maxLogBytes, ownedFiles);
             commitCheckpoint(reference);
             committed = true;
             if (rotationRoot == null) {
-                SegmentControlCheckpoint.publish(config, SegmentControlFormat.Owner.BOOKIE, reference, checkpointIo);
+                SegmentControlCheckpoint.publish(config, SegmentControlFormat.Owner.BOOKIE, reference,
+                        checkpointIo, ownedFiles);
             } else {
                 SegmentControlRotation.publish(config, SegmentControlFormat.Owner.BOOKIE, reference,
-                        rotationRoot, checkpointIo);
+                        rotationRoot, checkpointIo, ownedFiles);
             }
             if (!reference.equals(SegmentControlCheckpoint.publication(
-                    config, SegmentControlFormat.Owner.BOOKIE, slot))) {
+                    config, SegmentControlFormat.Owner.BOOKIE, slot, ownedFiles))) {
                 throw new IOException("Bookie checkpoint publication verification failed");
             }
             synchronized (this) {
@@ -1451,7 +1591,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             target = SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE, root.generation());
             if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
                 // Both fresh publications recover the current journal. Delete only a proven older/orphan file.
-                try (FileChannel orphan = FileChannel.open(target, StandardOpenOption.READ,
+                try (FileChannel orphan = SegmentOwnedFiles.open(ownedFiles, target, StandardOpenOption.READ,
                         LinkOption.NOFOLLOW_LINKS)) {
                     ByteBuffer header = ByteBuffer.allocate(4096);
                     SegmentFileIo.readFully(orphan, header, 0);
@@ -1464,22 +1604,25 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     }
                 }
                 Files.delete(target);
-                IsolatedSegmentFiles.syncDirectory(config.directory());
+                SegmentOwnedFiles.syncDirectory(ownedFiles, config.directory());
             }
-            candidate = FileChannel.open(target, StandardOpenOption.CREATE_NEW, StandardOpenOption.READ,
+            candidate = SegmentOwnedFiles.open(ownedFiles, target, StandardOpenOption.CREATE_NEW,
+                    StandardOpenOption.READ,
                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
             created = true;
             rotationIo.writeFully(candidate, identity.encode(config, -3), 0);
             rotationIo.writeFully(candidate, SegmentControlRotation.header(SegmentControlFormat.Owner.BOOKIE, root),
                     4096);
             rotationIo.force(candidate, true);
-            IsolatedSegmentFiles.syncDirectory(config.directory());
+            SegmentOwnedFiles.syncDirectory(ownedFiles, config.directory());
             if (!root.equals(SegmentControlRotation.readHeader(candidate, SegmentControlFormat.Owner.BOOKIE))) {
                 throw new IOException("Bookie rotation candidate verification failed");
             }
             publicationAttempted = true;
-            SegmentControlRotation.publish(config, SegmentControlFormat.Owner.BOOKIE, first, root, rotationIo);
-            SegmentControlRotation.publish(config, SegmentControlFormat.Owner.BOOKIE, second, root, rotationIo);
+            SegmentControlRotation.publish(config, SegmentControlFormat.Owner.BOOKIE, first, root,
+                    rotationIo, ownedFiles);
+            SegmentControlRotation.publish(config, SegmentControlFormat.Owner.BOOKIE, second, root,
+                    rotationIo, ownedFiles);
             // The independent lock remains held. This marker prevents empty-log and old-decoder fallback.
             rotationIo.writeFully(originalChannel,
                     SegmentControlRotation.header(SegmentControlFormat.Owner.BOOKIE, root),
@@ -1501,7 +1644,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 previous.close();
                 Files.delete(SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE,
                         previousGeneration));
-                IsolatedSegmentFiles.syncDirectory(config.directory());
+                SegmentOwnedFiles.syncDirectory(ownedFiles, config.directory());
             }
             synchronized (this) {
                 Set<UUID> retained = retainedCheckpointIds();
@@ -1518,7 +1661,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     candidate.close();
                     candidate = null;
                     Files.delete(target);
-                    IsolatedSegmentFiles.syncDirectory(config.directory());
+                    SegmentOwnedFiles.syncDirectory(ownedFiles, config.directory());
                 } catch (IOException cleanup) {
                     failure.addSuppressed(cleanup);
                 }
@@ -2883,8 +3026,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         for (int slot = 0; slot < 2; slot++) {
             SegmentControlRotation.Root root;
             try {
-                SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.BOOKIE, slot);
-                root = SegmentControlRotation.publication(config, SegmentControlFormat.Owner.BOOKIE, slot);
+                SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.BOOKIE, slot, ownedFiles);
+                root = SegmentControlRotation.publication(config, SegmentControlFormat.Owner.BOOKIE, slot, ownedFiles);
             } catch (IOException invalidPublication) {
                 // An invalid page is optional. A selected generation's journal is never optional.
                 continue;
@@ -2897,7 +3040,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
         }
         if (rotationRoot != null) {
-            channel = FileChannel.open(SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE,
+            channel = SegmentOwnedFiles.open(ownedFiles,
+                    SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE,
                     rotationRoot.generation()),
                     StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
             ByteBuffer header = ByteBuffer.allocate(4096);
@@ -2923,9 +3067,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
             boolean valid = false;
             try {
                 SegmentControlCheckpoint.Reference reference = SegmentControlCheckpoint.publication(
-                        config, SegmentControlFormat.Owner.BOOKIE, slot);
+                        config, SegmentControlFormat.Owner.BOOKIE, slot, ownedFiles);
                 if (rotationRoot.equals(SegmentControlRotation.publication(config,
-                        SegmentControlFormat.Owner.BOOKIE, slot))) {
+                        SegmentControlFormat.Owner.BOOKIE, slot, ownedFiles))) {
                     publications[slot] = reference;
                     valid = true;
                 }
@@ -2933,7 +3077,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 // Recovery still has to validate one complete publication and every current suffix record.
             }
             if (valid) {
-                SegmentControlCheckpoint.syncPublication(config, slot);
+                SegmentControlCheckpoint.syncPublication(config, slot, ownedFiles);
             }
         }
         long sequence = rotationRoot.through() + 1;
@@ -3015,7 +3159,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     private void restoreSnapshot(SegmentControlCheckpoint.Reference reference) throws IOException {
         SegmentControlCheckpoint.Snapshot snapshot = SegmentControlCheckpoint.read(
-                config, identity, SegmentControlFormat.Owner.BOOKIE, reference, maxLogBytes);
+                config, identity, SegmentControlFormat.Owner.BOOKIE, reference, maxLogBytes, ownedFiles);
         resetRecoveredState();
         for (SegmentControlCheckpoint.ImageRecord operation : snapshot.operations()) {
             if (snapshot.compactedCheckpointHistory()) {
@@ -3058,7 +3202,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         for (int slot = 0; slot < publications.length; slot++) {
             try {
                 publications[slot] = SegmentControlCheckpoint.publication(config, SegmentControlFormat.Owner.BOOKIE,
-                        slot);
+                        slot, ownedFiles);
             } catch (IOException incompletePublication) {
                 // The immutable identity page remains mandatory; only this owner's publication can fall back.
             }
@@ -3116,7 +3260,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 resetRecoveredState();
                 continue;
             }
-            SegmentControlCheckpoint.syncPublication(config, reference.slot());
+            SegmentControlCheckpoint.syncPublication(config, reference.slot(), ownedFiles);
             return;
         }
         resetRecoveredState();
@@ -3618,7 +3762,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         validateIdentity(config.directory().resolve("superblock-a"), -1, 4096);
         validateIdentity(config.directory().resolve("superblock-b"), -2, 4096);
         if (identity.manifest() != null) {
-            identity.requireStoredManifest(config, -3);
+            identity.requireStoredManifest(config, -3, ownedFiles);
             validateIdentity(config.directory().resolve("bookie-control"), -3, -1);
             return; // Per-Arena recovery and whole-Bookie readiness belong to the complete storage graph.
         }
@@ -3633,7 +3777,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Isolated storage file must be a regular file");
         }
-        try (FileChannel input = FileChannel.open(path, StandardOpenOption.READ)) {
+        try (FileChannel input = SegmentOwnedFiles.open(ownedFiles, path, StandardOpenOption.READ)) {
             boolean superblock = fileId == -1 || fileId == -2;
             if ((superblock && (input.size() < FIRST_RECORD || input.size() > 12288))
                     || (!superblock && expectedSize < 0 && input.size() < FIRST_RECORD)
@@ -3647,19 +3791,60 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     private void requireWritable() throws IOException {
+        if (ownedFiles != null) {
+            ownedFiles.requireHealthy();
+        }
         if (closed || failed || (rotating != null && rotating != Thread.currentThread())) {
             throw new IOException("Bookie control log is closed, rotating or has uncertain I/O");
         }
     }
 
-    @Override
-    public synchronized void close() throws IOException {
-        if (closed) {
-            return;
-        }
+    private void requireCloseQuiescent() throws IOException {
         if (writing || checkpointing || rotating != null || activeAdmissions != 0 || reclamation != null) {
             throw new IOException("Bookie control I/O or admissions are still in flight");
         }
+    }
+
+    private synchronized void retireOwned() throws IOException {
+        if (ownedFiles == null) {
+            throw new IllegalStateException("An explicit control file owner is required");
+        }
+        if (!closed) {
+            requireCloseQuiescent();
+            closedRollbackSafetyFacts = rollbackSafetyFacts();
+            closed = true;
+        }
+    }
+
+    private synchronized void releaseClosedState() {
+        // Keep bounded diagnostics, but release history and container backing from a retained closed service.
+        ledgers = new HashMap<>();
+        tombstones = new HashMap<>();
+        classicRoutes = new HashMap<>();
+        bootstrapComplete = null;
+        handoffOperations = new HashMap<>();
+        effectiveOperations = new HashMap<>();
+        operations = new HashMap<>();
+        fenceOperations = new HashMap<>();
+        checkpointState = new HashMap<>();
+        checkpointLacs = new HashMap<>();
+        checkpointIds = new HashSet<>();
+        pending = null;
+        pendingHandoff = null;
+        pendingFenceWrite = null;
+        pendingLacWrite = null;
+        pendingRecoveryCloseWrite = null;
+    }
+
+    @Override
+    public synchronized void close() throws IOException {
+        if (ownedFiles != null) {
+            throw new IllegalStateException("Use the explicit owned Bookie control drain result");
+        }
+        if (closed) {
+            return;
+        }
+        requireCloseQuiescent();
         closedRollbackSafetyFacts = rollbackSafetyFacts();
         closed = true;
         IOException first = null;
@@ -3688,23 +3873,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 first.addSuppressed(failure);
             }
         }
-        // Keep bounded diagnostics, but release history and container backing from a retained closed service.
-        ledgers = new HashMap<>();
-        tombstones = new HashMap<>();
-        classicRoutes = new HashMap<>();
-        bootstrapComplete = null;
-        handoffOperations = new HashMap<>();
-        effectiveOperations = new HashMap<>();
-        operations = new HashMap<>();
-        fenceOperations = new HashMap<>();
-        checkpointState = new HashMap<>();
-        checkpointLacs = new HashMap<>();
-        checkpointIds = new HashSet<>();
-        pending = null;
-        pendingHandoff = null;
-        pendingFenceWrite = null;
-        pendingLacWrite = null;
-        pendingRecoveryCloseWrite = null;
+        releaseClosedState();
         if (first != null) {
             throw first;
         }
