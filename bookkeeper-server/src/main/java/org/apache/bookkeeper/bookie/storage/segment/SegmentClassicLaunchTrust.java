@@ -20,6 +20,8 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -61,6 +63,8 @@ final class SegmentClassicLaunchTrust {
     static final int MAX_RECIPE_BYTES = 4096;
     private static final byte[] RECIPE_DOMAIN = "BookKeeper/ControlledClassicRecipe/v1\0"
             .getBytes(StandardCharsets.US_ASCII);
+    private static final int MAX_LOADING_DIRECTORY_ENTRIES = 262144;
+    private static final int MAX_LOADING_DIRECTORY_NAME_BYTES = 64 * 1024 * 1024;
 
     record Recipe(String recipeId, String deployment, String keyName, SegmentClassicHandoff.Digest signerKeyId,
                   SegmentClassicHandoff.Digest program, SegmentClassicHandoff.Digest configuration,
@@ -107,6 +111,26 @@ final class SegmentClassicLaunchTrust {
     /** Bounded path facts only. The chain digest compares two observations, never startup authority. */
     record LinuxPathObservation(LinuxPathKind kind, Path entry, Path resolved, Path absentAt, Identity identity,
                                 SegmentClassicHandoff.Digest chain) { }
+
+    /** Complete observed names only, not approved library candidates or a loader selection. */
+    record LinuxDirectoryObservation(LinuxPathObservation path, List<String> members) {
+        LinuxDirectoryObservation {
+            members = List.copyOf(members);
+        }
+    }
+
+    private static final class LoadingDirectoryBudget {
+        int entries;
+        int nameBytes;
+
+        void retain(String name) throws IOException {
+            int bytes = name.getBytes(StandardCharsets.UTF_8).length;
+            if (++entries > MAX_LOADING_DIRECTORY_ENTRIES || bytes > MAX_LOADING_DIRECTORY_NAME_BYTES - nameBytes) {
+                throw new IOException("Loading directory observations exceed their fixed total name capacity");
+            }
+            nameBytes += bytes;
+        }
+    }
 
     /** Only the fixed-root UID-0 loader can create this provenance; a fixture cannot promote parsed values. */
     static final class Installed {
@@ -503,6 +527,116 @@ final class SegmentClassicLaunchTrust {
         return List.copyOf(result);
     }
 
+    /** Original iterator/open/first-close ownership; unrelated directory names never become approved files. */
+    synchronized List<LinuxDirectoryObservation> verifyLinuxLoadingDirectories(
+            SegmentClassicLinuxDeployment.Loading loading, long deadlineNanos) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadlineNanos);
+            var first = observeLinuxLoadingDirectories(loading, deadlineNanos);
+            if (!first.equals(observeLinuxLoadingDirectories(loading, deadlineNanos))) {
+                throw new IOException("Original Linux loading directory members changed between observations");
+            }
+            files.requireHealthy();
+            requireTime(deadlineNanos);
+            return first;
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private List<LinuxDirectoryObservation> observeLinuxLoadingDirectories(
+            SegmentClassicLinuxDeployment.Loading loading, long deadline) throws IOException {
+        Map<Path, SegmentClassicLinuxDeployment.Alias> aliases = new HashMap<>();
+        for (var alias : loading.aliases()) {
+            aliases.put(alias.link(), alias);
+        }
+        var budget = new LoadingDirectoryBudget();
+        Map<Path, List<String>> observed = new HashMap<>();
+        var result = new ArrayList<LinuxDirectoryObservation>();
+        for (var directory : loading.directories()) {
+            var path = observeLinuxPath(LinuxPathKind.DIRECTORY, directory.path(), aliases,
+                    directory.present(), deadline);
+            List<String> names = List.of();
+            if (path.identity() != null) {
+                names = observed.get(path.resolved());
+                if (names == null) {
+                    names = enumerateLinuxDirectory(path.resolved(), budget, deadline);
+                    observed.put(path.resolved(), names);
+                }
+            }
+            if (!path.equals(observeLinuxPath(LinuxPathKind.DIRECTORY, directory.path(), aliases,
+                    directory.present(), deadline))) {
+                throw new IOException("Original loading directory or parent changed during enumeration");
+            }
+            result.add(new LinuxDirectoryObservation(path, names));
+        }
+        return List.copyOf(result);
+    }
+
+    private List<String> enumerateLinuxDirectory(Path directory, LoadingDirectoryBudget budget, long deadline)
+            throws IOException {
+        var names = new java.util.TreeSet<String>();
+        var read = new AuxiliaryRead();
+        auxiliaryReads.add(read);
+        Throwable failure = null;
+        try {
+            requireTime(deadline);
+            read.openStarted = true;
+            DirectoryStream<Path> stream = Files.newDirectoryStream(directory);
+            read.resource = stream;
+            read.openReturned = true;
+            for (Path member : stream) {
+                requireTime(deadline);
+                Path leaf = member.getFileName();
+                String name = leaf == null ? "" : leaf.toString();
+                if (!directory.equals(member.getParent()) || name.isEmpty() || name.equals(".") || name.equals("..")
+                        || leaf.getNameCount() != 1 || !StandardCharsets.UTF_8.newEncoder().canEncode(name)
+                        || !exactUtf8DirectoryName(leaf, name) || !names.add(name)) {
+                    throw new IOException("Unsupported or duplicate loading directory member name");
+                }
+                budget.retain(name);
+            }
+        } catch (IOException | RuntimeException | Error problem) {
+            failure = problem;
+            throw problem;
+        } finally {
+            finishAuxiliary(read, failure);
+        }
+        requireTime(deadline);
+        return List.copyOf(names);
+    }
+
+    private static boolean exactUtf8DirectoryName(Path leaf, String name) throws IOException {
+        return leaf.equals(utf8LoadingPath("/" + name).getFileName());
+    }
+
+    private static Path utf8LoadingPath(String text) throws IOException {
+        try {
+            // The approved Unix provider decodes an ASCII file URI to native bytes, independent of JNU encoding.
+            URI uri = new URI("file", "", text, null, null);
+            String ascii = uri.toASCIIString();
+            if (!ascii.startsWith("file:///") || uri.getRawAuthority() != null
+                    || uri.getRawQuery() != null || uri.getRawFragment() != null) {
+                throw new IOException("Loading member URI would use the JNU path fallback");
+            }
+            return Path.of(URI.create(ascii));
+        } catch (URISyntaxException | IllegalArgumentException unsupported) {
+            throw new IOException("Unsupported exact UTF-8 loading directory name", unsupported);
+        }
+    }
+
+    private static void requireUtf8LoadingPath(Path path) throws IOException {
+        String text = path.toString();
+        if (!StandardCharsets.UTF_8.newEncoder().canEncode(text) || !path.equals(utf8LoadingPath(text))) {
+            throw new IOException("Actual loading path bytes differ from strict UTF-8");
+        }
+    }
+
     private LinuxPathObservation observeLinuxPath(LinuxPathKind kind, Path entry,
             Map<Path, SegmentClassicLinuxDeployment.Alias> aliases, boolean present, long deadline) throws IOException {
         MessageDigest digest;
@@ -515,6 +649,7 @@ final class SegmentClassicLaunchTrust {
         int followed = 0;
         resolve: while (true) {
             requireTime(deadline);
+            requireUtf8LoadingPath(value);
             Path current = value.getRoot();
             Identity parent = checked(current);
             observeLinuxComponent(digest, current, parent.parent());
@@ -596,6 +731,7 @@ final class SegmentClassicLaunchTrust {
     private void readLoadingAlias(Path path, Identity before, SegmentClassicLinuxDeployment.Alias alias,
                                   long deadline) throws IOException {
         requireTime(deadline);
+        requireUtf8LoadingPath(path);
         var link = nativeIo.observeSymbolicLink(path.toString());
         requireTime(deadline);
         Identity observed;
@@ -624,6 +760,7 @@ final class SegmentClassicLaunchTrust {
         initializingThread = Thread.currentThread();
         try {
             requireBoundDeadline(deadlineNanos);
+            requireUtf8LoadingPath(file.path());
             boolean executable = file.role().elf() && file.role() != SegmentClassicLinuxDeployment.Role.LIBRARY
                     && file.role() != SegmentClassicLinuxDeployment.Role.MODULE;
             var observed = hashFile(file.path(), file.length(), file.sha256(), executable, file.role().elf(),

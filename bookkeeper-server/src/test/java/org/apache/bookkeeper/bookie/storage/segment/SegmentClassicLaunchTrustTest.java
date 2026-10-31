@@ -35,6 +35,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -111,6 +112,267 @@ public class SegmentClassicLaunchTrustTest {
                 directories.stream().sorted(Comparator.comparing(d -> d.path().toString())).toList(),
                 configuration.stream().sorted(Comparator.comparing(c -> c.path().toString())).toList(),
                 List.of(), List.of());
+    }
+
+    @Test
+    public void loadingDirectoriesReturnSortedActualNamesIncludingUnrelatedMembersWithoutFollowingThem()
+            throws Exception {
+        Path directory = Files.createDirectory(root.resolve("physical"));
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
+        write(directory.resolve("aaa.so"), new byte[]{7});
+        write(directory.resolve("公钥"), new byte[]{8});
+        write(directory.resolve("x%#?.so"), new byte[]{9});
+        Files.createDirectory(directory.resolve("subdir"));
+        Files.createSymbolicLink(directory.resolve("dangling"), Path.of("not-present"));
+        Path first = Files.createSymbolicLink(root.resolve("first"), Path.of("physical"));
+        Path second = Files.createSymbolicLink(root.resolve("second"), Path.of("physical"));
+        Path missing = root.resolve("absent");
+        var input = loading(key, List.of(new SegmentClassicLinuxDeployment.Alias(first, "physical"),
+                new SegmentClassicLinuxDeployment.Alias(second, "physical")), List.of(
+                new SegmentClassicLinuxDeployment.Directory(directory, true),
+                new SegmentClassicLinuxDeployment.Directory(first, true),
+                new SegmentClassicLinuxDeployment.Directory(second, true),
+                new SegmentClassicLinuxDeployment.Directory(missing, false)), List.of());
+        var owner = owner();
+        owner.initialize();
+        var result = owner.verifyLinuxLoadingDirectories(input, SegmentClassicLinuxElfTest.deadline());
+        assertEquals(4, result.size());
+        for (var observed : result) {
+            if (observed.path().entry().equals(missing)) {
+                assertEquals(missing, observed.path().absentAt());
+                assertTrue(observed.members().isEmpty());
+            } else {
+                assertEquals(directory, observed.path().resolved());
+                assertEquals(List.of("aaa.so", "dangling", "subdir", "x%#?.so", "公钥"), observed.members());
+                assertThrows(UnsupportedOperationException.class, () -> observed.members().add("new"));
+            }
+        }
+        assertThrows(IOException.class, owner::installed);
+        assertTrue(owner.closeAndDrain().drained());
+        assertArrayEquals(new byte[]{7}, Files.readAllBytes(directory.resolve("aaa.so")));
+        assertTrue(Files.isSymbolicLink(directory.resolve("dangling")));
+    }
+
+    @Test
+    public void loadingDirectoryReplacementAfterOpenRejectsTheOriginalIteratorResult() throws Exception {
+        Path directory = Files.createDirectory(root.resolve("physical"));
+        write(directory.resolve("original.so"), new byte[]{7});
+        var input = loading(key, List.of(), List.of(
+                new SegmentClassicLinuxDeployment.Directory(directory, true)), List.of());
+        var owner = owner();
+        owner.initialize();
+        try (var calls = mockStatic(Files.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("newDirectoryStream")
+                    && directory.equals(invocation.getArgument(0))) {
+                Files.move(directory, root.resolve("original-directory"));
+                Files.createDirectory(directory);
+            }
+            return actual;
+        })) {
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoadingDirectories(input, SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertTrue(owner.closeAndDrain().drained());
+        assertArrayEquals(new byte[]{7}, Files.readAllBytes(root.resolve("original-directory/original.so")));
+        assertTrue(Files.isDirectory(directory));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void loadingDirectoryFirstCloseFailureRetainsOriginalIteratorWithoutRetry() throws Exception {
+        Path directory = Files.createDirectory(root.resolve("physical"));
+        var input = loading(key, List.of(), List.of(
+                new SegmentClassicLinuxDeployment.Directory(directory, true)), List.of());
+        var owner = owner();
+        owner.initialize();
+        var captured = new AtomicReference<DirectoryStream<Path>>();
+        var closes = new AtomicInteger();
+        IOException failure = new IOException("loading iterator original first close");
+        try (var calls = mockStatic(Files.class, invocation -> {
+            Object value = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("newDirectoryStream")
+                    && directory.equals(invocation.getArgument(0))) {
+                DirectoryStream<Path> actual = (DirectoryStream<Path>) value;
+                captured.set(actual);
+                return new DirectoryStream<Path>() {
+                    @Override
+                    public java.util.Iterator<Path> iterator() {
+                        return actual.iterator();
+                    }
+
+                    @Override
+                    public void close() throws IOException {
+                        closes.incrementAndGet();
+                        throw failure;
+                    }
+                };
+            }
+            return value;
+        })) {
+            assertSame(failure, assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoadingDirectories(input, SegmentClassicLinuxElfTest.deadline())));
+        }
+        try {
+            for (int i = 0; i < 2; i++) {
+                var result = owner.closeAndDrain();
+                assertFalse(result.drained());
+                assertEquals(1, result.retainedAuxiliaryReads());
+                assertSame(failure, result.auxiliaryCloseFailure());
+                assertSame(failure, result.launcherFailure());
+            }
+            assertEquals(1, closes.get());
+        } finally {
+            captured.get().close();
+        }
+        assertFalse(owner.closeAndDrain().drained());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void rawFilenameVectorRejectsReplacementDecodingAndStillClosesOriginalDirectory() throws Exception {
+        Path directory = Files.createDirectory(root.resolve("physical"));
+        Path raw = Path.of(java.net.URI.create(directory.toUri().toASCIIString() + "%FF.conf"));
+        var input = loading(key, List.of(), List.of(
+                new SegmentClassicLinuxDeployment.Directory(directory, true)), List.of());
+        var owner = owner();
+        owner.initialize();
+        var closes = new AtomicInteger();
+        try (var calls = mockStatic(Files.class, invocation -> {
+            Object value = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("newDirectoryStream")) {
+                DirectoryStream<Path> actual = (DirectoryStream<Path>) value;
+                return new DirectoryStream<Path>() {
+                    @Override
+                    public java.util.Iterator<Path> iterator() {
+                        // A raw native-name vector, independent of whether this host permits creating that name.
+                        return List.of(raw).iterator();
+                    }
+
+                    @Override
+                    public void close() throws IOException {
+                        closes.incrementAndGet();
+                        actual.close();
+                    }
+                };
+            }
+            return value;
+        })) {
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoadingDirectories(input, SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertEquals(1, closes.get());
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void loadingDirectoryNameAndCountBudgetsCoverAllPhysicalDirectoriesAndCloseOverflowIterators()
+            throws Exception {
+        Path first = Files.createDirectory(root.resolve("first-directory"));
+        Path second = Files.createDirectory(root.resolve("second-directory"));
+        var input = loading(key, List.of(), List.of(
+                new SegmentClassicLinuxDeployment.Directory(first, true),
+                new SegmentClassicLinuxDeployment.Directory(second, true)), List.of());
+        for (boolean bytes : new boolean[]{true, false}) {
+            var owner = owner();
+            owner.initialize();
+            var closes = new AtomicInteger();
+            try (var calls = mockStatic(Files.class, invocation -> {
+                Object value = invocation.callRealMethod();
+                if (invocation.getMethod().getName().equals("newDirectoryStream")) {
+                    Path directory = invocation.getArgument(0);
+                    DirectoryStream<Path> actual = (DirectoryStream<Path>) value;
+                    return new DirectoryStream<Path>() {
+                        @Override
+                        public java.util.Iterator<Path> iterator() {
+                            // Capacity fault only: no synthesized member is accepted as an existing/approved file.
+                            return java.util.stream.IntStream.range(0, bytes ? 32769 : 131073)
+                                    .mapToObj(i -> directory.resolve((bytes ? "x".repeat(1020) : "x") + i)).iterator();
+                        }
+
+                        @Override
+                        public void close() throws IOException {
+                            closes.incrementAndGet();
+                            actual.close();
+                        }
+                    };
+                }
+                return value;
+            })) {
+                var failure = assertThrows(IOException.class,
+                        () -> owner.verifyLinuxLoadingDirectories(input, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage().contains("capacity"));
+            }
+            assertTrue(owner.closeAndDrain().drained());
+            assertEquals(2, closes.get());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void loadingDirectoryOpenBodyOwnsExternalCloseAndCannotDrainItself() throws Exception {
+        Path directory = Files.createDirectory(root.resolve("physical"));
+        var input = loading(key, List.of(), List.of(
+                new SegmentClassicLinuxDeployment.Directory(directory, true)), List.of());
+        var owner = owner();
+        owner.initialize();
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var read = new FutureTask<>(() -> {
+            try (var calls = mockStatic(Files.class, invocation -> {
+                Object value = invocation.callRealMethod();
+                if (invocation.getMethod().getName().equals("newDirectoryStream")) {
+                    assertThrows(IllegalStateException.class, owner::closeAndDrain);
+                    entered.countDown();
+                    assertTrue(release.await(5, TimeUnit.SECONDS));
+                }
+                return value;
+            })) {
+                return owner.verifyLinuxLoadingDirectories(input, SegmentClassicLinuxElfTest.deadline());
+            }
+        });
+        var close = new FutureTask<>(owner::closeAndDrain);
+        Thread reader = new Thread(read);
+        Thread closer = new Thread(close);
+        try {
+            reader.start();
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            closer.start();
+            await().atMost(5, TimeUnit.SECONDS).until(() -> closer.getState() == Thread.State.BLOCKED);
+            assertThrows(TimeoutException.class, () -> close.get(20, TimeUnit.MILLISECONDS));
+            release.countDown();
+            assertEquals(1, read.get(5, TimeUnit.SECONDS).size());
+            assertTrue(close.get(5, TimeUnit.SECONDS).drained());
+        } finally {
+            release.countDown();
+            reader.join(5000);
+            if (closer.getState() != Thread.State.NEW) {
+                closer.join(5000);
+            }
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertFalse(reader.isAlive());
+        assertFalse(closer.isAlive());
+    }
+
+    /** External filename-byte fixture; standard DirectoryStream owns the real original native iterator. */
+    public static final class DirectoryProbe {
+        public static void main(String[] args) throws Exception {
+            var fixture = new SegmentClassicLaunchTrustTest();
+            fixture.temporary.create();
+            try {
+                fixture.fixture();
+                var owner = fixture.owner();
+                owner.initialize();
+                var input = loading(fixture.key, List.of(), List.of(
+                        new SegmentClassicLinuxDeployment.Directory(Path.of(args[0]), true)), List.of());
+                assertThrows(IOException.class,
+                        () -> owner.verifyLinuxLoadingDirectories(input, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(owner.closeAndDrain().drained());
+            } finally {
+                fixture.temporary.delete();
+            }
+        }
     }
 
     @Test
@@ -279,10 +541,27 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void opaqueNonUtf8LoadingPathIsRejectedBeforeAnyFileIo() throws Exception {
+        Path raw = Path.of(java.net.URI.create(root.toUri().toASCIIString() + "%FF.conf"));
+        var file = new SegmentClassicLinuxDeployment.File(raw, SegmentClassicLinuxDeployment.Role.LOADER_CONFIG,
+                0, new SegmentClassicHandoff.Digest(MessageDigest.getInstance("SHA-256").digest(new byte[0])));
+        var owner = owner();
+        owner.initialize();
+        try (var calls = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Opaque invalid UTF-8 path reached file I/O");
+        })) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.verifyLinuxFile(file, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("strict UTF-8"));
+        }
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
+    @Test
     public void linuxFilesUseOriginalHashAndElfHandleIncludingAnEmptyConfiguration() throws Exception {
         var empty = linuxFile(root.resolve("loader.conf"), SegmentClassicLinuxDeployment.Role.LOADER_CONFIG,
                 new byte[0]);
-        var library = linuxFile(root.resolve("libowned.so.3"), SegmentClassicLinuxDeployment.Role.LIBRARY,
+        var library = linuxFile(root.resolve("lib-公钥.so.3"), SegmentClassicLinuxDeployment.Role.LIBRARY,
                 SegmentClassicLinuxElfTest.image());
         var owner = owner();
         owner.initialize();

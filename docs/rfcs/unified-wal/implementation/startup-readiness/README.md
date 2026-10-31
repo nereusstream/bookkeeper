@@ -720,6 +720,20 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## Linux 加载目录成员与逐路径字节等价
+
+2026-11-01在父`b3bcb2f12f4eece7536e035a892a5e56d918cead`上，原SegmentClassicLaunchTrust/AuxiliaryRead增加完整成员名观察：先核验声明目录的物理路径，再持有原DirectoryStream、枚举名称并检查实际首次关闭，前后目录/父链及整组A/B必须一致；缺失和真正空目录分别表达。同一resolved目录的alias视图复用本轮名称列表。按规划会话冻结总成员262144，另用64MiB UTF8名称字节上限保护本组件，超限失败并关闭原iterator；这不是整个父进程的heap或full-bytes验收。名称包含确实无关成员，不跟随它们、不逐个读取内容，也不把枚举事实变成批准候选。异常/未知关闭保留原failure，外部close等待实际open体退出，自drain拒绝。
+
+字节边界采用当前测试JDK Corretto21.0.10+7-LTS的原始UnixPath比较及file URI百分号解码规则。名称先quote为ASCII，显式file:///并拒绝authority/query/fragment，再由批准Unix provider构造UTF8预期Path，与原native-byte叶Path比较；不使用URI.getPath或生产Path.toUri，不用可变sun.jnu.encoding自报。首次草案new URI(file,null,...)生成file:/会走JNU fallback，这个实际缺口经匹配源码核对后改为空authority及显式前缀检查，最终验证另外绑定。相同无I/O字节检查已提前到Linux最终文件、解析后的加载路径及alias的JNI调用，原v1 hash/regular ACL入口保持。新profile仍需把原始descriptor字符串及实际default provider/Path/URI行为绑定到批准JDK，不能只验类名；当前组件不发行该资格。Corretto src.zip三份原源及SHA保留，仅作为实际测试runtime的源码依据。
+
+首组两类41项、后续六类73项各按当时的名称预算或URI实现保存；最终UTF8边界/Unicode文件用例后的trust/program/deployment/materials/publication/preload六类74项全部通过，0失败/错误/跳过，最终Spotless/Checkstyle退出0。覆盖真实Unicode及%/#/?字面成员、未跟随的dangling member、alias与空/缺失目录、open后目录inode替换、首次iterator close失败不重试、外部close等原调用体，以及跨物理目录的总名称/总数量超限；容量反例为包装真实iterator的合成名称故障，不当作真实成员或批准阳性。内存中file:///%FF原字节向量验证有损解码拒绝、原iterator关闭；不合法的完整Path在任何Files I/O前拒绝。五阶段各1415项原源/资源分别对照快照或父Git字节，无缺失/错配；最终两个代码源和样式/最终测试完全一致。早期PASS不移绑最终实现或262144契约。
+
+Mac文件系统创建真实非法UTF8文件名被errno92拒绝，对应DirectoryProbe JVM未启动，不计内核反例阳性；空fixture经两次lsof及身份检查后清理。两个独立Java源探针只读匹配JDK缓存charset与URI向量，默认和-Dsun.jnu.encoding=ISO-8859-1尝试均观察到UTF8缓存，不能据此声称已测试非UTF8 runtime；测试用module open不成为生产入口。没有新增JNI、Rust构建、Linux运行、模型或性能验证；实际qualified阳性仍NOT_EXECUTED。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-directories-evidence-b3bcb2f1`保存原source/class/XML、各阶段命令、JDK源/探针及容量/URI纠正边界。终态RAT退出1，原431项未批准路径及父b3字节一致，本次无新增，扫描前排除用户PDF。五个Maven raw scope经两次独立lsof及原inode/SHA/硬链接核验后清理10目录/41文件路径/2,821,018逻辑字节，归档保留、regular-file数据块回收0，共享target、原精确JNI和用户文件不动。
+
+规划会话已冻结后续完整接受语义：批准vendor build的glibc2.39/LP64/little-endian，new cache1.1/generator/hwcaps扩展及明确支持的endian-unset；全结构验证、无关或其他ABI合法条目可保留，cache最大16MiB/262144条目。请求者ELF＋NEEDED原序号/名称绑定批准候选集合，递归未选中候选；实际winner/CPU/OS特性为运行观察。真实RPATH加载者链/RUNPATH/cache/有序default目录、NODEFLIB、ORIGIN/LIB/PLATFORM及alias加载路径上下文、v4/v3/v2/base规则都须纳入同一新schema；批准loader固定--list-diagnostics及候选批准后的--list systemctl仅为有界原进程观察/oracle，不证明后续dlopen闭合。conf为ldconfig输入，按C locale glob64的相对/绝对include与* ? []、depth32闭合完整匹配，实际零匹配允许，未知不当零；不运行ldconfig修复或用Java **/brace近似。确实无关目录成员可保留，可能参与加载/include者不得现场批准。以上与service/target合并新LinuxDeployment schema，旧schema1不补认缺失语义，旧ELF格式1的token拒绝也不悄悄改义。当前目录观察尚未完成新schema、cache/conf parser、candidate/selection solver、实际Linux接受/拒绝或v2 qualified启动；各整体Gate仍OPEN，完整16步active，默认OFF/SYSTEM/PARK及disabled不变。
+
 ## Linux 声明加载路径的物理观察
 
 2026-11-01在父`33353b2ad6571c4566c2342a68d00576c4f8f98b`上，按规划会话只读裁决，在原SegmentClassicLaunchTrust增加包内Loading路径观察；它只核验声明alias、目录、config/cache存在或缺失和interpreter入口，返回原物理身份/缺失位置及流式父链摘要。逐段验证root或原owner的真实父目录、ACL及替换权限，再处理已声明链接；未声明/不符owner/多链接/错误target/循环或超限拒绝，目标文件仍单独走原hash/ELF合同。缺失只接受原始NoSuchFileException，且实际存在的父目录不允许其他主体创建；不把不可读、错误或悬空链接当缺失。整组观察两次必须相同，不循环刷绿，也不把A/B相同当作原子或连续保护证明。摘要只比较同进程观察，不是持久或签名编码；流式处理不保留无界父链列表。普通checked、根/key/recipe/一般文件的禁止别名及regular/dir ACL语义保持。
