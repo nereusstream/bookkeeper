@@ -720,6 +720,16 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## 固定 UDS 操作报文与有界字节交换实施中
+
+2026-11-01在本地父`88802b2be2`上新增包内SegmentClassicLauncherOperationCodec及OperationIo，作为既定v2/专用Ctl的必要字节接线，尚未接入launcher或发行实际受理。独立UWCLO001报文头16字节（magic/schema1/kind/flags0/正文长度），GREETING与STOP各带非零episode，HANDOFF另带非零bindingId，REPLY仅ACCEPTED/REJECTED；最大48字节，不携私钥、可签facts或drain结果。固定头全部验证后才分配固定正文，截断/尾随/未知码/非法identity拒绝；旧HELLO/START不能互解为操作。所有episode值仍为数据，后续原owner必须关联真实unit/Process并拒绝旧episode，不以codec解析成功授予操作。
+
+OperationIo只在原owner已登记的一个非阻塞Unix channel与专用selector上工作；一个原absolute deadline贯穿connect或整个帧，固定头通过前不按声明长度分配。不会自动替换/重连channel，不建立线程、认证root、创建endpoint或提交业务操作；EOF/超时/中断后资源仍归原owner实际关闭，中断flag保持。selector短等待仅推进这条原连接，不能复用为通用RPC或业务事件循环。后续listener/Ctl还须核验固定路径父链/实际对象、kernel peer UID/PID和原Main出生，单命令/连接、预算、原owner关闭图及STOP/HANDOFF竞争均未接通。
+
+独立Python五份固定向量与四项codec测试首轮通过。首轮加真实I/O的八项中四项在bind前因私有fixture追加UUID导致macOS Unix路径超长而error，原输入/日志/XML保留；只将同一私有TemporaryFolder内的endpoint改为短固定叶子，原断言不放宽。修正后的两类八项全部通过，0失败/错误/跳过；实际私有Unix连接覆盖greeting→一命令→受理字节、半头原deadline、半body EOF、超长声明未等body即拒绝，以及过期/中断不发命令且原socket继续可用。ACCEPTED字节来自fixture，不是生产launcher受理、业务drain或Linux资格阳性。原codec四项及最终两类源码的Spotless/Checkstyle均退出0；后续接线仍在进行，RAT/TLA/性能未运行。证据保留于`/Users/liusinan/.codex/artifacts/unified-wal/classic-operation-evidence-88802b2b`，本包仍WIP；v2描述文件装载、root UDS/Ctl、systemctl取证与固定隔离dropper/完整Unix资格及所有整体Gate继续OPEN，完整目标active，默认OFF/SYSTEM/PARK和disabled不变。
+
+规划会话同时冻结systemd取证使用固定`/usr/bin/systemctl show`（精确system manager/unit/property argv、空环境、原owner持一个实际查询及两路有界pipe，失败仍实际排空），CLI及依赖另纳v2批准文件，不新增native D-Bus或追认v1批准。实际属性/两次关联顺序由execution-objective拥有；磁盘cat/list-dependencies或两次相等快照不能建立唯一启动入口与连续隔离，期间unit/reload/reexec/activation图无法受控仍拒绝。本处只同步裁决，尚无CLI实现或实际Linux阳性。
+
 ## Linux 操作通道的只读 peer 凭据依赖
 
 2026-11-01在本地父`081e437f946435d748fc7a0e195ea90b8751d50c`上，规划会话冻结完整Unix交接首版仅支持受控Linux x86_64/systemd/统一cgroup v2/宿主namespace/专用静态旧UID/独占本地ext4；具体资格与取证顺序由execution-objective拥有，macOS完整资格为UNSUPPORTED。后续父描述文件使用UWCLX002/schema2，固定root UDS在同episode、资格建立后且child创建前绑定；专用Ctl只投递STOP或HANDOFF，ACCEPTED只表示受理。v1字节及普通关闭不升级资格；当前尚未实现v2装载、UDS/Ctl、固定隔离dropper或完整Linux资格生产者，不以新增native方法替代这些工作。
