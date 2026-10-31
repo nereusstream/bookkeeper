@@ -123,6 +123,7 @@ abstract class ProfileZKTestBase {
         final CountDownLatch expired;
         final ZooKeeperWatcherBase watcherManager;
         final AtomicInteger reads = new AtomicInteger();
+        final AtomicReference<Runnable> beforeRead = new AtomicReference<>();
         final AtomicBoolean holdReadReply = new AtomicBoolean();
         final AtomicReference<Runnable> lateReadReply = new AtomicReference<>();
         final CountDownLatch readReplyHeld = new CountDownLatch(1);
@@ -164,6 +165,10 @@ abstract class ProfileZKTestBase {
 
         @Override
         public void getData(String path, boolean watch, DataCallback callback, Object context) {
+            Runnable before = beforeRead.getAndSet(null);
+            if (before != null) {
+                before.run();
+            }
             reads.incrementAndGet();
             boolean hold = holdReadReply.getAndSet(false);
             super.getData(path, watch, (code, returnedPath, ignored, bytes, stat) -> {

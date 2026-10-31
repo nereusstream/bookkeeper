@@ -85,8 +85,12 @@ public final class ZKBookieRouteBindingStore {
     }
 
     public ReadResult read(BookieId bookie) {
+        return read(bookie, System.nanoTime() + timeoutNanos, reads);
+    }
+
+    ReadResult read(BookieId bookie, long deadline, ProfileZKReadClient reader) {
         try {
-            return snapshot(bookie, System.nanoTime() + timeoutNanos);
+            return snapshot(bookie, deadline, reader);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return ReadResult.status(ReadStatus.UNAVAILABLE, "Interrupted native binding query");
@@ -96,6 +100,12 @@ public final class ZKBookieRouteBindingStore {
             return ReadResult.status(ReadStatus.INCOMPATIBLE, incompatible.getMessage());
         } catch (IllegalArgumentException corrupt) {
             return ReadResult.status(ReadStatus.CORRUPT, corrupt.getMessage());
+        }
+    }
+
+    void requireSourceClient(ZooKeeper client, String expectedLedgersRoot) {
+        if (zk != client || !ledgersRoot.equals(expectedLedgersRoot)) {
+            throw new IllegalArgumentException("Classic bootstrap native client/namespace mismatch");
         }
     }
 
@@ -216,10 +226,15 @@ public final class ZKBookieRouteBindingStore {
     }
 
     private ReadResult snapshot(BookieId bookie, long deadline) throws InterruptedException, TimeoutException {
-        if (reads.sync(ledgersRoot, deadline) != Code.OK.intValue()) {
+        return snapshot(bookie, deadline, reads);
+    }
+
+    private ReadResult snapshot(BookieId bookie, long deadline, ProfileZKReadClient reader)
+            throws InterruptedException, TimeoutException {
+        if (reader.sync(ledgersRoot, deadline) != Code.OK.intValue()) {
             return ReadResult.status(ReadStatus.UNAVAILABLE, "Native binding sync unavailable");
         }
-        var node = reads.get(path(bookie), deadline);
+        var node = reader.get(path(bookie), deadline);
         if (node.code() == Code.NONODE.intValue()) {
             return ReadResult.status(ReadStatus.ABSENT, "");
         }
@@ -235,7 +250,7 @@ public final class ZKBookieRouteBindingStore {
         if (stat == null || stat.getEphemeralOwner() != 0) {
             return ReadResult.status(ReadStatus.CORRUPT, "Invalid native common binding node");
         }
-        var anchor = reads.get(marker(bookie, envelope.birth()), deadline);
+        var anchor = reader.get(marker(bookie, envelope.birth()), deadline);
         if (anchor.code() == Code.NONODE.intValue()) {
             return ReadResult.status(ReadStatus.CORRUPT, "Required native binding birth marker is missing");
         }
@@ -247,7 +262,7 @@ public final class ZKBookieRouteBindingStore {
                 || anchor.bytes() == null || anchor.bytes().length != 0) {
             return ReadResult.status(ReadStatus.CORRUPT, "Invalid native binding birth marker");
         }
-        SourceCheck source = sourceChecks(binding, deadline);
+        SourceCheck source = sourceChecks(binding, deadline, reader);
         if (source.failure() != null) {
             return ReadResult.status(source.failure().status() == WriteStatus.UNAVAILABLE
                     ? ReadStatus.UNAVAILABLE : ReadStatus.INCOMPATIBLE, source.failure().detail());
@@ -260,7 +275,12 @@ public final class ZKBookieRouteBindingStore {
 
     private SourceCheck sourceChecks(BookieRouteBinding binding, long deadline)
             throws InterruptedException, TimeoutException {
-        var cluster = reads.get(instancePath, deadline);
+        return sourceChecks(binding, deadline, reads);
+    }
+
+    private SourceCheck sourceChecks(BookieRouteBinding binding, long deadline, ProfileZKReadClient reader)
+            throws InterruptedException, TimeoutException {
+        var cluster = reader.get(instancePath, deadline);
         if (cluster.code() != Code.OK.intValue()) {
             return new SourceCheck(List.of(), WriteResult.status(cluster.code() == Code.NONODE.intValue()
                     ? WriteStatus.INCOMPATIBLE : WriteStatus.UNAVAILABLE, "Native cluster source unavailable"));
@@ -269,7 +289,7 @@ public final class ZKBookieRouteBindingStore {
             return new SourceCheck(List.of(), WriteResult.status(WriteStatus.CONFLICT, "Cluster source changed"));
         }
         String cookiePath = cookieRoot + "/" + binding.bookieId();
-        var cookie = reads.get(cookiePath, deadline);
+        var cookie = reader.get(cookiePath, deadline);
         if (cookie.code() != Code.OK.intValue()) {
             return new SourceCheck(List.of(), WriteResult.status(cookie.code() == Code.NONODE.intValue()
                     ? WriteStatus.CONFLICT : WriteStatus.UNAVAILABLE, "Original Cookie source unavailable"));

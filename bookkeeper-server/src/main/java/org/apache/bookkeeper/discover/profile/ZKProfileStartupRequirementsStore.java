@@ -16,6 +16,7 @@
  */
 package org.apache.bookkeeper.discover.profile;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -32,6 +33,8 @@ import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
 import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
+import org.apache.bookkeeper.discover.BookieRouteBinding;
+import org.apache.bookkeeper.net.BookieId;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException.Code;
 import org.apache.zookeeper.Op;
@@ -45,6 +48,104 @@ public final class ZKProfileStartupRequirementsStore {
     public enum Status { FOUND, NOT_FOUND, UNAVAILABLE, CORRUPT }
     public enum ProvisionStatus { APPLIED, ALREADY_APPLIED, CONFLICT, UNAVAILABLE, RESPONSE_LOST }
     public record ReadResult(Status status, Optional<Observation> observation) { }
+
+    /** Fresh native values, not an adoptable session or a readiness observation. */
+    public record ClassicBootstrapSnapshot(BookieRouteBinding.Observation nativeBinding,
+            BookieCompatibilityFact commissionedCompatibility, RequiredDeviceManifest requiredDevices,
+            SourceIdentity requirementsSource) { }
+
+    public record ClassicBootstrapDrain(boolean drained, int pendingCallbacks, Throwable firstReadFailure) { }
+
+    /** Borrowed sources for one explicit offline owner. Never closes the client or the requirements store. */
+    public final class ClassicBootstrapSources {
+        private final ZKBookieRouteBindingStore nativeBindings;
+        private final BookieId bookie;
+        private final String writablePath;
+        private final String readonlyPath;
+        private final long readTimeoutNanos;
+        private final ProfileZKReadClient.Pending pending = new ProfileZKReadClient.Pending();
+        private final ProfileZKReadClient reader = new ProfileZKReadClient(zk, pending);
+        private Thread readingThread;
+        private boolean closing;
+        private Throwable firstReadFailure;
+
+        private ClassicBootstrapSources(ZKBookieRouteBindingStore nativeBindings, String ledgersRoot,
+                BookieId bookie, Duration timeout) {
+            this.nativeBindings = Objects.requireNonNull(nativeBindings, "nativeBindings");
+            this.bookie = Objects.requireNonNull(bookie, "bookie");
+            nativeBindings.requireSourceClient(zk, ledgersRoot);
+            path(bookie.toString());
+            String prefix = ledgersRoot.equals("/") ? "" : ledgersRoot;
+            writablePath = prefix + "/available/" + bookie;
+            readonlyPath = prefix + "/available/readonly/" + bookie;
+            PathUtils.validatePath(writablePath);
+            PathUtils.validatePath(readonlyPath);
+            if (timeout.isNegative() || timeout.isZero() || timeout.compareTo(Duration.ofMinutes(1)) > 0) {
+                throw new IllegalArgumentException("Bounded Classic bootstrap read timeout required");
+            }
+            readTimeoutNanos = timeout.toNanos();
+        }
+
+        /** Each use rereads the original native sources. There is no cached qualification or write operation. */
+        public synchronized ClassicBootstrapSnapshot read() throws IOException {
+            if (closing || firstReadFailure != null || readingThread != null) {
+                throw new IOException("Classic bootstrap sources are closing or failed", firstReadFailure);
+            }
+            readingThread = Thread.currentThread();
+            try {
+                long deadline = System.nanoTime() + readTimeoutNanos;
+                var nativeRead = nativeBindings.read(bookie, deadline, reader);
+                if (nativeRead.status() != BookieRouteBinding.ReadStatus.FOUND) {
+                    throw new IOException("Classic bootstrap native source: " + nativeRead.status()
+                            + ": " + nativeRead.detail());
+                }
+                var original = snapshot(bookie.toString(), deadline, reader, false);
+                if (original == null) {
+                    throw new IOException("Commissioned Classic bootstrap requirements are missing");
+                }
+                var binding = nativeRead.observation().orElseThrow().binding();
+                var commissioned = original.commissionedCompatibility();
+                if (!commissioned.storageIncarnation().equals(binding.incarnation())
+                        || !commissioned.deviceManifestIdentity().equals(binding.manifest())) {
+                    throw new IOException("Commissioned requirements differ from the native bootstrap scope");
+                }
+                for (String registration : List.of(writablePath, readonlyPath)) {
+                    var observed = reader.exists(registration, deadline);
+                    if (observed.code() != Code.NONODE.intValue()) {
+                        throw new IOException(observed.code() == Code.OK.intValue()
+                                ? "Classic bootstrap still has a Bookie registration"
+                                : "Classic bootstrap registration absence is unavailable");
+                    }
+                }
+                return new ClassicBootstrapSnapshot(nativeRead.observation().orElseThrow(),
+                        original.commissionedCompatibility(), original.requiredDevices(), original.sourceIdentity());
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                var failure = new IOException("Classic bootstrap requirements read interrupted", interrupted);
+                firstReadFailure = failure;
+                throw failure;
+            } catch (TimeoutException unavailable) {
+                var failure = new IOException("Classic bootstrap source deadline elapsed", unavailable);
+                firstReadFailure = failure;
+                throw failure;
+            } catch (IOException | RuntimeException | Error failure) {
+                firstReadFailure = failure;
+                throw failure;
+            } finally {
+                readingThread = null;
+            }
+        }
+
+        /** Stop new reads after the actual reader returns; abandoned callbacks retain the borrowed sources. */
+        public synchronized ClassicBootstrapDrain closeAndDrain() {
+            if (readingThread == Thread.currentThread()) {
+                throw new IllegalStateException("Classic bootstrap source reader cannot drain itself");
+            }
+            closing = true;
+            int remaining = pending.stop();
+            return new ClassicBootstrapDrain(remaining == 0, remaining, firstReadFailure);
+        }
+    }
 
     /** Value for external proof matching, never authority by construction. Includes the original native birth. */
     public record SourceIdentity(String nodePath, UUID birthId, long birthZxid, long modifiedZxid,
@@ -158,6 +259,15 @@ public final class ZKProfileStartupRequirementsStore {
         timeoutNanos = timeout.toNanos();
     }
 
+    /** Heap-only native-manager bridge. The supplied client and native namespace must be the actual bound ones. */
+    public ClassicBootstrapSources borrowClassicBootstrapSources(ZooKeeper nativeClient,
+            ZKBookieRouteBindingStore nativeBindings, String ledgersRoot, BookieId bookie, Duration timeout) {
+        if (zk != nativeClient) {
+            throw new IllegalArgumentException("Classic bootstrap requirements/native client mismatch");
+        }
+        return new ClassicBootstrapSources(nativeBindings, ledgersRoot, bookie, timeout);
+    }
+
     /** Bind the actual native assignment producer before consuming this immutable compatibility/device source. */
     public synchronized void bindDeleteAssignments(ZKProfileReservationStore reservations) {
         if (deleteAssignments != null || observationStarted) {
@@ -263,10 +373,16 @@ public final class ZKProfileStartupRequirementsStore {
     }
 
     private Observation snapshot(String bookieId, long deadline) throws InterruptedException, TimeoutException {
-        if (reads.sync(root, deadline) != Code.OK.intValue()) {
+        return snapshot(bookieId, deadline, reads, true);
+    }
+
+    private Observation snapshot(String bookieId, long deadline, ProfileZKReadClient reader,
+            boolean effectiveAssignment)
+            throws InterruptedException, TimeoutException {
+        if (reader.sync(root, deadline) != Code.OK.intValue()) {
             throw new IllegalStateException("Startup requirement sync unavailable");
         }
-        var node = reads.get(path(bookieId), deadline);
+        var node = reader.get(path(bookieId), deadline);
         if (node.code() == Code.NONODE.intValue()) {
             return null;
         }
@@ -279,7 +395,7 @@ public final class ZKProfileStartupRequirementsStore {
                 || !envelope.compatibility().bookieId().equals(bookieId)) {
             throw new IllegalArgumentException("Invalid immutable startup requirement node");
         }
-        var anchor = reads.get(marker(envelope), deadline);
+        var anchor = reader.get(marker(envelope), deadline);
         if (anchor.code() != Code.OK.intValue()) {
             if (anchor.code() == Code.NONODE.intValue()) {
                 throw new IllegalArgumentException("Required startup birth marker missing");
@@ -292,7 +408,7 @@ public final class ZKProfileStartupRequirementsStore {
             throw new IllegalArgumentException("Invalid startup birth marker");
         }
         var c = envelope.compatibility();
-        if (deleteAssignments != null) {
+        if (effectiveAssignment && deleteAssignments != null) {
             var target = new ProfileDeleteRecord.Target(c.bookieId(), c.storageIncarnation().value());
             var actual = deleteAssignments.readDeleteHead(target);
             if (actual.status() != org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.FOUND) {

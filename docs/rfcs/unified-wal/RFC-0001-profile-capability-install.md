@@ -1098,3 +1098,6 @@ RFC 进入 Accepted 前必须：
 
 
 2026-10-31接续[交接材料 I/O owner 与 supervisor 终态](implementation/startup-readiness/README.md#交接材料-io-owner-与-supervisor-终态)：包内材料子owner先登记后打开已有固定supervisor及proof/policy/retirement/AES输入，有界读取、验签/原scope匹配、检查原生路径身份及替换；所有fd首次close成功后才可释放guard，失败保留真实终态并清零原始key缓冲。验证由canonical拥有。仅返回数据，不发行session；真实launcher/UID-fd-ACL与当前metadata核验、公开bootstrap/Classic恢复封口仍OPEN，完整目标active，Main/G1/full-bytes/生产Gate及默认OFF/SYSTEM/PARK和disabled保持。
+
+
+2026-10-31接续[Classic bootstrap 的真实冷读与借用回调排空](implementation/startup-readiness/README.md#classic-bootstrap-的真实冷读与借用回调排空)：显式native manager桥按真实相同client/固定namespace借用冷读owner，重新读取原native/cluster/Cookie及commissioned requirements并核对共同incarnation/完整manifest与两类registration缺席；超时/中断后仍保留实际回调，首次错误与真实drain分开，未决不关闭caller资源。验证与原始来源由canonical拥有。只返回冷读数据，不发行session；完整loader/launcher/UID隔离、公开bootstrap及Classic恢复封口仍OPEN，完整目标active，Main/G1/full-bytes/生产Gate和默认OFF/SYSTEM/PARK及disabled保持。

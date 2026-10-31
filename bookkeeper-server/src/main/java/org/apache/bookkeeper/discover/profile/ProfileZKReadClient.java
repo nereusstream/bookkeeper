@@ -27,25 +27,93 @@ import org.apache.zookeeper.data.Stat;
 /** Shared bounded cold reads of a borrowed ZooKeeper client; no retry, cache, watcher or client ownership. */
 final class ProfileZKReadClient {
     record Node(int code, byte[] bytes, Stat stat) { }
+    record Existence(int code, Stat stat) { }
+
+    /** An explicit cold owner retains even an abandoned or ambiguously submitted callback. */
+    static final class Pending {
+        private int callbacks;
+        private boolean stopped;
+
+        synchronized void submitted() {
+            if (stopped) {
+                throw new IllegalStateException("Cold metadata owner is closing");
+            }
+            callbacks++;
+        }
+
+        synchronized void returned() {
+            callbacks--;
+        }
+
+        synchronized int stop() {
+            stopped = true;
+            return callbacks;
+        }
+    }
 
     private final ZooKeeper zk;
+    private final Pending pending;
 
     ProfileZKReadClient(ZooKeeper zk) {
+        this(zk, null);
+    }
+
+    ProfileZKReadClient(ZooKeeper zk, Pending pending) {
         this.zk = Objects.requireNonNull(zk, "zk");
+        this.pending = pending;
+    }
+
+    private void submitted() {
+        if (pending != null) {
+            pending.submitted();
+        }
+    }
+
+    private void returned() {
+        if (pending != null) {
+            pending.returned();
+        }
     }
 
     Node get(String path, long deadline) throws InterruptedException, TimeoutException {
         requireTime(deadline);
         CompletableFuture<Node> reply = new CompletableFuture<>();
-        zk.getData(path, false, (code, ignored, context, bytes, stat) ->
-                reply.complete(new Node(code, bytes, stat)), null);
+        submitted();
+        zk.getData(path, false, (code, ignored, context, bytes, stat) -> {
+            try {
+                reply.complete(new Node(code, bytes, stat));
+            } finally {
+                returned();
+            }
+        }, null);
+        return await(reply, deadline);
+    }
+
+    Existence exists(String path, long deadline) throws InterruptedException, TimeoutException {
+        requireTime(deadline);
+        CompletableFuture<Existence> reply = new CompletableFuture<>();
+        submitted();
+        zk.exists(path, false, (code, ignored, context, stat) -> {
+            try {
+                reply.complete(new Existence(code, stat));
+            } finally {
+                returned();
+            }
+        }, null);
         return await(reply, deadline);
     }
 
     int sync(String root, long deadline) throws InterruptedException, TimeoutException {
         requireTime(deadline);
         CompletableFuture<Integer> reply = new CompletableFuture<>();
-        zk.sync(root, (code, ignored, context) -> reply.complete(code), null);
+        submitted();
+        zk.sync(root, (code, ignored, context) -> {
+            try {
+                reply.complete(code);
+            } finally {
+                returned();
+            }
+        }, null);
         return await(reply, deadline);
     }
 

@@ -49,6 +49,7 @@ import org.apache.bookkeeper.client.BKException.MetaStoreException;
 import org.apache.bookkeeper.common.concurrent.FutureUtils;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.profile.ZKBookieRouteBindingStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManagerFactory;
 import org.apache.bookkeeper.meta.LayoutManager;
 import org.apache.bookkeeper.meta.LedgerManagerFactory;
@@ -168,6 +169,12 @@ public class ZKRegistrationManager implements RegistrationManager {
     @Override
     public BookieRouteBinding.ReadResult readBookieRouteBinding(BookieId bookieId) {
         return routeBindings.read(bookieId);
+    }
+
+    /** Explicit offline cold reader on this manager's actual client and fixed native namespace. No I/O here. */
+    public final ZKProfileStartupRequirementsStore.ClassicBootstrapSources borrowClassicBootstrapSources(
+            ZKProfileStartupRequirementsStore requirements, BookieId bookieId, Duration timeout) {
+        return requirements.borrowClassicBootstrapSources(zk, routeBindings, ledgersRootPath, bookieId, timeout);
     }
 
     @Override
