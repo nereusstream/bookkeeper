@@ -26,9 +26,47 @@ import java.util.Arrays;
 /** Bounded glibc 2.39 ldconfig input observations; never loader search order or an include-file approval. */
 final class SegmentClassicLinuxConfiguration {
     static final int MAX_BYTES = 1024 * 1024;
+    static final int MAX_GRAPH_BYTES = 16 * 1024 * 1024;
+    static final int MAX_FILE_EXPANSIONS = 65536;
+    static final int MAX_PATTERN_EVALUATIONS = 65536;
+    static final int MAX_ACTIVE_CONTEXTS = 32;
     private static final int MAX_TOKEN_BYTES = 4096;
 
     enum Kind { DIRECTORY, INCLUDE, IGNORED_HWCAP }
+
+    record Usage(int files, int patterns, int bytes) { }
+
+    /** One observation pass. Repeated files/patterns always consume their logical work and complete byte cost. */
+    static final class ExpansionBudget {
+        private int files;
+        private int patterns;
+        private int bytes;
+
+        void beginFile(int activeContexts) throws IOException {
+            if (activeContexts < 1 || activeContexts > MAX_ACTIVE_CONTEXTS || files == MAX_FILE_EXPANSIONS) {
+                throw new IOException("Configuration graph file or active-context capacity exceeded");
+            }
+            files++;
+        }
+
+        void retainFile(long length) throws IOException {
+            if (length < 0 || length > MAX_BYTES || length > MAX_GRAPH_BYTES - bytes) {
+                throw new IOException("Configuration graph complete file-byte capacity exceeded");
+            }
+            bytes += (int) length;
+        }
+
+        void pattern() throws IOException {
+            if (patterns == MAX_PATTERN_EVALUATIONS) {
+                throw new IOException("Configuration graph include-pattern capacity exceeded");
+            }
+            patterns++;
+        }
+
+        Usage usage() {
+            return new Usage(files, patterns, bytes);
+        }
+    }
 
     static final class Unsupported extends IOException {
         private static final long serialVersionUID = 1L;

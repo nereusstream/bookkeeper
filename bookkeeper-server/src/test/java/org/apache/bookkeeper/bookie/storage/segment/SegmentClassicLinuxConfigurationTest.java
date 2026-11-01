@@ -75,6 +75,36 @@ public class SegmentClassicLinuxConfigurationTest {
     }
 
     @Test
+    public void graphBudgetsChargeZeroLengthExpansionsPatternsWholeBytesAndActiveRootDepth() throws Exception {
+        var files = new SegmentClassicLinuxConfiguration.ExpansionBudget();
+        for (int i = 0; i < 65536; i++) {
+            files.beginFile(1);
+            files.retainFile(0);
+        }
+        assertEquals(new SegmentClassicLinuxConfiguration.Usage(65536, 0, 0), files.usage());
+        assertThrows(IOException.class, () -> files.beginFile(1));
+        var patterns = new SegmentClassicLinuxConfiguration.ExpansionBudget();
+        for (int i = 0; i < 65536; i++) {
+            patterns.pattern();
+        }
+        assertThrows(IOException.class, patterns::pattern);
+        var bytes = new SegmentClassicLinuxConfiguration.ExpansionBudget();
+        for (int i = 0; i < 16; i++) {
+            bytes.beginFile(1);
+            bytes.retainFile(1024 * 1024);
+        }
+        assertEquals(16 * 1024 * 1024, bytes.usage().bytes());
+        assertThrows(IOException.class, () -> bytes.retainFile(1));
+        assertThrows(IOException.class, () -> bytes.retainFile(-1));
+        assertThrows(IOException.class, () -> bytes.retainFile(1024 * 1024 + 1));
+        var depth = new SegmentClassicLinuxConfiguration.ExpansionBudget();
+        depth.beginFile(32);
+        assertThrows(IOException.class, () -> depth.beginFile(33));
+        assertThrows(IOException.class, () -> depth.beginFile(0));
+        assertEquals(1, depth.usage().files());
+    }
+
+    @Test
     public void independentVectorPreservesCWhitespaceCaseRawLinesAndEveryIncludeWord() throws Exception {
         byte[] bytes = vector();
         var image = read(bytes);

@@ -720,6 +720,22 @@ retire将原完整operation/members固定为同一规范字节；proof只接受�
 
 本子项只报告文件发布及资源事实，不验证实际旧服务/metadata资格、其他进程与fd、Unix提权/组/ACL完整隔离或当前control seal，不发行DRAINED/可采用session/readiness。完整launcher/loader须先完成冻结的实际输入/进程/当前metadata与Unix核验，再按原owner图采用这些文件；公共bootstrap、Classic导入/flush/seal及Main仍须接线验收。完整16步目标active，Main/G1/full-bytes/生产Gate保持OPEN，默认OFF/SYSTEM/PARK及disabled保持。
 
+## Linux conf/include 的完整原 owner 图（数据观察）
+
+2026-11-01在父`2df3c6180c7ebea41bc5228a9dd5c217e6975f38`上接入包内verifyLinuxConfigurationGraph：root必须属于传入的原Loading.configuration，present索引绑定同一批准表的LOADER_CONFIG；所有配置声明先按1MiB准入，再做目标I/O。显式absent root只有实际保护父链下确证缺失才返回空图，未提供/未知/校验失败不作为空图。未来qualified消费者固定选择/etc/ld.so.conf；临时树入口仅data-only，没有配置/环境替换根或发行Installed/START的入口。每个匹配的logical pathname解析到批准的物理配置，再用原owner同一个hash/parser FileChannel读取、检查身份/父链/ACL及首次关闭；匹配后打不开、类型/批准不符、读取或关闭失败使整图拒绝。
+
+按原[glibc2.39 glob](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/posix/glob.c)的dirname、literal/magic、backslash与MARK分支组成有界显式计划，不按pathname深度递归，不预先normalize或删除尾slash。每个pattern的完整逻辑返回名分别按C字节序排序，按原include word顺序逐个展开并保留重复；相对base来自本次逻辑配置名的[dirname](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/misc/dirname.c)，保留其别名/原路径上下文，不使用最终物理文件的父目录。虚拟`.`/`..`参与glob判断但不伪装成DirectoryStream物理成员。conf目录行仍只是ldconfig输入事实，不当作runtime loader搜索顺序。
+
+规划确认固定版本MARK的边界：literal regular.conf/的递归存在分支可返回regular.conf，MARK只给is_dir者追加slash而保留普通文件名；图按实际returned name继续验证/读取，不吞成NOMATCH或加新Unsupported。该变换只来自对应glob分支；实际lookup收到link/仍要求目录。新增内部LOOKUP仅观察实际regular/dir或确证缺失，LITERAL的最终普通link仅lstat、保留dangling匹配，后续follow仍须原声明及readlink原bytes。实际普通文件不能作目录时记录已核验的非目录分支；权限、未知alias、iterator/I/O/预算/期限错误不得被捕获成零匹配。LOOKUP允许root/dot和满足原sticky规则的既有前缀；实际枚举另要求最终目录受保护且不可写，旧四种kind及普通checked/key/recipe合同保持。
+
+每遍独立计费：root与重复文件计入65536次展开，include word计入65536次pattern，完整文件length（含注释/raw bytes）累计16MiB，活动上下文最多32且root计入。文件重复时仍实际hash/read并全长度计费；物理目录成员可复用同遍原观察，但每次检查原路径/身份，继续262144总成员/64MiB名称预算。活动cycle key使用实际dev/inode加逻辑include dirname/context，允许非活动重复及同一物理文件在不同逻辑base下重现；无法证明上下文重复时由深度/总量限制终止。A/B两遍共享原绝对deadline，完整不可变结果返回前再检查；已解析前缀不能成为部分成功。整遍比较包含有序file/include/search/match/完整目录事实及流式lookup摘要，后者仅同进程A/B比较，不是持久/可签发编码，不补认原子性或连续外部保护，也不证明整个heap/RSS上界。
+
+新增真实文件/目录/JNI集成覆盖顺序/嵌套/重复、同physical file不同logical base、显式缺失root及membership、known non-dir/file/..、dangling literal和未批准命中、dot候选、dirname magic/转义、MARK literal与magic差异、真实cycle、32接受/33拒绝，以及重复1MiB文件在超16MiB前拒绝下次payload open（已打开15次）。另验证sticky已存在literal可读而缺失/枚举拒绝、超大声明在目标metadata I/O前拒绝、原DirectoryStream held时self-close拒绝且external close等待实际body、B遍增加unrelated非匹配成员仍拒绝；纯budget与2048层显式glob计划检查分别覆盖工作量边界和无pathname递归。首轮停在testCompile的helper InterruptedException声明错误，0项测试执行；随后24项一处夹具把newline写成literal backslash-n，修正后3类27项全过。最终串行十一类125项全部通过、0失败/错误/跳过，独立Spotless/Checkstyle退出0。首次编译失败时捕获的旧target class不作为新源码PASS，原失败及各阶段源/class/log/XML保持原绑定。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-include-evidence-2df3c618`保留四阶段各1424项输入逐项核验，最终六个code与通过test/style原快照一致；原GNU glob/dirname/ldconfig源码及license仅在artifact保存，不进Apache源码。终态RAT退出1，原431项路径及父2df3字节不变、本次无新增，扫描前排除用户PDF。四raw scope经各两次独立lsof及inode/SHA/归档硬链接核验后仅清理8目录、29文件路径、2,080,146逻辑字节；原证据保留、regular-file数据块回收0，共享target/精确JNI库未动。没有Rust重建、模型或性能结论；实际Linux/glibc2.39差分与接受路径仍NOT_EXECUTED。
+
+本子包完成的是配置图数据观察，尚未接入新LinuxDeployment schema/provider及原声明字符串、完整候选集合/选择/诊断或qualified父子启动。旧schema1不补认新图/预算/算法资格，各整体Gate继续OPEN，完整16步active，默认OFF/SYSTEM/PARK与disabled保持。
+
 ## Linux include component 的 C 字节匹配
 
 2026-11-01在父`228f9a12d27f796df908548e7004d4541e5b18f3`上增加包内SegmentClassicLinuxGlob，接原LinuxDirectoryObservation.matchingMembers。输入仍是原owner实际A/B观察及首次关闭后的不可变普通成员名单；筛选不查文件、不follow link、不批准候选。完整原名单保留，匹配名单按unsigned UTF8 bytes排序而非Java UTF-16顺序；不按inode/path去重，不合并多个include pattern。真实文件测试以U+E000和补充平面字符验证两种排序的差异，原dangling/unrelated成员仍仅为名称事实。

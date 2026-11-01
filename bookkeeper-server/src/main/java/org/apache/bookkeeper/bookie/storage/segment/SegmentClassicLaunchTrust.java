@@ -42,6 +42,7 @@ import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -108,11 +109,25 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    enum LinuxPathKind { ALIAS, DIRECTORY, CONFIGURATION, INTERPRETER }
+    enum LinuxPathKind { ALIAS, DIRECTORY, CONFIGURATION, INTERPRETER, LOOKUP, LITERAL }
 
     /** Bounded path facts only. The chain digest compares two observations, never startup authority. */
     record LinuxPathObservation(LinuxPathKind kind, Path entry, Path resolved, Path absentAt, Identity identity,
                                 SegmentClassicHandoff.Digest chain) { }
+
+    private static final class LookupNotDirectory extends IOException {
+        private static final long serialVersionUID = 1L;
+        private final LinuxPathObservation observed;
+
+        private LookupNotDirectory(LinuxPathObservation observed) {
+            super("Observed ordinary file cannot be traversed as a directory");
+            this.observed = observed;
+        }
+    }
+
+    private static boolean lookupKind(LinuxPathKind kind) {
+        return kind == LinuxPathKind.LOOKUP || kind == LinuxPathKind.LITERAL;
+    }
 
     /** Complete observed names only, not approved library candidates or a loader selection. */
     record LinuxDirectoryObservation(LinuxPathObservation path, List<String> members) {
@@ -125,6 +140,34 @@ final class SegmentClassicLaunchTrust {
             return SegmentClassicLinuxGlob.matchingMembers(members, component, deadline);
         }
     }
+
+    record LinuxConfigurationFile(String logical, int file, Identity identity,
+                                  SegmentClassicLinuxConfiguration.Image content) { }
+
+    record LinuxConfigurationSearch(String logical, LinuxPathObservation path, int members) { }
+
+    record LinuxConfigurationInclude(int source, int line, int column, int word, String pattern,
+            List<LinuxConfigurationSearch> directories, List<String> matches) {
+        LinuxConfigurationInclude {
+            directories = List.copyOf(directories);
+            matches = List.copyOf(matches);
+        }
+    }
+
+    /** Entire bounded observation pass only. No deployment approval, Installed, START or authority is issued. */
+    record LinuxConfigurationGraph(boolean absent, SegmentClassicLinuxConfiguration.Usage usage,
+            List<LinuxConfigurationFile> files, List<LinuxConfigurationInclude> includes,
+            List<LinuxDirectoryObservation> directories, SegmentClassicHandoff.Digest observed) {
+        LinuxConfigurationGraph {
+            files = List.copyOf(files);
+            includes = List.copyOf(includes);
+            directories = List.copyOf(directories);
+        }
+    }
+
+    private record ConfigurationContext(long device, long inode, String directory) { }
+
+    private record LoadingLookup(LinuxPathObservation path, boolean complete) { }
 
     private static final class LoadingDirectoryBudget {
         int entries;
@@ -703,8 +746,18 @@ final class SegmentClassicLaunchTrust {
             }
             boolean last = pending.isEmpty();
             if ((raw.mode() & 0170000) == 0120000) {
+                if (kind == LinuxPathKind.LITERAL && last) {
+                    if (raw.uid() != ownerUid || raw.links() != 1) {
+                        throw new IOException("Untrusted final literal loading link");
+                    }
+                    observeLinuxComponent(digest, candidate, raw);
+                    requireTime(deadline);
+                    return new LinuxPathObservation(kind, entry, candidate, null, raw,
+                            new SegmentClassicHandoff.Digest(digest.digest()));
+                }
                 var alias = aliases.get(candidate);
-                if (alias == null || raw.uid() != ownerUid || raw.links() != 1 || !present && last) {
+                if (alias == null || raw.uid() != ownerUid || raw.links() != 1
+                        || !present && last && !lookupKind(kind)) {
                     throw new IOException("Undeclared, untrusted or falsely absent Linux loading alias");
                 }
                 readLoadingAlias(candidate, raw, alias, deadline);
@@ -736,8 +789,17 @@ final class SegmentClassicLaunchTrust {
                 continue;
             }
             Identity identity = checked(candidate);
-            if (!identity.equals(raw) || !last && !identity.directory()) {
-                throw new IOException("Linux loading component changed or is not a directory");
+            if (!identity.equals(raw)) {
+                throw new IOException("Linux loading component changed during observation");
+            }
+            if (!last && !identity.directory()) {
+                if (lookupKind(kind)) {
+                    observeLinuxComponent(digest, candidate, identity);
+                    requireTime(deadline);
+                    throw new LookupNotDirectory(new LinuxPathObservation(kind, entry, candidate, null, identity,
+                            new SegmentClassicHandoff.Digest(digest.digest())));
+                }
+                throw new IOException("Linux loading component is not a directory");
             }
             observeLinuxComponent(digest, candidate, last ? identity : identity.parent());
             if (last) {
@@ -751,13 +813,275 @@ final class SegmentClassicLaunchTrust {
 
     private static LinuxPathObservation linuxLoadingLeaf(LinuxPathKind kind, Path entry, Path resolved,
             Identity identity, boolean present, MessageDigest digest, long deadline) throws IOException {
-        if (resolved.getParent() == null || !present || kind == LinuxPathKind.ALIAS
-                || (kind == LinuxPathKind.DIRECTORY) != identity.directory() || (identity.mode() & 022) != 0) {
+        if (!lookupKind(kind) && (resolved.getParent() == null || !present || kind == LinuxPathKind.ALIAS
+                || (kind == LinuxPathKind.DIRECTORY) != identity.directory() || (identity.mode() & 022) != 0)) {
             throw new IOException("Linux loading leaf differs from its presence, kind or protection rule");
         }
         requireTime(deadline);
         return new LinuxPathObservation(kind, entry, resolved, null, identity,
                 new SegmentClassicHandoff.Digest(digest.digest()));
+    }
+
+    synchronized LinuxConfigurationGraph verifyLinuxConfigurationGraph(SegmentClassicLinuxDeployment.Loading loading,
+            List<SegmentClassicLinuxDeployment.File> approved, SegmentClassicLinuxDeployment.Requirement rootEntry,
+            long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            if (!loading.configuration().contains(rootEntry) || approved.size() > 1024
+                    || rootEntry.file() >= approved.size()
+                    || rootEntry.file() >= 0 && approved.get(rootEntry.file()).role()
+                    != SegmentClassicLinuxDeployment.Role.LOADER_CONFIG) {
+                throw new IOException("Configuration graph root is not its original approved configuration member");
+            }
+            var first = new ConfigurationScan(loading, approved, deadline).read(rootEntry);
+            var second = new ConfigurationScan(loading, approved, deadline).read(rootEntry);
+            if (!first.equals(second)) {
+                throw new IOException("Complete configuration graph changed between original observations");
+            }
+            files.requireHealthy();
+            requireTime(deadline);
+            return first;
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private final class ConfigurationScan {
+        private final List<SegmentClassicLinuxDeployment.File> approved;
+        private final Map<Path, Integer> configuration = new HashMap<>();
+        private final Map<Path, SegmentClassicLinuxDeployment.Alias> aliases = new HashMap<>();
+        private final SegmentClassicLinuxConfiguration.ExpansionBudget budget =
+                new SegmentClassicLinuxConfiguration.ExpansionBudget();
+        private final LoadingDirectoryBudget directoryBudget = new LoadingDirectoryBudget();
+        private final Set<ConfigurationContext> active = new HashSet<>();
+        private final List<LinuxConfigurationFile> visited = new ArrayList<>();
+        private final List<LinuxConfigurationInclude> includes = new ArrayList<>();
+        private final List<LinuxDirectoryObservation> directories = new ArrayList<>();
+        private final Map<Path, Integer> directoryIndices = new HashMap<>();
+        private final MessageDigest observed;
+        private final long deadline;
+
+        ConfigurationScan(SegmentClassicLinuxDeployment.Loading loading,
+                List<SegmentClassicLinuxDeployment.File> approved, long deadline) throws IOException {
+            this.approved = List.copyOf(approved);
+            this.deadline = deadline;
+            try {
+                observed = MessageDigest.getInstance("SHA-256");
+            } catch (GeneralSecurityException unavailable) {
+                throw new IOException("Configuration observation SHA-256 unavailable", unavailable);
+            }
+            for (var alias : loading.aliases()) {
+                aliases.put(alias.link(), alias);
+            }
+            Set<Path> paths = new HashSet<>();
+            for (int i = 0; i < approved.size(); i++) {
+                var file = approved.get(i);
+                if (!paths.add(file.path())) {
+                    throw new IOException("Duplicate approved configuration graph file path");
+                }
+                if (file.role() == SegmentClassicLinuxDeployment.Role.LOADER_CONFIG) {
+                    if (file.length() > SegmentClassicLinuxConfiguration.MAX_BYTES) {
+                        throw new IOException("Declared graph configuration length exceeds its supported bounds");
+                    }
+                    configuration.put(file.path(), i);
+                }
+            }
+        }
+
+        LinuxConfigurationGraph read(SegmentClassicLinuxDeployment.Requirement rootEntry) throws IOException {
+            if (rootEntry.file() == -1) {
+                budget.beginFile(1);
+                var path = observeLinuxPath(LinuxPathKind.CONFIGURATION, rootEntry.path(), aliases, false, deadline);
+                remember(rootEntry.path().toString(), path, true);
+            } else {
+                readFile(rootEntry.path().toString(), rootEntry.file(), 1);
+            }
+            var result = new LinuxConfigurationGraph(rootEntry.file() == -1, budget.usage(), visited, includes,
+                    directories, new SegmentClassicHandoff.Digest(observed.digest()));
+            requireTime(deadline);
+            return result;
+        }
+
+        private void readFile(String logical, int expected, int depth) throws IOException {
+            requireTime(deadline);
+            budget.beginFile(depth);
+            var path = observeLinuxPath(LinuxPathKind.CONFIGURATION, nativePath(logical), aliases, true, deadline);
+            remember(logical, path, true);
+            Integer index = configuration.get(path.resolved());
+            if (index == null || expected >= 0 && expected != index) {
+                throw new IOException("Included logical source does not resolve to its approved configuration file");
+            }
+            var context = new ConfigurationContext(path.identity().device(), path.identity().inode(),
+                    SegmentClassicLinuxGlob.logicalDirectory(logical));
+            if (!active.add(context)) {
+                throw new IOException("Active configuration file and logical include context form a cycle");
+            }
+            try {
+                var file = approved.get(index);
+                budget.retainFile(file.length());
+                requireUtf8LoadingPath(file.path());
+                var material = hashFile(file.path(), file.length(), file.sha256(), false, false, false, true, deadline);
+                if (!path.identity().equals(material.identity())) {
+                    throw new IOException("Included configuration identity changed before original hash/parser read");
+                }
+                for (Identity parent : material.parents()) {
+                    rememberText(parent.toString());
+                }
+                observed.update(file.sha256().value());
+                int source = visited.size();
+                visited.add(new LinuxConfigurationFile(logical, index, material.identity(), material.configuration()));
+                var cursor = material.configuration().cursor(deadline);
+                for (var directive = cursor.next(); directive != null; directive = cursor.next()) {
+                    if (directive.kind() != SegmentClassicLinuxConfiguration.Kind.INCLUDE) {
+                        continue;
+                    }
+                    budget.pattern();
+                    String pattern = directive.value().utf8();
+                    String absolute = pattern.startsWith("/") ? pattern
+                            : SegmentClassicLinuxGlob.logicalJoin(context.directory(), pattern);
+                    var searches = new ArrayList<LinuxConfigurationSearch>();
+                    List<String> matches = glob(absolute, searches);
+                    includes.add(new LinuxConfigurationInclude(source, directive.line(), directive.column(),
+                            directive.word(), pattern, searches, matches));
+                    for (String match : matches) {
+                        readFile(match, -1, depth + 1);
+                    }
+                }
+            } finally {
+                active.remove(context);
+            }
+        }
+
+        private List<String> glob(String pattern, List<LinuxConfigurationSearch> searches) throws IOException {
+            List<SegmentClassicLinuxGlob.Step> plan = SegmentClassicLinuxGlob.plan(pattern, deadline);
+            List<String> values = List.of();
+            for (int i = plan.size() - 1; i >= 0; i--) {
+                requireTime(deadline);
+                var step = plan.get(i);
+                var next = new ArrayList<String>();
+                switch (step.kind()) {
+                    case DIRECTORY -> inDirectory(step.directory(), step.component(), step.onlyDirectories(), searches,
+                            next);
+                    case MATCH -> {
+                        for (String directory : values) {
+                            inDirectory(directory, step.component(), step.onlyDirectories(), searches, next);
+                        }
+                    }
+                    case MARK -> {
+                        for (String value : values) {
+                            var path = lookup(value, false);
+                            next.add(path.complete() && path.path().identity() != null
+                                    && path.path().identity().directory() ? value + "/" : value);
+                            SegmentClassicLinuxGlob.requireLogicalText(next.get(next.size() - 1));
+                        }
+                    }
+                    default -> throw new IOException("Unknown include glob plan step");
+                }
+                values = next;
+            }
+            values.sort((left, right) -> Arrays.compareUnsigned(left.getBytes(StandardCharsets.UTF_8),
+                    right.getBytes(StandardCharsets.UTF_8)));
+            var result = List.copyOf(values);
+            requireTime(deadline);
+            return result;
+        }
+
+        private void inDirectory(String logical, String component, boolean onlyDirectories,
+                List<LinuxConfigurationSearch> searches, List<String> matches) throws IOException {
+            requireTime(deadline);
+            var lookup = lookup(logical, false);
+            var path = lookup.path();
+            if (!lookup.complete() || path.identity() == null || !path.identity().directory()) {
+                return;
+            }
+            if (SegmentClassicLinuxGlob.patternType(component) == 0) {
+                searches.add(new LinuxConfigurationSearch(logical, path, -1));
+                String candidate = SegmentClassicLinuxGlob.logicalJoin(logical, component);
+                var literal = lookup(candidate, true);
+                if (literal.complete() && literal.path().identity() != null) {
+                    matches.add(candidate);
+                }
+                return;
+            }
+            if ((path.identity().mode() & 022) != 0) {
+                throw new IOException("Glob enumeration requires a protected nonwritable directory");
+            }
+            Integer index = directoryIndices.get(path.resolved());
+            if (index == null) {
+                List<String> names = enumerateLinuxDirectory(path.resolved(), directoryBudget, deadline);
+                if (!path.equals(lookup(logical, false).path())) {
+                    throw new IOException("Glob directory changed during original enumeration");
+                }
+                index = directories.size();
+                directoryIndices.put(path.resolved(), index);
+                directories.add(new LinuxDirectoryObservation(path, names));
+            } else if (!directories.get(index).path().identity().equals(path.identity())) {
+                throw new IOException("Previously enumerated physical glob directory changed");
+            }
+            searches.add(new LinuxConfigurationSearch(logical, path, index));
+            var matcher = new SegmentClassicLinuxGlob(component);
+            var candidates = new ArrayList<>(directories.get(index).members());
+            // DirectoryStream omits these fixed lookup candidates; they are never reported as physical members.
+            candidates.add(".");
+            candidates.add("..");
+            for (String member : candidates) {
+                requireTime(deadline);
+                if (!matcher.matches(member.getBytes(StandardCharsets.UTF_8), deadline)) {
+                    continue;
+                }
+                String candidate = SegmentClassicLinuxGlob.logicalJoin(logical, member);
+                if (onlyDirectories) {
+                    var directory = lookup(candidate, false);
+                    if (!directory.complete() || directory.path().identity() == null
+                            || !directory.path().identity().directory()) {
+                        continue;
+                    }
+                }
+                matches.add(candidate);
+            }
+        }
+
+        private Path nativePath(String logical) throws IOException {
+            SegmentClassicLinuxGlob.requireLogicalText(logical);
+            // Preserve a raw trailing slash even when the approved Path provider drops it while constructing Path.
+            Path path = utf8LoadingPath(logical.endsWith("/") && !logical.equals("/") ? logical + "." : logical);
+            requireUtf8LoadingPath(path);
+            return path;
+        }
+
+        private LoadingLookup lookup(String logical, boolean literal) throws IOException {
+            LinuxPathKind kind = literal ? LinuxPathKind.LITERAL : LinuxPathKind.LOOKUP;
+            LoadingLookup result;
+            try {
+                result = new LoadingLookup(observeLinuxPath(kind, nativePath(logical), aliases, false, deadline), true);
+            } catch (LookupNotDirectory notDirectory) {
+                result = new LoadingLookup(notDirectory.observed, false);
+            }
+            remember(logical, result.path(), result.complete());
+            return result;
+        }
+
+        private void remember(String logical, LinuxPathObservation path, boolean complete) {
+            rememberText(logical);
+            rememberText(path.kind().name());
+            rememberText(path.entry().toString());
+            rememberText(path.resolved().toString());
+            rememberText(path.absentAt() == null ? "" : path.absentAt().toString());
+            rememberText(path.identity() == null ? "" : path.identity().toString());
+            observed.update((byte) (complete ? 1 : 0));
+            observed.update(path.chain().value());
+        }
+
+        private void rememberText(String text) {
+            byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+            observed.update(ByteBuffer.allocate(4).putInt(bytes.length).array());
+            observed.update(bytes);
+        }
     }
 
     private static void observeLinuxComponent(MessageDigest digest, Path path, Identity identity) {

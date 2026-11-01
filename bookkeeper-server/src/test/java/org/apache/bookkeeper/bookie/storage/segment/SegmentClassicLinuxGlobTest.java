@@ -35,6 +35,29 @@ public class SegmentClassicLinuxGlobTest {
     }
 
     @Test
+    public void dirnamePlansPreserveMagicLiteralEscapesAndTrailingDirectoryMarks() throws Exception {
+        long deadline = SegmentClassicLinuxElfTest.deadline();
+        var steps = SegmentClassicLinuxGlob.plan("/etc/[ab]/*.conf", deadline);
+        assertEquals(2, steps.size());
+        assertEquals(new SegmentClassicLinuxGlob.Step(SegmentClassicLinuxGlob.StepKind.MATCH, "", "*.conf", false),
+                steps.get(0));
+        assertEquals(new SegmentClassicLinuxGlob.Step(SegmentClassicLinuxGlob.StepKind.DIRECTORY, "/etc", "[ab]", true),
+                steps.get(1));
+        assertEquals(new SegmentClassicLinuxGlob.Step(SegmentClassicLinuxGlob.StepKind.DIRECTORY, "/etc/a", "b.conf",
+                false), SegmentClassicLinuxGlob.plan("/etc/a\\/b.conf", deadline).get(0));
+        assertEquals(SegmentClassicLinuxGlob.StepKind.MARK,
+                SegmentClassicLinuxGlob.plan("/etc/a*/", deadline).get(0).kind());
+        assertEquals("/a//b", SegmentClassicLinuxGlob.logicalDirectory("/a//b///c"));
+        assertEquals("//", SegmentClassicLinuxGlob.logicalDirectory("//file"));
+        assertEquals("/", SegmentClassicLinuxGlob.logicalDirectory("///file"));
+        assertEquals("/a", SegmentClassicLinuxGlob.logicalDirectory("/a/.."));
+        assertEquals("/a//b", SegmentClassicLinuxGlob.logicalJoin("/a/", "b"));
+        assertEquals(2048, SegmentClassicLinuxGlob.plan("/" + "*/".repeat(2047) + "x", deadline).size());
+        assertThrows(IOException.class, () -> SegmentClassicLinuxGlob.plan("relative", deadline));
+        assertThrows(IOException.class, () -> SegmentClassicLinuxGlob.plan("/a", System.nanoTime() - 1));
+    }
+
+    @Test
     public void ordinaryWildcardsEscapesAndHiddenNamesUseByteSemantics() throws Exception {
         for (String[] pair : List.of(new String[]{"*.conf", "one.conf"}, new String[]{"a**?c", "abbc"},
                 new String[]{"??", "é"}, new String[]{"é", "é"}, new String[]{"\\*", "*"},

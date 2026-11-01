@@ -42,6 +42,120 @@ final class SegmentClassicLinuxGlob {
 
     private record Name(String text, byte[] bytes) { }
 
+    enum StepKind { DIRECTORY, MATCH, MARK }
+
+    record Step(StepKind kind, String directory, String component, boolean onlyDirectories) { }
+
+    /** Outer-to-inner glibc dirname decomposition, evaluated in reverse without pathname-depth recursion. */
+    static List<Step> plan(String logicalPattern, long deadline) throws IOException {
+        requireTime(deadline);
+        requireLogicalText(logicalPattern);
+        var steps = new ArrayList<Step>();
+        String value = logicalPattern;
+        boolean onlyDirectories = false;
+        while (true) {
+            requireTime(deadline);
+            onlyDirectories |= value.endsWith("/");
+            int slash = value.lastIndexOf('/');
+            String directory = slash == 0 || slash == 1 && value.charAt(0) == '\\'
+                    ? "/" : value.substring(0, slash);
+            String component = value.substring(slash + 1);
+            if (component.isEmpty() && directory.length() > 1) {
+                steps.add(new Step(StepKind.MARK, "", "", true));
+                value = removeSeparatorQuote(directory);
+                onlyDirectories = true;
+            } else if ((patternType(directory) & 5) != 0) {
+                steps.add(new Step(StepKind.MATCH, "", component, onlyDirectories));
+                value = removeSeparatorQuote(directory);
+                onlyDirectories = true;
+            } else {
+                steps.add(new Step(StepKind.DIRECTORY, unquote(directory), component, onlyDirectories));
+                requireTime(deadline);
+                return List.copyOf(steps);
+            }
+        }
+    }
+
+    static int patternType(String value) {
+        int type = 0;
+        for (int i = 0; i < value.length(); i++) {
+            switch (value.charAt(i)) {
+                case '?', '*' -> {
+                    return 1;
+                }
+                case '\\' -> {
+                    if (i + 1 < value.length()) {
+                        i++;
+                    }
+                    type |= 2;
+                }
+                case '[' -> type |= 4;
+                case ']' -> {
+                    if ((type & 4) != 0) {
+                        return 1;
+                    }
+                }
+                default -> { }
+            }
+        }
+        return type;
+    }
+
+    private static String removeSeparatorQuote(String directory) {
+        int quotes = 0;
+        for (int i = directory.length() - 1; i >= 0 && directory.charAt(i) == '\\'; i--) {
+            quotes++;
+        }
+        return (quotes & 1) == 0 ? directory : directory.substring(0, directory.length() - 1);
+    }
+
+    private static String unquote(String value) {
+        var result = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\\') {
+                if (++i == value.length()) {
+                    break;
+                }
+                c = value.charAt(i);
+            }
+            result.append(c);
+        }
+        return result.toString();
+    }
+
+    static String logicalDirectory(String filename) {
+        int end = filename.length();
+        while (end > 1 && filename.charAt(end - 1) == '/') {
+            end--;
+        }
+        int slash = filename.lastIndexOf('/', end - 1);
+        if (slash < 0) {
+            return ".";
+        }
+        while (slash > 0 && filename.charAt(slash - 1) == '/') {
+            slash--;
+        }
+        if (slash == 0) {
+            return filename.startsWith("//") && (filename.length() == 2 || filename.charAt(2) != '/') ? "//" : "/";
+        }
+        return filename.substring(0, slash);
+    }
+
+    static String logicalJoin(String directory, String member) throws IOException {
+        String result = directory.equals("/") ? "/" + member : directory + "/" + member;
+        requireLogicalText(result);
+        return result;
+    }
+
+    static void requireLogicalText(String value) throws IOException {
+        if (value.isEmpty() || value.length() > MAX_BYTES || !value.startsWith("/") || value.indexOf(0) >= 0
+                || !StandardCharsets.UTF_8.newEncoder().canEncode(value)
+                || value.getBytes(StandardCharsets.UTF_8).length > MAX_BYTES) {
+            throw new IOException("Unsupported bounded strict UTF-8 absolute logical include path");
+        }
+    }
+
     /** Filters the supplied complete member facts, preserving their identity and returning C byte order. */
     static List<String> matchingMembers(List<String> members, String component, long deadline) throws IOException {
         requireTime(deadline);
