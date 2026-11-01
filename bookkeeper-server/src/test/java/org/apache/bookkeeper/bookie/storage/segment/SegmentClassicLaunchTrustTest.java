@@ -1197,6 +1197,25 @@ public class SegmentClassicLaunchTrustTest {
         assertTrue(owner.closeAndDrain().drained());
     }
 
+    @Test
+    public void typedElfMemberWithoutOriginalProviderSourceCannotReachTargetIo() throws Exception {
+        for (int member : new int[]{-1, 0, 4, Integer.MAX_VALUE}) {
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Unbound D2 member reached target I/O");
+            })) {
+                IOException failure = assertThrows(IOException.class,
+                        () -> owner.verifyLinuxElfMember(member, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage().contains("original provider/source binding"));
+            }
+            assertThrows(IOException.class, owner::parsed);
+            assertTrue(owner.closeAndDrain().drained());
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxElfMember(member, SegmentClassicLinuxElfTest.deadline()));
+        }
+    }
+
     private void rejected() throws Exception {
         var owner = owner();
         try {

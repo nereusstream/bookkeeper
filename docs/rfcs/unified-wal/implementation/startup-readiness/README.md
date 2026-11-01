@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## D2 ELF 成员的原句柄摘要与元数据观察
+
+2026-11-01在父`5bada70b677841e429b1a7a9fc7cd08134f338b6`上，按总体规划会话冻结的范围，在原`SegmentClassicLaunchTrust`接入`verifyLinuxElfMember(int fileIndex, long deadline)`。入口只收原D2表索引和原期限；先要求本owner的production/Installed、原program/image/launcher来源及provider ready，再检查索引和ELF role，之后才构造成员Path、执行原physical字节门及目标I/O。不接caller Path/File/program/parser/资格布尔值，不将D2 String转换成旧File绕过门；非ELF明确拒绝，旧ELF1与cache/config kind边界保持。
+
+原`hashFile`保留metadata/ACL、单链接、UID/mode/角色执行权限、身份/父链、长度、首次实际close、后置SHA和资源健康/期限检查。一次原`SegmentOwnedFiles`打开的channel完成完整流式SHA-256与`readVersionTwo`；只有首次close及全部后检查成功后才返回带原索引、身份/父链、摘要和Image2的观察。沿用原owner同步、sticky failure、初始化自排空拒绝和外部close等待，没有新owner、重试或authority。
+
+为让真实fixture验证生产共用机制，仅抽出`readLinuxContent(held channel, length, fixed kind, deadline)`数据函数；从同channel起点完整hash并固定分派parser，不open/close、不保存来源或资格。纯表选择及元数据比较同由生产和fixture调用：NEEDED原顺序与重复、RPATH/RUNPATH presence/value、FLAGS/FLAGS1数值逐项相等；SYSTEMCTL的PT_INTERP原文还须匹配批准interpreter，角色type/entry规则保持。SONAME与flags tag presence继续作为原观察保留，D2无对应预期字段不表示实际缺失。本块不处理候选winner、祖先RPATH、first-loaded reuse或模块来源。
+
+Corretto21.0.10+7-LTS/macOS aarch64上，真实owned channel读取原独立1536-byte ELF2向量，验证完整摘要、原动态字段、一次打开且数据函数不关闭，以及截断、无进展、parser失败、期限和首次native close失败。原owner缺provider/source时目标I/O检测点不可达且失败sticky；越界及非ELF的原表选择在纯数据层验证，不伪造Installed或注入私有ready。首轮三类62项全部通过；首style仅三行超长退出1，换行后样式0。最终串行十八类177项全部通过，0失败/错误/跳过；两阶段各1430源码/资源与原source/父Git blob逐项匹配，最终三code与测试/style快照一致，原style失败独立保留。
+
+终态RAT退出1/431，路径及全部字节与父HEAD相同，本次代码无新增unknown；用户PDF扫描前排除且未读取。两次独立lsof及原身份/SHA/archive hardlink核验后，仅清理本次两个确切raw scope的四目录、27文件路径、1,631,998逻辑字节，归档硬链接保留、regular-file数据块回收0。证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-member-evidence-5bada70b`。
+
+低层真实fixture只证明同handle共用机制和数据比较；typed D2入口的实际Linux阳性仍NOT_EXECUTED。完整D2 walker、loader闭包/选择/diagnostics、systemd2、qualification、parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN，不签START/handoff或解除v2 childCommand拒绝。未运行本块models/性能；默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。
+
 ## Linux provider 的原 owner 来源与字节门
 
 2026-11-01在本地父`9f9b08dd67ec44cf3663817f8da49e24f4296c64`上，按总体规划会话裁决，在原`SegmentClassicLaunchTrust`增加`readLauncherInputs(deadline)`与无外来事实参数的`verifyLinuxProvider(deadline)`。原`verifyProgram`只在全部hash、完整JDK/JAR、首次close/资源健康及原preload核验成功后，保存本owner的program decode来源及原`lib/modules` hash读取所返回的身份/父链观察；摘要事实来自同一次成功hash，不用D2路径自证JDK来源。原`.launcher`的一次私有读取内完成raw decode，保存原描述符SHA、typed value和六个外层path原文。旧byte与typed入口共用原一次读取，不能用第二次读取或caller复制值补升来源。

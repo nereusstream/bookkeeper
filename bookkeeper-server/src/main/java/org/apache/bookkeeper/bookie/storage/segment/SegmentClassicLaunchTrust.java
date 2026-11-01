@@ -112,6 +112,31 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Original member observations only; not a loader choice, installed provenance or qualification. */
+    record LinuxElfMemberObservation(int member, Identity identity, List<Identity> parents,
+                                     SegmentClassicHandoff.Digest sha256, SegmentClassicLinuxElf.Image2 elf) {
+        LinuxElfMemberObservation {
+            parents = List.copyOf(parents);
+        }
+    }
+
+    enum LinuxContentKind { NONE, ELF1, ELF2, CACHE, LDCONFIG }
+
+    /** Data read from a caller-held channel; no source authority or native close result is implied. */
+    record LinuxContent(SegmentClassicHandoff.Digest sha256, SegmentClassicLinuxElf.Image elf,
+                        SegmentClassicLinuxElf.Image2 elf2, SegmentClassicLinuxCache.Image cache,
+                        SegmentClassicLinuxConfiguration.Image configuration) { }
+
+    private record HashedFile(Identity identity, List<Identity> parents, LinuxContent content) {
+        private HashedFile {
+            parents = List.copyOf(parents);
+        }
+
+        LinuxFileObservation legacy() {
+            return new LinuxFileObservation(identity, parents, content.elf(), content.cache(), content.configuration());
+        }
+    }
+
     enum LinuxPathKind { ALIAS, DIRECTORY, CONFIGURATION, INTERPRETER, LOOKUP, LITERAL }
 
     /** Bounded path facts only. The chain digest compares two observations, never startup authority. */
@@ -1152,7 +1177,8 @@ final class SegmentClassicLaunchTrust {
                 var file = approved.get(index);
                 budget.retainFile(file.length());
                 requireUtf8LoadingPath(file.path());
-                var material = hashFile(file.path(), file.length(), file.sha256(), false, false, false, true, deadline);
+                var material = hashFile(file.path(), file.length(), file.sha256(), false, LinuxContentKind.LDCONFIG,
+                        deadline).legacy();
                 if (!path.identity().equals(material.identity())) {
                     throw new IOException("Included configuration identity changed before original hash/parser read");
                 }
@@ -1363,9 +1389,12 @@ final class SegmentClassicLaunchTrust {
             }
             boolean executable = file.role().elf() && file.role() != SegmentClassicLinuxDeployment.Role.LIBRARY
                     && file.role() != SegmentClassicLinuxDeployment.Role.MODULE;
-            var observed = hashFile(file.path(), file.length(), file.sha256(), executable, file.role().elf(),
-                    file.role() == SegmentClassicLinuxDeployment.Role.LOADER_CACHE,
-                    file.role() == SegmentClassicLinuxDeployment.Role.LOADER_CONFIG, deadlineNanos);
+            LinuxContentKind kind = file.role().elf() ? LinuxContentKind.ELF1
+                    : file.role() == SegmentClassicLinuxDeployment.Role.LOADER_CACHE ? LinuxContentKind.CACHE
+                    : file.role() == SegmentClassicLinuxDeployment.Role.LOADER_CONFIG ? LinuxContentKind.LDCONFIG
+                    : LinuxContentKind.NONE;
+            var observed = hashFile(file.path(), file.length(), file.sha256(), executable, kind,
+                    deadlineNanos).legacy();
             if (executable && observed.elf().entry() == 0 || !executable && file.role().elf()
                     && observed.elf().type() != 3) {
                 throw new IOException("Linux ELF type or entry differs from its declared file role");
@@ -1379,15 +1408,85 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Only a member index from this original D2 table; no caller Path/File/parser or source permit. */
+    synchronized LinuxElfMemberObservation verifyLinuxElfMember(int fileIndex, long deadlineNanos) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadlineNanos);
+            requireTime(deadlineNanos);
+            if (!production || installed == null || verifiedProgram == null || verifiedRuntimeImage == null
+                    || launcherSource == null || launcherSourceIdentity == null || launcherInput == null
+                    || launcherInput.linuxDeployment() == null || launcherInput.linuxDeployment().schema() != 2
+                    || linuxProvider == null || !sameProvider(linuxProvider, providerAtDecode)) {
+                throw new IOException("D2 ELF member requires this owner's original provider/source binding");
+            }
+            var deployment = launcherInput.linuxDeployment().versionTwo();
+            var file = selectLinuxElfMember(deployment, fileIndex);
+            if (!sameProvider(linuxProvider, linuxProviderObjects())) {
+                throw new IOException("Default implementation changed before original D2 member I/O");
+            }
+            Path path = linuxProvider.filesystem().getPath(file.path());
+            requirePhysicalBytes(file.path(), path, linuxProvider, deadlineNanos);
+            boolean executable = file.role() != SegmentClassicLinuxDeployment.Role.LIBRARY
+                    && file.role() != SegmentClassicLinuxDeployment.Role.MODULE;
+            var observed = hashFile(path, file.length(), file.sha256(), executable, LinuxContentKind.ELF2,
+                    deadlineNanos);
+            var elf = observed.content().elf2();
+            var expected = deployment.loading().elf().stream().filter(e -> e.file() == fileIndex)
+                    .findFirst().orElseThrow(() -> new IOException("Original D2 ELF metadata is missing"));
+            requireLinuxElfMetadata(file.role(), deployment.loading().interpreter(), expected, elf);
+            var result = new LinuxElfMemberObservation(fileIndex, observed.identity(), observed.parents(),
+                    observed.content().sha256(), elf);
+            files.requireHealthy();
+            requireTime(deadlineNanos);
+            return result;
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Pure original-table selection only. The caller still needs the owner's provider/source gate for I/O. */
+    static SegmentClassicLinuxDeploymentV2.File selectLinuxElfMember(SegmentClassicLinuxDeploymentV2 deployment,
+                                                                    int fileIndex) throws IOException {
+        if (fileIndex < 0 || fileIndex >= deployment.files().size()) {
+            throw new IOException("D2 ELF member index is outside the original file table");
+        }
+        var file = deployment.files().get(fileIndex);
+        if (!file.role().elf()) {
+            throw new IOException("D2 member does not have an approved ELF role");
+        }
+        return file;
+    }
+
+    /** Metadata comparison only, not a source, file hash or qualification proof. */
+    static void requireLinuxElfMetadata(SegmentClassicLinuxDeployment.Role role, String interpreter,
+            SegmentClassicLinuxDeploymentV2.Elf expected, SegmentClassicLinuxElf.Image2 observed) throws IOException {
+        boolean executable = role.elf() && role != SegmentClassicLinuxDeployment.Role.LIBRARY
+                && role != SegmentClassicLinuxDeployment.Role.MODULE;
+        if (!role.elf() || executable && observed.entry() == 0 || !executable && observed.type() != 3) {
+            throw new IOException("D2 ELF type or entry differs from its declared role");
+        }
+        if (!observed.needed().equals(expected.needed()) || !observed.rpath().equals(expected.rpath())
+                || !observed.runpath().equals(expected.runpath()) || observed.flags() != expected.flags()
+                || observed.flags1() != expected.flags1()
+                || role == SegmentClassicLinuxDeployment.Role.SYSTEMCTL
+                && !Objects.equals(observed.interpreter(), interpreter)) {
+            throw new IOException("Original D2 ELF metadata or SYSTEMCTL interpreter differs");
+        }
+    }
+
     private LinuxFileObservation hashProgramFile(SegmentClassicLaunchProgram.File file, long deadlineNanos)
             throws IOException {
         return hashFile(file.path(), file.length(), file.sha256(),
-                (file.roles() & SegmentClassicLaunchProgram.JAVA) != 0,
-                false, false, false, deadlineNanos);
+                (file.roles() & SegmentClassicLaunchProgram.JAVA) != 0, LinuxContentKind.NONE, deadlineNanos).legacy();
     }
 
-    private LinuxFileObservation hashFile(Path path, long declaredLength, SegmentClassicHandoff.Digest sha256,
-            boolean executable, boolean elf, boolean cache, boolean configuration, long deadlineNanos)
+    private HashedFile hashFile(Path path, long declaredLength, SegmentClassicHandoff.Digest sha256,
+            boolean executable, LinuxContentKind kind, long deadlineNanos)
             throws IOException {
         requireTime(deadlineNanos);
         Identity before = checked(path);
@@ -1397,50 +1496,72 @@ final class SegmentClassicLaunchTrust {
             throw new IOException("Program file identity, permissions or declared length mismatch");
         }
         var parents = chain(path);
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance("SHA-256");
-        } catch (GeneralSecurityException unavailable) {
-            throw new IOException("Required program SHA-256 is unavailable", unavailable);
-        }
-        SegmentClassicLinuxElf.Image image;
-        SegmentClassicLinuxCache.Image cacheImage;
-        SegmentClassicLinuxConfiguration.Image configurationImage;
+        LinuxContent content;
         try (FileChannel channel = SegmentOwnedFiles.open(files, path,
                 StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
             requireTime(deadlineNanos);
             if (channel.size() != declaredLength) {
                 throw new IOException("Program file length changed during open");
             }
-            ByteBuffer buffer = ByteBuffer.allocate(64 * 1024);
-            long remaining = declaredLength;
-            while (remaining != 0) {
-                requireTime(deadlineNanos);
-                buffer.clear().limit((int) Math.min(buffer.capacity(), remaining));
-                int length = channel.read(buffer);
-                if (length <= 0) {
-                    throw new IOException("Program file read made no progress before the declared end");
-                }
-                remaining -= length;
-                buffer.flip();
-                digest.update(buffer);
-            }
-            image = elf ? SegmentClassicLinuxElf.read(channel, declaredLength, deadlineNanos) : null;
-            cacheImage = cache ? SegmentClassicLinuxCache.read(channel, declaredLength, deadlineNanos) : null;
-            configurationImage = configuration
-                    ? SegmentClassicLinuxConfiguration.read(channel, declaredLength, deadlineNanos) : null;
+            content = readLinuxContent(channel, declaredLength, kind, deadlineNanos);
             if (channel.size() != declaredLength || !before.equals(checked(path))) {
                 throw new IOException("Program file changed during its stream hash");
             }
         }
         requireTime(deadlineNanos);
         if (!before.equals(checked(path)) || !parents.equals(chain(path))
-                || !MessageDigest.isEqual(sha256.value(), digest.digest())) {
+                || !MessageDigest.isEqual(sha256.value(), content.sha256().value())) {
             throw new IOException("Program file, parent or SHA-256 differs from its fixed declaration");
         }
         files.requireHealthy();
         requireTime(deadlineNanos);
-        return new LinuxFileObservation(before, parents, image, cacheImage, configurationImage);
+        return new HashedFile(before, parents, content);
+    }
+
+    /** One stream hash and fixed parser on the same held channel. Caller retains open/close and source checks. */
+    static LinuxContent readLinuxContent(FileChannel channel, long length, LinuxContentKind kind, long deadline)
+            throws IOException {
+        requireTime(deadline);
+        if (length < 0 || kind == null || kind == LinuxContentKind.CACHE
+                && (length < 48 || length > SegmentClassicLinuxCache.MAX_BYTES)
+                || kind == LinuxContentKind.LDCONFIG && length > SegmentClassicLinuxConfiguration.MAX_BYTES) {
+            throw new IOException("Unsupported bounded Linux content kind or length");
+        }
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (GeneralSecurityException unavailable) {
+            throw new IOException("Required program SHA-256 is unavailable", unavailable);
+        }
+        if (channel.size() != length) {
+            throw new IOException("Held Linux content channel length differs from its declaration");
+        }
+        channel.position(0);
+        ByteBuffer buffer = ByteBuffer.allocate(64 * 1024);
+        long remaining = length;
+        while (remaining != 0) {
+            requireTime(deadline);
+            buffer.clear().limit((int) Math.min(buffer.capacity(), remaining));
+            int read = channel.read(buffer);
+            if (read <= 0) {
+                throw new IOException("Program file read made no progress before the declared end");
+            }
+            remaining -= read;
+            buffer.flip();
+            digest.update(buffer);
+        }
+        SegmentClassicLinuxElf.Image elf = kind == LinuxContentKind.ELF1
+                ? SegmentClassicLinuxElf.read(channel, length, deadline) : null;
+        SegmentClassicLinuxElf.Image2 elf2 = kind == LinuxContentKind.ELF2
+                ? SegmentClassicLinuxElf.readVersionTwo(channel, length, deadline) : null;
+        SegmentClassicLinuxCache.Image cache = kind == LinuxContentKind.CACHE
+                ? SegmentClassicLinuxCache.read(channel, length, deadline) : null;
+        SegmentClassicLinuxConfiguration.Image configuration = kind == LinuxContentKind.LDCONFIG
+                ? SegmentClassicLinuxConfiguration.read(channel, length, deadline) : null;
+        var result = new LinuxContent(new SegmentClassicHandoff.Digest(digest.digest()), elf, elf2, cache,
+                configuration);
+        requireTime(deadline);
+        return result;
     }
 
     private void verifyJdkTree(SegmentClassicLaunchProgram program, long deadlineNanos) throws IOException {
