@@ -35,15 +35,18 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LinuxConfigurationMaterial;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeployment.Alias;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeployment.Loading;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeployment.Requirement;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeploymentV2.ConfigurationKind;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -127,6 +130,85 @@ public class SegmentClassicLinuxConfigurationGraphTest {
             return failure;
         } finally {
             assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    private static LinuxConfigurationMaterial material(int index, SegmentClassicLinuxDeployment.File file,
+                                                       ConfigurationKind kind) {
+        return new LinuxConfigurationMaterial(index, file.path(), file.length(), file.sha256(), kind);
+    }
+
+    @Test
+    public void kindAwareGraphKeepsIndicesAndDoesNotParseUnmatchedModuleRuntime() throws Exception {
+        var first = config("root.conf", "include child.conf\n");
+        var child = config("child.conf", "/library/child\n");
+        var module = config("runtime.conf", new byte[]{0, (byte) 0xff});
+        var unparsed = new LinuxConfigurationMaterial(31, module.path(),
+                SegmentClassicLinuxConfiguration.MAX_BYTES + 1L, module.sha256(), ConfigurationKind.MODULE_RUNTIME);
+        var owner = owner();
+        try (var calls = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open")) {
+                assertFalse(module.path().equals(invocation.getArgument(0)));
+            }
+            return invocation.callRealMethod();
+        })) {
+            var graph = owner.readLinuxConfigurationGraph(List.of(material(7, first, ConfigurationKind.LDCONFIG),
+                    material(19, child, ConfigurationKind.LDCONFIG), unparsed), Map.of(), first.path(), 7,
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(List.of(7, 19), graph.files().stream().map(f -> f.file()).toList());
+            assertEquals(new SegmentClassicLinuxConfiguration.Usage(2, 1,
+                    (int) (first.length() + child.length())), graph.usage());
+            assertThrows(IOException.class, owner::installed);
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoaderConfiguration(0, SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void includedModuleRuntimeRejectsBeforeContentOpenOrLdconfigLengthBudget() throws Exception {
+        var first = config("root.conf", "include runtime.conf\n");
+        var module = config("runtime.conf", new byte[]{0, (byte) 0xff});
+        var unsupported = new LinuxConfigurationMaterial(19, module.path(),
+                SegmentClassicLinuxConfiguration.MAX_BYTES + 1L, module.sha256(), ConfigurationKind.MODULE_RUNTIME);
+        var owner = owner();
+        try (var calls = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open")) {
+                assertFalse(module.path().equals(invocation.getArgument(0)));
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxConfigurationGraph(
+                    List.of(material(7, first, ConfigurationKind.LDCONFIG), unsupported), Map.of(), first.path(), 7,
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("Unsupported configuration kind"));
+            assertThrows(IOException.class, owner::parsed);
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void conflictingPhysicalKindsAndIndicesCannotBeOverwrittenByDeclarationOrder() throws Exception {
+        var first = config("root.conf", "/library/root\n");
+        var other = config("other.conf", "/library/other\n");
+        var a = material(7, first, ConfigurationKind.LDCONFIG);
+        var b = material(7, first, ConfigurationKind.MODULE_RUNTIME);
+        var c = material(7, other, ConfigurationKind.LDCONFIG);
+        var d = material(19, first, ConfigurationKind.LDCONFIG);
+        for (var declarations : List.of(List.of(a, b), List.of(b, a), List.of(a, c), List.of(a, d))) {
+            var owner = owner();
+            try (var calls = mockStatic(FileChannel.class, invocation -> {
+                throw new AssertionError("Conflicting configuration declarations reached content open");
+            })) {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxConfigurationGraph(
+                        declarations, Map.of(), first.path(), 7, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage().contains("Conflicting physical configuration"));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
         }
     }
 

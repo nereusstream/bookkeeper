@@ -39,6 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LinuxContentKind;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeployment.Role;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeploymentV2.ConfigurationKind;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeploymentV2.DynamicPath;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeploymentV2.Elf;
 import org.junit.Rule;
@@ -161,6 +162,50 @@ public class SegmentClassicLinuxContentTest {
                         () -> SegmentClassicLaunchTrust.selectLinuxElfMember(deployment, index));
             }
         }
+    }
+
+    @Test
+    public void configurationSelectionUsesOriginalRuleKindAndRejectsIndependentModuleRuntime() throws Exception {
+        var d = SegmentClassicLinuxDeployment.decode(
+                SegmentClassicLinuxDeploymentTest.vector("classic-linux-deployment-v2")).versionTwo();
+        int moduleRules = 0;
+        for (int i = 0; i < d.loading().configuration().size(); i++) {
+            int index = i;
+            if (d.loading().configuration().get(i).kind() == ConfigurationKind.MODULE_RUNTIME) {
+                assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.selectLinuxConfiguration(d, index));
+                moduleRules++;
+            } else {
+                assertSame(d.loading().configuration().get(i),
+                        SegmentClassicLaunchTrust.selectLinuxConfiguration(d, i));
+            }
+        }
+        assertTrue(moduleRules > 0);
+        for (int i : new int[]{-1, d.loading().configuration().size(), Integer.MAX_VALUE}) {
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.selectLinuxConfiguration(d, i));
+        }
+    }
+
+    @Test
+    public void commonHeldChannelCacheKindHashesTheFullImageAndKeepsRawCacheMetadata() throws Exception {
+        byte[] bytes = SegmentClassicLinuxCacheTest.vector();
+        Path path = write(bytes);
+        var owner = new SegmentOwnedFiles();
+        try (FileChannel channel = SegmentOwnedFiles.open(owner, path, StandardOpenOption.READ)) {
+            channel.position(17);
+            var content = SegmentClassicLaunchTrust.readLinuxContent(channel, bytes.length,
+                    LinuxContentKind.CACHE, deadline());
+            assertEquals(SegmentClassicHandoff.digest(bytes), content.sha256());
+            assertEquals(bytes.length, channel.position());
+            assertEquals(7, content.cache().entries().size());
+            assertEquals("libz.so.10", content.cache().entries().get(0).name().utf8());
+            assertEquals("libz.so.2", content.cache().entries().get(1).name().utf8());
+            assertEquals("ldconfig (independent byte vector) release version 2.39", content.cache().generator().utf8());
+            assertNull(content.elf());
+            assertNull(content.elf2());
+            assertNull(content.configuration());
+            assertTrue(channel.isOpen());
+        }
+        assertTrue(owner.drain().drained());
     }
 
     @Test

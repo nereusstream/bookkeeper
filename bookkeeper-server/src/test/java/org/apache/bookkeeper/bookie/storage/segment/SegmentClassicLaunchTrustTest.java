@@ -1216,6 +1216,25 @@ public class SegmentClassicLaunchTrustTest {
         }
     }
 
+    @Test
+    public void typedLoaderConfigurationWithoutOriginalProviderSourceCannotReachTargetIo() throws Exception {
+        for (int rule : new int[]{-1, 0, 1, Integer.MAX_VALUE}) {
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Unbound D2 configuration reached target I/O");
+            })) {
+                IOException failure = assertThrows(IOException.class,
+                        () -> owner.verifyLinuxLoaderConfiguration(rule, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage().contains("original provider/source binding"));
+            }
+            assertThrows(IOException.class, owner::parsed);
+            assertTrue(owner.closeAndDrain().drained());
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoaderConfiguration(rule, SegmentClassicLinuxElfTest.deadline()));
+        }
+    }
+
     private void rejected() throws Exception {
         var owner = owner();
         try {

@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## D2 loader 配置与 kind 分派的原 owner 观察
+
+2026-11-01在父`e1400835b344086eb4ebe9a60e52814995fde43e`上，按总体规划会话冻结的范围，原`SegmentClassicLaunchTrust.verifyLinuxLoaderConfiguration(ruleIndex, deadline)`只从本owner绑定的原D2 configuration表选择规则。原production/Installed、program/image/launcher来源、provider及原期限先于规则Path和目标I/O；明确按kind/format分派，独立MODULE_RUNTIME规则仍Unsupported。cache声明长度在目标I/O前限制48 bytes…16MiB；preload必须明确缺失，cache缺失也只消费原表的显式absence，不补默认。两者按原logical路径分别执行A/B，present cache用原owned channel完成SHA＋固定CACHE parser、首次close、原身份/父链/摘要及后置路径复核。结果是数据观察，不产生provider ready、winner或qualification。
+
+LDCONFIG复用原完整include图，仅把私有扫描输入拆成原fileIndex/physical Path/length/SHA/明确kind的material与Path→原target String alias表；没有重建D1 Loading/File。旧D1入口适配原事实和原语义，筛选后不重编号。包内共用`readLinuxConfigurationGraph`只回图数据，caller提供的材料或已读图不能补升typed入口来源。A/B前固定同一份list/map；按physical Path与fileIndex同时建索引，同材料不同kind或其他冲突拒绝，不按插入顺序覆盖。
+
+scanner在进入ldconfig文件/字节预算和hash/parser前检查匹配材料的kind。仅LDCONFIG可读；MODULE_RUNTIME被include命中使整图Unsupported，没有部分图返回，也不打开该模块内容。未命中的模块材料不套用ldconfig的1MiB上限。原16MiB完整字节、65536文件/65536pattern、32活动context、重复计费、完整glob排序/alias/dot/dotdot/尾slash语义保持。alias仍限128、target限4096 strict UTF8 bytes，原readlink bytes逐项比较；新增logical/include原串在Path前逐component检查，已绑定provider的实际Path及每次展开/JNI边界继续检查，不改变逻辑原文。
+
+Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19、未命中超长/非法字节MODULE_RUNTIME不读、命中在内容open及ldconfig预算前拒绝、physical/index/kind冲突不覆盖，以及同handle cache完整摘要/原元数据。fixture不能取得Installed或原D2 provider ready；无原source的typed入口在目标I/O前拒绝并保持sticky。首轮四类77项有1 failure（原超长拒绝诊断被改写）及1 error（新测试误将独立向量原有MODULE_RUNTIME当可选择规则）；恢复原诊断、修正kind断言后77项全过，原失败源码/class/XML另存。样式退出0；最终串行十八类183项全部通过，0失败/错误/跳过，三个阶段各1430源码/资源逐项匹配原source/父Git blob，最终四code与test/style快照一致。
+
+终态RAT退出1/431，未批准路径及全部字节与父HEAD相同，本次代码无新增unknown，用户PDF扫描前排除且未读取。三个确切raw scope经两次独立lsof及原inode/mode/SHA/archive hardlink核验后，仅清理六目录、35文件路径、2,201,054逻辑字节，归档硬链接保留、regular-file数据块回收0。证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-loader-config-evidence-e1400835`，各原阶段不移绑。
+
+可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
+
 ## D2 ELF 成员的原句柄摘要与元数据观察
 
 2026-11-01在父`5bada70b677841e429b1a7a9fc7cd08134f338b6`上，按总体规划会话冻结的范围，在原`SegmentClassicLaunchTrust`接入`verifyLinuxElfMember(int fileIndex, long deadline)`。入口只收原D2表索引和原期限；先要求本owner的production/Installed、原program/image/launcher来源及provider ready，再检查索引和ELF role，之后才构造成员Path、执行原physical字节门及目标I/O。不接caller Path/File/program/parser/资格布尔值，不将D2 String转换成旧File绕过门；非ELF明确拒绝，旧ELF1与cache/config kind边界保持。

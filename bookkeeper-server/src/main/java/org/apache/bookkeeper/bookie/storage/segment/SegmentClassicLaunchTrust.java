@@ -57,6 +57,7 @@ import java.util.jar.Attributes;
 import java.util.jar.JarFile;
 import java.util.jar.Manifest;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicHandoffPaths.Identity;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeploymentV2.ConfigurationKind;
 import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOBootstrap;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
@@ -196,6 +197,23 @@ final class SegmentClassicLaunchTrust {
     private record ConfigurationContext(long device, long inode, String directory) { }
 
     private record LoadingLookup(LinuxPathObservation path, boolean complete) { }
+
+    /** Original material facts for data scanning only; file indices are never renumbered. */
+    record LinuxConfigurationMaterial(int file, Path path, long length, SegmentClassicHandoff.Digest sha256,
+                                      ConfigurationKind kind) {
+        LinuxConfigurationMaterial {
+            Objects.requireNonNull(path, "path");
+            Objects.requireNonNull(sha256, "sha256");
+            Objects.requireNonNull(kind, "kind");
+            if (file < 0 || file >= 1024 || length < 0 || kind == ConfigurationKind.PRELOAD_ABSENT) {
+                throw new IllegalArgumentException("Invalid present configuration material");
+            }
+        }
+    }
+
+    /** One original configuration rule's data observation, never loader choice or qualification. */
+    record LinuxLoaderConfigurationObservation(int rule, ConfigurationKind kind, LinuxPathObservation path,
+            SegmentClassicHandoff.Digest sha256, LinuxFileObservation material, LinuxConfigurationGraph graph) { }
 
     private static final class LoadingDirectoryBudget {
         int entries;
@@ -809,9 +827,9 @@ final class SegmentClassicLaunchTrust {
 
     private List<LinuxPathObservation> observeLinuxLoadingPaths(SegmentClassicLinuxDeployment.Loading loading,
                                                                long deadline) throws IOException {
-        Map<Path, SegmentClassicLinuxDeployment.Alias> aliases = new HashMap<>();
+        Map<Path, String> aliases = new HashMap<>();
         for (var alias : loading.aliases()) {
-            aliases.put(alias.link(), alias);
+            aliases.put(alias.link(), alias.target());
         }
         var result = new ArrayList<LinuxPathObservation>();
         for (var alias : loading.aliases()) {
@@ -853,9 +871,9 @@ final class SegmentClassicLaunchTrust {
 
     private List<LinuxDirectoryObservation> observeLinuxLoadingDirectories(
             SegmentClassicLinuxDeployment.Loading loading, long deadline) throws IOException {
-        Map<Path, SegmentClassicLinuxDeployment.Alias> aliases = new HashMap<>();
+        Map<Path, String> aliases = new HashMap<>();
         for (var alias : loading.aliases()) {
-            aliases.put(alias.link(), alias);
+            aliases.put(alias.link(), alias.target());
         }
         var budget = new LoadingDirectoryBudget();
         Map<Path, List<String>> observed = new HashMap<>();
@@ -939,8 +957,19 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    private void requireLoadingPathBytes(Path path, long deadline) throws IOException {
+        if (linuxProvider != null) {
+            if (path.getClass() != linuxProvider.pathClass()) {
+                throw new IOException("Loading path has an unapproved implementation");
+            }
+            requirePhysicalBytes(path.toString(), path, linuxProvider, deadline);
+        }
+        requireUtf8LoadingPath(path);
+        requireTime(deadline);
+    }
+
     private LinuxPathObservation observeLinuxPath(LinuxPathKind kind, Path entry,
-            Map<Path, SegmentClassicLinuxDeployment.Alias> aliases, boolean present, long deadline) throws IOException {
+            Map<Path, String> aliases, boolean present, long deadline) throws IOException {
         MessageDigest digest;
         try {
             digest = MessageDigest.getInstance("SHA-256");
@@ -948,7 +977,7 @@ final class SegmentClassicLaunchTrust {
             throw new IOException("Required loading path SHA-256 is unavailable", unavailable);
         }
         requireTime(deadline);
-        requireUtf8LoadingPath(entry);
+        requireLoadingPathBytes(entry, deadline);
         Path current = entry.getRoot();
         Identity parent = checked(current);
         observeLinuxComponent(digest, current, parent.parent());
@@ -977,7 +1006,7 @@ final class SegmentClassicLaunchTrust {
             if (!candidate.equals(utf8LoadingPath(base + (base.endsWith("/") ? "" : "/") + component))) {
                 throw new IOException("Expanded Linux loading component differs from its original UTF-8 bytes");
             }
-            requireUtf8LoadingPath(candidate);
+            requireLoadingPathBytes(candidate, deadline);
             Identity raw;
             try {
                 raw = SegmentClassicHandoffPaths.loadingIdentity(candidate);
@@ -988,7 +1017,7 @@ final class SegmentClassicLaunchTrust {
                 requireTime(deadline);
                 Path unresolved = pending.isEmpty() ? candidate
                         : utf8LoadingPath(candidate + "/" + String.join("/", pending));
-                requireUtf8LoadingPath(unresolved);
+                requireLoadingPathBytes(unresolved, deadline);
                 return new LinuxPathObservation(kind, entry, unresolved, candidate, null,
                         new SegmentClassicHandoff.Digest(digest.digest()));
             }
@@ -1014,7 +1043,7 @@ final class SegmentClassicLaunchTrust {
                 }
                 readLoadingAlias(candidate, raw, alias, deadline);
                 observeLinuxComponent(digest, candidate, raw);
-                byte[] target = alias.target().getBytes(StandardCharsets.UTF_8);
+                byte[] target = alias.getBytes(StandardCharsets.UTF_8);
                 digest.update(ByteBuffer.allocate(4).putInt(target.length).array());
                 digest.update(target);
                 if (kind == LinuxPathKind.ALIAS && last) {
@@ -1027,12 +1056,12 @@ final class SegmentClassicLaunchTrust {
                 if (++followed > SegmentClassicLinuxDeployment.MAX_ALIAS_FOLLOWS) {
                     throw new IOException("Cyclic or excessive Linux loading alias expansion");
                 }
-                if (alias.target().startsWith("/")) {
+                if (alias.startsWith("/")) {
                     current = entry.getRoot();
                     parent = checked(current);
                     observeLinuxComponent(digest, current, parent.parent());
                 }
-                SegmentClassicLinuxDeployment.prependLoadingTarget(pending, alias.target());
+                SegmentClassicLinuxDeployment.prependLoadingTarget(pending, alias);
                 try {
                     SegmentClassicLinuxDeployment.requireLoadingPathCapacity(current, pending);
                 } catch (IllegalArgumentException excessive) {
@@ -1087,14 +1116,23 @@ final class SegmentClassicLaunchTrust {
                     != SegmentClassicLinuxDeployment.Role.LOADER_CONFIG) {
                 throw new IOException("Configuration graph root is not its original approved configuration member");
             }
-            var first = new ConfigurationScan(loading, approved, deadline).read(rootEntry);
-            var second = new ConfigurationScan(loading, approved, deadline).read(rootEntry);
-            if (!first.equals(second)) {
-                throw new IOException("Complete configuration graph changed between original observations");
+            var materials = new ArrayList<LinuxConfigurationMaterial>();
+            Set<Path> paths = new HashSet<>();
+            for (int i = 0; i < approved.size(); i++) {
+                var file = approved.get(i);
+                if (!paths.add(file.path())) {
+                    throw new IOException("Duplicate approved configuration graph file path");
+                }
+                if (file.role() == SegmentClassicLinuxDeployment.Role.LOADER_CONFIG) {
+                    materials.add(new LinuxConfigurationMaterial(i, file.path(), file.length(), file.sha256(),
+                            ConfigurationKind.LDCONFIG));
+                }
             }
-            files.requireHealthy();
-            requireTime(deadline);
-            return first;
+            Map<Path, String> aliases = new HashMap<>();
+            for (var alias : loading.aliases()) {
+                aliases.put(alias.link(), alias.target());
+            }
+            return configurationGraph(materials, aliases, rootEntry.path(), rootEntry.file(), deadline);
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
             throw failure;
@@ -1103,10 +1141,81 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Shared owned graph data only; caller facts cannot establish this owner's typed D2 source/provider state. */
+    synchronized LinuxConfigurationGraph readLinuxConfigurationGraph(List<LinuxConfigurationMaterial> materials,
+            Map<Path, String> aliases, Path rootPath, int rootFile, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return configurationGraph(materials, aliases, rootPath, rootFile, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private Map<Path, String> fixedLoadingAliases(Map<Path, String> declarations, long deadline) throws IOException {
+        var aliases = Map.copyOf(declarations);
+        if (aliases.size() > 128) {
+            throw new IOException("Excessive original loading aliases");
+        }
+        for (var alias : aliases.entrySet()) {
+            Path link = alias.getKey();
+            if (!link.isAbsolute() || link.getParent() == null || !link.equals(link.normalize())) {
+                throw new IOException("Loading alias requires its original canonical physical path");
+            }
+            requireLoadingPathBytes(link, deadline);
+            requireUtf8LoadingText(alias.getValue(), deadline);
+        }
+        return aliases;
+    }
+
+    private LinuxConfigurationGraph configurationGraph(List<LinuxConfigurationMaterial> declarations,
+            Map<Path, String> aliasDeclarations, Path rootPath, int rootFile, long deadline) throws IOException {
+        requireTime(deadline);
+        var materials = List.copyOf(declarations);
+        if (materials.size() > 1024 || rootFile < -1 || rootFile >= 1024) {
+            throw new IOException("Configuration graph declarations exceed their original bounds");
+        }
+        Map<Path, LinuxConfigurationMaterial> configuration = new HashMap<>();
+        Map<Integer, LinuxConfigurationMaterial> indices = new HashMap<>();
+        for (var file : materials) {
+            requireTime(deadline);
+            if (!file.path().isAbsolute() || !file.path().equals(file.path().normalize())) {
+                throw new IOException("Declared graph configuration path is unsupported");
+            }
+            if (file.kind() == ConfigurationKind.LDCONFIG
+                    && file.length() > SegmentClassicLinuxConfiguration.MAX_BYTES) {
+                throw new IOException("Declared graph configuration length exceeds its supported bounds");
+            }
+            var priorPath = configuration.putIfAbsent(file.path(), file);
+            var priorIndex = indices.putIfAbsent(file.file(), file);
+            if (priorPath != null && !priorPath.equals(file) || priorIndex != null && !priorIndex.equals(file)) {
+                throw new IOException("Conflicting physical configuration material, index or kind");
+            }
+        }
+        if (rootFile >= 0 && (indices.get(rootFile) == null
+                || indices.get(rootFile).kind() != ConfigurationKind.LDCONFIG)) {
+            throw new IOException("Configuration graph root requires its original LDCONFIG material");
+        }
+        var fixed = Map.copyOf(configuration);
+        var aliases = fixedLoadingAliases(aliasDeclarations, deadline);
+        var first = new ConfigurationScan(fixed, aliases, deadline).read(rootPath, rootFile);
+        var second = new ConfigurationScan(fixed, aliases, deadline).read(rootPath, rootFile);
+        if (!first.equals(second)) {
+            throw new IOException("Complete configuration graph changed between original observations");
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+        return first;
+    }
+
     private final class ConfigurationScan {
-        private final List<SegmentClassicLinuxDeployment.File> approved;
-        private final Map<Path, Integer> configuration = new HashMap<>();
-        private final Map<Path, SegmentClassicLinuxDeployment.Alias> aliases = new HashMap<>();
+        private final Map<Path, LinuxConfigurationMaterial> configuration;
+        private final Map<Path, String> aliases;
         private final SegmentClassicLinuxConfiguration.ExpansionBudget budget =
                 new SegmentClassicLinuxConfiguration.ExpansionBudget();
         private final LoadingDirectoryBudget directoryBudget = new LoadingDirectoryBudget();
@@ -1118,42 +1227,27 @@ final class SegmentClassicLaunchTrust {
         private final MessageDigest observed;
         private final long deadline;
 
-        ConfigurationScan(SegmentClassicLinuxDeployment.Loading loading,
-                List<SegmentClassicLinuxDeployment.File> approved, long deadline) throws IOException {
-            this.approved = List.copyOf(approved);
+        ConfigurationScan(Map<Path, LinuxConfigurationMaterial> configuration, Map<Path, String> aliases,
+                          long deadline) throws IOException {
+            this.configuration = configuration;
+            this.aliases = aliases;
             this.deadline = deadline;
             try {
                 observed = MessageDigest.getInstance("SHA-256");
             } catch (GeneralSecurityException unavailable) {
                 throw new IOException("Configuration observation SHA-256 unavailable", unavailable);
             }
-            for (var alias : loading.aliases()) {
-                aliases.put(alias.link(), alias);
-            }
-            Set<Path> paths = new HashSet<>();
-            for (int i = 0; i < approved.size(); i++) {
-                var file = approved.get(i);
-                if (!paths.add(file.path())) {
-                    throw new IOException("Duplicate approved configuration graph file path");
-                }
-                if (file.role() == SegmentClassicLinuxDeployment.Role.LOADER_CONFIG) {
-                    if (file.length() > SegmentClassicLinuxConfiguration.MAX_BYTES) {
-                        throw new IOException("Declared graph configuration length exceeds its supported bounds");
-                    }
-                    configuration.put(file.path(), i);
-                }
-            }
         }
 
-        LinuxConfigurationGraph read(SegmentClassicLinuxDeployment.Requirement rootEntry) throws IOException {
-            if (rootEntry.file() == -1) {
+        LinuxConfigurationGraph read(Path rootPath, int rootFile) throws IOException {
+            if (rootFile == -1) {
                 budget.beginFile(1);
-                var path = observeLinuxPath(LinuxPathKind.CONFIGURATION, rootEntry.path(), aliases, false, deadline);
-                remember(rootEntry.path().toString(), path, true);
+                var path = observeLinuxPath(LinuxPathKind.CONFIGURATION, rootPath, aliases, false, deadline);
+                remember(rootPath.toString(), path, true);
             } else {
-                readFile(rootEntry.path().toString(), rootEntry.file(), 1);
+                readFile(rootPath.toString(), rootFile, 1);
             }
-            var result = new LinuxConfigurationGraph(rootEntry.file() == -1, budget.usage(), visited, includes,
+            var result = new LinuxConfigurationGraph(rootFile == -1, budget.usage(), visited, includes,
                     directories, new SegmentClassicHandoff.Digest(observed.digest()));
             requireTime(deadline);
             return result;
@@ -1161,22 +1255,25 @@ final class SegmentClassicLaunchTrust {
 
         private void readFile(String logical, int expected, int depth) throws IOException {
             requireTime(deadline);
-            budget.beginFile(depth);
             var path = observeLinuxPath(LinuxPathKind.CONFIGURATION, nativePath(logical), aliases, true, deadline);
             remember(logical, path, true);
-            Integer index = configuration.get(path.resolved());
-            if (index == null || expected >= 0 && expected != index) {
+            var file = configuration.get(path.resolved());
+            if (file == null || expected >= 0 && expected != file.file()) {
                 throw new IOException("Included logical source does not resolve to its approved configuration file");
             }
+            if (file.kind() != ConfigurationKind.LDCONFIG) {
+                throw new IOException("Unsupported configuration kind cannot enter the ldconfig include graph");
+            }
+            budget.beginFile(depth);
+            int index = file.file();
             var context = new ConfigurationContext(path.identity().device(), path.identity().inode(),
                     SegmentClassicLinuxGlob.logicalDirectory(logical));
             if (!active.add(context)) {
                 throw new IOException("Active configuration file and logical include context form a cycle");
             }
             try {
-                var file = approved.get(index);
                 budget.retainFile(file.length());
-                requireUtf8LoadingPath(file.path());
+                requireLoadingPathBytes(file.path(), deadline);
                 var material = hashFile(file.path(), file.length(), file.sha256(), false, LinuxContentKind.LDCONFIG,
                         deadline).legacy();
                 if (!path.identity().equals(material.identity())) {
@@ -1301,9 +1398,10 @@ final class SegmentClassicLaunchTrust {
 
         private Path nativePath(String logical) throws IOException {
             SegmentClassicLinuxGlob.requireLogicalText(logical);
+            requireUtf8LoadingText(logical, deadline);
             // Preserve a raw trailing slash even when the approved Path provider drops it while constructing Path.
             Path path = utf8LoadingPath(logical.endsWith("/") && !logical.equals("/") ? logical + "." : logical);
-            requireUtf8LoadingPath(path);
+            requireLoadingPathBytes(path, deadline);
             return path;
         }
 
@@ -1346,10 +1444,10 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    private void readLoadingAlias(Path path, Identity before, SegmentClassicLinuxDeployment.Alias alias,
+    private void readLoadingAlias(Path path, Identity before, String alias,
                                   long deadline) throws IOException {
         requireTime(deadline);
-        requireUtf8LoadingPath(path);
+        requireLoadingPathBytes(path, deadline);
         var link = nativeIo.observeSymbolicLink(path.toString());
         requireTime(deadline);
         Identity observed;
@@ -1364,8 +1462,8 @@ final class SegmentClassicLaunchTrust {
         String text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(target)).toString();
         if (!before.equals(observed) || !before.equals(SegmentClassicHandoffPaths.loadingIdentity(path))
-                || !text.equals(alias.target())
-                || !MessageDigest.isEqual(target, alias.target().getBytes(StandardCharsets.UTF_8))) {
+                || !text.equals(alias)
+                || !MessageDigest.isEqual(target, alias.getBytes(StandardCharsets.UTF_8))) {
             throw new IOException("Original loading alias identity or exact target bytes differ from declaration");
         }
         requireTime(deadline);
@@ -1413,19 +1511,8 @@ final class SegmentClassicLaunchTrust {
         requireReady();
         initializingThread = Thread.currentThread();
         try {
-            requireBoundDeadline(deadlineNanos);
-            requireTime(deadlineNanos);
-            if (!production || installed == null || verifiedProgram == null || verifiedRuntimeImage == null
-                    || launcherSource == null || launcherSourceIdentity == null || launcherInput == null
-                    || launcherInput.linuxDeployment() == null || launcherInput.linuxDeployment().schema() != 2
-                    || linuxProvider == null || !sameProvider(linuxProvider, providerAtDecode)) {
-                throw new IOException("D2 ELF member requires this owner's original provider/source binding");
-            }
-            var deployment = launcherInput.linuxDeployment().versionTwo();
+            var deployment = originalLinuxDeployment(deadlineNanos);
             var file = selectLinuxElfMember(deployment, fileIndex);
-            if (!sameProvider(linuxProvider, linuxProviderObjects())) {
-                throw new IOException("Default implementation changed before original D2 member I/O");
-            }
             Path path = linuxProvider.filesystem().getPath(file.path());
             requirePhysicalBytes(file.path(), path, linuxProvider, deadlineNanos);
             boolean executable = file.role() != SegmentClassicLinuxDeployment.Role.LIBRARY
@@ -1447,6 +1534,113 @@ final class SegmentClassicLaunchTrust {
         } finally {
             initializingThread = null;
         }
+    }
+
+    private SegmentClassicLinuxDeploymentV2 originalLinuxDeployment(long deadline) throws IOException {
+        requireBoundDeadline(deadline);
+        requireTime(deadline);
+        if (!production || installed == null || verifiedProgram == null || verifiedRuntimeImage == null
+                || launcherSource == null || launcherSourceIdentity == null || launcherInput == null
+                || launcherInput.linuxDeployment() == null || launcherInput.linuxDeployment().schema() != 2
+                || linuxProvider == null || !sameProvider(linuxProvider, providerAtDecode)) {
+            throw new IOException("D2 member requires this owner's original provider/source binding");
+        }
+        if (!sameProvider(linuxProvider, linuxProviderObjects())) {
+            throw new IOException("Default implementation changed before original D2 member I/O");
+        }
+        return launcherInput.linuxDeployment().versionTwo();
+    }
+
+    private Path linuxPhysicalPath(String original, long deadline) throws IOException {
+        Path path = linuxProvider.filesystem().getPath(original);
+        requirePhysicalBytes(original, path, linuxProvider, deadline);
+        return path;
+    }
+
+    /** Only an original configuration rule index; no caller material, graph, kind or source permit. */
+    synchronized LinuxLoaderConfigurationObservation verifyLinuxLoaderConfiguration(int ruleIndex, long deadline)
+            throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            var rule = selectLinuxConfiguration(deployment, ruleIndex);
+            Map<Path, String> declarations = new HashMap<>();
+            for (var alias : deployment.loading().aliases()) {
+                declarations.put(linuxPhysicalPath(alias.link(), deadline), alias.target());
+            }
+            var aliases = fixedLoadingAliases(declarations, deadline);
+            Path path = linuxPhysicalPath(rule.path(), deadline);
+            LinuxLoaderConfigurationObservation result;
+            if (rule.kind() == ConfigurationKind.LDCONFIG) {
+                var materials = new ArrayList<LinuxConfigurationMaterial>();
+                for (var entry : deployment.loading().configuration()) {
+                    if (entry.file() >= 0) {
+                        var file = deployment.files().get(entry.file());
+                        materials.add(new LinuxConfigurationMaterial(entry.file(),
+                                linuxPhysicalPath(file.path(), deadline), file.length(), file.sha256(), entry.kind()));
+                    }
+                }
+                var graph = configurationGraph(materials, aliases, path, rule.file(), deadline);
+                result = new LinuxLoaderConfigurationObservation(ruleIndex, rule.kind(), null, null, null, graph);
+            } else {
+                var first = observeLoaderConfiguration(deployment, ruleIndex, rule, path, aliases, deadline);
+                var second = observeLoaderConfiguration(deployment, ruleIndex, rule, path, aliases, deadline);
+                if (!first.equals(second)) {
+                    throw new IOException("Original loader cache or preload path changed between observations");
+                }
+                result = first;
+            }
+            files.requireHealthy();
+            requireTime(deadline);
+            return result;
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxLoaderConfigurationObservation observeLoaderConfiguration(SegmentClassicLinuxDeploymentV2 deployment,
+            int ruleIndex, SegmentClassicLinuxDeploymentV2.Configuration rule, Path path, Map<Path, String> aliases,
+            long deadline) throws IOException {
+        var observed = observeLinuxPath(LinuxPathKind.CONFIGURATION, path, aliases, rule.file() >= 0, deadline);
+        if (rule.file() == -1) {
+            return new LinuxLoaderConfigurationObservation(ruleIndex, rule.kind(), observed, null, null, null);
+        }
+        var file = deployment.files().get(rule.file());
+        Path physical = linuxPhysicalPath(file.path(), deadline);
+        if (!observed.resolved().equals(physical)) {
+            throw new IOException("Original cache path differs from its declared physical material");
+        }
+        var material = hashFile(physical, file.length(), file.sha256(), false, LinuxContentKind.CACHE, deadline);
+        if (!observed.identity().equals(material.identity())
+                || !observed.equals(observeLinuxPath(LinuxPathKind.CONFIGURATION, path, aliases, true, deadline))) {
+            throw new IOException("Original cache identity or logical path changed during its hash/parser read");
+        }
+        return new LinuxLoaderConfigurationObservation(ruleIndex, rule.kind(), observed, material.content().sha256(),
+                material.legacy(), null);
+    }
+
+    /** Mandatory rule/kind/format dispatch only; no Path construction or authority. */
+    static SegmentClassicLinuxDeploymentV2.Configuration selectLinuxConfiguration(
+            SegmentClassicLinuxDeploymentV2 deployment, int ruleIndex) throws IOException {
+        var rules = deployment.loading().configuration();
+        if (ruleIndex < 0 || ruleIndex >= rules.size()) {
+            throw new IOException("D2 configuration index is outside the original rule table");
+        }
+        var rule = rules.get(ruleIndex);
+        if (rule.format() != 1 || rule.kind() == ConfigurationKind.MODULE_RUNTIME) {
+            throw new IOException("Unsupported independent configuration kind or format");
+        }
+        if (rule.kind() == ConfigurationKind.CACHE && rule.file() >= 0) {
+            long length = deployment.files().get(rule.file()).length();
+            if (length < 48 || length > SegmentClassicLinuxCache.MAX_BYTES) {
+                throw new IOException("Declared loader cache length exceeds its supported format bounds");
+            }
+        }
+        return rule;
     }
 
     /** Pure original-table selection only. The caller still needs the owner's provider/source gate for I/O. */
