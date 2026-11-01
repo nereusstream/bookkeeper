@@ -47,6 +47,17 @@ public class SegmentClassicLauncherInputsTest {
     }
 
     @Test
+    public void legacyAndD1OuterRawDecodeKeepsTheOriginalPathTextWithoutChangingWire() throws Exception {
+        for (String name : List.of("classic-launcher-inputs-v1", "classic-launcher-inputs-v2")) {
+            byte[] original = SegmentClassicLinuxDeploymentTest.vector(name);
+            var decoded = SegmentClassicLauncherInputs.decodeWithRawPaths(original);
+            assertArrayEquals(original, decoded.value().encode());
+            assertEquals(decoded.value().dropper().path().toString(), decoded.paths().dropper());
+            assertEquals(6, decoded.paths().values().size());
+        }
+    }
+
+    @Test
     public void independentVectorBindsTheRecipeAndBuildsOnlyExplicitNumericExecArguments() throws Exception {
         var inputs = SegmentClassicLauncherInputs.decode(vector("classic-launcher-inputs-v1"));
         var original = original();

@@ -121,6 +121,20 @@ public class SegmentClassicLaunchProgramTest {
     }
 
     @Test
+    public void rawProgramPathsSurviveBeforeTheLegacyPathRepresentationCollapsesSlashes() throws Exception {
+        byte[] original = SegmentClassicLinuxDeploymentTest.vector("classic-linux-program-v1");
+        byte[] changed = SegmentClassicLinuxProviderTest.replaceFirstText(original, "/opt/jdk", "/opt//jdk");
+        changed = SegmentClassicLinuxProviderTest.replaceFirstText(changed, "/opt/jdk/bin/java", "/opt//jdk/bin/java");
+        var decoded = SegmentClassicLaunchProgram.decodeWithRawPaths(changed);
+        assertEquals("/opt//jdk", decoded.javaHome());
+        assertEquals("/opt//jdk/bin/java", decoded.filePaths().get(0));
+        assertEquals(Path.of("/opt/jdk"), decoded.value().javaHome());
+        assertEquals(Path.of("/opt/jdk/bin/java"), decoded.value().files().get(0).path());
+        assertThrows(UnsupportedOperationException.class, () -> decoded.filePaths().clear());
+        assertArrayEquals(original, encode(decoded.value()));
+    }
+
+    @Test
     public void independentProgramVectorPinsRolesOrderedClasspathArgumentsAndDigest() throws Exception {
         byte[] bytes = vector("classic-launch-program-v1.hex");
         var p = SegmentClassicLaunchProgram.decode(bytes);
@@ -430,6 +444,57 @@ public class SegmentClassicLaunchProgramTest {
         }
         b.putInt(12, b.position() - 16);
         return Arrays.copyOf(b.array(), b.position());
+    }
+
+    @Test
+    public void actualWrappedDefaultFilesystemIsRejectedBeforeD2CandidatePathsEvenAfterPropertyClear()
+            throws Exception {
+        try (var fixture = new Fixture(null, false)) {
+            Path directory = Files.createDirectory(fixture.root.resolve("launcher"));
+            Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
+            Path descriptor = directory.resolve("classic-1.launcher");
+            Files.write(descriptor, SegmentClassicLinuxProviderTest.schemaTwoInput().encode());
+            Files.setPosixFilePermissions(descriptor, PosixFilePermissions.fromString("rw-------"));
+            var command = List.of(Path.of(System.getProperty("java.home"), "bin/java").toString(),
+                    "-Djava.nio.file.spi.DefaultFileSystemProvider="
+                            + SegmentClassicLinuxProviderTest.WrapperProvider.class.getName(),
+                    "-Dbookkeeper.native.io.library.path=" + System.getProperty("bookkeeper.native.io.library.path"),
+                    "-cp", System.getProperty("java.class.path"), WrappedProviderProbe.class.getName(),
+                    fixture.root.toString());
+            Process child = new ProcessBuilder(command).redirectErrorStream(true).start();
+            byte[] output;
+            try (var stream = child.getInputStream()) {
+                output = stream.readAllBytes();
+            }
+            assertEquals(new String(output, StandardCharsets.UTF_8), 0, child.waitFor());
+            assertTrue(new String(output, StandardCharsets.UTF_8).contains("WRAPPER_REJECTED_PATHS_0_CONTROL_1"));
+        }
+    }
+
+    /** Real SPI/default filesystem and owned recipe/descriptor reads, still a non-installed fixture. */
+    public static final class WrappedProviderProbe {
+        public static void main(String[] args) throws Exception {
+            var owner = SegmentClassicLaunchTrust.forMaterialIoTests(Path.of(args[0]), "classic-1",
+                    new UnixSystem().getUid());
+            try {
+                owner.initialize();
+                System.clearProperty("java.nio.file.spi.DefaultFileSystemProvider");
+                SegmentClassicLinuxProviderTest.tripwire = true;
+                IOException refused = assertThrows(IOException.class, () -> owner.readLauncherInputs(deadline()));
+                assertTrue(refused.getMessage().contains("implementation source"));
+                assertEquals(0, SegmentClassicLinuxProviderTest.candidatePaths);
+                assertThrows(IOException.class, owner::parsed);
+                assertThrows(IOException.class, owner::installed);
+                assertThrows(AssertionError.class, () -> Path.of("/explicit-tripwire-control"));
+                assertEquals(1, SegmentClassicLinuxProviderTest.candidatePaths);
+                SegmentClassicLinuxProviderTest.tripwire = false;
+                System.out.write("WRAPPER_REJECTED_PATHS_0_CONTROL_1\n".getBytes(StandardCharsets.US_ASCII));
+                System.out.flush();
+            } finally {
+                SegmentClassicLinuxProviderTest.tripwire = false;
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
     }
 
     private final class Fixture implements AutoCloseable {

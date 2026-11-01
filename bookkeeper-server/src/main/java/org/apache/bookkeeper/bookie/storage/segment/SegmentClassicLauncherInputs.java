@@ -174,6 +174,46 @@ record SegmentClassicLauncherInputs(String recipeId, SegmentClassicHandoff.Diges
     }
 
     static SegmentClassicLauncherInputs decode(byte[] encoded) throws IOException {
+        return decodeWithRawPaths(encoded).value();
+    }
+
+    record RawPaths(String dropper, String supervisor, String manifest, String proof, String policy, String aesKey) {
+        RawPaths {
+            for (String path : List.of(dropper, supervisor, manifest, proof, policy, aesKey)) {
+                if (path.isEmpty() || path.indexOf(0) >= 0 || path.length() > 4096
+                        || !StandardCharsets.UTF_8.newEncoder().canEncode(path)
+                        || path.getBytes(StandardCharsets.UTF_8).length > 4096) {
+                    throw new IllegalArgumentException("Invalid original launcher path text");
+                }
+            }
+        }
+
+        List<String> values() {
+            return List.of(dropper, supervisor, manifest, proof, policy, aesKey);
+        }
+    }
+
+    /** Raw immutable decode, with typed Path construction deferred until the caller has checked its provider. */
+    record Decoded(String recipeId, SegmentClassicHandoff.Digest recipe, SegmentClassicHandoff.Digest signerKeyId,
+                   SegmentClassicHandoff.Digest parentProgram, String os, String architecture, RawPaths paths,
+                   long dropperLength, SegmentClassicHandoff.Digest dropperHash, long targetUid,
+                   SegmentClassicLinuxDeployment linuxDeployment) {
+        SegmentClassicLauncherInputs value() throws IOException {
+            try {
+                return new SegmentClassicLauncherInputs(recipeId, recipe, signerKeyId, parentProgram, os, architecture,
+                        new SegmentClassicLaunchProgram.File(Path.of(paths.dropper()),
+                                SegmentClassicLaunchProgram.NATIVE,
+                                dropperLength, dropperHash), Path.of(paths.supervisor()), targetUid,
+                        Path.of(paths.manifest()), Path.of(paths.proof()), Path.of(paths.policy()),
+                        Path.of(paths.aesKey()),
+                        linuxDeployment);
+            } catch (IllegalArgumentException malformed) {
+                throw new IOException("Invalid fixed launcher descriptor", malformed);
+            }
+        }
+    }
+
+    static Decoded decodeWithRawPaths(byte[] encoded) throws IOException {
         if (encoded == null || encoded.length < 16 || encoded.length > MAX_V2_BYTES) {
             throw new IOException("Launcher descriptor exceeds its fixed bounds");
         }
@@ -192,18 +232,18 @@ record SegmentClassicLauncherInputs(String recipeId, SegmentClassicHandoff.Diges
             var program = digest(b);
             String os = text(b, 16);
             String arch = text(b, 16);
-            Path dropper = Path.of(text(b, 4096));
+            String dropper = text(b, 4096);
             long length = b.getLong();
             var hash = digest(b);
             if (b.getInt() != (v2 ? 2 : 1)) {
                 throw new IllegalArgumentException("Unsupported exec-dropper invocation format");
             }
-            Path directory = Path.of(text(b, 4096));
+            String directory = text(b, 4096);
             long uid = Integer.toUnsignedLong(b.getInt());
-            Path manifest = Path.of(text(b, 4096));
-            Path proof = Path.of(text(b, 4096));
-            Path policy = Path.of(text(b, 4096));
-            Path aesKey = Path.of(text(b, 4096));
+            String manifest = text(b, 4096);
+            String proof = text(b, 4096);
+            String policy = text(b, 4096);
+            String aesKey = text(b, 4096);
             SegmentClassicLinuxDeployment deployment = null;
             if (v2) {
                 int size = b.getInt();
@@ -214,13 +254,11 @@ record SegmentClassicLauncherInputs(String recipeId, SegmentClassicHandoff.Diges
                 b.get(body);
                 deployment = SegmentClassicLinuxDeployment.decode(body);
             }
-            var result = new SegmentClassicLauncherInputs(id, recipe, signer, program, os, arch,
-                    new SegmentClassicLaunchProgram.File(dropper, SegmentClassicLaunchProgram.NATIVE, length, hash),
-                    directory, uid, manifest, proof, policy, aesKey, deployment);
             if (b.hasRemaining()) {
                 throw new IllegalArgumentException("Trailing fixed launcher descriptor data");
             }
-            return result;
+            return new Decoded(id, recipe, signer, program, os, arch,
+                    new RawPaths(dropper, directory, manifest, proof, policy, aesKey), length, hash, uid, deployment);
         } catch (IllegalArgumentException | BufferUnderflowException malformed) {
             throw new IOException("Invalid fixed launcher descriptor", malformed);
         }

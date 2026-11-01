@@ -19,7 +19,6 @@
 package org.apache.bookkeeper.bookie.storage.segment;
 
 import java.io.IOException;
-import java.lang.management.ManagementFactory;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -273,23 +272,15 @@ public final class SegmentClassicLauncher {
         program = trust.verifyProgram(deadline);
         frozen = trust.verifyConfiguration(deadline);
         configuration = SegmentClassicLaunchConfiguration.materialize(frozen);
-        input = SegmentClassicLauncherInputs.decode(trust.readLauncherDescriptor());
+        input = trust.readLauncherInputs(deadline);
         input.requireRecipe(material);
         if (input.linuxDeployment() != null) {
             input.linuxDeployment().requireProgram(program, recipeId);
         }
         requireRoot();
-        if (!System.getenv().isEmpty() || !program.runtime().equals(System.getProperty("java.runtime.version"))
-                || !program.vendor().equals(System.getProperty("java.vendor"))
-                || !program.javaHome().equals(Path.of(System.getProperty("java.home")).toRealPath())
-                || !Path.of(current.info().command().orElseThrow()).toRealPath()
-                        .equals(program.files().get(program.javaFile()).path())
-                || !arguments.equals(SegmentClassicLauncherInputs.parentCommand(program, recipeId)
-                        .subList(1, SegmentClassicLauncherInputs.parentCommand(program, recipeId).size()))
-                || !ManagementFactory.getRuntimeMXBean().getInputArguments().equals(program.jvmArguments())
-                || !System.getProperty("java.class.path").equals(String.join(":", program.classPath().stream()
-                        .map(i -> program.files().get(i).path().toString()).toList()))) {
-            throw new IOException("Actual launcher JVM differs from the fixed approved parent program");
+        program.requireCurrentLauncher(recipeId);
+        if (input.linuxDeployment() != null && input.linuxDeployment().schema() == 2) {
+            trust.verifyLinuxProvider(deadline);
         }
         trust.verifyLauncherDropper(input, deadline);
         loadPrivateKey();

@@ -28,12 +28,15 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileTime;
+import java.nio.file.spi.FileSystemProvider;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.MessageDigest;
@@ -225,11 +228,19 @@ final class SegmentClassicLaunchTrust {
     private Installed installed;
     private boolean programAttempted;
     private Throwable programFailure;
+    private SegmentClassicLaunchProgram.Decoded verifiedProgram;
+    private LinuxFileObservation verifiedRuntimeImage;
     private boolean configurationAttempted;
     private Throwable configurationFailure;
     private boolean launcherDescriptorAttempted;
     private boolean launcherKeyAttempted;
     private Throwable launcherFailure;
+    private SegmentClassicLauncherInputs.Decoded launcherSource;
+    private SegmentClassicLauncherInputs launcherInput;
+    private SegmentClassicHandoff.Digest launcherSourceIdentity;
+    private LinuxProvider providerAtDecode;
+    private LinuxProvider linuxProvider;
+    private boolean linuxProviderAttempted;
     private Throwable auxiliaryCloseFailure;
     private final List<AuxiliaryRead> auxiliaryReads = new ArrayList<>();
 
@@ -330,7 +341,8 @@ final class SegmentClassicLaunchTrust {
             requireTime(deadlineNanos);
             byte[] bytes = read(root.resolve(recipeId + ".program"), 16, SegmentClassicLaunchProgram.MAX_BYTES);
             requireTime(deadlineNanos);
-            var program = SegmentClassicLaunchProgram.decode(bytes);
+            var decoded = SegmentClassicLaunchProgram.decodeWithRawPaths(bytes);
+            var program = decoded.value();
             if (!parsed.recipe().program().equals(SegmentClassicLaunchProgram.identity(bytes))) {
                 throw new IOException("Program bytes differ from the fixed recipe digest");
             }
@@ -347,8 +359,12 @@ final class SegmentClassicLaunchTrust {
                     throw new IOException("Program differs from the exact native-io library already loaded");
                 }
             }
+            LinuxFileObservation runtimeImage = null;
             for (var file : program.files()) {
-                hashProgramFile(file, deadlineNanos);
+                var observed = hashProgramFile(file, deadlineNanos);
+                if (file.path().equals(program.javaHome().resolve("lib/modules"))) {
+                    runtimeImage = observed;
+                }
             }
             verifyJdkTree(program, deadlineNanos);
             for (int jar : program.classPath()) {
@@ -362,6 +378,8 @@ final class SegmentClassicLaunchTrust {
             if (preload != null) {
                 preload.verifyOriginal(deadlineNanos);
             }
+            verifiedProgram = decoded;
+            verifiedRuntimeImage = runtimeImage;
             return program;
         } catch (IOException | RuntimeException | Error failure) {
             programFailure = failure;
@@ -413,6 +431,39 @@ final class SegmentClassicLaunchTrust {
         return readLauncherPrivate(recipeId + ".launcher", 16, SegmentClassicLauncherInputs.MAX_V2_BYTES);
     }
 
+    /** Same one-use descriptor source; raw text remains private data, never a transferable provider permit. */
+    synchronized SegmentClassicLauncherInputs readLauncherInputs(long deadlineNanos) throws IOException {
+        requireReady();
+        try {
+            requireBoundDeadline(deadlineNanos);
+            requireTime(deadlineNanos);
+            byte[] bytes = readLauncherDescriptor();
+            initializingThread = Thread.currentThread();
+            var decoded = SegmentClassicLauncherInputs.decodeWithRawPaths(bytes);
+            LinuxProvider candidate = null;
+            if (decoded.linuxDeployment() != null && decoded.linuxDeployment().schema() == 2) {
+                // Inspect the already-used bootstrap default filesystem before constructing candidate Paths.
+                candidate = linuxProviderObjects();
+                if (verifiedProgram == null || verifiedRuntimeImage == null) {
+                    throw new IOException("D2 decoding requires this owner's original verified program/image");
+                }
+            }
+            var value = decoded.value();
+            requireTime(deadlineNanos);
+            files.requireHealthy();
+            launcherSource = decoded;
+            launcherInput = value;
+            launcherSourceIdentity = SegmentClassicHandoff.digest(bytes);
+            providerAtDecode = candidate;
+            return value;
+        } catch (IOException | RuntimeException | Error problem) {
+            launcherFailure = problem;
+            throw problem;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
     /** Key name is anchored by the original recipe, never by a command or a received packet. */
     synchronized byte[] readLauncherPrivateKey() throws IOException {
         requireReady();
@@ -423,12 +474,188 @@ final class SegmentClassicLaunchTrust {
         return readLauncherPrivate(parsed.recipe().keyName() + ".pk8", 48, 48);
     }
 
+    private record LinuxProvider(FileSystem filesystem, FileSystemProvider provider, Class<?> pathClass) { }
+
+    /** Fixed implementation objects under the original bootstrap; no candidate Path is queried to discover them. */
+    private static LinuxProvider linuxProviderObjects() throws IOException {
+        FileSystem filesystem = FileSystems.getDefault();
+        requireBootstrapType(filesystem.getClass(), "sun.nio.fs.LinuxFileSystem");
+        FileSystemProvider provider = filesystem.provider();
+        requireBootstrapType(provider.getClass(), "sun.nio.fs.LinuxFileSystemProvider");
+        Path rootPath = filesystem.getPath("/");
+        requireBootstrapType(rootPath.getClass(), "sun.nio.fs.UnixPath");
+        requireBootstrapType(URI.class, "java.net.URI");
+        try {
+            requireBootstrapType(Class.forName("sun.nio.fs.UnixUriUtils", false, null), "sun.nio.fs.UnixUriUtils");
+        } catch (ClassNotFoundException unavailable) {
+            throw new IOException("Approved bootstrap Unix URI implementation is unavailable", unavailable);
+        }
+        var module = ModuleLayer.boot().configuration().findModule("java.base");
+        if (module.isEmpty() || module.get().reference().location().isEmpty()
+                || !module.get().reference().location().get().equals(URI.create("jrt:/java.base"))) {
+            throw new IOException("Default filesystem implementation is outside the original runtime module image");
+        }
+        return new LinuxProvider(filesystem, provider, rootPath.getClass());
+    }
+
+    private static void requireBootstrapType(Class<?> actual, String name) throws IOException {
+        try {
+            if (!actual.getName().equals(name) || actual != Class.forName(name, false, null)
+                    || actual.getClassLoader() != null || actual.getModule() != URI.class.getModule()
+                    || actual.getModule().getLayer() != ModuleLayer.boot()) {
+                throw new IOException("Unsupported default filesystem/provider/Path/URI implementation source");
+            }
+        } catch (ClassNotFoundException unavailable) {
+            throw new IOException("Approved bootstrap implementation type is unavailable", unavailable);
+        }
+    }
+
+    private static boolean sameProvider(LinuxProvider first, LinuxProvider second) {
+        return first != null && second != null && first.filesystem() == second.filesystem()
+                && first.provider() == second.provider() && first.pathClass() == second.pathClass();
+    }
+
+    /** Byte comparison only under an already trusted bootstrap. No provider approval, path lookup or permit. */
+    static String requireUtf8LoadingText(String original, long deadline) throws IOException {
+        requireTime(deadline);
+        if (original == null || original.isEmpty() || original.length() > 4096 || original.indexOf(0) >= 0
+                || !StandardCharsets.UTF_8.newEncoder().canEncode(original)
+                || original.getBytes(StandardCharsets.UTF_8).length > 4096) {
+            throw new IOException("Invalid bounded original Linux loading text");
+        }
+        for (String component : original.split("/", -1)) {
+            requireTime(deadline);
+            if (component.isEmpty() || component.equals(".") || component.equals("..")) {
+                continue; // The logical walker must still retain separators, dot traversal and final directory checks.
+            }
+            Path actual = Path.of("/").resolve(component);
+            if (!actual.equals(utf8LoadingPath("/" + component))) {
+                throw new IOException("Original Linux name component differs from its strict UTF8 bytes");
+            }
+        }
+        requireTime(deadline);
+        return original;
+    }
+
+    private static void requirePhysicalBytes(String original, Path actual, LinuxProvider provider, long deadline)
+            throws IOException {
+        requireUtf8LoadingText(original, deadline);
+        // getClass is checked before invoking any candidate Path methods.
+        if (actual.getClass() != provider.pathClass()) {
+            throw new IOException("Candidate path has an unapproved implementation");
+        }
+        if (actual.getFileSystem() != provider.filesystem()) {
+            throw new IOException("Candidate path belongs to another filesystem");
+        }
+        Path expected = utf8LoadingPath(original);
+        if (expected.getClass() != provider.pathClass() || expected.getFileSystem() != provider.filesystem()
+                || !actual.equals(expected) || !actual.toString().equals(original)) {
+            throw new IOException("Original physical path text, native bytes or JNI string differ");
+        }
+        requireTime(deadline);
+    }
+
+    /** Owner-private provider/source binding only. Bootstrap TCB is a premise, not inferred from a later image hash. */
+    synchronized void verifyLinuxProvider(long deadlineNanos) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadlineNanos);
+            requireTime(deadlineNanos);
+            if (linuxProviderAttempted) {
+                throw new IOException("Original Linux provider verification is one-use");
+            }
+            linuxProviderAttempted = true;
+            if (!production || installed == null || preload == null || verifiedProgram == null
+                    || verifiedRuntimeImage == null || launcherSource == null || launcherSourceIdentity == null
+                    || launcherInput == null || launcherInput.linuxDeployment() == null
+                    || launcherInput.linuxDeployment().schema() != 2) {
+                throw new IOException("Linux provider binding requires the original installed program and descriptor");
+            }
+            LinuxProvider candidate = linuxProviderObjects();
+            if (!sameProvider(candidate, providerAtDecode)) {
+                throw new IOException("Default implementation changed since the original descriptor decode");
+            }
+            var child = verifiedProgram.value();
+            requirePhysicalBytes(verifiedProgram.javaHome(), child.javaHome(), candidate, deadlineNanos);
+            for (int i = 0; i < child.files().size(); i++) {
+                requirePhysicalBytes(verifiedProgram.filePaths().get(i), child.files().get(i).path(), candidate,
+                        deadlineNanos);
+            }
+            child.requireCurrentLauncher(recipeId);
+            launcherInput.requireRecipe(parsed);
+            launcherInput.linuxDeployment().requireProgram(child, recipeId);
+            var deployment = launcherInput.linuxDeployment().versionTwo();
+            if (!Runtime.version().toString().equals(deployment.provider().runtime())) {
+                throw new IOException("Actual runtime build differs from the original provider image binding");
+            }
+            var image = child.files().stream().filter(f -> f.path().equals(child.javaHome().resolve("lib/modules")))
+                    .findFirst().orElseThrow(() -> new IOException("Original runtime image is missing"));
+            if (!verifiedRuntimeImage.identity().equals(checked(image.path()))
+                    || !verifiedRuntimeImage.parents().equals(chain(image.path()))) {
+                throw new IOException("Original verified runtime image identity or protected parents changed");
+            }
+            List<Path> parsedPaths = List.of(launcherInput.dropper().path(), launcherInput.supervisorDirectory(),
+                    launcherInput.manifest(), launcherInput.proof(), launcherInput.policy(), launcherInput.aesKey());
+            List<String> originals = launcherSource.paths().values();
+            for (int i = 0; i < parsedPaths.size(); i++) {
+                requirePhysicalBytes(originals.get(i), parsedPaths.get(i), candidate, deadlineNanos);
+            }
+            if (!launcherSourceIdentity.equals(SegmentClassicHandoff.digest(launcherInput.encode()))) {
+                throw new IOException("Original D2 descriptor text differs from its canonical typed value");
+            }
+            for (var file : deployment.files()) {
+                requirePhysicalBytes(file.path(), candidate.filesystem().getPath(file.path()), candidate,
+                        deadlineNanos);
+            }
+            var loading = deployment.loading();
+            requireUtf8LoadingText(loading.interpreter(), deadlineNanos);
+            for (var alias : loading.aliases()) {
+                requireUtf8LoadingText(alias.link(), deadlineNanos);
+                requireUtf8LoadingText(alias.target(), deadlineNanos);
+            }
+            for (var directory : loading.directories()) {
+                requireUtf8LoadingText(directory.path(), deadlineNanos);
+            }
+            for (var configuration : loading.configuration()) {
+                requireUtf8LoadingText(configuration.path(), deadlineNanos);
+            }
+            for (var context : loading.contexts()) {
+                requireUtf8LoadingText(context.logicalLoadName(), deadlineNanos);
+            }
+            for (String directory : loading.policy().defaultDirectories()) {
+                requireUtf8LoadingText(directory, deadlineNanos);
+            }
+            for (var link : deployment.installLinks()) {
+                requireUtf8LoadingText(link.path(), deadlineNanos);
+                requireUtf8LoadingText(link.target(), deadlineNanos);
+            }
+            if (!sameProvider(candidate, linuxProviderObjects())) {
+                throw new IOException("Default implementation changed during original byte binding");
+            }
+            preload.verifyOriginal(deadlineNanos);
+            files.requireHealthy();
+            requireTime(deadlineNanos);
+            linuxProvider = candidate;
+        } catch (IOException | RuntimeException | Error problem) {
+            linuxProvider = null;
+            launcherFailure = problem;
+            throw problem;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
     synchronized void verifyLauncherDropper(SegmentClassicLauncherInputs input, long deadlineNanos)
             throws IOException {
         requireReady();
         initializingThread = Thread.currentThread();
         try {
             requireBoundDeadline(deadlineNanos);
+            if (input.linuxDeployment() != null && input.linuxDeployment().schema() == 2
+                    && (linuxProvider == null || input != launcherInput)) {
+                throw new IOException("D2 dropper I/O requires this owner's original provider/source binding");
+            }
             input.requireRecipe(parsed);
             var file = input.dropper();
             Identity original = checked(file.path());
@@ -1152,8 +1379,10 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    private void hashProgramFile(SegmentClassicLaunchProgram.File file, long deadlineNanos) throws IOException {
-        hashFile(file.path(), file.length(), file.sha256(), (file.roles() & SegmentClassicLaunchProgram.JAVA) != 0,
+    private LinuxFileObservation hashProgramFile(SegmentClassicLaunchProgram.File file, long deadlineNanos)
+            throws IOException {
+        return hashFile(file.path(), file.length(), file.sha256(),
+                (file.roles() & SegmentClassicLaunchProgram.JAVA) != 0,
                 false, false, false, deadlineNanos);
     }
 

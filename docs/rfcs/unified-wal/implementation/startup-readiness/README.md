@@ -826,6 +826,26 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## Linux provider 的原 owner 来源与字节门
+
+2026-11-01在本地父`9f9b08dd67ec44cf3663817f8da49e24f4296c64`上，按总体规划会话裁决，在原`SegmentClassicLaunchTrust`增加`readLauncherInputs(deadline)`与无外来事实参数的`verifyLinuxProvider(deadline)`。原`verifyProgram`只在全部hash、完整JDK/JAR、首次close/资源健康及原preload核验成功后，保存本owner的program decode来源及原`lib/modules` hash读取所返回的身份/父链观察；摘要事实来自同一次成功hash，不用D2路径自证JDK来源。原`.launcher`的一次私有读取内完成raw decode，保存原描述符SHA、typed value和六个外层path原文。旧byte与typed入口共用原一次读取，不能用第二次读取或caller复制值补升来源。
+
+原program codec新增`decodeWithRawPaths`，留存javaHome及逐file原String；launcher codec同名入口先返回不可变raw数据，保留dropper/supervisor/manifest/proof/policy/AES原文，`value()`才构造原typed Path。复用同一解析逻辑，不复制codec、不改变wire；旧decode仍返回原数据，原v1/v2固定字节和上限保持。D2 owner在`value()`前先检查原bootstrap已使用的实际默认filesystem；未知实现直接拒绝，不通过其provider/getPath或未知候选Path方法来探测。缺原program/image仍不能形成typed D2来源。原文不从Path.toString恢复，保留文本并不代表权限或permit。
+
+实际对象固定为批准LinuxFileSystem/LinuxFileSystemProvider/UnixPath与URI/UnixUriUtils，按bootstrap class对象、null loader、同一boot java.base及jrt模块来源核对，不调用installedProviders搜索替代实现、不增加反射开放参数。当前属性为空不证明默认filesystem未被包装：该实例会沿用初始化结果，依据[批准Corretto FileSystems原源](https://raw.githubusercontent.com/corretto/corretto-21/21.0.10.7.1/src/java.base/share/classes/java/nio/file/FileSystems.java)并由真实包装SPI反例核验。模块名、类名、runtime/vendor属性或后置image hash单独均不构成首次启动证明；外部可信安装/原bootstrap TCB仍是前提，不能据本门追认不可信JVM。
+
+最终门只消费owner私有保存的原program/image/launcher来源，要求production preload与Installed、原deadline、D/P2/recipe与child program匹配、实际父JVM/argv/classpath/JDK、runtime build、原image当前身份/保护父链一致。门不接caller program、Path、“verified provider”或布尔资格；最终状态只存本owner，失败进入原launcherFailure且不能重读刷绿，关闭后也不能继续。D2 dropper首次metadata/hash前还要求该状态与原typed input引用，caller构造或跨owner复制的值不能到达D2 dropper I/O。fixture始终不能得到Installed或该成功状态。
+
+普通名称component以显式ASCII百分号编码`file:///` URI构造UTF8预期Path，对比实际String→Path的字节表示；拒绝authority/query/fragment和非三斜杠分支。物理成员及六个外层/program既有Path再核对完整Path字节、同一filesystem/class以及原字符串与实际JNI字符串，不能仅凭组件通过或字符串相等放行。logical context/目录/interpreter/alias target/default目录/安装链接等保留原String；dot/dotdot、重复分隔符、尾斜杠不提前消解，不把整个URI转换结果当原文。相关源码明确[UnixUriUtils会处理重复及末尾斜杠](https://raw.githubusercontent.com/corretto/corretto-21/21.0.10.7.1/src/java.base/unix/classes/sun/nio/fs/UnixUriUtils.java)；后续walker仍须保留实际目录要求，alias仍须比对完整原readlink bytes，每次展开后NIO/JNI交界再执行既定字节检查。当前组件检查没有目标路径metadata、枚举、open或JNI I/O。
+
+launcher顺序为原preload/native/trust→原program/config→原descriptor来源/D2绑定→原实际父JVM检查→provider/字节门→dropper等后续D2观察。原实际JVM比较仅复用移动到program.requireCurrentLauncher，不变更旧判断；门自身也消费原program复核，不能由caller声明完成。原hashFile仍调用ELF1，未提前接ELF2或完整loader闭包/选择/Unix资格，也不解除childCommand的v2拒绝、发行START或签发handoff。
+
+验证在Corretto21.0.10+7-LTS/macOS aarch64完成：首轮四类65项全过；新wrapped filesystem子JVM首17项有1个夹具失败，发生于TemporaryFolder.toFile、尚未到门，原source/class/XML保留。修正为父测试建目录、子JVM只读原材料后，四类66项全过；真实SPI包装初始化后清空属性，D2 raw decode仍以未知filesystem拒绝，候选getPath计数0；显式控制调用计数1，检测点有效。该反例只证明拒绝顺序，不伪造Linux阳性。首轮style的泛型名称A违反既有规则，改为T后样式0；最终串行十七类171项全过（0失败/错误/跳过），包括原program/inputs/trust、ELF/loader数据及launcher/process回归。四阶段各1429源码/资源逐项核验，最终八项code与测试/style一致，原PASS不移绑。body文本包含特殊字符、Unicode、原文被旧Path折叠后的留存、one-use/超时/失败/关闭、伪造D2 input拒绝都有相应覆盖。
+
+终态RAT退出1/431，全部路径及字节与父9f9b08dd67相同，本次代码无新增unknown；用户PDF在扫描前排除且未读取。四个已记录raw scope经两次独立lsof/原inode/mode/SHA及archive hardlink核验后，清理8目录、39文件路径、2,559,081逻辑字节；archive保留，regular-file数据块回收0。该清理只覆盖可精确归因的raw路径；首个失败子夹具的匿名临时目录路径未记录，不按全局prefix删除未知目录。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-provider-evidence-9f9b08dd`，匹配JDK原源及SHA、原失败和分阶段回执均保存。本块只交付原owner来源/字节前置门；实际Linux成功路径仍NOT_EXECUTED，ELF2 owned hash、D2 walker/闭包/diagnostics/完整qualification、parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN，默认OFF/SYSTEM/PARK和advanced disabled。未运行本块models/性能，持续目标active。
+
 ## Linux ELF2 的原字符串元数据观察
 
 2026-11-01在本地父`662b4ff439e4eb246b37d8b390744a032d2d7434`上，按规划会话最新裁决，在原`SegmentClassicLinuxElf`中增加`readVersionTwo`和窄`Image2`结果。复用原ELF64 little-endian x86-64结构、区间/映射及positional reader，不复制parser、不新增模块或通用框架。调用方持有原真实FileChannel，parser不open/close、不移动channel position、不执行或装载ELF，也不读取依赖目标。原`read`经旧约束适配，继续拒绝旧flags范围外值、非法SONAME/NEEDED、重复NEEDED及空/relative/token/noncanonical搜索路径。两个公共读取入口的所有成功分支（含无dynamic/无字符串）均在最终返回前检查原deadline。

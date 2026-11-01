@@ -18,6 +18,7 @@
 package org.apache.bookkeeper.bookie.storage.segment;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
@@ -144,11 +145,45 @@ record SegmentClassicLaunchProgram(String os, String architecture, String runtim
         return Map.of();
     }
 
+    /** Original launcher runtime comparison; source authority remains with the owner that verified this program. */
+    void requireCurrentLauncher(String recipeId) throws IOException {
+        var current = ProcessHandle.current();
+        var arguments = List.of(current.info().arguments().orElseThrow());
+        if (!System.getenv().isEmpty() || !runtime().equals(System.getProperty("java.runtime.version"))
+                || !vendor().equals(System.getProperty("java.vendor"))
+                || !javaHome().equals(Path.of(System.getProperty("java.home")).toRealPath())
+                || !Path.of(current.info().command().orElseThrow()).toRealPath()
+                        .equals(files().get(javaFile()).path())
+                || !arguments.equals(SegmentClassicLauncherInputs.parentCommand(this, recipeId)
+                        .subList(1, SegmentClassicLauncherInputs.parentCommand(this, recipeId).size()))
+                || !ManagementFactory.getRuntimeMXBean().getInputArguments().equals(jvmArguments())
+                || !System.getProperty("java.class.path").equals(String.join(":", classPath().stream()
+                        .map(i -> files().get(i).path().toString()).toList()))) {
+            throw new IOException("Actual launcher JVM differs from the fixed approved parent program");
+        }
+    }
+
     static SegmentClassicHandoff.Digest identity(byte[] bytes) {
         return SegmentClassicHandoff.digest(DOMAIN, bytes);
     }
 
     static SegmentClassicLaunchProgram decode(byte[] encoded) throws IOException {
+        return decodeWithRawPaths(encoded).value();
+    }
+
+    /** Original decoder text only; neither an installed source nor a runtime/provider observation. */
+    record Decoded(SegmentClassicLaunchProgram value, String javaHome, List<String> filePaths) {
+        Decoded {
+            if (filePaths.size() > MAX_FILES || filePaths.size() != value.files().size()) {
+                throw new IllegalArgumentException("Program raw path count differs from its file table");
+            }
+            text(javaHome, 4096);
+            filePaths = List.copyOf(filePaths);
+            filePaths.forEach(path -> text(path, 4096));
+        }
+    }
+
+    static Decoded decodeWithRawPaths(byte[] encoded) throws IOException {
         if (encoded.length < 16 || encoded.length > MAX_BYTES) {
             throw new IOException("Controlled program length exceeds fixed bounds");
         }
@@ -162,7 +197,8 @@ record SegmentClassicLaunchProgram(String os, String architecture, String runtim
             String arch = getText(b, 16);
             String runtime = getText(b, 256);
             String vendor = getText(b, 256);
-            Path home = Path.of(getText(b, 4096));
+            String rawHome = getText(b, 4096);
+            Path home = Path.of(rawHome);
             String main = getText(b, 256);
             int java = b.getInt();
             int jni = b.getInt();
@@ -178,8 +214,11 @@ record SegmentClassicLaunchProgram(String os, String architecture, String runtim
             }
             int count = count(b, MAX_FILES);
             List<File> files = new ArrayList<>(count);
+            List<String> rawPaths = new ArrayList<>(count);
             for (int i = 0; i < count; i++) {
-                Path path = Path.of(getText(b, 4096));
+                String rawPath = getText(b, 4096);
+                Path path = Path.of(rawPath);
+                rawPaths.add(rawPath);
                 int roles = b.getInt();
                 long length = b.getLong();
                 byte[] digest = new byte[32];
@@ -189,8 +228,8 @@ record SegmentClassicLaunchProgram(String os, String architecture, String runtim
             if (b.hasRemaining()) {
                 throw new IllegalArgumentException("Trailing controlled program bytes");
             }
-            return new SegmentClassicLaunchProgram(os, arch, runtime, vendor, home, main, java, jni,
-                    classPath, args, files);
+            return new Decoded(new SegmentClassicLaunchProgram(os, arch, runtime, vendor, home, main, java, jni,
+                    classPath, args, files), rawHome, rawPaths);
         } catch (IllegalArgumentException | ArithmeticException | BufferUnderflowException malformed) {
             throw new IOException("Invalid controlled program manifest", malformed);
         }

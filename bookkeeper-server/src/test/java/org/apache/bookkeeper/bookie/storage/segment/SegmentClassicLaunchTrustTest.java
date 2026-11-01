@@ -1145,6 +1145,58 @@ public class SegmentClassicLaunchTrustTest {
         // These are synthetic header files and real reads, never executed or qualified droppers.
     }
 
+    @Test
+    public void typedDescriptorUsesTheOriginalOneReadAndFixtureCannotBindAProvider() throws Exception {
+        Path directory = launcherDirectory();
+        Path descriptor = directory.resolve("classic-1.launcher");
+        byte[] bytes = SegmentClassicLinuxDeploymentTest.vector("classic-launcher-inputs-v1");
+        Files.write(descriptor, bytes);
+        Files.setPosixFilePermissions(descriptor, PosixFilePermissions.fromString("rw-------"));
+        var owner = owner();
+        owner.initialize();
+        assertEquals(SegmentClassicLauncherInputs.decode(bytes),
+                owner.readLauncherInputs(SegmentClassicLinuxProviderTest.deadline()));
+        assertThrows(IOException.class, owner::readLauncherDescriptor);
+        assertThrows(IOException.class,
+                () -> owner.verifyLinuxProvider(SegmentClassicLinuxProviderTest.deadline()));
+        assertThrows(IOException.class, owner::parsed);
+        assertThrows(IOException.class, owner::installed);
+        assertTrue(owner.closeAndDrain().drained());
+        assertThrows(IOException.class,
+                () -> owner.verifyLinuxProvider(SegmentClassicLinuxProviderTest.deadline()));
+    }
+
+    @Test
+    public void byteOnlyReadCannotBeReusedAsTypedOriginalSourceAndDeadlineFailureIsSticky() throws Exception {
+        Path directory = launcherDirectory();
+        Path descriptor = directory.resolve("classic-1.launcher");
+        byte[] bytes = SegmentClassicLinuxDeploymentTest.vector("classic-launcher-inputs-v1");
+        Files.write(descriptor, bytes);
+        Files.setPosixFilePermissions(descriptor, PosixFilePermissions.fromString("rw-------"));
+        var read = owner();
+        read.initialize();
+        assertArrayEquals(bytes, read.readLauncherDescriptor());
+        assertThrows(IOException.class, () -> read.readLauncherInputs(SegmentClassicLinuxProviderTest.deadline()));
+        assertThrows(IOException.class, read::parsed);
+        assertTrue(read.closeAndDrain().drained());
+        var expired = owner();
+        expired.initialize();
+        assertThrows(IOException.class, () -> expired.readLauncherInputs(System.nanoTime()));
+        assertThrows(IOException.class, expired::parsed);
+        assertTrue(expired.closeAndDrain().drained());
+    }
+
+    @Test
+    public void callerConstructedD2InputCannotReachDropperIoWithoutTheOriginalProviderBinding() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        IOException refusal = assertThrows(IOException.class, () -> owner.verifyLauncherDropper(
+                SegmentClassicLinuxProviderTest.schemaTwoInput(), SegmentClassicLinuxProviderTest.deadline()));
+        assertTrue(refusal.getMessage().contains("original provider/source binding"));
+        assertThrows(IOException.class, owner::parsed);
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
     private void rejected() throws Exception {
         var owner = owner();
         try {
