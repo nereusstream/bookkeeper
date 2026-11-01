@@ -826,6 +826,22 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## Linux ELF2 的原字符串元数据观察
+
+2026-11-01在本地父`662b4ff439e4eb246b37d8b390744a032d2d7434`上，按规划会话最新裁决，在原`SegmentClassicLinuxElf`中增加`readVersionTwo`和窄`Image2`结果。复用原ELF64 little-endian x86-64结构、区间/映射及positional reader，不复制parser、不新增模块或通用框架。调用方持有原真实FileChannel，parser不open/close、不移动channel position、不执行或装载ELF，也不读取依赖目标。原`read`经旧约束适配，继续拒绝旧flags范围外值、非法SONAME/NEEDED、重复NEEDED及空/relative/token/noncanonical搜索路径。两个公共读取入口的所有成功分支（含无dynamic/无字符串）均在最终返回前检查原deadline。
+
+ELF2保留原NEEDED顺序、位置与重复，PT_INTERP/SONAME原文（null为缺失、空SONAME仍为present），RPATH/RUNPATH存在性和完整原字符串，以及FLAGS/FLAGS1存在性和原数值。动态路径中的empty、dot、relative、token和分隔符只作为原文，不展开、规范化、转Path/URI或抹除被RUNPATH遮蔽的RPATH，也不从token推导/补设ORIGIN flags。原明确singleton重复、audit/filter/textrel及未支持扩展仍拒绝。固定ELF2允许mask为DF `0x1b`、DF_1 `0x08000889`，在ELF1集合上仅增加已冻结的DF_ORIGIN、DF_1_ORIGIN和DF_1_NODEFLIB；位定义依据[glibc 2.39 elf.h](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/elf.h)，相关原源与SHA保留在工作区外，不是批准vendor运行证据。
+
+128 program headers、4096 dynamic entries、每image 1024个NEEDED、每string 4096 bytes、累计retained text 1MiB共同生效。每次重复字符串引用完整计费，不按唯一字符串去重；预算还包含interpreter等其他保留文本。每image限制与D2跨context的8192请求/262144候选membership预算分开，parser成功不证明搜索闭包或实际winner。
+
+独立Python struct生成1536-byte固定向量SHA为`894bbf508d445c4323df38818df24e56b091cf5feadd832c8b9fad192e2bebc3`，包含重复NEEDED、Unicode/路径形式名称、dot interpreter、原token/empty段、present-empty RUNPATH及新flags。定向13项全过；随后串行十三类149全过（0失败/错误/跳过），包括原ELF1/owned文件/trust/codec与相关数据回归。外部诊断的首次Probe默认stdout把Unicode替换为问号，独立NEEDED对照正确失败，parser进程exit0不冒充对照通过；原149阶段源码/class、原命令/输出/错误回执分开保留。仅将测试Probe2的输出改为显式UTF8 bytes后，定向13项及最终独立样式退出0；生产源码和resource与149阶段完全一致，不把原149项移绑到新测试源码。
+
+最终新Probe2在同Corretto21.0.10+7-LTS上读取固定向量及原已封存的Netty4.2.15.Final Linux .so（SHA `422aab63e1e07cbac931d4b69d9df599b2a619bd72e9894eab6496689bb2e701`），实际class-load来源和class SHA绑定新13项阶段；NEEDED原序/重复、SONAME、RPATH/RUNPATH存在性/原值及FLAGS/FLAGS1存在性/数值均与本机objdump的原输出匹配。两个文件均只在macOS读取，未装载/执行；显式诊断输出编码不证明整个JVM、provider或JNU接口的UTF8资格。
+
+三阶段各1428源码/资源输入按原阶段核验无缺失或错配，最终三项code与新13项及最终style一致。RAT首跑误继承149阶段的旧诊断测试输入表，原回执保留且不作终态；修正为新13项的实际源码表后重跑，退出1/431，路径及字节与父662b4ff439相同、本次代码/资源无新增unknown，受保护PDF在每次扫描前排除且未读取。三raw scope经两次独立lsof、原inode/mode/SHA及归档hardlink核验后清理6目录/24文件路径/1,666,824逻辑字节；archive保留，regular-file数据块回收0。
+
+原`SegmentClassicLaunchTrust.hashFile`保持ELF1，本块未新增接收D2转换后Path的入口。接续顺序仍为原String decode与D身份绑定→原可信bootstrap/JDK下核验providerRule/实际来源→显式UTF8 file:///与原字符串字节门→逐组件路径/alias/父链/ACL→原owned同handle hash＋对应parser→完整闭包/选择与qualification；字节门须先于该路径metadata/枚举/open/JNI，不能经待验证D2路径自证provider。相关源码/输入/class/log/XML、失败及静态oracle位于`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-elf2-evidence-662b4ff4`。当前仅ELF2 parser与真实文件元数据观察；D2 qualified I/O、solver/diagnostics、实际Linux接受、parent/child/Main/G1/full-bytes/16步与生产Gate继续OPEN，默认OFF/SYSTEM/PARK及advanced disabled，持续目标active。本块未运行models/性能。
+
 ## LinuxDeployment schema2 的分型批准数据
 
 2026-11-01在本地父`31e8cb536737ccf68ce4335347a235789b43ef4c`上，按总体规划会话的两次schema裁决及UNIT_LOOKUP补充裁决，实现同包窄wrapper与`SegmentClassicLinuxDeploymentV2`。本块只交付canonical approval data、codec及原UWCLX002承载，不执行provider/ELF2/systemd2取证，也不发行Installed、START、Unix资格或DRAINED。原UWCLD001/schema1构造校验、10个role tag、字节与v1独立域保持；新增`JDK_RUNTIME`只允许D2。旧getter对D2明确抛错，不能用空表或缺省值进入旧消费者。

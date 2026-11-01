@@ -17,6 +17,7 @@
 package org.apache.bookkeeper.bookie.storage.segment;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -30,9 +31,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeploymentV2.DynamicPath;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -199,6 +203,188 @@ public class SegmentClassicLinuxElfTest {
             channel.truncate(63);
             assertThrows(IOException.class, () -> SegmentClassicLinuxElf.read(channel, 1536, deadline()));
             assertTrue(channel.isOpen());
+        }
+    }
+
+    private SegmentClassicLinuxElf.Image2 readVersionTwo(byte[] bytes) throws IOException {
+        Path path = temporary.newFile().toPath();
+        Files.write(path, bytes);
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            return SegmentClassicLinuxElf.readVersionTwo(channel, bytes.length, deadline());
+        }
+    }
+
+    @Test
+    public void independentVersionTwoVectorKeepsRawFactsWithoutPathOrSearchInterpretation() throws Exception {
+        byte[] bytes = SegmentClassicLinuxDeploymentTest.vector("classic-linux-elf-v2");
+        assertEquals(1536, bytes.length);
+        assertEquals("894bbf508d445c4323df38818df24e56b091cf5feadd832c8b9fad192e2bebc3",
+                java.util.HexFormat.of().formatHex(SegmentClassicHandoff.digest(bytes).value()));
+        Path path = temporary.newFile().toPath();
+        Files.write(path, bytes);
+        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ)) {
+            channel.position(17);
+            var value = SegmentClassicLinuxElf.readVersionTwo(channel, bytes.length, deadline());
+            assertEquals("/lib64/../lib/ld-linux-x86-64.so.2", value.interpreter());
+            assertEquals("/not/a/whitelisted SONAME/雪.so", value.soname());
+            assertEquals(List.of("libz.so.1", "libz.so.1", "../${LIB}/lib雪.so", "$ORIGIN/deps/libx.so"),
+                    value.needed());
+            assertEquals(new DynamicPath(true, "$ORIGIN/../lib::relative:${LIB}/x:${PLATFORM}/p;/literal"),
+                    value.rpath());
+            assertEquals(new DynamicPath(true, ""), value.runpath());
+            assertTrue(value.flagsPresent());
+            assertTrue(value.flags1Present());
+            assertEquals(0x1b, value.flags());
+            assertEquals(0x08000889, value.flags1());
+            assertEquals(17, channel.position());
+            assertTrue(channel.isOpen());
+            assertThrows(UnsupportedOperationException.class, () -> value.needed().clear());
+            assertThrows(IOException.class, () -> SegmentClassicLinuxElf.read(channel, bytes.length, deadline()));
+            assertEquals(17, channel.position());
+        }
+    }
+
+    /** Independent synthetic dynamic table, with all strings in one unambiguous file-backed load mapping. */
+    private static byte[] dynamicImage(List<long[]> entries, byte[] strings) {
+        int dynamicBytes = (entries.size() + 3) * 16;
+        int stringOffset = (512 + dynamicBytes + 63) & ~63;
+        int length = Math.max(1536, stringOffset + strings.length);
+        ByteBuffer b = ByteBuffer.wrap(Arrays.copyOf(image(), length)).order(ByteOrder.LITTLE_ENDIAN);
+        b.putLong(152, length).putLong(160, length).putLong(208, dynamicBytes).putLong(216, dynamicBytes);
+        b.position(512).putLong(5).putLong(0x400000 + stringOffset).putLong(10).putLong(strings.length);
+        for (long[] entry : entries) {
+            b.putLong(entry[0]).putLong(entry[1]);
+        }
+        b.putLong(0).putLong(0);
+        b.position(stringOffset).put(strings);
+        return b.array();
+    }
+
+    @Test
+    public void versionTwoDistinguishesAbsentAndPresentEmptyTagsWithoutInferringOriginFlags() throws Exception {
+        var absent = readVersionTwo(dynamicImage(List.of(), new byte[]{0}));
+        assertNull(absent.soname());
+        assertEquals(new DynamicPath(false, ""), absent.rpath());
+        assertEquals(new DynamicPath(false, ""), absent.runpath());
+        assertFalse(absent.flagsPresent());
+        assertFalse(absent.flags1Present());
+        var empty = readVersionTwo(dynamicImage(List.of(new long[]{14, 0}, new long[]{15, 0}, new long[]{29, 0},
+                new long[]{30, 0}, new long[]{0x6ffffffbL, 0}), new byte[]{0}));
+        assertEquals("", empty.soname());
+        assertEquals(new DynamicPath(true, ""), empty.rpath());
+        assertEquals(new DynamicPath(true, ""), empty.runpath());
+        assertTrue(empty.flagsPresent());
+        assertTrue(empty.flags1Present());
+        assertEquals(0, empty.flags());
+        assertEquals(0, empty.flags1());
+        var token = readVersionTwo(dynamicImage(List.of(new long[]{15, 1}),
+                "\0$ORIGIN::../relative\0".getBytes(StandardCharsets.UTF_8)));
+        assertEquals(new DynamicPath(true, "$ORIGIN::../relative"), token.rpath());
+        assertFalse(token.flagsPresent());
+        assertFalse(token.flags1Present());
+        assertEquals(0, token.flags());
+        assertEquals(0, token.flags1());
+    }
+
+    @Test
+    public void versionTwoHasExplicitlyBroaderFlagsNamesAndDuplicateRulesWhileLegacyRejectsThem() throws Exception {
+        for (long[] flag : List.of(new long[]{30, 1}, new long[]{0x6ffffffbL, 0x80},
+                new long[]{0x6ffffffbL, 0x800})) {
+            byte[] bytes = dynamicImage(List.of(flag), new byte[]{0});
+            readVersionTwo(bytes);
+            assertThrows(IOException.class, () -> read(bytes));
+        }
+        byte[] duplicated = image();
+        ByteBuffer.wrap(duplicated).order(ByteOrder.LITTLE_ENDIAN).putLong(568, 1);
+        // The first needed name starts at string index 1; each repeated ordinal remains observable.
+        assertEquals(List.of("libz.so.1", "libz.so.1"), readVersionTwo(duplicated).needed());
+        assertThrows(IOException.class, () -> read(duplicated));
+        byte[] relative = dynamicImage(List.of(new long[]{1, 1}, new long[]{14, 1}),
+                "\0../lib/雪.so\0".getBytes(StandardCharsets.UTF_8));
+        assertEquals(List.of("../lib/雪.so"), readVersionTwo(relative).needed());
+        assertEquals("../lib/雪.so", readVersionTwo(relative).soname());
+        assertThrows(IOException.class, () -> read(relative));
+    }
+
+    private static byte[] repeatedNeeded(int count, int bytes) {
+        var entries = new ArrayList<long[]>();
+        for (int i = 0; i < count; i++) {
+            entries.add(new long[]{1, 1});
+        }
+        byte[] strings = new byte[bytes + 2];
+        Arrays.fill(strings, 1, bytes + 1, (byte) 'a');
+        return dynamicImage(entries, strings);
+    }
+
+    @Test
+    public void repeatedTextIsChargedInFullAndNeededCountDoesNotReplaceTheByteBudget() throws Exception {
+        assertEquals(1024, readVersionTwo(repeatedNeeded(1024, 1)).needed().size());
+        assertThrows(IOException.class, () -> readVersionTwo(repeatedNeeded(1025, 1)));
+        assertEquals(255, readVersionTwo(repeatedNeeded(255, 4096)).needed().size());
+        // 256 * 4096 plus the original interpreter already exceeds the one MiB cumulative text budget.
+        assertThrows(IOException.class, () -> readVersionTwo(repeatedNeeded(256, 4096)));
+        assertThrows(IOException.class, () -> readVersionTwo(repeatedNeeded(1, 4097)));
+    }
+
+    @Test
+    public void versionTwoStillRejectsMalformedMappingUtf8SingletonsAndUnsupportedExtensions() throws Exception {
+        for (Consumer<ByteBuffer> change : List.<Consumer<ByteBuffer>>of(
+                b -> b.putShort(18, (short) 183),
+                b -> b.putLong(32, Long.MAX_VALUE),
+                b -> b.putLong(192, 0x400201),
+                b -> b.putLong(520, Long.MAX_VALUE),
+                b -> b.putLong(576, 5),
+                b -> b.putLong(576, 0x6ffffefcL),
+                b -> b.putLong(576, 0x7fffffffL),
+                b -> b.putLong(576, 22),
+                b -> b.putLong(632, 4),
+                b -> b.putLong(648, 0x400),
+                b -> b.putLong(656, 4),
+                b -> b.put(1025, (byte) 0xc0),
+                b -> b.put(257, (byte) 0))) {
+            byte[] bytes = image();
+            change.accept(ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN));
+            assertThrows(IOException.class, () -> readVersionTwo(bytes));
+        }
+    }
+
+    @Test
+    public void versionTwoStaticAndNoStringReturnsKeepPresenceAndOriginalDeadlineChecks() throws Exception {
+        byte[] staticBytes = image();
+        ByteBuffer.wrap(staticBytes).order(ByteOrder.LITTLE_ENDIAN).putInt(176, 0).putLong(184, -1);
+        var noDynamic = readVersionTwo(staticBytes);
+        assertTrue(noDynamic.needed().isEmpty());
+        assertFalse(noDynamic.flagsPresent());
+        byte[] noStrings = image();
+        ByteBuffer.wrap(noStrings).order(ByteOrder.LITTLE_ENDIAN).position(512)
+                .putLong(30).putLong(0).putLong(0x6ffffffbL).putLong(0).putLong(0).putLong(0);
+        var onlyFlags = readVersionTwo(noStrings);
+        assertTrue(onlyFlags.needed().isEmpty());
+        assertTrue(onlyFlags.flagsPresent());
+        assertTrue(onlyFlags.flags1Present());
+        for (byte[] bytes : List.of(staticBytes, noStrings, image())) {
+            Path path = temporary.newFile().toPath();
+            Files.write(path, bytes);
+            try (FileChannel channel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                assertThrows(IOException.class,
+                        () -> SegmentClassicLinuxElf.readVersionTwo(channel, bytes.length, System.nanoTime()));
+                channel.truncate(63);
+                assertThrows(IOException.class,
+                        () -> SegmentClassicLinuxElf.readVersionTwo(channel, bytes.length, deadline()));
+                assertTrue(channel.isOpen());
+            }
+        }
+    }
+
+    /** External raw metadata diagnostic only; caller owns the actual file channel. */
+    public static final class Probe2 {
+        public static void main(String[] args) throws Exception {
+            try (FileChannel channel = FileChannel.open(Path.of(args[0]), StandardOpenOption.READ)) {
+                byte[] metadata = (SegmentClassicLinuxElf.readVersionTwo(channel, channel.size(), deadline()) + "\n")
+                        .getBytes(StandardCharsets.UTF_8);
+                System.out.write(metadata);
+                System.out.flush();
+            }
         }
     }
 

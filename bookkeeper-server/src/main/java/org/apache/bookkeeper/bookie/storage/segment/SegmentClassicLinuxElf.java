@@ -29,6 +29,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeploymentV2.DynamicPath;
 
 /** Bounded ELF64 little-endian x86-64 loading metadata, read from an original owner's still-open file. */
 final class SegmentClassicLinuxElf {
@@ -50,6 +51,15 @@ final class SegmentClassicLinuxElf {
         }
     }
 
+    /** Raw metadata only. Null interpreter/SONAME denotes absence; an empty SONAME remains present. */
+    record Image2(int type, long entry, String interpreter, String soname, List<String> needed,
+                  DynamicPath rpath, DynamicPath runpath, boolean flagsPresent, long flags,
+                  boolean flags1Present, long flags1) {
+        Image2 {
+            needed = List.copyOf(needed);
+        }
+    }
+
     private record Segment(long type, long flags, long offset, long address, long fileBytes, long memoryBytes) { }
 
     private final FileChannel channel;
@@ -66,13 +76,47 @@ final class SegmentClassicLinuxElf {
     /** No open/close, mapping, native load, executable/helper invocation, search or approval fallback. */
     static Image read(FileChannel channel, long length, long deadline) throws IOException {
         try {
-            return new SegmentClassicLinuxElf(channel, length, deadline).read();
+            var parser = new SegmentClassicLinuxElf(channel, length, deadline);
+            Image2 raw = parser.read();
+            if ((raw.flags() & ~0x1aL) != 0 || (raw.flags1() & ~0x08000009L) != 0) {
+                throw new IOException("ELF origin, search, audit or unsupported dynamic flags are not supported");
+            }
+            if (raw.interpreter() != null) {
+                canonicalPath(raw.interpreter());
+            }
+            Set<String> unique = new HashSet<>();
+            for (String name : raw.needed()) {
+                soname(name);
+                if (!unique.add(name)) {
+                    throw new IOException("Duplicate ELF dependency name");
+                }
+            }
+            if (raw.soname() != null) {
+                soname(raw.soname());
+            }
+            var result = new Image(raw.type(), raw.entry(), raw.interpreter(), raw.soname(), raw.needed(),
+                    raw.rpath().present() ? search(raw.rpath().value()) : List.of(),
+                    raw.runpath().present() ? search(raw.runpath().value()) : List.of(), raw.flags(), raw.flags1());
+            parser.requireTime();
+            return result;
         } catch (ArithmeticException | IllegalArgumentException malformed) {
             throw new IOException("Unsupported or invalid bounded Linux ELF loading metadata", malformed);
         }
     }
 
-    private Image read() throws IOException {
+    /** Same structural reader, without path conversion, token expansion, lookup, open/close or channel movement. */
+    static Image2 readVersionTwo(FileChannel channel, long length, long deadline) throws IOException {
+        try {
+            var parser = new SegmentClassicLinuxElf(channel, length, deadline);
+            Image2 result = parser.read();
+            parser.requireTime();
+            return result;
+        } catch (ArithmeticException | IllegalArgumentException malformed) {
+            throw new IOException("Unsupported or invalid bounded Linux ELF two metadata", malformed);
+        }
+    }
+
+    private Image2 read() throws IOException {
         ByteBuffer header = read(0, 64);
         if (header.getInt(0) != 0x464c457f || header.get(4) != 2 || header.get(5) != 1 || header.get(6) != 1
                 || header.get(7) != 0 && header.get(7) != 3 || header.get(8) != 0
@@ -136,7 +180,6 @@ final class SegmentClassicLinuxElf {
                     throw new IOException("ELF interpreter lacks its exact terminator");
                 }
                 interpreter = terminated(bytes, bytes.limit() - 1);
-                canonicalPath(interpreter);
             }
         }
         if (loads.isEmpty() || entry != 0 && loads.stream().noneMatch(s -> (s.flags() & 1) != 0
@@ -144,7 +187,8 @@ final class SegmentClassicLinuxElf {
             throw new IOException("ELF entry is outside its executable load segments");
         }
         if (dynamic == null) {
-            return new Image(type, entry, interpreter, null, List.of(), List.of(), List.of(), 0, 0);
+            return new Image2(type, entry, interpreter, null, List.of(), new DynamicPath(false, ""),
+                    new DynamicPath(false, ""), false, 0, false, 0);
         }
         if (virtualOffset(dynamic.address(), dynamic.fileBytes(), loads) != dynamic.offset()) {
             throw new IOException("ELF dynamic metadata differs from its loaded file mapping");
@@ -152,7 +196,7 @@ final class SegmentClassicLinuxElf {
         return dynamic(type, entry, interpreter, dynamic, loads);
     }
 
-    private Image dynamic(int type, long entry, String interpreter, Segment dynamic, List<Segment> loads)
+    private Image2 dynamic(int type, long entry, String interpreter, Segment dynamic, List<Segment> loads)
             throws IOException {
         ByteBuffer entries = read(dynamic.offset(), (int) dynamic.fileBytes());
         Map<Long, Long> values = new HashMap<>();
@@ -183,13 +227,15 @@ final class SegmentClassicLinuxElf {
         }
         long flags = values.getOrDefault(30L, 0L);
         long flags1 = values.getOrDefault(0x6ffffffbL, 0L);
-        if ((flags & ~0x1aL) != 0 || (flags1 & ~0x08000009L) != 0) {
-            throw new IOException("ELF origin, search, audit or unsupported dynamic flags are not supported");
+        if ((flags & ~0x1bL) != 0 || (flags1 & ~0x08000889L) != 0) {
+            throw new IOException("ELF loading flags exceed the supported ELF two masks");
         }
         boolean strings = !needed.isEmpty() || values.containsKey(14L) || values.containsKey(15L)
                 || values.containsKey(29L) || values.containsKey(5L) || values.containsKey(10L);
         if (!strings) {
-            return new Image(type, entry, interpreter, null, List.of(), List.of(), List.of(), flags, flags1);
+            return new Image2(type, entry, interpreter, null, List.of(), new DynamicPath(false, ""),
+                    new DynamicPath(false, ""), values.containsKey(30L), flags,
+                    values.containsKey(0x6ffffffbL), flags1);
         }
         if (!values.containsKey(5L) || !values.containsKey(10L) || values.get(10L) <= 0) {
             throw new IOException("Complete ELF dynamic string mapping is required");
@@ -197,23 +243,19 @@ final class SegmentClassicLinuxElf {
         long size = values.get(10L);
         long offset = virtualOffset(values.get(5L), size, loads);
         List<String> names = new ArrayList<>(needed.size());
-        Set<String> unique = new HashSet<>();
         for (long index : needed) {
-            String name = string(offset, size, index);
-            soname(name);
-            if (!unique.add(name)) {
-                throw new IOException("Duplicate ELF dependency name");
-            }
-            names.add(name);
+            names.add(string(offset, size, index));
         }
         String name = values.containsKey(14L) ? string(offset, size, values.get(14L)) : null;
-        if (name != null) {
-            soname(name);
-        }
-        List<Path> rpath = values.containsKey(15L) ? search(string(offset, size, values.get(15L))) : List.of();
-        List<Path> runpath = values.containsKey(29L) ? search(string(offset, size, values.get(29L))) : List.of();
-        requireTime();
-        return new Image(type, entry, interpreter, name, names, rpath, runpath, flags, flags1);
+        DynamicPath rpath = dynamicPath(offset, size, values, 15L);
+        DynamicPath runpath = dynamicPath(offset, size, values, 29L);
+        return new Image2(type, entry, interpreter, name, names, rpath, runpath, values.containsKey(30L), flags,
+                values.containsKey(0x6ffffffbL), flags1);
+    }
+
+    private DynamicPath dynamicPath(long offset, long size, Map<Long, Long> values, long tag) throws IOException {
+        return values.containsKey(tag) ? new DynamicPath(true, string(offset, size, values.get(tag)))
+                : new DynamicPath(false, "");
     }
 
     private long virtualOffset(long address, long bytes, List<Segment> loads) throws IOException {
