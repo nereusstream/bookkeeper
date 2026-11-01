@@ -73,7 +73,9 @@ record SegmentClassicLauncherInputs(String recipeId, SegmentClassicHandoff.Diges
                 || Set.of(manifest, proof, policy, aesKey).size() != 4) {
             throw new IllegalArgumentException("Fixed handoff leaves must be distinct and inside the supervisor scope");
         }
-        if (linuxDeployment != null) {
+        if (linuxDeployment != null && linuxDeployment.schema() == 2) {
+            requireVersionTwo(linuxDeployment.versionTwo(), os, architecture, dropper, supervisorDirectory, manifest);
+        } else if (linuxDeployment != null) {
             var approved = linuxDeployment.files().get(linuxDeployment.isolation().dropper());
             if (!os.equals("linux") || !architecture.equals("x86_64") || !dropper.path().equals(approved.path())
                     || dropper.length() != approved.length() || !dropper.sha256().equals(approved.sha256())) {
@@ -92,6 +94,34 @@ record SegmentClassicLauncherInputs(String recipeId, SegmentClassicHandoff.Diges
                         || alias.link().startsWith(supervisorDirectory)) {
                     throw new IllegalArgumentException("System loading aliases cannot cover private supervisor paths");
                 }
+            }
+        }
+    }
+
+    private static void requireVersionTwo(SegmentClassicLinuxDeploymentV2 deployment, String os, String architecture,
+            SegmentClassicLaunchProgram.File dropper, Path supervisorDirectory, Path manifest) {
+        var approved = deployment.files().get(deployment.isolation().dropper());
+        if (!os.equals("linux") || !architecture.equals("x86_64")
+                || !dropper.path().toString().equals(approved.path()) || dropper.length() != approved.length()
+                || !dropper.sha256().equals(approved.sha256())) {
+            throw new IllegalArgumentException("Public dropper/platform differs from deployment schema two");
+        }
+        String privateLauncher = "/etc/bookkeeper/unified-wal/classic-child/launcher";
+        String supervisor = supervisorDirectory.toString();
+        for (var file : deployment.files()) {
+            if (SegmentClassicLinuxDeploymentV2.beneath(file.path(), supervisor)
+                    || SegmentClassicLinuxDeploymentV2.beneath(file.path(), privateLauncher)
+                    || SegmentClassicLinuxDeploymentV2.beneath(file.path(), "/run/bookkeeper-uw")
+                    || file.path().equals(manifest.toString())) {
+                throw new IllegalArgumentException("Private material/runtime files cannot enter the program table");
+            }
+        }
+        for (var alias : deployment.loading().aliases()) {
+            if (SegmentClassicLinuxDeploymentV2.beneath(privateLauncher, alias.link())
+                    || SegmentClassicLinuxDeploymentV2.beneath(alias.link(), privateLauncher)
+                    || SegmentClassicLinuxDeploymentV2.beneath(supervisor, alias.link())
+                    || SegmentClassicLinuxDeploymentV2.beneath(alias.link(), supervisor)) {
+                throw new IllegalArgumentException("System aliases cannot cover private supervisor paths");
             }
         }
     }

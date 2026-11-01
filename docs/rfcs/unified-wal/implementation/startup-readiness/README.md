@@ -826,6 +826,28 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## LinuxDeployment schema2 的分型批准数据
+
+2026-11-01在本地父`31e8cb536737ccf68ce4335347a235789b43ef4c`上，按总体规划会话的两次schema裁决及UNIT_LOOKUP补充裁决，实现同包窄wrapper与`SegmentClassicLinuxDeploymentV2`。本块只交付canonical approval data、codec及原UWCLX002承载，不执行provider/ELF2/systemd2取证，也不发行Installed、START、Unix资格或DRAINED。原UWCLD001/schema1构造校验、10个role tag、字节与v1独立域保持；新增`JDK_RUNTIME`只允许D2。旧getter对D2明确抛错，不能用空表或缺省值进入旧消费者。
+
+D2使用`UWCLD002/schema2`、零flags、u32精确payload长度和`BookKeeper/ControlledClassicLinuxDeployment/v2\0`独立域。整个部署帧最多1MiB；原UWCLX002、P2公式及外层1MiB上限不变，完整D2仍进入D/P2，v1父输入32KiB限制不变。D2 decoder保留严格UTF8原String，只作长度、NUL、物理路径语法及引用检查，不调用Path/provider、URI或目标I/O。物理File路径要求canonical非根绝对语法；logical加载名保留alias、dot及原上下文，声明替换只作语法对应，不冒充实际lookup或原字节资格。
+
+providerRule1绑定批准Linux默认provider/UnixPath/UnixUri实现合同、vendor/runtime build及承载java.base的image；image必须是原child `.program`的JDK角色`javaHome/lib/modules`同路径、同长度、同SHA，不能另选JDK。实际已加载实现、原source image与bootstrap TCB仍须现场核验，不能靠类名、自报属性或后置hash补认启动。相同路径child文件仍须字节一致，系统alias不放宽原child文件合同；startup chain仍以原parent Main的完整JVM argv结束。
+
+loader policy必填ELF2及cache1.1、非溢出比较器、raw path、conf、glob、相关性、hwcaps、token、diagnostics各固定rule1，未知ID拒绝；rule1的conf/glob预算保持原1MiB单文件、4096 token、每遍65536文件/65536pattern/16MiB逻辑字节/32活跃context及原目录成员预算。批准build的default目录保留顺序且逐项有presence rule，LIB绑定原build token；CPU/OS/PLATFORM、实际winner、已加载复用与运行时来源不写入D。配置必填kind/format，分别为ldconfig、cache、明确preload-absent、模块运行配置；只有ldconfig-kind可交原conf/include图，LOADER_CONFIG角色或材料hash不代替模块来源语义。
+
+每个物理ELF保留NEEDED原序与重复、RPATH/RUNPATH absent和present-empty、原字符串及flags。Context(file,logicalLoadName)表最多4096项，每个context按原NEEDED ordinal绑定非空、排序唯一的候选context集合；模块请求也按requester context/name绑定并保留原请求顺序和重复。两类请求合计8192，每集合4096，两类候选membership合计262144，每次引用均计费。context二元组只是加载位置；后续solver必须沿incoming edges保留具体祖先RPATH链及base namespace first-loaded reuse，递归验证未选候选，不能以“候选属于集合”替代实际选择。
+
+Unit2只批准唯一launcher SERVICE及相关TARGET；target wire不含伪造service字段。commonRule1要求loaded、非transient、NeedDaemonReload=no、SourcePath明确空、原窗口稳定且无job；target稳定状态限inactive/dead或active/active，D保存规则而非某次实时状态或job ID。service constraint1继续UID0、显式u32 GID、Type=exec、DynamicUser=no、Restart=no及原有序执行阶段。fragment/drop-in绑定物理File，drop-in顺序保留；首版consumer要求实际FragmentPath、DropInPaths与批准File路径逐项、按有效顺序精确匹配，再完成原路径和文件核验。不能将不同logical路径resolve到同一物理文件后自动算匹配，不能去重或转成集合；实际重复应用或未承载的logical路径均明确Unsupported。
+
+每unit完整Names包含Id，最多32，按规范字节序唯一排序、同类型、全局唯一。26个正反关系family均显式存在，empty与missing分开；保留完整原unit name列表及表外名字，不截取批准表交集。每行1024、全表65536次名称引用，跨行/正反重复也收费，整体1MiB同时生效；入表双方核对反向关系。表外名字仍是未分类事实，actual observer必须按方向核对相关incoming activation、重启与旧UID入口，不能自动标无关，也不强迫纯ordering或无关host sibling展开成全机闭包；连续Upholds、socket/timer/path及其他service驱动入口不因codec可表示而获准。
+
+安装链接共用1024预算，分UNIT_LOOKUP/WANTS/REQUIRES/UPHOLDS，保留原path、raw target及unit归属。UNIT_LOOKUP的leaf属于Names，可等于Id；同名入口不制造manager alias或依赖边。systemd alias按获批unit lookup和优先级解释，外部linked fragment才按实际文件链核验，依赖链接也不能统一用普通realpath代替有效目标语义。数据中的依赖链接必须与对应manager关系相符；反向不要求每条manager关系都有物理链接。实际link身份/保护父链、遮蔽、有效fragment与drop-ins仍由后续owner核验，无法判定即Unsupported。
+
+独立Python struct生成的2804-byte合成向量SHA为`e8b0f9b4d8fc0c8821e18f9b0a58e9aae6cf68a222fcc8ac8227f623488d5a64`，D2身份`b1c5c07cdef05919f47a85ff519327128e46921e92ae38c6fa9e95971fc2383f`。首轮三类24项有1个测试夹具误用非Linux recipe的error，原源码/class/XML保留；修正后三类25全过，最终串行十二类136全过（0失败/错误/跳过），独立spotless/checkstyle退出0。覆盖D1旧向量、D2规范往返/截断/未知格式、实际共享请求和候选预算的分配前拒绝、65536关系引用边界及超限、外层D/P2与无资格启动拒绝。三阶段各1427源码/资源输入及最终五项code/test/style按原阶段核验一致。RAT退出1/431，全部路径及字节与父31e8cb5367一致，本次代码/资源无新增unknown，受保护PDF在扫描前排除且未读取。三raw scope经两次独立lsof/原inode与mode/SHA/归档硬链接核验后清理6目录、27文件路径、1,802,952逻辑字节；归档保留，regular-file数据块回收0。没有实际Linux/provider/glibc2.39/systemd接受阳性；models/性能未执行，各整体Gate保持OPEN，默认OFF/SYSTEM/PARK及advanced disabled。
+
+本块证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-deployment-v2-evidence-31e8cb53`，各阶段只绑定本阶段原输入/源码/class/log/XML，不重绑旧PASS。完整provider/ELF2/systemd2观察、候选闭合及选择/diagnostics、qualified parent/child/Main/G1/full-bytes/16步与生产验收仍未完成，持续目标active。
+
 ## Linux v2 的批准输入与父身份
 
 2026-11-01在本地父`1108ab13b8a239b5494519e6f2559231409a4dd8`上，按规划会话最新裁决增加包内SegmentClassicLinuxDeployment数据和UWCLX002/schema2父输入。v1的UWCLX001/schema1字节、父程序v1公式、32KiB解析上限及ABI1命令保持；v2总输入上限1MiB，只允许Linux x86_64固定profile，公共dropper/path/长度/SHA/ABI2必须和部署表引用相同。D以`BookKeeper/ControlledClassicLinuxDeployment/v1\0`覆盖完整UWCLD001/schema1规范帧，P2以`BookKeeper/ControlledClassicLauncherProgram/v2\0`覆盖child program摘要、u32 UTF8长度及固定父Main、D；部署帧不含自身/P2/.launcher摘要，避免循环。P2仅是批准输入身份，不是实际程序、启动或Unix证明。

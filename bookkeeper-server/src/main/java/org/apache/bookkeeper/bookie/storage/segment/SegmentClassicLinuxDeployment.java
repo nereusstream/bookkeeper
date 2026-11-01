@@ -33,8 +33,16 @@ import java.util.Objects;
 import java.util.Set;
 
 /** Approved Linux input data only. No boot, invocation, live process, drain or isolation observation is stored. */
-record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loading loading,
-        List<Command> startChain, List<Unit> units, int launcherUnit, Isolation isolation, Operations operations) {
+final class SegmentClassicLinuxDeployment {
+    private final Platform platform;
+    private final List<File> files;
+    private final Loading loading;
+    private final List<Command> startChain;
+    private final List<Unit> units;
+    private final int launcherUnit;
+    private final Isolation isolation;
+    private final Operations operations;
+    private final SegmentClassicLinuxDeploymentV2 versionTwo;
     static final int MAX_BYTES = 1024 * 1024;
     static final int MAX_ALIAS_FOLLOWS = 40;
     static final String PROFILE = "linux-x86_64-systemd-cgroup2-ext4-v1";
@@ -44,7 +52,7 @@ record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loadin
 
     enum Role {
         SYSTEMCTL, LOADER, LIBRARY, MODULE, LOADER_CONFIG, LOADER_CACHE, UNIT_FRAGMENT, UNIT_DROPIN,
-        START_CHAIN, DROPPER;
+        START_CHAIN, DROPPER, JDK_RUNTIME;
 
         boolean elf() {
             return this == SYSTEMCTL || this == LOADER || this == LIBRARY || this == MODULE
@@ -204,7 +212,8 @@ record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loadin
         }
     }
 
-    SegmentClassicLinuxDeployment {
+    SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loading loading,
+            List<Command> startChain, List<Unit> units, int launcherUnit, Isolation isolation, Operations operations) {
         Objects.requireNonNull(platform, "platform");
         Objects.requireNonNull(loading, "loading");
         Objects.requireNonNull(isolation, "isolation");
@@ -226,6 +235,9 @@ record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loadin
         role(files, isolation.dropper(), Role.DROPPER);
         long bytes = 0;
         for (File file : files) {
+            if (file.role() == Role.JDK_RUNTIME) {
+                throw new IllegalArgumentException("The JDK runtime image role requires deployment schema two");
+            }
             bytes = Math.addExact(bytes, file.length());
         }
         requireLoading(files, loading);
@@ -260,9 +272,113 @@ record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loadin
         if (!starts.equals(List.of(startChain.get(0)))) {
             throw new IllegalArgumentException("Original unit must name the exact first startup command once");
         }
+        this.platform = platform;
+        this.files = files;
+        this.loading = loading;
+        this.startChain = startChain;
+        this.units = units;
+        this.launcherUnit = launcherUnit;
+        this.isolation = isolation;
+        this.operations = operations;
+        this.versionTwo = null;
+    }
+
+    SegmentClassicLinuxDeployment(SegmentClassicLinuxDeploymentV2 versionTwo) {
+        this.versionTwo = Objects.requireNonNull(versionTwo, "versionTwo");
+        platform = null;
+        files = null;
+        loading = null;
+        startChain = null;
+        units = null;
+        launcherUnit = -1;
+        isolation = null;
+        operations = null;
+    }
+
+    int schema() {
+        return versionTwo == null ? 1 : 2;
+    }
+
+    SegmentClassicLinuxDeploymentV2 versionTwo() {
+        if (versionTwo == null) {
+            throw new IllegalStateException("Deployment schema one has no schema two approval data");
+        }
+        return versionTwo;
+    }
+
+    private void requireVersionOne() {
+        if (versionTwo != null) {
+            throw new IllegalStateException("Deployment schema two requires its typed consumer");
+        }
+    }
+
+    Platform platform() {
+        requireVersionOne();
+        return platform;
+    }
+
+    List<File> files() {
+        requireVersionOne();
+        return files;
+    }
+
+    Loading loading() {
+        requireVersionOne();
+        return loading;
+    }
+
+    List<Command> startChain() {
+        requireVersionOne();
+        return startChain;
+    }
+
+    List<Unit> units() {
+        requireVersionOne();
+        return units;
+    }
+
+    int launcherUnit() {
+        requireVersionOne();
+        return launcherUnit;
+    }
+
+    Isolation isolation() {
+        requireVersionOne();
+        return isolation;
+    }
+
+    Operations operations() {
+        requireVersionOne();
+        return operations;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (!(other instanceof SegmentClassicLinuxDeployment deployment)) {
+            return false;
+        }
+        if (versionTwo != null || deployment.versionTwo != null) {
+            return Objects.equals(versionTwo, deployment.versionTwo);
+        }
+        return platform.equals(deployment.platform)
+                && files.equals(deployment.files) && loading.equals(deployment.loading)
+                && startChain.equals(deployment.startChain) && units.equals(deployment.units)
+                && launcherUnit == deployment.launcherUnit && isolation.equals(deployment.isolation)
+                && operations.equals(deployment.operations);
+    }
+
+    @Override
+    public int hashCode() {
+        return versionTwo == null
+                ? Objects.hash(platform, files, loading, startChain, units, launcherUnit, isolation, operations)
+                : versionTwo.hashCode();
     }
 
     void requireProgram(SegmentClassicLaunchProgram child, String recipeId) throws IOException {
+        if (versionTwo != null) {
+            versionTwo.requireProgram(child, recipeId);
+            return;
+        }
         if (!child.os().equals("linux") || !child.architecture().equals("x86_64")) {
             throw new IOException("Linux deployment differs from the original child platform");
         }
@@ -287,11 +403,14 @@ record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loadin
     }
 
     SegmentClassicHandoff.Digest identity() throws IOException {
-        return SegmentClassicHandoff.digest(DOMAIN, encode());
+        return versionTwo == null ? SegmentClassicHandoff.digest(DOMAIN, encode()) : versionTwo.identity();
     }
 
     /** Canonical ordered tables and explicit references; the buffer cannot grow past the descriptor capacity. */
     byte[] encode() throws IOException {
+        if (versionTwo != null) {
+            return versionTwo.encode();
+        }
         try {
             ByteBuffer b = ByteBuffer.allocate(MAX_BYTES);
             b.putLong(MAGIC).putShort((short) 1).putShort((short) 0).putInt(0);
@@ -373,6 +492,9 @@ record SegmentClassicLinuxDeployment(Platform platform, List<File> files, Loadin
     static SegmentClassicLinuxDeployment decode(byte[] encoded) throws IOException {
         if (encoded == null || encoded.length < 16 || encoded.length > MAX_BYTES) {
             throw new IOException("Linux deployment exceeds its fixed bounds");
+        }
+        if (ByteBuffer.wrap(encoded).getLong() == SegmentClassicLinuxDeploymentV2.MAGIC) {
+            return new SegmentClassicLinuxDeployment(SegmentClassicLinuxDeploymentV2.decode(encoded));
         }
         try {
             ByteBuffer b = ByteBuffer.wrap(encoded.clone());
