@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## Loader diagnostics 的有界纯数据解析
+
+2026-11-05在父`5fb81cdee7c38064780dc7c7926836239e832605`上，新增包内SegmentClassicLinuxDiagnostics，仅接supplied byte[]及原absolute deadline；在clone前检查非空及原stdout 64KiB上限，一次私有副本保留原文，raw accessor再复制。按ASCII字节与LF扫描label[hex-index].subfield=value，不宽松UTF8解码、不构造Path或做I/O/Process/JNI。canonical小写0x整数/索引拒绝前导零异写，数值保留uint64位模式；原始NUL/非打印ASCII、坏引号/escape、溢出、重复字段及残缺末行均拒绝。所有未知字段仍检查行语法并保留在原bytes，不为全部CPU/env/uname构造对象树；扫描/记录规模受原64KiB及deadline限制，无新可调预算。
+
+只提取version.version=2.39、dl_dst_lib、dl_hwcap、dl_hwcap_important、dl_hwcap2、dl_hwcaps_subdirs、dl_hwcaps_subdirs_active、dl_platform、dl_string_platform、x86.cpu_features.isa_1及path.system_dirs。标量缺失/错类型拒绝，不补0或空值；dl_platform=0x0表示明确NULL，空字符串保留为可用空串，缺字段拒绝，其他数值替代平台字符串拒绝。subdirs须为固定v4:v3:v2完整名称串，内置active仅保留0..7原值，ISA限uint32，二者不互相推算。system_dirs按原0起连续索引保留1..64条，每条为绝对slash结尾、≤4096字节的可逆ASCII串；/合法，dot/slash/alias字面形式和顺序不变，不排序/normalize或补默认目录，其他消费单串也限4096字节。类型检查不是D2材料、编译来源或实际loader批准。
+
+[glibc2.39字符串编码器](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-diagnostics.c)的两位均使用(ch >> 6) & 7，丢失原byte中间3位，0x08与0x10均会输出同一数值转义文本；因此所有已消费字符串只解码可打印ASCII及反斜线/引号两种可逆escape，遇任何三位数值escape整次明确Unsupported，不能按标准octal猜原bytes或UTF8。未知/未消费字符串的三位0..7转义仅作opaque词法保留，包含当前编码可能产生的660/777形式，不误加单byte≤0377范围，也绝不逆向解码。这只是本diagnostics解码器的支持边界，不削弱D2/cache/真实文件的原UTF8路径合同；未新增codec策略或修正glibc输出。release/2.39/master同处静态源仅作交叉核对，不认证批准vendor。
+
+关键缺口保持显式：[dl_hwcap_important打印的是HWCAP_IMPORTANT](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-diagnostics.c)，[cache使用的hwcap_mask来自运行tunable](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-cache.c)，不能互代；内置active输出也不是应用运行prepend/mask后的[最终capstr/priority](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-hwcaps.c)。结果只称Parsed supplied bytes及已打印Fields，无ready/qualified/toCapabilities或实际winner便捷转换。原LinuxLoaderDiagnosticsObservation/private构造、owner入口与unconditional Unsupported guard逐字节未改；parser成功不证明capture完整、EOF、进程成功、loader来源、环境/父helper启动链或完整能力事实。
+
+新7项独立格式数据测试全部通过，0失败/错误/跳过；Spotless/Checkstyle首轮退出0，规划只读评审无新增阻塞。覆盖uint64/uint32及active独立、平台NULL/空串/缺字段、目录原序/raw形式及不可变副本、关键字符串有损escape拒绝而unknown env/uname原文保留（含000碰撞及660/777）、坏语法/数值/重复/缺字段或索引、64目录/4096消费字节、恰64KiB与超界/deadline。没有运行loader或调用JNI，不重跑未改owner/JNI/Cache矩阵，旧PASS不移绑。1441项输入与原snapshot/父Git blob无错配，两个当前code与测试/style快照一致。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-diagnostics-evidence-5fb81cde`，保留原source/class/命令/log/XML及6份glibc静态源。单个确切raw scope经双次lsof/identity/SHA/archive hardlink核验后清理2目录、4文件路径、364754逻辑字节，归档保留、regular-file数据块回收0。实际hwcap_mask、最终capstr/prepend/mask、owner来源绑定、前序环境/祖先/ORIGIN、first-loaded/递归solver/helper闭包/backend exec及typed Linux/vendor阳性仍OPEN/NOT_EXECUTED；本片models/性能未执行。完整16步目标active，整体Gate OPEN，默认OFF/SYSTEM/PARK及advanced disabled保持。
+
 ## Cache 单行选择与选后 NODEFLIB 的纯数据算法
 
 2026-11-05在父`f41ba00a625e45ca80b4d4e6c7bbccc03278a200`上，原SegmentClassicLinuxCache增加包内`select`，复用既有有界new-cache1.1 Image、原LP64 flags303及数字等价组。它只计算显式假定的raw64 dl_hwcap/hwcap_mask、platform观测值或明确缺失、uint32 isa_1、有序active内置hwcaps、requester flags1及编译system_dirs前缀；不取得实际CPU/loader事实，不接trust typed入口或执行放行。null/缺事实不能变成0/空表或NO_MATCH；明确空active合法，platform的Optional.empty表示已知缺失，未知平台值只产生不匹配。active只支持v4/v3/v2的有序无重复子序列，不从ISA或名称互相推断。
