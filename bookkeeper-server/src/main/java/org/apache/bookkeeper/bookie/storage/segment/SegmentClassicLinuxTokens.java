@@ -53,6 +53,21 @@ final class SegmentClassicLinuxTokens {
 
     private SegmentClassicLinuxTokens() { }
 
+    /** The same bounded lexer as expand; an unknown or incomplete dollar expression is not a known DST. */
+    static boolean hasKnownToken(String raw, long deadline) throws IOException {
+        requireTime(deadline);
+        utf8Length(raw, deadline);
+        for (int cursor = 0; cursor < raw.length(); cursor++) {
+            requireTime(deadline);
+            if (raw.charAt(cursor) == '$' && match(raw, cursor + 1) != null) {
+                requireTime(deadline);
+                return true;
+            }
+        }
+        requireTime(deadline);
+        return false;
+    }
+
     /** First blocked known token returns its state. Unknown syntax and colons remain literal, never list syntax. */
     static Value expand(String raw, Value origin, Value lib, Value platform, long deadline) throws IOException {
         requireTime(deadline);

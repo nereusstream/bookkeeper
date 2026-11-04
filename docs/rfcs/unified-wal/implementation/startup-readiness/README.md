@@ -854,6 +854,20 @@ Trust私有hashFile仅在ELF2分支，于同一owned channel的SHA/解析前取�
 
 本片只加强这次held fd与原路径/内容的对应；不证明查询后永久不变、先前名称未命中或真实已加载对象/namespace/l_loader历史。DST lookup-name展开、BFS/祖先链、完整递归helper/backend执行与批准Linux/vendor/Unix资格仍OPEN/NOT_EXECUTED；diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，未执行models/性能。完整16步目标active，默认OFF/SYSTEM/PARK与advanced disabled不变。
 
+## 普通 NEEDED 的名称与条件路径准备
+
+2026-11-05在父`c373f783c0aac05055942e7f2937c88d4c57f822`上，包内SegmentClassicLinuxNeededName实现有界纯数据两阶段。输入借用LinuxNeededContextObservation，只作为给定的原requester context、NEEDED ordinal/raw及NeededRule声明；返回保留同一原declaration和候选批准键，不用展开名称替换它。显式ORIGIN/LIB/PLATFORM Value与secure状态也只是给定事实，不证明原ELF、实际环境/Unix资格或来源；无文件/Process/JNI、typed owner放行、Installed/ready入口，owned fd路径不变。
+
+依据[glibc2.39 dl-deps.c的expand_dst及普通NEEDED分支](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-deps.c)，第一阶段仅遇到已识别DST才按SECURE拒绝、secure未观察停止；无已识别DST时未知secure不阻止字面名称。复用Tokens同一private match新增bounded hasKnownToken，完整strict UTF8/NUL/4096检查保持，原expand单次不递归、不识别语法原文保留、unused UNOBSERVED不阻止及first-blocked规则不变。已知UNAVAILABLE或替换最终空得到SKIPPED_EMPTY，不调用_map_object；实际用到的来源UNOBSERVED不给lookup name或前缀；非空LOOKUP_NAME供名称复用。raw本身须非空，slash/dot/$/colon/semicolon/Unicode不按目录列表处理，不规范化或补cwd。
+
+依据[同版dl-load.c的名称查找与slash分支](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)，独立afterNameMiss须有显式NO_REUSE形状，caller仍负责建立它与本次first name的对应和先后，纯结果不是name-miss证明。无slash则DIRECTORY_SEARCH并保留first name，不再次替换；含slash才第二次调用原Tokens单次替换。第一次替换值带入的新token可在这次调用被识别，但不能提前越过name reuse；第二阶段新增未知来源不抹掉第一阶段已可复用的名称。第二次UNAVAILABLE产生空DIRECT_PATH文字，表示交给open_verify会失败的空文字，不是第一阶段skip、安全缺失或CWD；全部AVAILABLE时原literal slash必保留，available空replacement不会使slash输入整体为空。不实现一般secure-ORIGIN可信目录例外，识别DST的受支持第二阶段须NON_SECURE。结果同时保存原raw、first lookup和conditional direct text；file-id复用记名仍用first lookup，不用第二次realname。
+
+新8项首轮为1failure/2errors：两处ObjectData空names与一处NeededRule空candidates先触发已有约束；仅修本片fixture及保留原别名的追加断言，生产未变。修正后新8全部通过；最终NeededName8、Tokens7、DynamicPath8共23项全部通过、0失败/错误/跳过，包含新8而非额外累计。覆盖原ordinal/raw独立、已知空/不可用与未观察、secure识别边界、字面/Unicode、两次单次替换的顺序、name hit不依赖后续未知事实、无slash不二次替换、first name记名及原UTF8/展开界/deadline。原始和修正后Spotless/Checkstyle均退出0；未重跑未改owner/JNI/纯cache/diagnostics/LoadedNames整套，原生库仅保留runner配置属性、不计JNI执行。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-needed-name-evidence-c373f783`分别保留失败/修正最小/最终相关三个阶段原source/class/日志/XML和两次style；各1446输入按原snapshot/父Git blob绑定无错配，最终三code与修正最小/最终相关/final style一致。原静态dl-deps.c（17592字节，SHA-256 `47a1cb0f16d2073e2992af1a17c5aa269ffdd08b606a5a7e627bbfe6988d8fb1`）及dl-load.c（70348字节，SHA-256 `26345f234ef918c866e40bb86524bdfd4c3beac487af81b3f51668379e671ae0`）单列保留，不计批准vendor运行。三个确切raw scope经两次独立lsof/identity/SHA/archive hardlink核验清理6目录、14文件路径、1196136逻辑字节，归档保留、regular-file数据块回收0，共享target/用户文件不清理。
+
+实际token/secure及原ELF关联、namespace/main/loader/l_loader、BFS/祖先/RPATH环境、完整递归helper/backend执行和批准Linux/vendor/Unix资格仍OPEN/NOT_EXECUTED，普通base/cache/default/四位置owner入口范围没有扩大。diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，未执行models/性能；完整目标active，默认OFF/SYSTEM/PARK及advanced disabled保持。
+
 ## 已给定文件身份的已加载对象复用
 
 2026-11-05在父`fcd63e2a1c6f1b1ebf2426e272e9e801cc4ebe1b`上，原LoadedNames新增FileId(device,inode)、FileObject(原ObjectData,fileId)及纯lookupFile。输入是明确原序的base-namespace对象/已给定file-id、本次已给定opened id、原map-from-fd request name和deadline；只描述普通非OPENEXEC分支的局部规则，无fd参数/操作或owner入口，不证明前面名称查找已经未命中。query继续非空strictUTF8/无NUL/≤4096，slash/$原文保留；没有mode策略、跨namespace镜像、NOLOAD或文件映射器。
