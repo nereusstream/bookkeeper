@@ -140,6 +140,26 @@ final class SegmentClassicLaunchTrust {
     record LinuxJdkHelperObservation(LinuxJdkHelperReference declaration, LinuxLoadPathObservation helper,
                                      LinuxLoadPathObservation interpreter) { }
 
+    /** This owner's cached backend/path and original helper material, never permission to execute either. */
+    static final class LinuxJdkProcessObservation {
+        private final NativeIO.JdkProcessLaunchObservation cached;
+        private final LinuxJdkHelperObservation helper;
+
+        private LinuxJdkProcessObservation(NativeIO.JdkProcessLaunchObservation cached,
+                LinuxJdkHelperObservation helper) {
+            this.cached = cached;
+            this.helper = helper;
+        }
+
+        NativeIO.JdkProcessLaunchObservation cached() {
+            return cached;
+        }
+
+        LinuxJdkHelperObservation helper() {
+            return helper;
+        }
+    }
+
     /** Only this original owner can bind raw diagnostic output to its actual loader observation. */
     static final class LinuxLoaderDiagnosticsObservation {
         private final LinuxLoadPathObservation loader;
@@ -318,7 +338,8 @@ final class SegmentClassicLaunchTrust {
     record Drain(boolean drained, Throwable initializationFailure, SegmentOwnedFiles.Result files,
                  int retainedAuxiliaryReads, Throwable auxiliaryCloseFailure, Throwable programFailure,
                  Throwable configurationFailure, Throwable launcherFailure, boolean diagnosticsInFlight,
-                 boolean diagnosticsStartClaimed, boolean diagnosticsDrained, Throwable diagnosticsFailure) { }
+                 boolean diagnosticsStartClaimed, boolean diagnosticsDrained, Throwable diagnosticsFailure,
+                 boolean backendInFlight, Throwable backendFailure) { }
 
     private static final class AuxiliaryRead {
         AutoCloseable resource;
@@ -363,6 +384,11 @@ final class SegmentClassicLaunchTrust {
     private Thread diagnosticsCaller;
     private SegmentClassicSystemdQuery.Output diagnosticsOutput;
     private Throwable diagnosticsFailure;
+    private boolean backendAttempted;
+    private boolean backendInFlight;
+    private Thread backendCaller;
+    private Throwable backendFailure;
+    private LinuxJdkProcessObservation backendObservation;
     private final List<AuxiliaryRead> auxiliaryReads = new ArrayList<>();
 
     private SegmentClassicLaunchTrust(Path root, String recipeId, long ownerUid, boolean production,
@@ -710,12 +736,7 @@ final class SegmentClassicLaunchTrust {
             if (!Runtime.version().toString().equals(deployment.provider().runtime())) {
                 throw new IOException("Actual runtime build differs from the original provider image binding");
             }
-            var image = child.files().stream().filter(f -> f.path().equals(child.javaHome().resolve("lib/modules")))
-                    .findFirst().orElseThrow(() -> new IOException("Original runtime image is missing"));
-            if (!verifiedRuntimeImage.identity().equals(checked(image.path()))
-                    || !verifiedRuntimeImage.parents().equals(chain(image.path()))) {
-                throw new IOException("Original verified runtime image identity or protected parents changed");
-            }
+            requireVerifiedRuntimeImage(deadlineNanos);
             List<Path> parsedPaths = List.of(launcherInput.dropper().path(), launcherInput.supervisorDirectory(),
                     launcherInput.manifest(), launcherInput.proof(), launcherInput.policy(), launcherInput.aesKey());
             List<String> originals = launcherSource.paths().values();
@@ -847,7 +868,8 @@ final class SegmentClassicLaunchTrust {
     private void requireReady() throws IOException {
         if (parsed == null || closing || initializationFailure != null || programFailure != null
                 || configurationFailure != null || launcherFailure != null
-                || diagnosticsInFlight && diagnosticsCaller != Thread.currentThread()) {
+                || diagnosticsInFlight && diagnosticsCaller != Thread.currentThread()
+                || backendInFlight && backendCaller != Thread.currentThread()) {
             throw new IOException("Installed Classic trust is not ready or is closing",
                     initializationFailure != null ? initializationFailure
                             : programFailure != null ? programFailure
@@ -867,6 +889,7 @@ final class SegmentClassicLaunchTrust {
 
     synchronized Drain closeAndDrain() throws InterruptedException {
         if (initializingThread == Thread.currentThread() || diagnosticsCaller == Thread.currentThread()
+                || backendCaller == Thread.currentThread()
                 || diagnosticsOutput != null && diagnosticsOutput.isCurrentThread()) {
             throw new IllegalStateException("Classic trust material reader cannot drain itself");
         }
@@ -880,11 +903,12 @@ final class SegmentClassicLaunchTrust {
         }
         var result = files.drain();
         boolean diagnosticsDrained = diagnosticsOutput == null || diagnosticsOutput.drained();
-        return new Drain(result.drained() && auxiliaryReads.isEmpty() && !diagnosticsInFlight && diagnosticsDrained,
+        return new Drain(result.drained() && auxiliaryReads.isEmpty() && !diagnosticsInFlight && diagnosticsDrained
+                        && !backendInFlight,
                 initializationFailure, result, auxiliaryReads.size(), auxiliaryCloseFailure, programFailure,
                 configurationFailure, launcherFailure, diagnosticsInFlight, diagnosticsStartClaimed,
                 diagnosticsDrained, diagnosticsFailure != null || diagnosticsOutput == null
-                        ? diagnosticsFailure : diagnosticsOutput.failure());
+                        ? diagnosticsFailure : diagnosticsOutput.failure(), backendInFlight, backendFailure);
     }
 
     /** Declared loading paths only; compares actual protected components without granting startup authority. */
@@ -1916,6 +1940,149 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Fixed JNI initialization executes outside this monitor; late return cannot publish after close or expiry. */
+    LinuxJdkProcessObservation verifyLinuxJdkProcess(long deadline) throws IOException {
+        final SegmentClassicLaunchProgram.Decoded program;
+        final SegmentClassicLinuxDeploymentV2 deployment;
+        final LinuxFileObservation image;
+        final LinuxProvider provider;
+        final SegmentClassicLauncherInputs.Decoded source;
+        final SegmentClassicHandoff.Digest sourceIdentity;
+        final NativeIOBootstrap.Library library;
+        final Class<?> processType;
+        final Class<?> mechanismType;
+        synchronized (this) {
+            requireReady();
+            requireBoundDeadline(deadline);
+            requireTime(deadline);
+            if (backendAttempted) {
+                throw new IOException("Original cached JDK process observation is one-use");
+            }
+            backendAttempted = true;
+            initializingThread = Thread.currentThread();
+            try {
+                deployment = originalLinuxDeployment(deadline);
+                program = verifiedProgram;
+                image = verifiedRuntimeImage;
+                provider = linuxProvider;
+                source = launcherSource;
+                sourceIdentity = launcherSourceIdentity;
+                library = NativeIOBootstrap.controlledLibrary();
+                processType = Class.forName("java.lang.ProcessImpl", false, null);
+                mechanismType = Class.forName("java.lang.ProcessImpl$LaunchMechanism", false, null);
+                requireBootstrapType(processType, "java.lang.ProcessImpl");
+                requireBootstrapType(mechanismType, "java.lang.ProcessImpl$LaunchMechanism");
+                if (!mechanismType.isEnum()) {
+                    throw new IOException("Unsupported fixed ProcessImpl mechanism type");
+                }
+                requireVerifiedRuntimeImage(deadline);
+                preload.verifyOriginal(deadline);
+                files.requireHealthy();
+                requireTime(deadline);
+                backendCaller = Thread.currentThread();
+                backendInFlight = true;
+            } catch (ClassNotFoundException unavailable) {
+                var failure = new IOException("Original bootstrap ProcessImpl implementation is unavailable",
+                        unavailable);
+                backendFailure = failure;
+                if (launcherFailure == null) {
+                    launcherFailure = failure;
+                }
+                throw failure;
+            } catch (IOException | RuntimeException | Error failure) {
+                backendFailure = failure;
+                if (launcherFailure == null) {
+                    launcherFailure = failure;
+                }
+                throw failure;
+            } finally {
+                initializingThread = null;
+            }
+        }
+        try {
+            var cached = nativeIo.jdkProcessLaunch();
+            synchronized (this) {
+                requireReady();
+                initializingThread = Thread.currentThread();
+                try {
+                    if (originalLinuxDeployment(deadline) != deployment || verifiedProgram != program
+                            || verifiedRuntimeImage != image || linuxProvider != provider || launcherSource != source
+                            || launcherSourceIdentity != sourceIdentity
+                            || NativeIOBootstrap.controlledLibrary() != library) {
+                        throw new IOException("Original JDK process source changed during its cached observation");
+                    }
+                    requireBootstrapType(processType, "java.lang.ProcessImpl");
+                    requireBootstrapType(mechanismType, "java.lang.ProcessImpl$LaunchMechanism");
+                    requireVerifiedRuntimeImage(deadline);
+                    preload.verifyOriginal(deadline);
+                    var members = fixedLinuxContextMembers(deployment.files(), deployment.loading(), deadline);
+                    var selected = bindLinuxJdkHelperCache(program.javaHome(), cached.helperPath(),
+                            program.value().files(), members, deployment.loading(), deadline);
+                    var helper = observeSelectedLinuxJdkHelper(selected, members, deployment.loading(), deadline);
+                    requireVerifiedRuntimeImage(deadline);
+                    preload.verifyOriginal(deadline);
+                    if (originalLinuxDeployment(deadline) != deployment
+                            || NativeIOBootstrap.controlledLibrary() != library) {
+                        throw new IOException("Original JDK process source changed during helper association");
+                    }
+                    files.requireHealthy();
+                    requireTime(deadline);
+                    var result = new LinuxJdkProcessObservation(cached, helper);
+                    backendObservation = result;
+                    return result;
+                } finally {
+                    initializingThread = null;
+                }
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            synchronized (this) {
+                if (backendFailure == null) {
+                    backendFailure = failure;
+                }
+                if (launcherFailure == null) {
+                    launcherFailure = failure;
+                }
+            }
+            throw failure;
+        } finally {
+            synchronized (this) {
+                backendInFlight = false;
+                backendCaller = null;
+            }
+        }
+    }
+
+    private void requireVerifiedRuntimeImage(long deadline) throws IOException {
+        requireTime(deadline);
+        var child = verifiedProgram.value();
+        var image = child.files().stream().filter(f -> f.path().equals(child.javaHome().resolve("lib/modules")))
+                .findFirst().orElseThrow(() -> new IOException("Original runtime image is missing"));
+        if (!verifiedRuntimeImage.identity().equals(checked(image.path()))
+                || !verifiedRuntimeImage.parents().equals(chain(image.path()))) {
+            throw new IOException("Original verified runtime image identity or protected parents changed");
+        }
+        requireTime(deadline);
+    }
+
+    /** Pure byte/declaration association only; caller data cannot establish owner source or backend permission. */
+    static LinuxJdkHelperReference bindLinuxJdkHelperCache(String javaHome, byte[] helperPath,
+            List<SegmentClassicLaunchProgram.File> program, List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, long deadline) throws IOException {
+        requireTime(deadline);
+        if (helperPath == null || helperPath.length < 2 || helperPath.length > 4097) {
+            throw new IOException("Invalid bounded cached JDK helper bytes");
+        }
+        byte[] actual = helperPath.clone();
+        var selected = selectLinuxJdkHelper(javaHome, program, members, loading, deadline);
+        byte[] path = selected.logical().getBytes(StandardCharsets.UTF_8);
+        byte[] expected = Arrays.copyOf(path, path.length + 1);
+        if (!Arrays.equals(expected, actual)) {
+            throw new IOException("Cached JDK helper bytes differ from the exact original approved helper path");
+        }
+        requireTime(deadline);
+        return selected;
+    }
+
     /** Only this owner's original raw JDK root and declarations; not an observation of the chosen backend. */
     synchronized LinuxJdkHelperObservation verifyLinuxJdkHelper(long deadline) throws IOException {
         requireReady();
@@ -1954,6 +2121,12 @@ final class SegmentClassicLaunchTrust {
             SegmentClassicLinuxDeploymentV2.Loading loading, long deadline) throws IOException {
         var members = fixedLinuxContextMembers(declarations, loading, deadline);
         var selected = selectLinuxJdkHelper(javaHome, program, members, loading, deadline);
+        return observeSelectedLinuxJdkHelper(selected, members, loading, deadline);
+    }
+
+    private LinuxJdkHelperObservation observeSelectedLinuxJdkHelper(LinuxJdkHelperReference selected,
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            long deadline) throws IOException {
         var aliases = linuxContextAliases(loading, deadline);
         var context = loading.contexts().get(selected.context());
         var helper = observeLinuxLoadPath(selected.context(), context, members.get(selected.member()),

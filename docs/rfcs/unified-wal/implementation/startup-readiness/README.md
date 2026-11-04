@@ -826,6 +826,18 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## 原 trust owner 的缓存 backend 来源绑定
+
+2026-11-05在父`f6f2554c5212db3b8b8642c349b748c5f187c9ae`上，原owner增加只收原deadline的`verifyLinuxJdkProcess`。A段在monitor内先核对原D2/provider/source，固定同一verifiedProgram、runtime image、provider、descriptor/source digest和原controlled JNI library引用；只用不初始化的Class.forName及原requireBootstrapType检查固定ProcessImpl/enum的bootstrap java.base来源，复核原lib/modules identity/父链及preload材料，再登记本次caller/inFlight/一次性状态。B段完全在monitor外调用原final nativeIo.jdkProcessLaunch，可能初始化或阻塞，不启动Process、不设置property/字段，也不接受caller观察、NativeIO替身或来源参数。
+
+C段在实际调用体返回后重新进入monitor，拒绝closing、失败、过期及原来源引用变化，再核对默认provider、固定module类型、原runtime image/preload和loaded JNI文件。纯`bindLinuxJdkHelperCache`复用原canonical严格UTF8 selector及program/D2/context原索引，将原helper bytes逐字节比较为raw javaHome＋固定suffix＋唯一末NUL；不宽松解码或normalize。随后直接复用提取的private原helper owned ELF/PT_INTERP观察体，末端再次复核runtime image/preload/D2/provider/library，全部成功才留存本owner私有binding并返回私有构造的数据结果。FORK/POSIX_SPAWN/VFORK如实保留；存在helper缓存不推导实际执行了helper，FORK也不自动免除未建立的启动准入。
+
+独立的attempted/inFlight/caller/failure/observation只服务本操作。requireReady在在途时拒绝其他线程新操作；close可标closing并观察资源，不等待或取消class-init/native，总drained还须!backendInFlight，自caller排空拒绝。首失败保留到原launcherFailure/backendFailure，finally在原调用体退出后清caller/inFlight；晚返回不恢复closing/过期后的成功。本块不引入Output、进程runner、通用任务registry或public同步入口重入。原verifyLinuxProvider的image identity检查仅提取为private复用，原helper材料入口仍保留其原数据合同。
+
+新增3项先通过，随后因requireReady/Drain共享边界变化执行完整Trust89项，0失败/错误/跳过，样式退出0。新增检查覆盖exact bytes与原1/1/2索引、不同字节/path/NUL/坏UTF8/期限拒绝，以及真实material owner的typed缺source、首次失败留存、实际排空和生产guard保持。typed拒绝发生于原source门，未触及target I/O/ProcessBuilder；JNI在该拒绝路径之前不会调用由源码顺序核对，不把mock观察当成功的owner/JNI整合。未新增source/observer注入或反射Installed。两阶段各1439项输入与原snapshot/父Git blob无错配，两code与三项/89项/样式原快照一致。未变化的JNI原语实际运行证据仍独立绑定上一块，未重跑或移绑其PASS。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-jdk-backend-evidence-f6f2554c`。终态RAT退出1/431，原未批准路径及字节与父HEAD相同，无新增；PDF扫描前排除且未读取。两个确切raw scope经双次lsof/identity/SHA/archive hardlink核验后清理4目录、8文件路径、745343逻辑字节，归档保留、regular-file数据块回收0。没有原批准Linux来源，完整owner A/B/C成功及close等待class-init、迟到返回不可成功、同episode不可重用的并发整合仍NOT_EXECUTED；本机JNI PASS仅证明原观察机制。本块models/性能及Linux/vendor阳性NOT_EXECUTED，helper传递依赖/实际backend执行语义、诊断parser和qualification仍待后续。`requireLinuxDiagnosticsProcessSource()`继续Unsupported；完整16步目标active，各整体Gate保持OPEN，默认OFF/SYSTEM/PARK及advanced disabled不变。
+
 ## 固定 ProcessImpl 缓存的只读 JNI 观察
 
 2026-11-05在父`a2e52a21693a0b48fc7320195c4aee4e717ef516`上，既有NativeIO/Impl/Jni及原Rust库增加无参数`jdkProcessLaunch()`。只定位bootstrap java.base的固定ProcessImpl及LaunchMechanism，取得实际static缓存的机制name/ordinal和helperpath原bytes；不接受caller类/字段/路径/机制，不设置属性或字段，不调用start/fork/exec。未知类来源、布局、枚举或缺失数据明确失败，不回退到可变属性或推算路径。Java默认接口仍拒绝未实现能力，旧库缺新增symbol由明确NativeIOException保留原LinkageError。

@@ -1179,6 +1179,77 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void cachedJdkHelperBytesKeepExactOriginalDeclarationIndicesWithoutIo() throws Exception {
+        var f = jdkHelperFixture(true, true);
+        byte[] helper = (f.javaHome() + "/lib/jspawnhelper" + (char) 0).getBytes(StandardCharsets.UTF_8);
+        byte[] original = helper.clone();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Pure cached helper binding reached target I/O");
+        })) {
+            var selected = SegmentClassicLaunchTrust.bindLinuxJdkHelperCache(f.javaHome(), helper,
+                    f.program(), f.members(), f.loading(), SegmentClassicLinuxElfTest.deadline());
+            assertEquals(1, selected.program());
+            assertEquals(1, selected.member());
+            assertEquals(2, selected.context());
+            assertEquals(f.javaHome() + "/lib/jspawnhelper", selected.logical());
+            assertArrayEquals(original, helper);
+            assertEquals(SegmentClassicLaunchTrust.selectLinuxJdkHelper(f.javaHome(), f.program(), f.members(),
+                    f.loading(), SegmentClassicLinuxElfTest.deadline()), selected);
+        }
+    }
+
+    @Test
+    public void cachedJdkHelperBindingRejectsDifferentBytesPathsAndTerminatorsWithoutIo() throws Exception {
+        var f = jdkHelperFixture(true, true);
+        byte[] valid = (f.javaHome() + "/lib/jspawnhelper" + (char) 0).getBytes(StandardCharsets.UTF_8);
+        byte[] different = valid.clone();
+        different[different.length - 2] ^= 1;
+        byte[] interior = valid.clone();
+        interior[1] = 0;
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Pure cached helper rejection reached target I/O");
+        })) {
+            for (byte[] bytes : java.util.Arrays.asList(null, new byte[0], new byte[]{0}, different, interior,
+                    java.util.Arrays.copyOf(valid, valid.length - 1), java.util.Arrays.copyOf(valid, valid.length + 1),
+                    new byte[4098], new byte[]{(byte) 0xff, (byte) 0xc0, 0},
+                    (f.javaHome() + "/lib/./jspawnhelper" + (char) 0).getBytes(StandardCharsets.UTF_8))) {
+                assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.bindLinuxJdkHelperCache(f.javaHome(),
+                        bytes, f.program(), f.members(), f.loading(), SegmentClassicLinuxElfTest.deadline()));
+            }
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.bindLinuxJdkHelperCache(
+                    f.javaHome() + "\ud800", valid, f.program(), f.members(), f.loading(),
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.bindLinuxJdkHelperCache(f.javaHome(), valid,
+                    f.program(), f.members(), f.loading(), System.nanoTime()));
+        }
+    }
+
+    @Test
+    public void typedJdkProcessMissingSourceRejectsBeforeObservationAndRetainsFailure() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        IOException failure;
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound typed JDK process observation reached target I/O");
+        }); var builders = mockConstruction(ProcessBuilder.class)) {
+            failure = assertThrows(IOException.class,
+                    () -> owner.verifyLinuxJdkProcess(SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("original provider/source binding"));
+            assertTrue(builders.constructed().isEmpty());
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxJdkProcess(SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        var drained = owner.closeAndDrain();
+        assertTrue(drained.drained());
+        assertFalse(drained.backendInFlight());
+        assertSame(failure, drained.backendFailure());
+        assertSame(failure, drained.launcherFailure());
+        assertSame(failure, owner.closeAndDrain().backendFailure());
+        assertThrows(IOException.class, SegmentClassicLaunchTrust::requireLinuxDiagnosticsProcessSource);
+    }
+
+    @Test
     public void candidateContextSetKeepsEveryLogicalViewOriginalOrdinalAndRepeatedModuleRequest() throws Exception {
         var fixture = candidateFixture();
         var owner = owner();
