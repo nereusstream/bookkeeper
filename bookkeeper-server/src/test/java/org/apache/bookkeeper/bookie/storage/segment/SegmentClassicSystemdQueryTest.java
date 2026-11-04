@@ -16,19 +16,29 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeFalse;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.spy;
 
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.lang3.SystemUtils;
 import org.junit.Rule;
 import org.junit.Test;
@@ -102,12 +112,20 @@ public class SegmentClassicSystemdQueryTest {
     @Test(timeout = 30000)
     public void realChildStdinEofAndBothPipeConsumersFinishBeforeReturningBytes() throws Exception {
         var output = new SegmentClassicSystemdQuery.Output();
-        output.initialize(child("ok"));
+        assertTrue(output.drained());
+        var builder = spy(child("ok"));
+        doAnswer(invocation -> {
+            assertTrue(builder.environment().isEmpty());
+            assertEquals(new java.io.File("/"), builder.directory());
+            return invocation.callRealMethod();
+        }).when(builder).start();
+        output.initialize(builder);
         try {
             var bytes = output.read(deadline());
             assertEquals(properties(), new String(bytes.stdout(), StandardCharsets.UTF_8));
             assertEquals("diagnostic", new String(bytes.stderr(), StandardCharsets.UTF_8));
             assertTrue(output.drain(deadline()));
+            assertTrue(output.drained());
             assertThrows(IOException.class, () -> output.initialize(child("ok")));
         } finally {
             assertTrue(output.drain(deadline()));
@@ -136,8 +154,10 @@ public class SegmentClassicSystemdQueryTest {
             assertThrows(SocketTimeoutException.class,
                     () -> output.read(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(80)));
             assertFalse(output.drain(System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(80)));
+            assertFalse(output.drained());
             Files.writeString(release, "release");
             assertTrue(output.drain(deadline()));
+            assertTrue(output.drained());
             assertThrows(IOException.class, () -> output.read(deadline()));
         } finally {
             Files.writeString(release, "release");
@@ -155,6 +175,207 @@ public class SegmentClassicSystemdQueryTest {
         assertThrows(IOException.class, owner::initialize);
     }
 
+    @Test(timeout = 30000)
+    public void expiredDiagnosticInitializeNeverStartsAProcessAndRetainsItsFailure() throws Exception {
+        var output = new SegmentClassicSystemdQuery.Output();
+        var builder = spy(child("ok"));
+        var starts = new AtomicInteger();
+        doAnswer(invocation -> {
+            starts.incrementAndGet();
+            return invocation.callRealMethod();
+        }).when(builder).start();
+        try {
+            assertThrows(SocketTimeoutException.class, () -> output.initialize(builder, System.nanoTime()));
+            assertEquals(0, starts.get());
+            assertTrue(output.drained());
+            assertTrue(output.failure() instanceof SocketTimeoutException);
+            assertThrows(IOException.class, () -> output.initialize(builder, deadline()));
+            assertThrows(IOException.class, () -> output.read(deadline()));
+        } finally {
+            assertTrue(output.drain(deadline()));
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void diagnosticDeadlineAfterConsumerStartStillPreventsNativeProcessStart() throws Exception {
+        var output = new SegmentClassicSystemdQuery.Output();
+        var builder = spy(child("ok"));
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var starts = new AtomicInteger();
+        doAnswer(invocation -> {
+            entered.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return invocation.callRealMethod();
+        }).when(builder).environment();
+        doAnswer(invocation -> {
+            starts.incrementAndGet();
+            return invocation.callRealMethod();
+        }).when(builder).start();
+        long originalDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        var initialize = new FutureTask<Void>(() -> {
+            output.initialize(builder, originalDeadline);
+            return null;
+        });
+        Thread caller = new Thread(initialize);
+        try {
+            caller.start();
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertFalse(output.drained());
+            await().atMost(5, TimeUnit.SECONDS).until(() -> originalDeadline - System.nanoTime() <= 0);
+            release.countDown();
+            var failure = assertThrows(ExecutionException.class, () -> initialize.get(5, TimeUnit.SECONDS));
+            assertTrue(failure.getCause() instanceof SocketTimeoutException);
+            assertEquals(0, starts.get());
+            assertTrue(output.drain(deadline()));
+            assertTrue(output.drained());
+            assertThrows(IOException.class, () -> output.read(deadline()));
+        } finally {
+            release.countDown();
+            caller.join(5000);
+            assertTrue(output.drain(deadline()));
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void interruptedObservationDoesNotEndOriginalProcessOrPromoteItsLateBytes() throws Exception {
+        Path release = temporary.getRoot().toPath().resolve("interrupt-release");
+        var output = new SegmentClassicSystemdQuery.Output();
+        output.initialize(child("late", release.toString()));
+        var entered = new CountDownLatch(1);
+        var interrupted = new AtomicInteger();
+        var read = new FutureTask<IOException>(() -> {
+            entered.countDown();
+            try {
+                output.read(deadline());
+                throw new AssertionError("Interrupted original observation returned bytes");
+            } catch (IOException failure) {
+                if (Thread.currentThread().isInterrupted()) {
+                    interrupted.incrementAndGet();
+                }
+                return failure;
+            }
+        });
+        Thread caller = new Thread(read);
+        try {
+            caller.start();
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            caller.interrupt();
+            assertTrue(read.get(5, TimeUnit.SECONDS) instanceof InterruptedIOException);
+            assertEquals(1, interrupted.get());
+            assertFalse(output.drained());
+            Files.writeString(release, "release");
+            assertTrue(output.drain(deadline()));
+            assertTrue(output.drained());
+            assertThrows(IOException.class, () -> output.read(deadline()));
+        } finally {
+            Files.writeString(release, "release");
+            caller.join(5000);
+            assertTrue(output.drain(deadline()));
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void actualPipeConsumersRejectSelfDrainAndFirstCloseFailureRemainsUnresolved() throws Exception {
+        for (boolean failedClose : List.of(false, true)) {
+            var output = new SegmentClassicSystemdQuery.Output();
+            var builder = spy(child("ok"));
+            var readers = new AtomicInteger();
+            var closes = new AtomicInteger();
+            doAnswer(invocation -> pipeFixture((Process) invocation.callRealMethod(), output, readers, closes,
+                    failedClose)).when(builder).start();
+            output.initialize(builder, deadline());
+            if (failedClose) {
+                assertThrows(IOException.class, () -> output.read(deadline()));
+            } else {
+                output.read(deadline());
+            }
+            assertEquals(!failedClose, output.drain(deadline()));
+            assertEquals(!failedClose, output.drained());
+            assertEquals(2, readers.get());
+            assertEquals(1, closes.get());
+            if (failedClose) {
+                assertTrue(output.failure() instanceof IOException);
+                assertThrows(IOException.class, () -> output.read(deadline()));
+                assertFalse(output.drained());
+                assertEquals(1, closes.get());
+            }
+        }
+    }
+
+    private static Process pipeFixture(Process original, SegmentClassicSystemdQuery.Output output,
+            AtomicInteger readers, AtomicInteger closes, boolean failedClose) {
+        return new Process() {
+            private InputStream checked(InputStream stream, boolean stdout) {
+                return new FilterInputStream(stream) {
+                    private boolean checked;
+
+                    @Override
+                    public int read(byte[] bytes, int offset, int length) throws IOException {
+                        if (!checked) {
+                            assertTrue(output.isCurrentThread());
+                            assertThrows(IllegalStateException.class, () -> output.drain(deadline()));
+                            checked = true;
+                            readers.incrementAndGet();
+                        }
+                        return super.read(bytes, offset, length);
+                    }
+
+                    @Override
+                    public void close() throws IOException {
+                        super.close();
+                        if (stdout) {
+                            closes.incrementAndGet();
+                            if (failedClose) {
+                                throw new IOException("Original stdout close failed after physical fixture close");
+                            }
+                        }
+                    }
+                };
+            }
+
+            @Override
+            public java.io.OutputStream getOutputStream() {
+                return original.getOutputStream();
+            }
+
+            @Override
+            public InputStream getInputStream() {
+                return checked(original.getInputStream(), true);
+            }
+
+            @Override
+            public InputStream getErrorStream() {
+                return checked(original.getErrorStream(), false);
+            }
+
+            @Override
+            public int waitFor() throws InterruptedException {
+                return original.waitFor();
+            }
+
+            @Override
+            public boolean waitFor(long timeout, TimeUnit unit) throws InterruptedException {
+                return original.waitFor(timeout, unit);
+            }
+
+            @Override
+            public boolean isAlive() {
+                return original.isAlive();
+            }
+
+            @Override
+            public int exitValue() {
+                return original.exitValue();
+            }
+
+            @Override
+            public void destroy() {
+                throw new AssertionError("Fixture observation must not cancel the original process");
+            }
+        };
+    }
+
     private static long deadline() {
         return System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
     }
@@ -164,11 +385,17 @@ public class SegmentClassicSystemdQueryTest {
                 .toString(), "-Xms32m", "-Xmx96m", "-XX:MaxDirectMemorySize=64m", "-XX:ActiveProcessorCount=2",
                 "-cp", System.getProperty("java.class.path"), PipePeer.class.getName()));
         command.addAll(List.of(arguments));
-        return new ProcessBuilder(command);
+        var builder = new ProcessBuilder(command).directory(new java.io.File("/"));
+        builder.environment().put("UNIFIED_WAL_QUERY_FIXTURE_UNTRUSTED", "must-be-cleared");
+        return builder;
     }
 
     public static final class PipePeer {
         public static void main(String[] arguments) throws Exception {
+            if (!Path.of(System.getProperty("user.dir")).equals(Path.of("/"))
+                    || System.getenv("UNIFIED_WAL_QUERY_FIXTURE_UNTRUSTED") != null) {
+                throw new IOException("Original parent did not fix cwd and clear the fixture environment");
+            }
             if (System.in.read() != -1) {
                 throw new IOException("Original parent did not close query stdin");
             }

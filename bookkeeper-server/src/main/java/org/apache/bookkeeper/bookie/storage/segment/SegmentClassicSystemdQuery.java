@@ -106,6 +106,14 @@ final class SegmentClassicSystemdQuery {
         record Bytes(byte[] stdout, byte[] stderr) { }
 
         void initialize(ProcessBuilder builder) throws IOException {
+            initialize(builder, false, 0);
+        }
+
+        void initialize(ProcessBuilder builder, long deadline) throws IOException {
+            initialize(builder, true, deadline);
+        }
+
+        private void initialize(ProcessBuilder builder, boolean bounded, long deadline) throws IOException {
             synchronized (gate) {
                 if (attempted) {
                     throw new IOException("Original query Process starts once");
@@ -114,6 +122,7 @@ final class SegmentClassicSystemdQuery {
                 initializing = true;
             }
             try {
+                requireStartTime(bounded, deadline);
                 // Start both fixed consumers before acquiring the Process, including partial Thread.start failures.
                 stdout.thread.start();
                 stderr.thread.start();
@@ -123,6 +132,7 @@ final class SegmentClassicSystemdQuery {
                 builder.redirectError(ProcessBuilder.Redirect.PIPE);
                 builder.redirectErrorStream(false);
                 synchronized (gate) {
+                    requireStartTime(bounded, deadline);
                     acquiring = "original systemd query construction/pipe attachment";
                 }
                 Process original = builder.start();
@@ -154,6 +164,12 @@ final class SegmentClassicSystemdQuery {
                     initializationFinished = true;
                     gate.notifyAll();
                 }
+            }
+        }
+
+        private static void requireStartTime(boolean bounded, long deadline) throws SocketTimeoutException {
+            if (bounded && deadline - System.nanoTime() <= 0) {
+                throw new SocketTimeoutException("Original query start deadline elapsed");
             }
         }
 
@@ -190,7 +206,7 @@ final class SegmentClassicSystemdQuery {
 
         /** Observation only: never kills, interrupts a reader, retries close or closes a pipe under its active read. */
         boolean drain(long deadline) throws InterruptedException {
-            if (Thread.currentThread() == stdout.thread || Thread.currentThread() == stderr.thread) {
+            if (isCurrentThread()) {
                 throw new IllegalStateException("Query pipe consumer cannot await its own termination");
             }
             Process original;
@@ -226,11 +242,33 @@ final class SegmentClassicSystemdQuery {
                 }
             }
             synchronized (gate) {
-                return !initializing && acquiring == null && stdinCloseFailure == null
-                        && (process == null || stdinClosed)
-                        && (stdout.input == null || stdout.closed) && (stderr.input == null || stderr.closed)
-                        && stdout.closeFailure == null && stderr.closeFailure == null;
+                return physicallyDrained();
             }
+        }
+
+        /** Nonblocking physical facts only; an invalid observation may still have fully terminated resources. */
+        boolean drained() {
+            synchronized (gate) {
+                return physicallyDrained();
+            }
+        }
+
+        boolean isCurrentThread() {
+            return Thread.currentThread() == stdout.thread || Thread.currentThread() == stderr.thread;
+        }
+
+        Throwable failure() {
+            synchronized (gate) {
+                return observationFailure;
+            }
+        }
+
+        private boolean physicallyDrained() {
+            return !initializing && acquiring == null && (process == null || !process.isAlive())
+                    && !stdout.thread.isAlive() && !stderr.thread.isAlive() && stdinCloseFailure == null
+                    && (process == null || stdinClosed)
+                    && (stdout.input == null || stdout.closed) && (stderr.input == null || stderr.closed)
+                    && stdout.closeFailure == null && stderr.closeFailure == null;
         }
 
         private void reject(Throwable failure) {

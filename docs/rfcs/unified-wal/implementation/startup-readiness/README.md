@@ -826,6 +826,22 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## D2 loader 诊断资源机制：PARTIAL，生产启动仍明确拒绝
+
+2026-11-05在父`2c73c5aa18698bcd71e6910e683e82f537588fca`上，为原trust owner增加一次性诊断槽位及`verifyLinuxLoaderDiagnostics(deadline)`生命周期接线，直接复用原`SegmentClassicSystemdQuery.Output`。**当前生产入口在start claim、ProcessBuilder构造及initialize之前，由`requireLinuxDiagnosticsProcessSource()`明确Unsupported；原JDK backend及helper外部依赖准入尚未实现。本块不交付可执行的生产诊断采集。**没有增加caller许可、可变property/FORK回退、fixture登记接口、schema/role或TCB范围。
+
+保留的A/B/C接线在monitor内登记原Output/caller/inFlight和原期限、执行已有同步文件前检及start claim，锁外initialize/read，锁内检查closing/原source/loader前后绑定并发布防修改raw结果；initializingThread只覆盖同步文件段。其他线程新trust操作在inFlight时拒绝，close不等待诊断调用重新取得monitor，只把原Output非等待物理快照及!inFlight合入原Drain。caller和两consumer不能自排空，首次失败保留，晚终结只能改变物理排空事实，不能恢复观察成功。结果类型构造器私有、stdout复制，caller bytes不能包装成生产来源；上述成功路径目前因启动链guard不可达，只有源码核对，不能写成已实测的trust并发整合。
+
+原Output新增deadline-aware initialize重载，在consumer启动前和实际start前检查原期限；原systemd入口的命令、字节上限、解码及旧initialize行为保持。stdout64KiB/stderr16KiB、空目标env、根cwd、stdin首次关闭、原Process exit/两pipe EOF及首次close责任继续复用。非等待drained快照要求Process实际终结、两consumer退出和首次关闭成功，不以过期业务deadline误报已终结资源。通用Output真实JVM夹具验证该物理合同，不证明实际批准loader或其JDK启动链。
+
+来源核对发现，目标loader自包含条件（ET_DYN/非零entry/无PT_INTERP/无NEEDED）不足以单独放行ProcessBuilder。[OpenJDK21u 21.0.10 ProcessImpl](https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.10-ga/src/java.base/unix/classes/java/lang/ProcessImpl.java)及[native spawnChild](https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.10-ga/src/java.base/unix/native/libjava/ProcessImpl_md.c)存在先执行固定jspawnhelper、使用parent environ再传目标env的路线；这只是参考实现，不认证原approved vendor/backend。既有verifyProgram逐项hash且verifyJdkTree完整枚举要求declared==seen，现场存在的树内helper不能从program漏列；剩余缺口是实际backend与原已核验成员的对应、helper实际PT_INTERP/NEEDED及树外传递加载依据，不能扩大为“任意JDK安装内容可信”。当前可用program/D2向量是合成数据且未含helper，不是生产输入；本机fixture为Amazon 21.0.10+7-LTS/macOS aarch64，另列而不补升Linux来源。glibc2.39的[rtld.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/rtld.c)及[dl-diagnostics.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-diagnostics.c)只为目标诊断早退代码路径提供静态依据，不替代这条JDK启动依赖。
+
+初版WIP的Trust77＋SystemdQuery11共88项全部通过，0失败/错误/跳过，原style0、原source/class/log/XML/输入绑定保留；其中新增Output真实JVM检查包括过期启动、consumer已启动后的期限耗尽/无native start、interrupt后晚终结、consumer自drain拒绝及首次close失败不被后续观察抹除，原env/cwd/stdin夹具也执行。Trust新增仅缺原source的pre-start拒绝、命令/自包含纯检查与真实owned前后数据绑定，没有造Installed或Linux来源。修正启动链guard后只运行两项对应pre-start拒绝检查，全部通过，最终style0；原88未重跑，也未移绑新源码，不合计成“当前源码90项全通过”。两阶段1436项输入均与各自snapshot/父Git blob无错配，当前四code仅与最后两项检查及style-final绑定。新规划会话分别核对A/B/C及最终guard，接受按PARTIAL收口。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-loader-diagnostics-evidence-2c73c5aa`。原RAT和修正后rat-final均退出1/431，未批准路径及字节为父HEAD既有，无新增unknown，PDF扫描前排除且未读取；两份RAT分别保留各自输入。两个确切raw scope经各自两次独立lsof及inode/mode/SHA/archive hardlink核验后清理四目录、九文件路径、789,146逻辑字节，归档保留，regular-file数据块回收0。七份glibc/JDK参考原源及SHA另存，不认证原vendor或真实Linux执行。
+
+后续按新规划裁决先复用原program与D2 START_CHAIN/context/ELF/NEEDED，观察固定jspawnhelper材料及其PT_INTERP对应；这一材料边成功也不能撤去启动guard。实际backend来源和外部传递依赖闭合、诊断parser、CPU/platform/hwcap事实、完整搜索/winner及qualification继续待实现。trust新A/B/C并发整合、typed Linux/vendor诊断执行NOT_EXECUTED，本块models/性能未运行；完整16步目标active，parent/child/Main/G1/full-bytes/full16/production Gate保持OPEN，默认OFF/SYSTEM/PARK及advanced disabled不变。
+
 ## D2 单个普通 NEEDED base 查找点的实际批准对应
 
 2026-11-04在父`1dd01a8dfab7944ee3cc51206148ae51d8ce7079`上，原trust owner新增`verifyLinuxNeededLookup(ruleIndex, directoryIndex, deadline)`。typed入口先过原source/provider/期限门，只从本owner原D2选择NeededRule和Directory，不接caller name、Path、alias或已有观察。单独的`readLinuxNeededLookup(files, Loading, ...)`只供独立子图真实文件夹具，复用同一private实现，不签发来源或ready。既有context全集方法的文件/引用校验和alias固定只作小提取，不重入public同步入口，首次关闭/失败留存及原owner排空语义不变。

@@ -28,6 +28,7 @@ import static org.junit.Assume.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.spy;
 
@@ -776,6 +777,106 @@ public class SegmentClassicLaunchTrustTest {
         }
         assertThrows(IOException.class, owner::parsed);
         assertTrue(owner.closeAndDrain().drained());
+    }
+
+    @Test
+    public void typedLoaderDiagnosticsWithoutOriginalSourceCannotConstructOrStartAProcess() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        IOException failure;
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound diagnostics reached target I/O");
+        }); var builders = mockConstruction(ProcessBuilder.class)) {
+            failure = assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoaderDiagnostics(SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(builders.constructed().isEmpty());
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoaderDiagnostics(SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        var drained = owner.closeAndDrain();
+        assertTrue(drained.drained());
+        assertFalse(drained.diagnosticsInFlight());
+        assertFalse(drained.diagnosticsStartClaimed());
+        assertTrue(drained.diagnosticsDrained());
+        assertSame(failure, drained.diagnosticsFailure());
+    }
+
+    private static SegmentClassicLinuxElf.Image2 diagnosticsElf(int type, long entry, String interpreter,
+            List<String> needed) {
+        var absent = new SegmentClassicLinuxDeploymentV2.DynamicPath(false, "");
+        return new SegmentClassicLinuxElf.Image2(type, entry, interpreter, null, needed, absent, absent,
+                false, 0, false, 0);
+    }
+
+    @Test
+    public void unverifiedJdkProcessStartupSourceRejectsBeforeProcessConstruction() throws Exception {
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unverified process backend reached target I/O");
+        }); var builders = mockConstruction(ProcessBuilder.class)) {
+            var failure = assertThrows(IOException.class,
+                    SegmentClassicLaunchTrust::requireLinuxDiagnosticsProcessSource);
+            assertTrue(failure.getMessage().contains("Unsupported original JDK process startup chain"));
+            assertTrue(builders.constructed().isEmpty());
+        }
+    }
+
+    @Test
+    public void diagnosticsFixedCommandAndSelfContainedDataChecksDoNotTouchAPathOrGrantApproval() throws Exception {
+        var valid = diagnosticsElf(3, 0x1000, null, List.of());
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Diagnostic command data validation reached target I/O");
+        })) {
+            for (String path : List.of("/fixed/ld.so", "/fixed:$HOME;雪//./ld.so")) {
+                var command = SegmentClassicLaunchTrust.linuxLoaderDiagnosticsCommand(path, valid,
+                        SegmentClassicLinuxElfTest.deadline());
+                assertEquals(List.of(path, "--list-diagnostics"), command);
+                assertThrows(UnsupportedOperationException.class, () -> command.add("/usr/bin/systemctl"));
+            }
+            for (var elf : List.of(diagnosticsElf(2, 0x1000, null, List.of()), diagnosticsElf(3, 0, null, List.of()),
+                    diagnosticsElf(3, 0x1000, "/other/loader", List.of()),
+                    diagnosticsElf(3, 0x1000, null, List.of("unverified.so")))) {
+                assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.linuxLoaderDiagnosticsCommand(
+                        "/fixed/ld.so", elf, SegmentClassicLinuxElfTest.deadline()));
+            }
+            for (String path : List.of("ld.so", "", "/fixed/" + (char) 0)) {
+                assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.linuxLoaderDiagnosticsCommand(path,
+                        valid, SegmentClassicLinuxElfTest.deadline()));
+            }
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.linuxLoaderDiagnosticsCommand(
+                    "/fixed/ld.so", valid, System.nanoTime()));
+        }
+    }
+
+    @Test
+    public void diagnosticsPrePostDataBindingRejectsSameBytesInDifferentOwnedInodes() throws Exception {
+        var file = loadPathFile("diagnostics-loader.so", SegmentClassicLinuxDeployment.Role.LOADER);
+        Path path = Path.of(file.path());
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwxr-xr-x"));
+        var context = new SegmentClassicLinuxDeploymentV2.Context(4, file.path());
+        var owner = owner();
+        owner.initialize();
+        try {
+            var before = owner.readLinuxLoadPath(-1, context, file, SegmentClassicLinuxContentTest.expected(),
+                    file.path(), Map.of(), SegmentClassicLinuxElfTest.deadline());
+            var same = owner.readLinuxLoadPath(-1, context, file, SegmentClassicLinuxContentTest.expected(),
+                    file.path(), Map.of(), SegmentClassicLinuxElfTest.deadline());
+            SegmentClassicLaunchTrust.requireLinuxDiagnosticsBinding(before, same);
+            Path original = root.resolve("old-diagnostics-loader.so");
+            Files.move(path, original);
+            Files.copy(original, path);
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwxr-xr-x"));
+            var changed = owner.readLinuxLoadPath(-1, context, file, SegmentClassicLinuxContentTest.expected(),
+                    file.path(), Map.of(), SegmentClassicLinuxElfTest.deadline());
+            assertArrayEquals(Files.readAllBytes(original), Files.readAllBytes(path));
+            assertFalse(before.content().identity().equals(changed.content().identity()));
+            assertThrows(IOException.class,
+                    () -> SegmentClassicLaunchTrust.requireLinuxDiagnosticsBinding(before, changed));
+            assertThrows(IOException.class,
+                    () -> SegmentClassicLaunchTrust.requireLinuxDiagnosticsBinding(null, before));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
     }
 
     @Test

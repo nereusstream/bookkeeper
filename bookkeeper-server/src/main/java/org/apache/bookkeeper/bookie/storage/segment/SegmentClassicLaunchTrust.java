@@ -133,6 +133,25 @@ final class SegmentClassicLaunchTrust {
             LinuxPathObservation directoryPath, LinuxPathObservation path, LinuxLoadPathObservation requester,
             LinuxLoadPathObservation candidate) { }
 
+    /** Only this original owner can bind raw diagnostic output to its actual loader observation. */
+    static final class LinuxLoaderDiagnosticsObservation {
+        private final LinuxLoadPathObservation loader;
+        private final byte[] stdout;
+
+        private LinuxLoaderDiagnosticsObservation(LinuxLoadPathObservation loader, byte[] stdout) {
+            this.loader = loader;
+            this.stdout = stdout.clone();
+        }
+
+        LinuxLoadPathObservation loader() {
+            return loader;
+        }
+
+        byte[] stdout() {
+            return stdout.clone();
+        }
+    }
+
     /** Entire declared context set only; no cross-object snapshot, search closure or loader winner is implied. */
     record LinuxCandidateContextObservation(List<LinuxLoadPathObservation> contexts,
             LinuxLoadPathObservation interpreter, List<LinuxNeededContextObservation> needed,
@@ -291,7 +310,8 @@ final class SegmentClassicLaunchTrust {
 
     record Drain(boolean drained, Throwable initializationFailure, SegmentOwnedFiles.Result files,
                  int retainedAuxiliaryReads, Throwable auxiliaryCloseFailure, Throwable programFailure,
-                 Throwable configurationFailure, Throwable launcherFailure) { }
+                 Throwable configurationFailure, Throwable launcherFailure, boolean diagnosticsInFlight,
+                 boolean diagnosticsStartClaimed, boolean diagnosticsDrained, Throwable diagnosticsFailure) { }
 
     private static final class AuxiliaryRead {
         AutoCloseable resource;
@@ -330,6 +350,12 @@ final class SegmentClassicLaunchTrust {
     private LinuxProvider linuxProvider;
     private boolean linuxProviderAttempted;
     private Throwable auxiliaryCloseFailure;
+    private boolean diagnosticsAttempted;
+    private boolean diagnosticsInFlight;
+    private boolean diagnosticsStartClaimed;
+    private Thread diagnosticsCaller;
+    private SegmentClassicSystemdQuery.Output diagnosticsOutput;
+    private Throwable diagnosticsFailure;
     private final List<AuxiliaryRead> auxiliaryReads = new ArrayList<>();
 
     private SegmentClassicLaunchTrust(Path root, String recipeId, long ownerUid, boolean production,
@@ -813,7 +839,8 @@ final class SegmentClassicLaunchTrust {
 
     private void requireReady() throws IOException {
         if (parsed == null || closing || initializationFailure != null || programFailure != null
-                || configurationFailure != null || launcherFailure != null) {
+                || configurationFailure != null || launcherFailure != null
+                || diagnosticsInFlight && diagnosticsCaller != Thread.currentThread()) {
             throw new IOException("Installed Classic trust is not ready or is closing",
                     initializationFailure != null ? initializationFailure
                             : programFailure != null ? programFailure
@@ -832,7 +859,8 @@ final class SegmentClassicLaunchTrust {
     }
 
     synchronized Drain closeAndDrain() throws InterruptedException {
-        if (initializingThread == Thread.currentThread()) {
+        if (initializingThread == Thread.currentThread() || diagnosticsCaller == Thread.currentThread()
+                || diagnosticsOutput != null && diagnosticsOutput.isCurrentThread()) {
             throw new IllegalStateException("Classic trust material reader cannot drain itself");
         }
         closing = true;
@@ -844,8 +872,12 @@ final class SegmentClassicLaunchTrust {
             }
         }
         var result = files.drain();
-        return new Drain(result.drained() && auxiliaryReads.isEmpty(), initializationFailure, result,
-                auxiliaryReads.size(), auxiliaryCloseFailure, programFailure, configurationFailure, launcherFailure);
+        boolean diagnosticsDrained = diagnosticsOutput == null || diagnosticsOutput.drained();
+        return new Drain(result.drained() && auxiliaryReads.isEmpty() && !diagnosticsInFlight && diagnosticsDrained,
+                initializationFailure, result, auxiliaryReads.size(), auxiliaryCloseFailure, programFailure,
+                configurationFailure, launcherFailure, diagnosticsInFlight, diagnosticsStartClaimed,
+                diagnosticsDrained, diagnosticsFailure != null || diagnosticsOutput == null
+                        ? diagnosticsFailure : diagnosticsOutput.failure());
     }
 
     /** Declared loading paths only; compares actual protected components without granting startup authority. */
@@ -1759,6 +1791,122 @@ final class SegmentClassicLaunchTrust {
         requireLinuxLoadReference(contextIndex, context, file, expected);
         return observeLinuxLoadPath(contextIndex, context, file, expected, deployment.loading().interpreter(),
                 originalLinuxAliases(deployment, deadline), deadline);
+    }
+
+    /** One original self-contained approved loader only; process initialization/waits never hold this monitor. */
+    LinuxLoaderDiagnosticsObservation verifyLinuxLoaderDiagnostics(long deadline) throws IOException {
+        final SegmentClassicSystemdQuery.Output output;
+        synchronized (this) {
+            requireReady();
+            requireBoundDeadline(deadline);
+            requireTime(deadline);
+            if (diagnosticsAttempted) {
+                throw new IOException("Original loader diagnostics starts once");
+            }
+            diagnosticsAttempted = true;
+            try {
+                output = new SegmentClassicSystemdQuery.Output();
+            } catch (RuntimeException | Error failure) {
+                diagnosticsFailure = failure;
+                launcherFailure = failure;
+                throw failure;
+            }
+            diagnosticsOutput = output;
+            diagnosticsInFlight = true;
+            diagnosticsCaller = Thread.currentThread();
+        }
+        try {
+            final SegmentClassicLinuxDeploymentV2 deployment;
+            final SegmentClassicLinuxDeploymentV2.Context context;
+            final LinuxLoadPathObservation before;
+            final List<String> command;
+            synchronized (this) {
+                requireReady();
+                initializingThread = Thread.currentThread();
+                try {
+                    deployment = originalLinuxDeployment(deadline);
+                    var program = verifiedProgram.value();
+                    if (!program.os().equals("linux") || !program.architecture().equals("x86_64")) {
+                        throw new IOException("Unsupported approved platform for loader diagnostics");
+                    }
+                    requireLinuxDiagnosticsProcessSource();
+                    var loading = deployment.loading();
+                    context = new SegmentClassicLinuxDeploymentV2.Context(loading.loader(), loading.interpreter());
+                    before = observeOriginalLinuxLoadPath(deployment, -1, context, deadline);
+                    command = linuxLoaderDiagnosticsCommand(before.logical(), before.content().elf(), deadline);
+                } finally {
+                    initializingThread = null;
+                }
+            }
+            var builder = new ProcessBuilder(command);
+            builder.directory(new java.io.File("/"));
+            synchronized (this) {
+                requireReady();
+                requireTime(deadline);
+                diagnosticsStartClaimed = true;
+            }
+            output.initialize(builder, deadline);
+            var bytes = output.read(deadline);
+            if (bytes.stderr().length != 0) {
+                throw new IOException("Original loader diagnostics produced stderr");
+            }
+            synchronized (this) {
+                requireReady();
+                initializingThread = Thread.currentThread();
+                try {
+                    if (originalLinuxDeployment(deadline) != deployment) {
+                        throw new IOException("Original loader deployment changed during diagnostics");
+                    }
+                    var after = observeOriginalLinuxLoadPath(deployment, -1, context, deadline);
+                    requireLinuxDiagnosticsBinding(before, after);
+                    files.requireHealthy();
+                    requireTime(deadline);
+                    return new LinuxLoaderDiagnosticsObservation(after, bytes.stdout());
+                } finally {
+                    initializingThread = null;
+                }
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            synchronized (this) {
+                if (diagnosticsFailure == null) {
+                    diagnosticsFailure = output.failure() == null ? failure : output.failure();
+                }
+                if (launcherFailure == null) {
+                    launcherFailure = failure;
+                }
+            }
+            throw failure;
+        } finally {
+            synchronized (this) {
+                diagnosticsInFlight = false;
+                diagnosticsCaller = null;
+            }
+        }
+    }
+
+    /** Original JDK bytes are approved, but its process backend and external helper dependencies are not bound yet. */
+    static void requireLinuxDiagnosticsProcessSource() throws IOException {
+        throw new IOException("Unsupported original JDK process startup chain for loader diagnostics");
+    }
+
+    /** Pure fixed-command data only; these checks do not establish approval or permission to execute. */
+    static List<String> linuxLoaderDiagnosticsCommand(String interpreter, SegmentClassicLinuxElf.Image2 elf,
+            long deadline) throws IOException {
+        requireTime(deadline);
+        SegmentClassicLinuxGlob.requireLogicalText(interpreter);
+        if (elf.type() != 3 || elf.entry() == 0 || elf.interpreter() != null || !elf.needed().isEmpty()) {
+            throw new IOException("Unsupported loader diagnostics requires an approved self-contained ET_DYN loader");
+        }
+        requireTime(deadline);
+        return List.of(interpreter, "--list-diagnostics");
+    }
+
+    /** Original pre/post data comparison only; caller observations cannot construct a bound diagnostic result. */
+    static void requireLinuxDiagnosticsBinding(LinuxLoadPathObservation before, LinuxLoadPathObservation after)
+            throws IOException {
+        if (before == null || !before.equals(after)) {
+            throw new IOException("Original loader path or owned ELF identity changed during diagnostics");
+        }
     }
 
     /** Independent declaration data only; results cannot establish this owner's original D2 source or readiness. */
