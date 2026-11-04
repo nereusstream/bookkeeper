@@ -20,6 +20,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
@@ -790,6 +791,238 @@ public class SegmentClassicLaunchTrustTest {
         })) {
             assertThrows(IOException.class, () -> owner.verifyLinuxNeededDirectoryPositions(0, 0,
                     SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
+    private static SegmentClassicLinuxDeploymentV2.Loading defaultLoading(
+            SegmentClassicLinuxDeploymentV2.Loading l, List<SegmentClassicLinuxDeploymentV2.Directory> directories,
+            List<String> defaults, List<SegmentClassicLinuxDeploymentV2.Elf> metadata) {
+        var p = l.policy();
+        var policy = new SegmentClassicLinuxDeploymentV2.LoaderPolicy(p.elf(), p.cache(), p.comparator(), p.paths(),
+                p.configuration(), p.glob(), p.relevance(), p.hwcaps(), p.tokens(), p.diagnostics(), p.libToken(),
+                defaults);
+        return new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(), l.aliases(),
+                directories, l.configuration(), policy, metadata, l.contexts(), l.needed(), l.modules());
+    }
+
+    private CandidateFixture defaultLookupFixture() throws Exception {
+        var f = builtinLookupFixture();
+        var l = f.loading();
+        Path path = Path.of(f.files().get(0).path());
+        byte[] bytes = Files.readAllBytes(path);
+        var buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+        var original = l.elf().get(0);
+        long flags1 = original.flags1() & ~0x800L;
+        int changed = 0;
+        for (int i = 0; i <= bytes.length - 16; i += 8) {
+            if (buffer.getLong(i) == 0x6ffffffbL && buffer.getLong(i + 8) == original.flags1()) {
+                buffer.putLong(i + 8, flags1);
+                changed++;
+            }
+        }
+        assertEquals(1, changed);
+        write(path, bytes);
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwxr-xr-x"));
+        var members = new java.util.ArrayList<>(f.files());
+        members.set(0, new SegmentClassicLinuxDeploymentV2.File(path.toString(), f.files().get(0).role(), bytes.length,
+                SegmentClassicHandoff.digest(bytes)));
+        var metadata = new java.util.ArrayList<>(l.elf());
+        metadata.set(0, new SegmentClassicLinuxDeploymentV2.Elf(0, original.needed(), original.rpath(),
+                original.runpath(), original.flags(), flags1));
+        var loading = defaultLoading(l, l.directories(),
+                List.of(l.directories().get(3).path(), l.directories().get(2).path()), metadata);
+        return new CandidateFixture(members, loading);
+    }
+
+    @Test
+    public void defaultStageUsesPolicyOrderAllPositionsAndOneRequesterDespiteCandidateFlags() throws Exception {
+        var f = defaultLookupFixture();
+        var owner = owner();
+        owner.initialize();
+        var requesterOpens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.files().get(0).path()).equals(invocation.getArgument(0))) {
+                requesterOpens.incrementAndGet();
+            }
+            return invocation.callRealMethod();
+        })) {
+            var result = owner.readLinuxNeededDefaults(f.files(), f.loading(), 0,
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(SegmentClassicLaunchTrust.LinuxDefaultState.BUILTIN_POSITIONS_OBSERVED, result.state());
+            assertEquals(0, result.rule());
+            assertEquals("libz.so.1", result.name());
+            assertTrue(result.flags1Present());
+            assertEquals(0, result.flags1() & 0x800L);
+            assertEquals(1, requesterOpens.get());
+            assertEquals(List.of(0, 1), result.directories().stream().map(d -> d.policyOrdinal()).toList());
+            assertEquals(List.of(3, 2), result.directories().stream().map(d -> d.observation().directory()).toList());
+            for (var directory : result.directories()) {
+                assertSame(result.requester(), directory.observation().requester());
+                assertEquals(4, directory.observation().positions().size());
+                assertNotNull(directory.observation().positions().get(0).candidate());
+                assertNull(directory.observation().positions().get(1).candidate());
+                assertNotNull(directory.observation().positions().get(2).candidate());
+                var base = directory.observation().positions().get(3).candidate();
+                assertNotNull(base);
+                assertEquals(0x800L, base.content().elf().flags1() & 0x800L);
+            }
+            assertThrows(UnsupportedOperationException.class, () -> result.directories().clear());
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void defaultStageRealRequesterNodeflibSkipsLongDefaultsAndAllDefaultCandidateCacheIo() throws Exception {
+        var f = defaultLookupFixture();
+        var l = f.loading();
+        String prefix = root + "/default-a/";
+        String longDirectory = prefix + "x".repeat(4086 - prefix.getBytes(StandardCharsets.UTF_8).length);
+        String second = root + "/default-b";
+        var directories = new java.util.ArrayList<>(l.directories());
+        directories.add(new SegmentClassicLinuxDeploymentV2.Directory(longDirectory, true));
+        directories.add(new SegmentClassicLinuxDeploymentV2.Directory(second, false));
+        directories.sort(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Directory::path));
+        var loading = defaultLoading(l, directories, List.of(second, longDirectory), l.elf());
+        int requester = java.util.stream.IntStream.range(0, l.contexts().size())
+                .filter(i -> l.contexts().get(i).file() == 1).findFirst().orElseThrow();
+        int rule = requester * 4;
+        assertEquals(0, l.elf().get(0).flags1() & 0x800L); // Main differs from this real library requester.
+        Path source = Path.of(f.files().get(1).path());
+        var owner = owner();
+        owner.initialize();
+        var opens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                assertEquals("Suppressed default stage opened other material", source, invocation.getArgument(0));
+                opens.incrementAndGet();
+            }
+            return invocation.callRealMethod();
+        }); var targets = mockStatic(Files.class, invocation -> {
+            if (invocation.getArguments().length > 0 && invocation.getArgument(0) instanceof Path path
+                    && (path.startsWith(root.resolve("default-a")) || path.startsWith(root.resolve("default-b"))
+                        || path.equals(root.resolve("loader.cache")))) {
+                throw new AssertionError("NODEFLIB default stage performed target I/O");
+            }
+            return invocation.callRealMethod();
+        })) {
+            var result = owner.readLinuxNeededDefaults(f.files(), loading, rule, SegmentClassicLinuxElfTest.deadline());
+            assertEquals(SegmentClassicLaunchTrust.LinuxDefaultState.SUPPRESSED_NODEFLIB, result.state());
+            assertEquals(requester, result.requester().context());
+            assertTrue(result.flags1Present());
+            assertEquals(0x800L, result.flags1() & 0x800L);
+            assertEquals(1, opens.get());
+            assertTrue(result.directories().isEmpty()); // Suppressed, never reported as observed missing directories.
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void defaultStageDeclarationOnlyNodeflibCannotForgeSuppression() throws Exception {
+        var f = defaultLookupFixture();
+        var l = f.loading();
+        var metadata = new java.util.ArrayList<>(l.elf());
+        var first = metadata.get(0);
+        metadata.set(0, new SegmentClassicLinuxDeploymentV2.Elf(first.file(), first.needed(), first.rpath(),
+                first.runpath(), first.flags(), first.flags1() | 0x800L));
+        var loading = defaultLoading(l, l.directories(), l.policy().defaultDirectories(), metadata);
+        var owner = owner();
+        owner.initialize();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && !Path.of(f.files().get(0).path()).equals(invocation.getArgument(0))) {
+                throw new AssertionError("Unbound requester flag reached default candidate content");
+            }
+            return invocation.callRealMethod();
+        })) {
+            assertThrows(IOException.class, () -> owner.readLinuxNeededDefaults(f.files(), loading, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertThrows(IOException.class, owner::parsed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void defaultStageLastDirectoryReadCannotHideEarlierDirectoryAliasReplacement() throws Exception {
+        var f = defaultLookupFixture();
+        Path earlier = root.resolve("view:$HOME;雪");
+        var opens = new AtomicInteger();
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        var owner = owner();
+        owner.initialize();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.files().get(1).path()).equals(invocation.getArgument(0))
+                    && opens.incrementAndGet() == 4) {
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                fault.beforeClose = () -> {
+                    try {
+                        Files.delete(earlier);
+                        Files.createSymbolicLink(earlier, Path.of("lib"));
+                    } catch (IOException failure) {
+                        throw new AssertionError(failure);
+                    }
+                };
+                captured.set(fault);
+                return fault;
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededDefaults(f.files(), f.loading(), 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("Fixed built-in candidate changed across"));
+            assertEquals(4, opens.get());
+            assertEquals(1, captured.get().closes.get());
+            assertFalse(captured.get().actual.isOpen());
+            assertThrows(IOException.class, owner::parsed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void defaultStageExactReferencesAndEveryDirectoryPathBoundPrecedeRequesterIo() throws Exception {
+        var f = defaultLookupFixture();
+        var l = f.loading();
+        var badReference = defaultLoading(l, l.directories(),
+                List.of(l.directories().get(3).path(), l.directories().get(2).path() + "/"), l.elf());
+        String prefix = root + "/lib/";
+        String longest = prefix + "x".repeat(4086 - prefix.getBytes(StandardCharsets.UTF_8).length);
+        var directories = new java.util.ArrayList<>(l.directories());
+        directories.set(2, new SegmentClassicLinuxDeploymentV2.Directory(longest, true));
+        var overlong = defaultLoading(l, directories, List.of(l.directories().get(3).path(), longest), l.elf());
+        for (var loading : List.of(badReference, overlong)) {
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Invalid later default directory reached requester or target I/O");
+            })) {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededDefaults(f.files(), loading, 0,
+                        SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage(), failure.getMessage().contains(loading == badReference
+                        ? "directory references" : "Fixed built-in candidate path exceeds"));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void typedDefaultStageWithoutOriginalSourceCannotReachTargetIo() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound typed default stage reached target I/O");
+        })) {
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxNeededDefaults(0, SegmentClassicLinuxElfTest.deadline()));
         }
         assertThrows(IOException.class, owner::parsed);
         assertTrue(owner.closeAndDrain().drained());

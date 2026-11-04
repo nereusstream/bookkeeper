@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## 有序默认目录阶段与真实 requester NODEFLIB
+
+2026-11-05在父`55c51ce5ce4ca4042879f6fdf4acf9b1b7203b3b`上，原trust新增`verifyLinuxNeededDefaults(ruleIndex, deadline)`，只从本owner原D2/source/provider绑定取rule、requester/context/ordinal和LoaderPolicy.defaultDirectories。原full constructor的默认目录引用约束提取为共用纯`defaultDirectoryIndices`：按policy原raw顺序精确匹配Directory索引，缺失或歧义在目标I/O前拒绝，不按目录表排序、物理路径或normalize重排。原格式、编码及旧单目录/base/cache入口语义不变；独立read seam仍只提供声明/真实文件观察，不制造Installed/source。
+
+声明flags1只决定预规划。未置NODEFLIB时，先预检全部原默认目录的完整v4/v3/v2/base路径及strict UTF8/4096界，然后才经一次private owned requester ELF2、原ordinal/name与完整元数据绑定；以实际ELF的flags1位`0x800`返回显式状态和presence/value事实。[glibc2.39 default分支](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)及[DF_1_NODEFLIB常量](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/elf.h)提供静态依据。只用本requester，不传播main、祖先或候选的位。置位时返回`SUPPRESSED_NODEFLIB`，不生成默认候选路径集合，不探测默认目录/候选或访问cache；空观察列表表示阶段被抑制，不表示全部缺失。按规划澄清允许原alias字典的纯数据Path/字节准备，必要requester自身材料和所经过的alias仍完整核验。
+
+未抑制时按policy顺序调用窄private四位置机制，每组保留policy ordinal、原Directory索引、presence/protection和全部位置/候选事实；requester和原表只绑定一次，不嵌套public同步入口。dirname/alias walker、exact logical＋physical pre-content批准、owned ELF2及first-close合同沿用。各目录原有局部终端检查保留，所有默认目录读完后再统一复核全部位置与各原目录，后面目录读取期间替换前面的候选或目录不能被局部稳定掩盖。仍是有限观察，不声称统一快照、连续保护或实际loader尝试序列；沿用64目录/每目录4位置及原路径/ELF/deadline上限，无新预算、缓存、重试或线程。
+
+新增6项先全部通过，最终Trust112＋Deployment9共121项全部通过，0失败/错误/跳过，样式首轮退出0；121已含6项，不累计为127独立用例。夹具真实改写requester ELF DT_FLAGS_1字节清`0x800`并同步SHA/声明，候选保留该位仍不抑制本requester阶段；反向用实际带位的library requester、已清位的main、会导致完整拼接超界的未使用默认目录和目标I/O guard，确认只一次requester内容open即明确抑制，不触及default/candidate/cache。声明单独置位不能伪造跳过。另覆盖policy顺序3→2不同于目录表排序、全目录全位置/共享一次requester、最后目录base close期间同target替换早先目录alias被全组末端检查拒绝、raw引用不匹配及后续目录最长路径在任何requester/target I/O前拒绝、typed缺source。原四位置/base/cache的Trust相关覆盖及受共享约束影响的原Deployment构造/向量覆盖同时执行；未改Cache/JNI矩阵未重跑，旧PASS不移绑。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-default-stage-evidence-55c51ce5`。两阶段各1439项输入与原snapshot/父Git blob无错配，当前三code与6项/121项/style快照完全一致。终态RAT退出1/431，原未批准路径及字节与父HEAD相同，无新增；PDF扫描前排除且未读取。两个确切raw scope经双次lsof/identity/SHA/archive hardlink核验后清理4目录、9文件路径、795778逻辑字节，归档保留、regular-file数据块回收0；两份glibc原源静态归档不认证实际vendor运行。
+
+结果仅表示“若查找走到default阶段”的受支持内置位置对应或实际requester位抑制，不证明first-loaded/RPATH/env/RUNPATH/cache此前均失败，也不选winner。cache方法未改：[glibc先选单条cached再按NODEFLIB作system_dirs原字节前缀拒绝](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)，不能先删cache默认目录行再取后行充当fallback；实际cache capability/ISA选择及选后过滤仍OPEN。实际active/capstr、前序环境/祖先/ORIGIN来源、first-loaded/递归solver/helper闭包/backend exec及typed Linux/vendor阳性仍未验收，本块models/性能NOT_EXECUTED。diagnostics unconditional Unsupported、完整16步目标active、各整体Gate OPEN、默认OFF/SYSTEM/PARK及advanced disabled保持。
+
 ## 单个声明目录的固定内置四位置候选对应
 
 2026-11-05在父`b012a5b711d162f3f652c5cc24ec6b88718f1476`上，原trust新增`verifyLinuxNeededDirectoryPositions(ruleIndex, directoryIndex, deadline)`，原D2/source/provider/owner门后，只从原policy的hwcaps rule1、requester原NEEDED ordinal及一个原Directory导出固定v4/v3/v2/base四位置。依据[glibc2.39 x86-64内置顺序](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/sysdeps/x86_64/dl-hwcaps-subdirs.c)、[suffix生成及空base](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-hwcaps.c)和[open_path拼接](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)，依次观察`glibc-hwcaps/x86-64-v4/`、v3、v2及空suffix。该集合尚未按实际能力筛选，不是当前capstr，不接受caller suffix/CPU/mask或额外目录。独立read seam只消费声明子图及真实临时文件，不建立Installed/source。

@@ -425,12 +425,29 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
                 throw new IllegalArgumentException("Directory presence conflicts with an approved member");
             }
         }
+        defaultDirectoryIndices(loading);
+        requireContextReferences(files, loading);
+    }
+
+    /** Exact raw declarations, in policy search order; no physical normalization or runtime selection. */
+    static List<Integer> defaultDirectoryIndices(Loading loading) {
+        var indices = new ArrayList<Integer>();
         for (String directory : loading.policy().defaultDirectories()) {
-            if (loading.directories().stream().noneMatch(d -> d.path().equals(directory))) {
+            int selected = -1;
+            for (int i = 0; i < loading.directories().size(); i++) {
+                if (loading.directories().get(i).path().equals(directory)) {
+                    if (selected != -1) {
+                        throw new IllegalArgumentException("Default search directory has conflicting presence rules");
+                    }
+                    selected = i;
+                }
+            }
+            if (selected == -1) {
                 throw new IllegalArgumentException("Default search directory lacks its explicit presence rule");
             }
+            indices.add(selected);
         }
-        requireContextReferences(files, loading);
+        return List.copyOf(indices);
     }
 
     /** Pure context-subgraph check only; the complete constructor retains all other deployment checks. */

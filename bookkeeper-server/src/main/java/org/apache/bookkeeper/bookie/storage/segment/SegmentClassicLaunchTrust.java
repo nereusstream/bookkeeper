@@ -72,6 +72,7 @@ final class SegmentClassicLaunchTrust {
     private static final int MAX_LOADING_DIRECTORY_NAME_BYTES = 64 * 1024 * 1024;
     private static final List<String> BUILTIN_HWCAP_SUFFIXES = List.of("glibc-hwcaps/x86-64-v4/",
             "glibc-hwcaps/x86-64-v3/", "glibc-hwcaps/x86-64-v2/", "");
+    private static final long DF_1_NODEFLIB = 0x800L;
 
     record Recipe(String recipeId, String deployment, String keyName, SegmentClassicHandoff.Digest signerKeyId,
                   SegmentClassicHandoff.Digest program, SegmentClassicHandoff.Digest configuration,
@@ -147,6 +148,21 @@ final class SegmentClassicLaunchTrust {
             positions = List.copyOf(positions);
         }
     }
+
+    enum LinuxDefaultState { BUILTIN_POSITIONS_OBSERVED, SUPPRESSED_NODEFLIB }
+
+    record LinuxDefaultDirectoryObservation(int policyOrdinal, LinuxNeededDirectoryObservation observation) { }
+
+    /** Conditional default-stage facts, never proof that preceding search stages failed or a winner exists. */
+    record LinuxNeededDefaultObservation(int rule, SegmentClassicLinuxDeploymentV2.NeededRule declaration,
+            String name, LinuxLoadPathObservation requester, boolean flags1Present, long flags1,
+            LinuxDefaultState state, List<LinuxDefaultDirectoryObservation> directories) {
+        LinuxNeededDefaultObservation {
+            directories = List.copyOf(directories);
+        }
+    }
+
+    private record LinuxDefaultPlan(int directory, List<String> logicals) { }
 
     /** One numeric-equivalent LP64 cache row, not capability-filtered and never a selected winner. */
     record LinuxNeededCacheRow(SegmentClassicLinuxCache.Entry entry, String logical, LinuxPathObservation path,
@@ -2536,6 +2552,19 @@ final class SegmentClassicLaunchTrust {
                 || name.equals(".") || name.equals("..")) {
             throw new IOException("Unsupported NEEDED name for fixed built-in directory positions");
         }
+        var logicals = builtinLogicalPaths(loading, directoryIndex, name, deadline);
+        var aliases = linuxContextAliases(loading, deadline);
+        var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
+                loading.interpreter(), aliases, deadline);
+        if (!name.equals(requester.content().elf().needed().get(rule.ordinal()))) {
+            throw new IOException("Original built-in NEEDED differs from its requester ELF observation");
+        }
+        return observeLinuxDirectoryPositions(ruleIndex, directoryIndex, requester, logicals, members, loading,
+                aliases, deadline);
+    }
+
+    private static List<String> builtinLogicalPaths(SegmentClassicLinuxDeploymentV2.Loading loading,
+            int directoryIndex, String name, long deadline) throws IOException {
         var declaredDirectory = loading.directories().get(directoryIndex);
         String dirname = SegmentClassicLinuxDynamicPath.dirname(declaredDirectory.path(), deadline);
         int bytes = dirname.getBytes(StandardCharsets.UTF_8).length + name.getBytes(StandardCharsets.UTF_8).length;
@@ -2549,12 +2578,16 @@ final class SegmentClassicLaunchTrust {
             SegmentClassicLinuxGlob.requireLogicalText(logical);
             logicals.add(logical);
         }
-        var aliases = linuxContextAliases(loading, deadline);
-        var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
-                loading.interpreter(), aliases, deadline);
-        if (!name.equals(requester.content().elf().needed().get(rule.ordinal()))) {
-            throw new IOException("Original built-in NEEDED differs from its requester ELF observation");
-        }
+        return List.copyOf(logicals);
+    }
+
+    private LinuxNeededDirectoryObservation observeLinuxDirectoryPositions(int ruleIndex, int directoryIndex,
+            LinuxLoadPathObservation requester, List<String> logicals,
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            Map<Path, String> aliases, long deadline) throws IOException {
+        var rule = loading.needed().get(ruleIndex);
+        String name = requester.content().elf().needed().get(rule.ordinal());
+        var declaredDirectory = loading.directories().get(directoryIndex);
         var directory = new LinuxSearchDirectory(directoryIndex, declaredDirectory.path(), declaredDirectory.present());
         Path directoryEntry = loadingNativePath(directory.logical(), deadline);
         var beforeDirectory = searchDirectoryPath(directory, directoryEntry, aliases, LinuxPathKind.LOOKUP, deadline);
@@ -2567,21 +2600,123 @@ final class SegmentClassicLaunchTrust {
             positions.add(new LinuxNeededDirectoryPosition(i, BUILTIN_HWCAP_SUFFIXES.get(i), logical, probe,
                     candidate));
         }
-        for (var position : positions) {
+        var result = new LinuxNeededDirectoryObservation(ruleIndex, directoryIndex, rule, name, beforeDirectory,
+                requester, positions);
+        recheckLinuxDirectoryPositions(result, loading, aliases, deadline);
+        files.requireHealthy();
+        requireTime(deadline);
+        return result;
+    }
+
+    private void recheckLinuxDirectoryPositions(LinuxNeededDirectoryObservation observed,
+            SegmentClassicLinuxDeploymentV2.Loading loading, Map<Path, String> aliases, long deadline)
+            throws IOException {
+        var declaredDirectory = loading.directories().get(observed.directory());
+        var directory = new LinuxSearchDirectory(observed.directory(), declaredDirectory.path(),
+                declaredDirectory.present());
+        Path directoryEntry = loadingNativePath(directory.logical(), deadline);
+        for (var position : observed.positions()) {
             var terminal = observeLinuxPath(LinuxPathKind.LOOKUP, loadingNativePath(position.logical(), deadline),
                     aliases, false, deadline);
             if (!position.path().equals(terminal)) {
                 throw new IOException("Fixed built-in candidate changed across its directory observation");
             }
         }
-        if (!beforeDirectory.equals(searchDirectoryPath(directory, directoryEntry, aliases, LinuxPathKind.LOOKUP,
-                deadline))) {
+        if (!observed.directoryPath().equals(searchDirectoryPath(directory, directoryEntry, aliases,
+                LinuxPathKind.LOOKUP, deadline))) {
             throw new IOException("Original base directory changed across its built-in position observation");
+        }
+    }
+
+    /** Only an original rule and deadline; policy order and requester flags come from this original owner. */
+    synchronized LinuxNeededDefaultObservation verifyLinuxNeededDefaults(int ruleIndex, long deadline)
+            throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            return observeLinuxNeededDefaults(deployment.files(), deployment.loading(), ruleIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Independent pure declarations and actual file fixture, not typed source, Installed or runtime search. */
+    synchronized LinuxNeededDefaultObservation readLinuxNeededDefaults(
+            List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxNeededDefaults(members, loading, ruleIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxNeededDefaultObservation observeLinuxNeededDefaults(
+            List<SegmentClassicLinuxDeploymentV2.File> declared,
+            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, long deadline) throws IOException {
+        var members = fixedLinuxContextMembers(declared, loading, deadline);
+        if (loading.policy().hwcaps() != 1 || ruleIndex < 0 || ruleIndex >= loading.needed().size()) {
+            throw new IOException("Unsupported default-stage policy or original NEEDED index");
+        }
+        final List<Integer> indices;
+        try {
+            indices = SegmentClassicLinuxDeploymentV2.defaultDirectoryIndices(loading);
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Default-stage directory references differ from their original declarations",
+                    invalid);
+        }
+        var rule = loading.needed().get(ruleIndex);
+        var context = loading.contexts().get(rule.requester());
+        var metadata = linuxElfDeclaration(loading, context.file());
+        String name = metadata.needed().get(rule.ordinal());
+        if (name.isEmpty() || name.indexOf('/') >= 0 || name.indexOf('$') >= 0
+                || name.equals(".") || name.equals("..")) {
+            throw new IOException("Unsupported NEEDED name for an ordinary default-directory stage");
+        }
+        var plans = new ArrayList<LinuxDefaultPlan>();
+        if ((metadata.flags1() & DF_1_NODEFLIB) == 0) {
+            for (int directory : indices) {
+                plans.add(new LinuxDefaultPlan(directory, builtinLogicalPaths(loading, directory, name, deadline)));
+            }
+        }
+        // Pure alias declaration Paths may be prepared here; only the requester's actual chain is probed.
+        var aliases = linuxContextAliases(loading, deadline);
+        var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
+                loading.interpreter(), aliases, deadline);
+        var actual = requester.content().elf();
+        if (!name.equals(actual.needed().get(rule.ordinal()))) {
+            throw new IOException("Original default-stage NEEDED differs from its requester ELF observation");
+        }
+        if ((actual.flags1() & DF_1_NODEFLIB) != 0) {
+            files.requireHealthy();
+            requireTime(deadline);
+            return new LinuxNeededDefaultObservation(ruleIndex, rule, name, requester, actual.flags1Present(),
+                    actual.flags1(), LinuxDefaultState.SUPPRESSED_NODEFLIB, List.of());
+        }
+        var directories = new ArrayList<LinuxDefaultDirectoryObservation>();
+        for (int i = 0; i < plans.size(); i++) {
+            var plan = plans.get(i);
+            var observed = observeLinuxDirectoryPositions(ruleIndex, plan.directory(), requester, plan.logicals(),
+                    members, loading, aliases, deadline);
+            directories.add(new LinuxDefaultDirectoryObservation(i, observed));
+        }
+        for (var directory : directories) {
+            recheckLinuxDirectoryPositions(directory.observation(), loading, aliases, deadline);
         }
         files.requireHealthy();
         requireTime(deadline);
-        return new LinuxNeededDirectoryObservation(ruleIndex, directoryIndex, rule, name, beforeDirectory,
-                requester, positions);
+        return new LinuxNeededDefaultObservation(ruleIndex, rule, name, requester, actual.flags1Present(),
+                actual.flags1(), LinuxDefaultState.BUILTIN_POSITIONS_OBSERVED, directories);
     }
 
     /** Only an original NEEDED rule and deadline; the fixed cache configuration is selected from this owner. */
