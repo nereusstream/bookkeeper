@@ -133,6 +133,13 @@ final class SegmentClassicLaunchTrust {
             LinuxPathObservation directoryPath, LinuxPathObservation path, LinuxLoadPathObservation requester,
             LinuxLoadPathObservation candidate) { }
 
+    /** Original declaration indices only, never a selected Process backend or permission to execute. */
+    record LinuxJdkHelperReference(int program, int member, int context, String logical) { }
+
+    /** Helper material and its actual PT_INTERP association only; NEEDED candidates are not a proved closure. */
+    record LinuxJdkHelperObservation(LinuxJdkHelperReference declaration, LinuxLoadPathObservation helper,
+                                     LinuxLoadPathObservation interpreter) { }
+
     /** Only this original owner can bind raw diagnostic output to its actual loader observation. */
     static final class LinuxLoaderDiagnosticsObservation {
         private final LinuxLoadPathObservation loader;
@@ -1907,6 +1914,138 @@ final class SegmentClassicLaunchTrust {
         if (before == null || !before.equals(after)) {
             throw new IOException("Original loader path or owned ELF identity changed during diagnostics");
         }
+    }
+
+    /** Only this owner's original raw JDK root and declarations; not an observation of the chosen backend. */
+    synchronized LinuxJdkHelperObservation verifyLinuxJdkHelper(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            return observeLinuxJdkHelper(verifiedProgram.javaHome(), verifiedProgram.value().files(),
+                    deployment.files(), deployment.loading(), deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Independent member/subgraph data only; does not establish a complete program, typed source or backend. */
+    synchronized LinuxJdkHelperObservation readLinuxJdkHelper(String javaHome,
+            List<SegmentClassicLaunchProgram.File> program, List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxJdkHelper(javaHome, program, members, loading, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxJdkHelperObservation observeLinuxJdkHelper(String javaHome,
+            List<SegmentClassicLaunchProgram.File> program, List<SegmentClassicLinuxDeploymentV2.File> declarations,
+            SegmentClassicLinuxDeploymentV2.Loading loading, long deadline) throws IOException {
+        var members = fixedLinuxContextMembers(declarations, loading, deadline);
+        var selected = selectLinuxJdkHelper(javaHome, program, members, loading, deadline);
+        var aliases = linuxContextAliases(loading, deadline);
+        var context = loading.contexts().get(selected.context());
+        var helper = observeLinuxLoadPath(selected.context(), context, members.get(selected.member()),
+                linuxElfDeclaration(loading, selected.member()), loading.interpreter(), aliases, deadline);
+        LinuxLoadPathObservation interpreter = null;
+        String actual = helper.content().elf().interpreter();
+        if (actual != null) {
+            if (!actual.equals(loading.interpreter())) {
+                throw new IOException("JDK helper PT_INTERP differs from the exact original interpreter name");
+            }
+            var fixed = new SegmentClassicLinuxDeploymentV2.Context(loading.loader(), loading.interpreter());
+            interpreter = observeLinuxLoadPath(-1, fixed, members.get(loading.loader()),
+                    linuxElfDeclaration(loading, loading.loader()), loading.interpreter(), aliases, deadline);
+        }
+        for (var observed : interpreter == null ? List.of(helper) : List.of(helper, interpreter)) {
+            var kind = observed.context() == -1 ? LinuxPathKind.INTERPRETER : LinuxPathKind.LOOKUP;
+            var after = observeLinuxPath(kind, loadingNativePath(observed.logical(), deadline), aliases, true,
+                    deadline);
+            if (!observed.path().equals(after) || !observed.content().identity().equals(after.identity())) {
+                throw new IOException("JDK helper or interpreter changed during their material association");
+            }
+        }
+        var result = new LinuxJdkHelperObservation(selected, helper, interpreter);
+        files.requireHealthy();
+        requireTime(deadline);
+        return result;
+    }
+
+    /** Bounded pure matching only; the caller must separately validate the original context subgraph and source. */
+    static LinuxJdkHelperReference selectLinuxJdkHelper(String javaHome, List<SegmentClassicLaunchProgram.File> program,
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            long deadline) throws IOException {
+        requireTime(deadline);
+        try {
+            SegmentClassicLinuxDeploymentV2.physical(javaHome);
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Fixed JDK helper requires the original canonical raw javaHome", invalid);
+        }
+        String suffix = "/lib/jspawnhelper";
+        if (javaHome.getBytes(StandardCharsets.UTF_8).length > 4096 - suffix.length()
+                || program.size() > SegmentClassicLaunchProgram.MAX_FILES || members.size() > 1024) {
+            throw new IOException("Fixed JDK helper declaration exceeds its original bounds");
+        }
+        var fixedProgram = List.copyOf(program);
+        var fixedMembers = List.copyOf(members);
+        String logical = javaHome + suffix;
+        int programIndex = -1;
+        for (int i = 0; i < fixedProgram.size(); i++) {
+            requireTime(deadline);
+            var file = fixedProgram.get(i);
+            if (file.path().toString().equals(logical)) {
+                if (programIndex != -1 || (file.roles() & SegmentClassicLaunchProgram.JDK) == 0) {
+                    throw new IOException("Conflicting or non-JDK fixed helper program declaration");
+                }
+                programIndex = i;
+            }
+        }
+        int member = -1;
+        for (int i = 0; i < fixedMembers.size(); i++) {
+            requireTime(deadline);
+            var file = fixedMembers.get(i);
+            if (file.path().equals(logical)) {
+                if (member != -1 || file.role() != SegmentClassicLinuxDeployment.Role.START_CHAIN) {
+                    throw new IOException("Unsupported fixed JDK helper requires one original START_CHAIN member");
+                }
+                member = i;
+            }
+        }
+        if (programIndex == -1 || member == -1) {
+            throw new IOException("Unsupported fixed JDK helper lacks its original program or D2 declaration");
+        }
+        var original = fixedProgram.get(programIndex);
+        var file = fixedMembers.get(member);
+        if (original.length() != file.length() || !original.sha256().equals(file.sha256())) {
+            throw new IOException("Original program and D2 approve conflicting fixed JDK helper bytes");
+        }
+        int context = -1;
+        for (int i = 0; i < loading.contexts().size(); i++) {
+            requireTime(deadline);
+            var entry = loading.contexts().get(i);
+            if (entry.file() == member && entry.logicalLoadName().equals(logical)) {
+                if (context != -1) {
+                    throw new IOException("Conflicting fixed JDK helper execution contexts");
+                }
+                context = i;
+            }
+        }
+        if (context == -1) {
+            throw new IOException("Unsupported fixed JDK helper lacks its exact original execution context");
+        }
+        requireTime(deadline);
+        return new LinuxJdkHelperReference(programIndex, member, context, logical);
     }
 
     /** Independent declaration data only; results cannot establish this owner's original D2 source or readiness. */

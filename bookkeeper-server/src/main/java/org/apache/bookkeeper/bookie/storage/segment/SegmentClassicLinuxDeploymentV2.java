@@ -1144,7 +1144,8 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
         }
     }
 
-    private static void physical(String value) {
+    /** Raw canonical syntax only; does not construct a Path, observe a provider or establish source authority. */
+    static void physical(String value) {
         logical(value);
         if (value.equals("/") || value.endsWith("/") || value.contains("//")
                 || Arrays.stream(value.substring(1).split("/", -1)).anyMatch(s -> s.equals(".") || s.equals(".."))) {

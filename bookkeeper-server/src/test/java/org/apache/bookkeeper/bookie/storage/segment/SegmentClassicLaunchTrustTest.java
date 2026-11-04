@@ -879,6 +879,305 @@ public class SegmentClassicLaunchTrustTest {
         }
     }
 
+    private record JdkHelperFixture(String javaHome, List<SegmentClassicLaunchProgram.File> program,
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading) { }
+
+    private JdkHelperFixture jdkHelperFixture(boolean interpreter, boolean exact) throws Exception {
+        Path home = Files.createDirectories(root.resolve("jdk/lib")).getParent();
+        var loader = loadPathFile("a-loader.so", SegmentClassicLinuxDeployment.Role.LOADER);
+        Path view = Files.createSymbolicLink(root.resolve("a-loader-view"), Path.of("a-loader.so"));
+        Files.setPosixFilePermissions(Path.of(loader.path()), PosixFilePermissions.fromString("rwxr-xr-x"));
+        byte[] bytes = SegmentClassicLinuxDeploymentTest.vector("classic-linux-elf-v2");
+        var buffer = ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        if (interpreter) {
+            byte[] name = ((exact ? view.toString() : loader.path()) + (char) 0).getBytes(StandardCharsets.UTF_8);
+            assertTrue(name.length < 256);
+            buffer.putLong(96, name.length).putLong(104, name.length);
+            buffer.position(256).put(name);
+        } else {
+            buffer.putInt(64, 0); // No PT_INTERP; NEEDED and the dynamic table remain unchanged.
+        }
+        Path path = home.resolve("lib/jspawnhelper");
+        write(path, bytes);
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwxr-xr-x"));
+        var helper = new SegmentClassicLinuxDeploymentV2.File(path.toString(),
+                SegmentClassicLinuxDeployment.Role.START_CHAIN, bytes.length, SegmentClassicHandoff.digest(bytes));
+        var program = List.of(new SegmentClassicLaunchProgram.File(home.resolve("bin/java"),
+                        SegmentClassicLaunchProgram.JDK | SegmentClassicLaunchProgram.JAVA, 1, helper.sha256()),
+                new SegmentClassicLaunchProgram.File(path, SegmentClassicLaunchProgram.JDK, bytes.length,
+                        helper.sha256()),
+                new SegmentClassicLaunchProgram.File(home.resolve("release"), SegmentClassicLaunchProgram.JDK,
+                        1, helper.sha256()));
+        Path alias = Files.createSymbolicLink(root.resolve("helper-view"), Path.of("jdk/lib/jspawnhelper"));
+        var aliases = List.of(new SegmentClassicLinuxDeploymentV2.Alias(view.toString(), "a-loader.so"),
+                new SegmentClassicLinuxDeploymentV2.Alias(alias.toString(), "jdk/lib/jspawnhelper"));
+        var contexts = List.of(new SegmentClassicLinuxDeploymentV2.Context(0, view.toString()),
+                new SegmentClassicLinuxDeploymentV2.Context(1, alias.toString()),
+                new SegmentClassicLinuxDeploymentV2.Context(1, path.toString()));
+        var expected = SegmentClassicLinuxContentTest.expected();
+        var metadata = List.of(new SegmentClassicLinuxDeploymentV2.Elf(0, expected.needed(), expected.rpath(),
+                        expected.runpath(), expected.flags(), expected.flags1()),
+                new SegmentClassicLinuxDeploymentV2.Elf(1, expected.needed(), expected.rpath(), expected.runpath(),
+                        expected.flags(), expected.flags1()));
+        var needed = new java.util.ArrayList<SegmentClassicLinuxDeploymentV2.NeededRule>();
+        for (int context = 0; context < contexts.size(); context++) {
+            for (int ordinal = 0; ordinal < expected.needed().size(); ordinal++) {
+                needed.add(new SegmentClassicLinuxDeploymentV2.NeededRule(context, ordinal, List.of(0)));
+            }
+        }
+        var original = SegmentClassicLinuxDeployment.decode(
+                SegmentClassicLinuxDeploymentTest.vector("classic-linux-deployment-v2")).versionTwo().loading();
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(0, 0, view.toString(), aliases, List.of(), List.of(),
+                original.policy(), metadata, contexts, needed, List.of());
+        // Only the consumed member list/subgraph is declared, not a complete program, service or Installed source.
+        return new JdkHelperFixture(home.toString(), program, List.of(loader, helper), loading);
+    }
+
+    @Test
+    public void jdkHelperMaterialKeepsExactOriginalIndicesNeededOrderAndInterpreter() throws Exception {
+        var f = jdkHelperFixture(true, true);
+        var owner = owner();
+        owner.initialize();
+        try {
+            var result = owner.readLinuxJdkHelper(f.javaHome(), f.program(), f.members(), f.loading(),
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(1, result.declaration().program());
+            assertEquals(1, result.declaration().member());
+            assertEquals(2, result.declaration().context());
+            assertEquals(f.javaHome() + "/lib/jspawnhelper", result.declaration().logical());
+            assertEquals(2, result.helper().context());
+            assertEquals(SegmentClassicLinuxContentTest.expected().needed(), result.helper().content().elf().needed());
+            assertEquals(result.helper().content().elf().needed().get(0),
+                    result.helper().content().elf().needed().get(1));
+            assertEquals(0, f.loading().needed().get(8).ordinal());
+            assertEquals(2, f.loading().needed().get(8).requester());
+            assertEquals(List.of(0), f.loading().needed().get(8).candidates());
+            assertEquals(-1, result.interpreter().context());
+            assertEquals(0, result.interpreter().member());
+            assertEquals(f.loading().interpreter(), result.interpreter().logical());
+            assertEquals(result.helper().content().identity(), result.helper().path().identity());
+            assertThrows(IOException.class, SegmentClassicLaunchTrust::requireLinuxDiagnosticsProcessSource);
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperAbsentInterpreterDoesNotImplyAbsentNeededOrOpenTheFixedLoader() throws Exception {
+        var f = jdkHelperFixture(false, true);
+        var owner = owner();
+        owner.initialize();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.members().get(0).path()).equals(invocation.getArgument(0))) {
+                throw new AssertionError("Absent PT_INTERP should not read the fixed loader");
+            }
+            return invocation.callRealMethod();
+        })) {
+            var result = owner.readLinuxJdkHelper(f.javaHome(), f.program(), f.members(), f.loading(),
+                    SegmentClassicLinuxElfTest.deadline());
+            assertNull(result.interpreter());
+            assertNull(result.helper().content().elf().interpreter());
+            assertEquals(SegmentClassicLinuxContentTest.expected().needed(), result.helper().content().elf().needed());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperOtherInterpreterTextForSamePhysicalLoaderRejectsBeforeItsOpen() throws Exception {
+        var f = jdkHelperFixture(true, false);
+        var owner = owner();
+        owner.initialize();
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                if (Path.of(f.members().get(0).path()).equals(invocation.getArgument(0))) {
+                    throw new AssertionError("Mismatched PT_INTERP text reached fixed loader content open");
+                }
+                if (Path.of(f.members().get(1).path()).equals(invocation.getArgument(0))) {
+                    var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) invocation.callRealMethod());
+                    captured.set(fault);
+                    return fault;
+                }
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelper(f.javaHome(), f.program(),
+                    f.members(), f.loading(), SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("exact original interpreter name"));
+            assertEquals(1, captured.get().closes.get());
+            assertFalse(captured.get().actual.isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperChangedDuringLaterInterpreterReadCannotReturnAssociation() throws Exception {
+        var f = jdkHelperFixture(true, true);
+        var owner = owner();
+        owner.initialize();
+        Path helper = Path.of(f.members().get(1).path());
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.members().get(0).path()).equals(invocation.getArgument(0))) {
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                fault.beforeClose = () -> {
+                    try {
+                        Files.move(helper, root.resolve("old-jspawnhelper"));
+                        Files.copy(root.resolve("old-jspawnhelper"), helper);
+                        Files.setPosixFilePermissions(helper, PosixFilePermissions.fromString("rwxr-xr-x"));
+                    } catch (IOException failed) {
+                        throw new AssertionError(failed);
+                    }
+                };
+                captured.set(fault);
+                return fault;
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelper(f.javaHome(), f.program(),
+                    f.members(), f.loading(), SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("changed during their material association"));
+            assertEquals(1, captured.get().closes.get());
+            assertFalse(captured.get().actual.isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertArrayEquals(Files.readAllBytes(root.resolve("old-jspawnhelper")), Files.readAllBytes(helper));
+    }
+
+    @Test
+    public void jdkHelperRecheckCannotHideInterpreterReplacementAfterItsStableRead() throws Exception {
+        var f = jdkHelperFixture(true, true);
+        var owner = owner();
+        owner.initialize();
+        Path helper = Path.of(f.members().get(1).path());
+        Path loader = Path.of(f.members().get(0).path());
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        var changed = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && loader.equals(invocation.getArgument(0))) {
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                captured.set(fault);
+                return fault;
+            }
+            return actual;
+        }); var targets = mockStatic(Files.class, invocation -> {
+            var channel = captured.get();
+            if (invocation.getMethod().getName().equals("readAttributes") && helper.equals(invocation.getArgument(0))
+                    && channel != null && channel.closes.get() == 1 && changed.compareAndSet(0, 1)) {
+                Files.move(loader, root.resolve("old-helper-interpreter"));
+                Files.copy(root.resolve("old-helper-interpreter"), loader);
+                Files.setPosixFilePermissions(loader, PosixFilePermissions.fromString("rwxr-xr-x"));
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelper(f.javaHome(), f.program(),
+                    f.members(), f.loading(), SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("changed during their material association"));
+            assertEquals(1, changed.get());
+            assertEquals(1, captured.get().closes.get());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertArrayEquals(Files.readAllBytes(root.resolve("old-helper-interpreter")), Files.readAllBytes(loader));
+    }
+
+    @Test
+    public void jdkHelperReferenceMismatchRejectsBeforeAnyTargetIo() throws Exception {
+        var f = jdkHelperFixture(true, true);
+        var l = f.loading();
+        record HelperCase(List<SegmentClassicLaunchProgram.File> program,
+                          List<SegmentClassicLinuxDeploymentV2.File> members,
+                          SegmentClassicLinuxDeploymentV2.Loading loading) { }
+        var cases = new java.util.ArrayList<HelperCase>();
+        cases.add(new HelperCase(List.of(f.program().get(0)), f.members(), l));
+        for (int kind = 0; kind < 3; kind++) {
+            var program = new java.util.ArrayList<>(f.program());
+            var helper = program.get(1);
+            program.set(1, new SegmentClassicLaunchProgram.File(helper.path(), kind == 0
+                    ? SegmentClassicLaunchProgram.NATIVE : helper.roles(), helper.length() + (kind == 1 ? 1 : 0),
+                    kind == 2 ? SegmentClassicHandoff.digest(new byte[]{7}) : helper.sha256()));
+            cases.add(new HelperCase(program, f.members(), l));
+        }
+        var wrongRole = new java.util.ArrayList<>(f.members());
+        var helper = wrongRole.get(1);
+        wrongRole.set(1, new SegmentClassicLinuxDeploymentV2.File(helper.path(),
+                SegmentClassicLinuxDeployment.Role.LIBRARY, helper.length(), helper.sha256()));
+        cases.add(new HelperCase(f.program(), wrongRole, l));
+        var aliasOnly = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
+                l.aliases(), l.directories(), l.configuration(), l.policy(), l.elf(), l.contexts().subList(0, 2),
+                l.needed().subList(0, 8), List.of());
+        cases.add(new HelperCase(f.program(), f.members(), aliasOnly));
+        var missingD2 = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
+                l.aliases(), l.directories(), l.configuration(), l.policy(), l.elf().subList(0, 1),
+                l.contexts().subList(0, 1), l.needed().subList(0, 4), List.of());
+        cases.add(new HelperCase(f.program(), f.members().subList(0, 1), missingD2));
+        for (var input : cases) {
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Unmatched fixed helper declaration reached target I/O");
+            })) {
+                assertThrows(IOException.class, () -> owner.readLinuxJdkHelper(f.javaHome(), input.program(),
+                        input.members(), input.loading(), SegmentClassicLinuxElfTest.deadline()));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void jdkHelperSelectorRejectsAmbiguityNoncanonicalRawHomeAndFixedBoundsWithoutIo() throws Exception {
+        var f = jdkHelperFixture(true, true);
+        var duplicateProgram = new java.util.ArrayList<>(f.program());
+        duplicateProgram.add(f.program().get(1));
+        var duplicateD2 = new java.util.ArrayList<>(f.members());
+        duplicateD2.add(f.members().get(1));
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Pure helper selection reached target I/O");
+        })) {
+            for (String home : List.of(f.javaHome() + "/", f.javaHome() + "/.", f.javaHome() + "/../jdk",
+                    f.javaHome().replace("/jdk", "//jdk"), "relative", "/", "/" + "x".repeat(4090))) {
+                assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.selectLinuxJdkHelper(home, f.program(),
+                        f.members(), f.loading(), SegmentClassicLinuxElfTest.deadline()));
+            }
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.selectLinuxJdkHelper(f.javaHome(),
+                    duplicateProgram, f.members(), f.loading(), SegmentClassicLinuxElfTest.deadline()));
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.selectLinuxJdkHelper(f.javaHome(),
+                    f.program(), duplicateD2, f.loading(), SegmentClassicLinuxElfTest.deadline()));
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.selectLinuxJdkHelper(f.javaHome(),
+                    java.util.Collections.nCopies(4097, f.program().get(1)), f.members(), f.loading(),
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.selectLinuxJdkHelper(f.javaHome(),
+                    f.program(), java.util.Collections.nCopies(1025, f.members().get(1)), f.loading(),
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.selectLinuxJdkHelper(f.javaHome(),
+                    f.program(), f.members(), f.loading(), System.nanoTime()));
+        }
+    }
+
+    @Test
+    public void typedJdkHelperWithoutOriginalProviderSourceCannotReachTargetIo() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound typed helper read reached target I/O");
+        })) {
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxJdkHelper(SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
     @Test
     public void candidateContextSetKeepsEveryLogicalViewOriginalOrdinalAndRepeatedModuleRequest() throws Exception {
         var fixture = candidateFixture();

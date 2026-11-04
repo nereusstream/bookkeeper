@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## D2 固定 JDK helper 的原批准材料与 PT_INTERP 关联
+
+2026-11-05在父`01e86496e84dae85dbca47904788faf0deb39fdb`上，原trust owner增加`verifyLinuxJdkHelper(deadline)`，只从本owner原verifiedProgram raw javaHome/files与原D2取得声明，不读可变java.home/launchMechanism或查替代helper。固定原文形成`lib/jspawnhelper`位置，先匹配唯一program/member/context原索引：program成员须含JDK位，不机械要求NATIVE位；同路径D2成员必须是START_CHAIN，长度/SHA一致，context须精确匹配该file与执行logical name，不能以同physical的另一个alias替代。路径canonical语法、固定拼接4096字节及4096 program/1024 D2表上限先于目标I/O；program列表固定快照，重复匹配明确拒绝，不用findFirst掩盖冲突。
+
+复用既有fixedLinuxContextMembers的完整context/固定interpreter引用检查，以及原private路径—owned hash＋ELF2读取。helper按START_CHAIN执行角色检查entry/权限，实际NEEDED顺序及重复与原Elf metadata一致，每个原ordinal/candidates仍由原Loading引用关系保留。实际PT_INTERP存在时必须与原loading.interpreter字符串完全相等，才读取原固定loader；另一个字符串即使指向同物理成员也不补认。PT_INTERP缺失则返回null interpreter观察，保留可能非空的NEEDED，不推导没有用户态依赖。
+
+读取helper和适用interpreter后，分别复核两者完整path observation与owned内容identity；能拒绝helper在后续loader读取期间被同字节换inode，也能拒绝loader在helper末端复核期间被替换。没有反复全量hash或重演完整JDK树，不把这份前后关联描述成跨对象原子快照或持续不变保证。结果只有原reference索引、helper及可空interpreter观察；独立`readLinuxJdkHelper` seam只接成员列表/Loading数据，不构造完整Program或system部署，不产生Installed/ready/backend许可。原D2.physical只调整为包内可见，复用原canonical纯字符串语法，codec/role/schema不变。
+
+当前Trust86项（含8项新增真实文件/alias/owned ELF夹具）全部通过，0失败/错误/跳过，样式退出0；包括精确原索引/NEEDED序、无PT_INTERP但非空NEEDED、不匹配解释器在其内容open前拒绝、双向替换窗口、program↔D2路径/role/长度/SHA与exact context的pre-I/O拒绝、canonical/唯一/字节及表上限/期限，以及typed缺source拒绝。原关闭/字节覆盖复用该Trust相关集；未执行helper或重新运行未改的Output/其他矩阵。1436项源码输入与原snapshot/父Git blob无错配，三code与唯一测试及style快照一致，新规划会话只读核对未发现本范围阻塞缺陷。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-jdk-helper-evidence-01e86496`。终态RAT退出1/431，未批准路径及字节为父HEAD既有，无新增unknown；用户PDF扫描前排除且未读取。唯一确切raw scope经两次独立lsof及inode/mode/SHA/archive hardlink核验后清理两目录、四文件路径、379,804逻辑字节，归档保留，regular-file数据块回收0。原native属性/库SHA绑定和实际JNI ACL/readlink夹具只证明本机材料读取；既有七份静态来源不作vendor/bootstrap认证。
+
+本块不确认实际ProcessImpl已选择此helper或POSIX_SPAWN，不执行helper，也不证明其NEEDED候选和外部传递依赖已闭合。`requireLinuxDiagnosticsProcessSource()`继续明确Unsupported，不因材料观察成功解除；实际backend来源、传递加载、诊断执行/parser及qualification仍待后续。typed Linux/helper/vendor运行阳性NOT_EXECUTED，本块models/性能未执行；完整16步目标active，parent/child/Main/G1/full-bytes/full16/production Gate保持OPEN，默认OFF/SYSTEM/PARK及advanced disabled不变。
+
 ## D2 loader 诊断资源机制：PARTIAL，生产启动仍明确拒绝
 
 2026-11-05在父`2c73c5aa18698bcd71e6910e683e82f537588fca`上，为原trust owner增加一次性诊断槽位及`verifyLinuxLoaderDiagnostics(deadline)`生命周期接线，直接复用原`SegmentClassicSystemdQuery.Output`。**当前生产入口在start claim、ProcessBuilder构造及initialize之前，由`requireLinuxDiagnosticsProcessSource()`明确Unsupported；原JDK backend及helper外部依赖准入尚未实现。本块不交付可执行的生产诊断采集。**没有增加caller许可、可变property/FORK回退、fixture登记接口、schema/role或TCB范围。
