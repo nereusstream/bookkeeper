@@ -882,6 +882,20 @@ relative＋CWD UNAVAILABLE为已知origin不可用，UNOBSERVED不给出prefix�
 
 实际realname/CWD/main-origin与原owned ELF关联、namespace/main/loader/l_loader/BFS/祖先/environment、完整递归helper/backend执行和批准Linux/vendor/Unix资格仍OPEN/NOT_EXECUTED。diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，完整目标active，默认OFF/SYSTEM/PARK与advanced disabled不变。
 
+## 有效 library-path 列表的非 secure 数据展开
+
+2026-11-05在父`387cde4cf023f973dc263af9ab8c83630203a3cc`上，原DynamicPath增加包内expandLibraryPath，输入仅为给定非secure条件下的effective library-path Value、初始化对象origin及LIB/PLATFORM Value、原deadline；LibraryPath结果保留原effective Value与完整/未观察状态、不可变有序Directory列表。UNAVAILABLE明确表示已知llp==NULL，AVAILABLE空表示已知整串空，两者均完整空目录且原输入可区分；UNOBSERVED没有usable prefix，Java null拒绝。所有可用raw/replacement先检查strict UTF8/无NUL/4096界，不从环境/CLI/secure或当前Java进程猜来源。
+
+依据[glibc2.39 _dl_init_paths/fillin_rpath](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)，非空有效llp先按colon或semicolon分段，首/中/尾原空段是CWD，整串空不是CWD；引号/反斜线不escape分隔符。非空段才进行原Tokens单次展开，替换值中的colon/semicolon/$不重分段或递归；已知不可用/展开空跳过，不变CWD，实际用到UNOBSERVED则整份列表不发布此前prefix，沿原first-blocked规则。初始化origin须来自base main、缺main时的rtld stand-in，参数有值不证明这一关系，也不能替换成后来的NEEDED requester或physical parent。
+
+只窄提取private parse loop的两个固定调用：原DT入口仅colon，新library-path入口colon＋semicolon；无公开separator/策略/额外budget。原DynamicPath presence/empty与仅colon语义保持，absent原本只能携空raw由原构造器保证。目录末slash整理、根、相对/内部dot/slash/Unicode、精确dirname首次去重及最终含slash4096界共用原机制，CWD/相对目录仅是数据，不补实际cwd。SearchStages/owner范围、文件批准与整体资格门没有变化。
+
+新library6项全部通过；最终DynamicPath14（新6＋原DT8）及Tokens7共21项全部通过，0失败/错误/跳过，包含同新6而非再累计。覆盖NULL/whole-empty/未观察、两分隔符及CWD次序、quote/backslash、先split后替换、blocked不变CWD/无prefix、原目录/字节/slash/deadline与旧DT semicolon literal；一个Origin小组合保留初始化原文中的两种分隔符。Spotless/Checkstyle退出0；没有真实环境探针或owner/JNI/Cache/diagnostics/LoadedNames整套重跑，原生库只是runner配置属性、不计JNI执行，无models/性能。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-library-path-evidence-387cde4c`分别保留最小/最终两个阶段原source/class/日志/XML及style；各1448输入按原snapshot/父Git blob绑定无错配，最终两code与两测试/style一致。同版dl-load.c原静态参考70348字节、SHA-256 `26345f234ef918c866e40bb86524bdfd4c3beac487af81b3f51668379e671ae0`单列保留，不计批准vendor运行。两个确切raw scope经两次独立lsof/identity/SHA/archive hardlink核验清理4目录、9文件路径、778702逻辑字节，归档保留、regular-file数据块回收0，共享target/用户文件不清理。
+
+实际parent环境、nonsecure、effective CLI/env选择、初始化main/rtld身份与origin来源仍OPEN，不能从给定Value或纯结果补认。完整namespace/BFS/祖先与递归helper/backend、批准Linux/vendor/Unix及parent/child/Main/G1/full-bytes/full16/生产Gate仍未验收；diagnostics unconditional Unsupported与完整目标active保持，默认OFF/SYSTEM/PARK和advanced disabled不变。
+
 ## 已给定文件身份的已加载对象复用
 
 2026-11-05在父`fcd63e2a1c6f1b1ebf2426e272e9e801cc4ebe1b`上，原LoadedNames新增FileId(device,inode)、FileObject(原ObjectData,fileId)及纯lookupFile。输入是明确原序的base-namespace对象/已给定file-id、本次已给定opened id、原map-from-fd request name和deadline；只描述普通非OPENEXEC分支的局部规则，无fd参数/操作或owner入口，不证明前面名称查找已经未命中。query继续非空strictUTF8/无NUL/≤4096，slash/$原文保留；没有mode策略、跨namespace镜像、NOLOAD或文件映射器。

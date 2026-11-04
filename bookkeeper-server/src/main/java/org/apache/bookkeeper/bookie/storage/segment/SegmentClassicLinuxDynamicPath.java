@@ -25,7 +25,7 @@ import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeploymen
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxTokens.State;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxTokens.Value;
 
-/** One dynamic tag's bounded directory data; no filesystem observation or loader selection is implied. */
+/** Bounded tag or effective library-path data; no filesystem observation or loader selection is implied. */
 final class SegmentClassicLinuxDynamicPath {
     private static final int MAX_BYTES = 4096;
 
@@ -54,6 +54,20 @@ final class SegmentClassicLinuxDynamicPath {
         }
     }
 
+    /** Given nonsecure effective llp: unavailable means known NULL; empty and unobserved remain distinct inputs. */
+    record LibraryPath(Value effective, State state, List<Directory> directories) {
+        LibraryPath {
+            Objects.requireNonNull(effective, "effective");
+            Objects.requireNonNull(state, "state");
+            directories = List.copyOf(directories);
+            if (state == State.UNAVAILABLE || state == State.UNOBSERVED && !directories.isEmpty()) {
+                throw new IllegalArgumentException("A library path is complete or unobserved without a prefix");
+            }
+        }
+    }
+
+    private record Parsed(State state, List<Directory> directories) { }
+
     private SegmentClassicLinuxDynamicPath() { }
 
     static Expansion expand(DynamicPath declaration, Value origin, Value lib, Value platform, long deadline)
@@ -62,17 +76,39 @@ final class SegmentClassicLinuxDynamicPath {
         if (declaration == null) {
             throw new IOException("An explicit dynamic path declaration is required");
         }
-        // Validate all explicit replacement data even when the declaration contains no nonempty component.
+        Parsed parsed = parse(declaration.value(), false, origin, lib, platform, deadline);
+        requireTime(deadline);
+        return new Expansion(declaration, parsed.state(), parsed.directories());
+    }
+
+    /** Initialization origin belongs to the main object or rtld stand-in, never an arbitrary later requester. */
+    static LibraryPath expandLibraryPath(Value effective, Value initializationOrigin, Value lib, Value platform,
+                                         long deadline) throws IOException {
+        requireTime(deadline);
+        if (effective == null) {
+            throw new IOException("Explicit nonsecure effective library-path data is required");
+        }
+        Parsed parsed = parse(effective.state() == State.AVAILABLE ? effective.text() : "", true,
+                initializationOrigin, lib, platform, deadline);
+        State state = effective.state() == State.UNOBSERVED ? State.UNOBSERVED : parsed.state();
+        requireTime(deadline);
+        return new LibraryPath(effective, state, parsed.directories());
+    }
+
+    private static Parsed parse(String raw, boolean libraryPath, Value origin, Value lib, Value platform,
+                                long deadline) throws IOException {
+        SegmentClassicLinuxTokens.utf8Length(raw, deadline);
+        // Validate all explicit replacement data even when the list contains no nonempty component.
         SegmentClassicLinuxTokens.expand("", origin, lib, platform, deadline);
         var directories = new LinkedHashSet<Directory>();
-        String raw = declaration.value();
-        if (declaration.present() && !raw.isEmpty()) {
+        if (!raw.isEmpty()) {
             int start = 0;
             while (true) {
                 requireTime(deadline);
-                int end = raw.indexOf(':', start);
-                if (end < 0) {
-                    end = raw.length();
+                int end = start;
+                while (end < raw.length() && raw.charAt(end) != ':' && (!libraryPath || raw.charAt(end) != ';')) {
+                    requireTime(deadline);
+                    end++;
                 }
                 if (end == start) {
                     directories.add(new Directory(Kind.CWD, ""));
@@ -81,7 +117,7 @@ final class SegmentClassicLinuxDynamicPath {
                             platform, deadline);
                     if (expanded.state() == State.UNOBSERVED) {
                         requireTime(deadline);
-                        return new Expansion(declaration, State.UNOBSERVED, List.of());
+                        return new Parsed(State.UNOBSERVED, List.of());
                     }
                     if (expanded.state() == State.AVAILABLE && !expanded.text().isEmpty()) {
                         directories.add(new Directory(Kind.DIRECTORY, dirname(expanded.text(), deadline)));
@@ -93,9 +129,8 @@ final class SegmentClassicLinuxDynamicPath {
                 start = end + 1;
             }
         }
-        var result = new Expansion(declaration, State.AVAILABLE, List.copyOf(directories));
         requireTime(deadline);
-        return result;
+        return new Parsed(State.AVAILABLE, List.copyOf(directories));
     }
 
     /** Callers supply nonempty strict UTF8 bounded by the token helper or an original D2 Directory declaration. */

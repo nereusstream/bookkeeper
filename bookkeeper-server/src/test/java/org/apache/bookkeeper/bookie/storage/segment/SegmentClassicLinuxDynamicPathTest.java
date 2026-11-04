@@ -31,7 +31,7 @@ import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxTokens.St
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxTokens.Value;
 import org.junit.Test;
 
-/** Pure one-tag data semantics, never process CWD observation, search selection or actual loader execution. */
+/** Pure list data semantics, never environment/CWD observation, search selection or actual loader execution. */
 public class SegmentClassicLinuxDynamicPathTest {
     private static long deadline() {
         return SegmentClassicLinuxElfTest.deadline();
@@ -48,6 +48,108 @@ public class SegmentClassicLinuxDynamicPathTest {
 
     private static Directory cwd() {
         return new Directory(Kind.CWD, "");
+    }
+
+    private static SegmentClassicLinuxDynamicPath.LibraryPath library(String raw) throws IOException {
+        return SegmentClassicLinuxDynamicPath.expandLibraryPath(Value.available(raw), Value.available("/main"),
+                Value.available("lib64"), Value.available("x86_64"), deadline());
+    }
+
+    @Test
+    public void libraryKnownNullWholeEmptyAndUnobservedKeepDistinctInputsWithoutInventingCwd() throws Exception {
+        var knownNull = Value.unavailable();
+        var empty = Value.available("");
+        var unknown = Value.unobserved();
+        for (Value effective : List.of(knownNull, empty, unknown)) {
+            var result = SegmentClassicLinuxDynamicPath.expandLibraryPath(effective, Value.unobserved(),
+                    Value.unavailable(), Value.unobserved(), deadline());
+            assertSame(effective, result.effective());
+            assertEquals(effective == unknown ? State.UNOBSERVED : State.AVAILABLE, result.state());
+            assertEquals(List.of(), result.directories());
+        }
+        assertNotEquals(knownNull, empty);
+        assertNotEquals(empty, unknown);
+        assertThrows(IOException.class, () -> SegmentClassicLinuxDynamicPath.expandLibraryPath(null,
+                Value.unobserved(), Value.unobserved(), Value.unobserved(), deadline()));
+    }
+
+    @Test
+    public void libraryBothSeparatorsKeepFirstEmptyPositionAndQuoteOrBackslashDoesNotEscapeThem() throws Exception {
+        assertEquals(List.of(cwd(), directory("/a/"), directory("/b/")), library(":/a;;/b:").directories());
+        assertEquals(List.of(directory("/a/"), cwd(), directory("/b/")), library("/a:;/b;").directories());
+        assertEquals(List.of(directory("/a/"), directory("/b/"), cwd()), library("/a;/b;;").directories());
+        assertEquals(List.of(cwd()), library(";:").directories());
+        assertEquals(List.of(directory("\"a/"), directory("b\"/"), directory("c\\/"), directory("d/")),
+                library("\"a;b\":c\\;d").directories());
+    }
+
+    @Test
+    public void librarySplitsBeforeSubstitutionAndUsesTheGivenInitializationOriginWithoutResplittingIt()
+            throws Exception {
+        var origin = SegmentClassicLinuxOrigin.compute("/logical:part;semi/root/lib.so", Value.unobserved(),
+                deadline());
+        var effective = Value.available("$ORIGIN;/tail");
+        var result = SegmentClassicLinuxDynamicPath.expandLibraryPath(effective, Value.available(origin.text()),
+                Value.unobserved(), Value.unobserved(), deadline());
+        assertSame(effective, result.effective());
+        assertEquals(List.of(directory("/logical:part;semi/root/"), directory("/tail/")), result.directories());
+        assertEquals(List.of(directory("$LIB:/a;雪/"), directory("/actual/")),
+                SegmentClassicLinuxDynamicPath.expandLibraryPath(Value.available("$ORIGIN:/actual"),
+                        Value.available("$LIB:/a;雪"), Value.available("lib64"), Value.unobserved(), deadline())
+                        .directories());
+    }
+
+    @Test
+    public void libraryNonemptyBlockedOrExpandedEmptyComponentsNeverBecomeCwdOrPublishAnUnknownPrefix()
+            throws Exception {
+        for (Value origin : List.of(Value.unavailable(), Value.available(""))) {
+            var skipped = SegmentClassicLinuxDynamicPath.expandLibraryPath(Value.available("/valid;$ORIGIN;/next"),
+                    origin, Value.unobserved(), Value.unobserved(), deadline());
+            assertEquals(State.AVAILABLE, skipped.state());
+            assertEquals(List.of(directory("/valid/"), directory("/next/")), skipped.directories());
+        }
+        var unknown = SegmentClassicLinuxDynamicPath.expandLibraryPath(Value.available("/valid;$PLATFORM;$ORIGIN"),
+                Value.unavailable(), Value.unobserved(), Value.unobserved(), deadline());
+        assertEquals(State.UNOBSERVED, unknown.state());
+        assertEquals(List.of(), unknown.directories());
+        var firstBlocked = SegmentClassicLinuxDynamicPath.expandLibraryPath(Value.available("$ORIGIN/$PLATFORM;/last"),
+                Value.unavailable(), Value.unobserved(), Value.unobserved(), deadline());
+        assertEquals(State.AVAILABLE, firstBlocked.state());
+        assertEquals(List.of(directory("/last/")), firstBlocked.directories());
+    }
+
+    @Test
+    public void libraryDirectoryRulesStayExactAndTheOriginalDtEntryStillTreatsSemicolonLiterally() throws Exception {
+        var result = library("/a//;/a/;/;..;雪;雪/");
+        assertEquals(List.of(directory("/a/"), directory("/"), directory("../"), directory("雪/")),
+                result.directories());
+        assertThrows(UnsupportedOperationException.class, () -> result.directories().add(cwd()));
+        assertEquals(List.of(directory("/a;/b/")), expand("/a;/b").directories());
+        assertEquals(List.of(directory("lib64;/tail/")), expand("$LIB;/tail").directories());
+    }
+
+    @Test
+    public void libraryValidatesRawReplacementAddedSlashAndDeadlineEvenForNullEmptyOrUnknownEffectiveData()
+            throws Exception {
+        String exact = "/" + "a".repeat(4094) + '/';
+        assertEquals(List.of(directory(exact)), library(exact).directories());
+        assertEquals(List.of(directory("a".repeat(4095) + '/')), library("a".repeat(4095)).directories());
+        assertThrows(IOException.class, () -> library("a".repeat(4096)));
+        for (String bad : List.of("a" + (char) 0, String.valueOf((char) 0xd800), "雪".repeat(1366))) {
+            assertThrows(IOException.class, () -> library(bad));
+            for (Value effective : List.of(Value.unavailable(), Value.available(""), Value.unobserved())) {
+                assertThrows(IOException.class, () -> SegmentClassicLinuxDynamicPath.expandLibraryPath(effective,
+                        Value.unobserved(), Value.available(bad), Value.unobserved(), deadline()));
+            }
+        }
+        assertThrows(IOException.class, () -> SegmentClassicLinuxDynamicPath.expandLibraryPath(
+                Value.available("$ORIGIN"), Value.available("a".repeat(4096)), Value.unobserved(), Value.unobserved(),
+                deadline()));
+        for (Value effective : List.of(Value.unavailable(), Value.available(""), Value.unobserved(),
+                Value.available("/literal"), Value.available("$ORIGIN"))) {
+            assertThrows(IOException.class, () -> SegmentClassicLinuxDynamicPath.expandLibraryPath(effective,
+                    Value.unobserved(), Value.unavailable(), Value.unobserved(), System.nanoTime()));
+        }
     }
 
     @Test
