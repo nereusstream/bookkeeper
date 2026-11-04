@@ -170,6 +170,27 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Original directory index and logical spelling only, never a resolved-path or startup permit. */
+    record LinuxSearchDirectory(int directory, String logical, boolean present) {
+        LinuxSearchDirectory {
+            Objects.requireNonNull(logical, "logical");
+            if (directory < 0 || directory >= 64) {
+                throw new IllegalArgumentException("Directory index is outside the original bounded table");
+            }
+        }
+    }
+
+    record LinuxSearchDirectoryObservation(int directory, String logical, boolean present, LinuxPathObservation path,
+                                            List<String> members) {
+        LinuxSearchDirectoryObservation {
+            members = List.copyOf(members);
+        }
+
+        LinuxDirectoryObservation legacy() {
+            return new LinuxDirectoryObservation(path, members);
+        }
+    }
+
     record LinuxConfigurationFile(String logical, int file, Identity identity,
                                   SegmentClassicLinuxConfiguration.Image content) { }
 
@@ -215,15 +236,16 @@ final class SegmentClassicLaunchTrust {
     record LinuxLoaderConfigurationObservation(int rule, ConfigurationKind kind, LinuxPathObservation path,
             SegmentClassicHandoff.Digest sha256, LinuxFileObservation material, LinuxConfigurationGraph graph) { }
 
-    private static final class LoadingDirectoryBudget {
-        int entries;
-        int nameBytes;
+    static final class LoadingDirectoryBudget {
+        private int entries;
+        private int nameBytes;
 
         void retain(String name) throws IOException {
             int bytes = name.getBytes(StandardCharsets.UTF_8).length;
-            if (++entries > MAX_LOADING_DIRECTORY_ENTRIES || bytes > MAX_LOADING_DIRECTORY_NAME_BYTES - nameBytes) {
+            if (entries >= MAX_LOADING_DIRECTORY_ENTRIES || bytes > MAX_LOADING_DIRECTORY_NAME_BYTES - nameBytes) {
                 throw new IOException("Loading directory observations exceed their fixed total name capacity");
             }
+            entries++;
             nameBytes += bytes;
         }
     }
@@ -849,18 +871,22 @@ final class SegmentClassicLaunchTrust {
 
     /** Original iterator/open/first-close ownership; unrelated directory names never become approved files. */
     synchronized List<LinuxDirectoryObservation> verifyLinuxLoadingDirectories(
-            SegmentClassicLinuxDeployment.Loading loading, long deadlineNanos) throws IOException {
+            SegmentClassicLinuxDeployment.Loading loading, long deadline) throws IOException {
         requireReady();
         initializingThread = Thread.currentThread();
         try {
-            requireBoundDeadline(deadlineNanos);
-            var first = observeLinuxLoadingDirectories(loading, deadlineNanos);
-            if (!first.equals(observeLinuxLoadingDirectories(loading, deadlineNanos))) {
-                throw new IOException("Original Linux loading directory members changed between observations");
+            requireBoundDeadline(deadline);
+            var directories = new ArrayList<LinuxSearchDirectory>();
+            for (int i = 0; i < loading.directories().size(); i++) {
+                var directory = loading.directories().get(i);
+                directories.add(new LinuxSearchDirectory(i, directory.path().toString(), directory.present()));
             }
-            files.requireHealthy();
-            requireTime(deadlineNanos);
-            return first;
+            Map<Path, String> aliases = new HashMap<>();
+            for (var alias : loading.aliases()) {
+                aliases.put(alias.link(), alias.target());
+            }
+            return searchDirectories(directories, aliases, LinuxPathKind.DIRECTORY, deadline).stream()
+                    .map(LinuxSearchDirectoryObservation::legacy).toList();
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
             throw failure;
@@ -869,33 +895,143 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    private List<LinuxDirectoryObservation> observeLinuxLoadingDirectories(
-            SegmentClassicLinuxDeployment.Loading loading, long deadline) throws IOException {
-        Map<Path, String> aliases = new HashMap<>();
-        for (var alias : loading.aliases()) {
-            aliases.put(alias.link(), alias.target());
+    /** Whole original D2 table only; no caller directories, aliases, budget or prior observations. */
+    synchronized List<LinuxSearchDirectoryObservation> verifyLinuxSearchDirectories(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            var directories = new ArrayList<LinuxSearchDirectory>();
+            for (int i = 0; i < deployment.loading().directories().size(); i++) {
+                var directory = deployment.loading().directories().get(i);
+                directories.add(new LinuxSearchDirectory(i, directory.path(), directory.present()));
+            }
+            return searchDirectories(directories, originalLinuxAliases(deployment, deadline), LinuxPathKind.LOOKUP,
+                    deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
         }
-        var budget = new LoadingDirectoryBudget();
-        Map<Path, List<String>> observed = new HashMap<>();
-        var result = new ArrayList<LinuxDirectoryObservation>();
-        for (var directory : loading.directories()) {
-            var path = observeLinuxPath(LinuxPathKind.DIRECTORY, directory.path(), aliases,
-                    directory.present(), deadline);
+    }
+
+    /** Data-only A/B observations; fixture declarations cannot upgrade the typed owner's original source. */
+    synchronized List<LinuxSearchDirectoryObservation> readLinuxSearchDirectories(
+            List<LinuxSearchDirectory> directories, Map<Path, String> aliases, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return searchDirectories(directories, aliases, LinuxPathKind.LOOKUP, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Shared single-pass data I/O; fixed budget charges cannot confer a typed source or startup qualification. */
+    synchronized List<LinuxSearchDirectoryObservation> readLinuxDirectoryPass(List<LinuxSearchDirectory> directories,
+            Map<Path, String> aliases, LoadingDirectoryBudget budget, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            var fixed = fixedSearchDirectories(directories, deadline);
+            var result = observeLinuxSearchDirectories(fixed, fixedLoadingAliases(aliases, deadline),
+                    LinuxPathKind.LOOKUP, budget, deadline);
+            files.requireHealthy();
+            requireTime(deadline);
+            return result;
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private List<LinuxSearchDirectory> fixedSearchDirectories(List<LinuxSearchDirectory> declarations, long deadline)
+            throws IOException {
+        var directories = List.copyOf(declarations);
+        if (directories.size() > 64) {
+            throw new IOException("Excessive original search directory declarations");
+        }
+        Set<Integer> indices = new HashSet<>();
+        for (var directory : directories) {
+            requireTime(deadline);
+            if (!directory.logical().startsWith("/") || !indices.add(directory.directory())) {
+                throw new IOException("Search directories require absolute logical paths and unique original indices");
+            }
+            requireUtf8LoadingText(directory.logical(), deadline);
+        }
+        return directories;
+    }
+
+    private List<LinuxSearchDirectoryObservation> searchDirectories(List<LinuxSearchDirectory> declarations,
+            Map<Path, String> aliasDeclarations, LinuxPathKind kind, long deadline) throws IOException {
+        var directories = fixedSearchDirectories(declarations, deadline);
+        var aliases = fixedLoadingAliases(aliasDeclarations, deadline);
+        var first = observeLinuxSearchDirectories(directories, aliases, kind, new LoadingDirectoryBudget(), deadline);
+        var second = observeLinuxSearchDirectories(directories, aliases, kind, new LoadingDirectoryBudget(), deadline);
+        if (!first.equals(second)) {
+            throw new IOException("Original Linux loading directory members changed between observations");
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+        return first;
+    }
+
+    private List<LinuxSearchDirectoryObservation> observeLinuxSearchDirectories(List<LinuxSearchDirectory> directories,
+            Map<Path, String> aliases, LinuxPathKind kind, LoadingDirectoryBudget budget, long deadline)
+            throws IOException {
+        Map<Path, LinuxDirectoryObservation> observed = new HashMap<>();
+        var result = new ArrayList<LinuxSearchDirectoryObservation>();
+        for (var directory : directories) {
+            Path entry = loadingNativePath(directory.logical(), deadline);
+            var path = searchDirectoryPath(directory, entry, aliases, kind, deadline);
             List<String> names = List.of();
             if (path.identity() != null) {
-                names = observed.get(path.resolved());
-                if (names == null) {
+                var cached = observed.get(path.resolved());
+                if (cached == null) {
                     names = enumerateLinuxDirectory(path.resolved(), budget, deadline);
-                    observed.put(path.resolved(), names);
+                    observed.put(path.resolved(), new LinuxDirectoryObservation(path, names));
+                } else {
+                    if (!cached.path().identity().equals(path.identity())) {
+                        throw new IOException("Previously enumerated physical search directory changed");
+                    }
+                    names = cached.members();
                 }
             }
-            if (!path.equals(observeLinuxPath(LinuxPathKind.DIRECTORY, directory.path(), aliases,
-                    directory.present(), deadline))) {
+            if (!path.equals(searchDirectoryPath(directory, entry, aliases, kind, deadline))) {
                 throw new IOException("Original loading directory or parent changed during enumeration");
             }
-            result.add(new LinuxDirectoryObservation(path, names));
+            result.add(new LinuxSearchDirectoryObservation(directory.directory(), directory.logical(),
+                    directory.present(), path, names));
         }
+        requireTime(deadline);
         return List.copyOf(result);
+    }
+
+    private LinuxPathObservation searchDirectoryPath(LinuxSearchDirectory directory, Path entry,
+            Map<Path, String> aliases, LinuxPathKind kind, long deadline) throws IOException {
+        var path = observeLinuxPath(kind, entry, aliases, directory.present(), deadline);
+        if (path.identity() == null ? directory.present() : !directory.present() || !path.identity().directory()
+                || (path.identity().mode() & 022) != 0) {
+            throw new IOException("Search directory differs from its declared presence, type or protection");
+        }
+        return path;
+    }
+
+    private Path loadingNativePath(String logical, long deadline) throws IOException {
+        SegmentClassicLinuxGlob.requireLogicalText(logical);
+        requireUtf8LoadingText(logical, deadline);
+        // Preserve a raw trailing slash even when the approved Path provider drops it while constructing Path.
+        Path path = utf8LoadingPath(logical.endsWith("/") && !logical.equals("/") ? logical + "." : logical);
+        requireLoadingPathBytes(path, deadline);
+        return path;
     }
 
     private List<String> enumerateLinuxDirectory(Path directory, LoadingDirectoryBudget budget, long deadline)
@@ -906,6 +1042,7 @@ final class SegmentClassicLaunchTrust {
         Throwable failure = null;
         try {
             requireTime(deadline);
+            requireLoadingPathBytes(directory, deadline);
             read.openStarted = true;
             DirectoryStream<Path> stream = Files.newDirectoryStream(directory);
             read.resource = stream;
@@ -1089,6 +1226,9 @@ final class SegmentClassicLaunchTrust {
             current = candidate;
             parent = identity;
         }
+        if (lookupKind(kind)) {
+            return linuxLoadingLeaf(kind, entry, current, parent, present, digest, deadline);
+        }
         throw new IOException("Linux loading entry must name an explicit non-root path");
     }
 
@@ -1255,7 +1395,8 @@ final class SegmentClassicLaunchTrust {
 
         private void readFile(String logical, int expected, int depth) throws IOException {
             requireTime(deadline);
-            var path = observeLinuxPath(LinuxPathKind.CONFIGURATION, nativePath(logical), aliases, true, deadline);
+            var path = observeLinuxPath(LinuxPathKind.CONFIGURATION, loadingNativePath(logical, deadline), aliases,
+                    true, deadline);
             remember(logical, path, true);
             var file = configuration.get(path.resolved());
             if (file == null || expected >= 0 && expected != file.file()) {
@@ -1396,20 +1537,12 @@ final class SegmentClassicLaunchTrust {
             }
         }
 
-        private Path nativePath(String logical) throws IOException {
-            SegmentClassicLinuxGlob.requireLogicalText(logical);
-            requireUtf8LoadingText(logical, deadline);
-            // Preserve a raw trailing slash even when the approved Path provider drops it while constructing Path.
-            Path path = utf8LoadingPath(logical.endsWith("/") && !logical.equals("/") ? logical + "." : logical);
-            requireLoadingPathBytes(path, deadline);
-            return path;
-        }
-
         private LoadingLookup lookup(String logical, boolean literal) throws IOException {
             LinuxPathKind kind = literal ? LinuxPathKind.LITERAL : LinuxPathKind.LOOKUP;
             LoadingLookup result;
             try {
-                result = new LoadingLookup(observeLinuxPath(kind, nativePath(logical), aliases, false, deadline), true);
+                result = new LoadingLookup(observeLinuxPath(kind, loadingNativePath(logical, deadline), aliases,
+                        false, deadline), true);
             } catch (LookupNotDirectory notDirectory) {
                 result = new LoadingLookup(notDirectory.observed, false);
             }
@@ -1557,6 +1690,15 @@ final class SegmentClassicLaunchTrust {
         return path;
     }
 
+    private Map<Path, String> originalLinuxAliases(SegmentClassicLinuxDeploymentV2 deployment, long deadline)
+            throws IOException {
+        Map<Path, String> declarations = new HashMap<>();
+        for (var alias : deployment.loading().aliases()) {
+            declarations.put(linuxPhysicalPath(alias.link(), deadline), alias.target());
+        }
+        return fixedLoadingAliases(declarations, deadline);
+    }
+
     /** Only an original configuration rule index; no caller material, graph, kind or source permit. */
     synchronized LinuxLoaderConfigurationObservation verifyLinuxLoaderConfiguration(int ruleIndex, long deadline)
             throws IOException {
@@ -1565,11 +1707,7 @@ final class SegmentClassicLaunchTrust {
         try {
             var deployment = originalLinuxDeployment(deadline);
             var rule = selectLinuxConfiguration(deployment, ruleIndex);
-            Map<Path, String> declarations = new HashMap<>();
-            for (var alias : deployment.loading().aliases()) {
-                declarations.put(linuxPhysicalPath(alias.link(), deadline), alias.target());
-            }
-            var aliases = fixedLoadingAliases(declarations, deadline);
+            var aliases = originalLinuxAliases(deployment, deadline);
             Path path = linuxPhysicalPath(rule.path(), deadline);
             LinuxLoaderConfigurationObservation result;
             if (rule.kind() == ConfigurationKind.LDCONFIG) {

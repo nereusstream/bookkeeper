@@ -45,12 +45,15 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LinuxSearchDirectory;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LoadingDirectoryBudget;
 import org.apache.commons.lang3.SystemUtils;
 import org.junit.Before;
 import org.junit.Rule;
@@ -125,6 +128,239 @@ public class SegmentClassicLaunchTrustTest {
                 directories.stream().sorted(Comparator.comparing(d -> d.path().toString())).toList(),
                 configuration.stream().sorted(Comparator.comparing(c -> c.path().toString())).toList(),
                 List.of(), List.of());
+    }
+
+    @Test
+    public void searchDirectoriesKeepRawLogicalIndicesAliasViewsAndExplicitAbsence() throws Exception {
+        Path physical = Files.createDirectory(root.resolve("physical"));
+        Files.createDirectory(physical.resolve("nested"));
+        write(physical.resolve("unrelated.txt"), new byte[]{7});
+        Files.createSymbolicLink(physical.resolve("dangling"), Path.of("not-present"));
+        Path alias = Files.createSymbolicLink(root.resolve("view"), Path.of("physical"));
+        Path empty = Files.createDirectory(root.resolve("empty"));
+        String logical = alias + "/nested/../";
+        var directories = List.of(new LinuxSearchDirectory(3, logical, true),
+                new LinuxSearchDirectory(9, physical + "/.", true),
+                new LinuxSearchDirectory(11, root + "/absent/", false),
+                new LinuxSearchDirectory(15, empty.toString(), true));
+        var owner = owner();
+        owner.initialize();
+        var physicalOpens = new AtomicInteger();
+        try (var calls = mockStatic(Files.class, invocation -> {
+            if (invocation.getMethod().getName().equals("newDirectoryStream")
+                    && physical.equals(invocation.getArgument(0))) {
+                physicalOpens.incrementAndGet();
+            }
+            return invocation.callRealMethod();
+        })) {
+            var result = owner.readLinuxSearchDirectories(directories, Map.of(alias, "physical"),
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(List.of(3, 9, 11, 15), result.stream().map(d -> d.directory()).toList());
+            assertEquals(logical, result.get(0).logical());
+            assertEquals(physical, result.get(0).path().resolved());
+            assertEquals(List.of("dangling", "nested", "unrelated.txt"), result.get(0).members());
+            assertEquals(result.get(0).members(), result.get(1).members());
+            assertEquals(2, physicalOpens.get());
+            assertFalse(result.get(2).present());
+            assertEquals(root.resolve("absent"), result.get(2).path().absentAt());
+            assertTrue(result.get(2).members().isEmpty());
+            assertTrue(result.get(3).present());
+            assertTrue(result.get(3).path().identity().directory());
+            assertTrue(result.get(3).members().isEmpty());
+            assertThrows(UnsupportedOperationException.class, () -> result.get(0).members().add("new"));
+            assertThrows(IOException.class, owner::installed);
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxSearchDirectories(SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void searchDirectoryFileDotDotAndTrailingSlashStillRequireRealDirectories() throws Exception {
+        write(root.resolve("ordinary"), new byte[]{7});
+        Files.createDirectory(root.resolve("physical"));
+        for (String logical : List.of(root + "/ordinary/../physical", root + "/ordinary/")) {
+            var owner = owner();
+            owner.initialize();
+            try {
+                assertThrows(IOException.class, () -> owner.readLinuxSearchDirectories(
+                        List.of(new LinuxSearchDirectory(3, logical, true)), Map.of(),
+                        SegmentClassicLinuxElfTest.deadline()));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void searchDirectorySecondPassChangeRejectsTheWholeObservation() throws Exception {
+        Path directory = Files.createDirectory(root.resolve("physical"));
+        write(directory.resolve("original.so"), new byte[]{7});
+        var owner = owner();
+        owner.initialize();
+        var opens = new AtomicInteger();
+        try (var calls = mockStatic(Files.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("newDirectoryStream")
+                    && directory.equals(invocation.getArgument(0)) && opens.incrementAndGet() == 2) {
+                write(directory.resolve("later.so"), new byte[]{8});
+            }
+            return actual;
+        })) {
+            assertThrows(IOException.class, () -> owner.readLinuxSearchDirectories(
+                    List.of(new LinuxSearchDirectory(3, directory.toString(), true)), Map.of(),
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertEquals(2, opens.get());
+            assertThrows(IOException.class, owner::parsed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void searchDirectoryAliasCannotReuseOldNamesWithANewPhysicalIdentity() throws Exception {
+        Path physical = Files.createDirectory(root.resolve("physical"));
+        write(physical.resolve("original.so"), new byte[]{7});
+        Path alias = Files.createSymbolicLink(root.resolve("view"), Path.of("physical"));
+        var owner = owner();
+        owner.initialize();
+        var changed = new AtomicInteger();
+        var opens = new AtomicInteger();
+        try (var calls = mockStatic(Files.class, invocation -> {
+            if (invocation.getMethod().getName().equals("readAttributes")
+                    && alias.equals(invocation.getArgument(0)) && changed.compareAndSet(0, 1)) {
+                Files.move(physical, root.resolve("original-physical"));
+                Files.createDirectory(physical);
+                write(physical.resolve("replacement.so"), new byte[]{8});
+            }
+            if (invocation.getMethod().getName().equals("newDirectoryStream")
+                    && physical.equals(invocation.getArgument(0))) {
+                opens.incrementAndGet();
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxSearchDirectories(List.of(
+                    new LinuxSearchDirectory(3, physical.toString(), true),
+                    new LinuxSearchDirectory(9, alias.toString(), true)), Map.of(alias, "physical"),
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("Previously enumerated physical search directory changed"));
+            assertEquals(1, opens.get());
+            assertEquals(1, changed.get());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void sharedDirectoryEntryAndByteBudgetsRejectAcrossRealDirectoriesAndCloseBothIterators() throws Exception {
+        Path first = Files.createDirectory(root.resolve("first"));
+        Path second = Files.createDirectory(root.resolve("second"));
+        write(first.resolve("a"), new byte[]{7});
+        write(second.resolve("b"), new byte[]{8});
+        var directories = List.of(new LinuxSearchDirectory(3, first.toString(), true),
+                new LinuxSearchDirectory(9, second.toString(), true));
+        for (int mode = 0; mode < 2; mode++) {
+            var budget = new LoadingDirectoryBudget();
+            if (mode == 0) {
+                for (int i = 0; i < 262143; i++) {
+                    budget.retain("x");
+                }
+            } else {
+                String charge = "x".repeat(4096);
+                for (int i = 0; i < 16383; i++) {
+                    budget.retain(charge);
+                }
+                budget.retain(charge.substring(0, 4095));
+            }
+            var owner = owner();
+            owner.initialize();
+            var opens = new AtomicInteger();
+            var closes = new AtomicInteger();
+            try (var calls = mockStatic(Files.class, invocation -> {
+                Object actual = invocation.callRealMethod();
+                if (invocation.getMethod().getName().equals("newDirectoryStream")) {
+                    opens.incrementAndGet();
+                    DirectoryStream<Path> stream = (DirectoryStream<Path>) actual;
+                    return new DirectoryStream<Path>() {
+                        @Override
+                        public java.util.Iterator<Path> iterator() {
+                            return stream.iterator();
+                        }
+
+                        @Override
+                        public void close() throws IOException {
+                            closes.incrementAndGet();
+                            stream.close();
+                        }
+                    };
+                }
+                return actual;
+            })) {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxDirectoryPass(
+                        directories, Map.of(), budget, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage().contains("fixed total name capacity"));
+                assertEquals(2, opens.get());
+                assertEquals(2, closes.get());
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void searchDirectoryRootObservationPreservesLegacyRootRefusalAndExplicitPresence() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try {
+            var result = owner.readLinuxSearchDirectories(List.of(new LinuxSearchDirectory(3, "/", true)), Map.of(),
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals("/", result.get(0).logical());
+            assertEquals(Path.of("/"), result.get(0).path().resolved());
+            assertTrue(result.get(0).path().identity().directory());
+            assertTrue(result.get(0).members().contains(root.getName(0).toString()));
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        var absent = owner();
+        absent.initialize();
+        try {
+            assertThrows(IOException.class, () -> absent.readLinuxSearchDirectories(
+                    List.of(new LinuxSearchDirectory(3, "/", false)), Map.of(),
+                    SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(absent.closeAndDrain().drained());
+        }
+        Path alias = Files.createSymbolicLink(root.resolve("root-view"), Path.of("/"));
+        var legacy = owner();
+        legacy.initialize();
+        try {
+            assertThrows(IOException.class, () -> legacy.verifyLinuxLoadingDirectories(loading(key,
+                    List.of(new SegmentClassicLinuxDeployment.Alias(alias, "/")),
+                    List.of(new SegmentClassicLinuxDeployment.Directory(alias, true)), List.of()),
+                    SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(legacy.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void typedSearchDirectoriesWithoutOriginalProviderSourceCannotReachTargetIo() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound D2 search directories reached target I/O");
+        })) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.verifyLinuxSearchDirectories(SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("original provider/source binding"));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        assertTrue(owner.closeAndDrain().drained());
+        assertThrows(IOException.class,
+                () -> owner.verifyLinuxSearchDirectories(SegmentClassicLinuxElfTest.deadline()));
     }
 
     @Test
