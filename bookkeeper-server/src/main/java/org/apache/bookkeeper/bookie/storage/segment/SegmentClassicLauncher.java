@@ -283,6 +283,7 @@ public final class SegmentClassicLauncher {
             trust.verifyLinuxProvider(deadline);
         }
         trust.verifyLauncherDropper(input, deadline);
+        final List<String> childCommand = input.childCommand(material, program);
         loadPrivateKey();
         checkStarting();
         URI uri = URI.create(configuration.getMetadataServiceUri());
@@ -328,7 +329,7 @@ public final class SegmentClassicLauncher {
         requireOriginal(SegmentClassicChild.originalScope(configuration, sources.read()));
         requireRoot();
         checkStarting();
-        var builder = new ProcessBuilder(input.childCommand(material, program));
+        var builder = new ProcessBuilder(childCommand);
         builder.environment().clear();
         builder.directory(program.javaHome().toFile());
         builder.redirectError(ProcessBuilder.Redirect.INHERIT);

@@ -1234,6 +1234,10 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 正常D2原provider/source阳性及其绑定owner后替换descriptor的动态验证在本机NOT_EXECUTED，路由只作实际入口静态核对；缺来源的typed拒绝实际测试，未反射预置owner或假Installed。该增量只增强已有normal consumer的材料拒绝，不证明exec/open_exec、降权、cgroup、Unix交接或传递依赖闭合。私钥/ZK/supervisor/Process顺序、childCommand的qualification拒绝和diagnostics unconditional Unsupported保持；真实JDK helper/父环境、完整启动与parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，models/性能未执行，完整目标active，默认OFF/SYSTEM/PARK及advanced disabled不变。
 
+2026-11-05在父`7743fa52e67d7205bb6da662670af5e7c6a65462`上，后续仅调整原launcher直线启动顺序：verifyLauncherDropper成功后、loadPrivateKey之前，调用一次既有input.childCommand(material,program)，保存其List.copyOf结果到final方法局部argv。原ProcessBuilder位置改用同一argv，supervisor/retirement、fresh scope/root和checkStarting以及Process.initialize仍在原位置；未提前创建builder/进程，未复制schema/qualification判断、缓存字段或新增permit。当前外层v2承载D1/D2的原拒绝因此先于私钥、ZooKeeper session及supervisor锁获取；无效命令的错误优先级是有意变更，合法v1数字参数和成功I/O顺序保持。局部命令数据不替代临近启动的runtime检查，也不是资格票据。
+
+该顺序增量仅跑现有LauncherInputs6、DeploymentV2 11、Launcher3共20项，全部通过，0失败/错误/跳过，Spotless/Checkstyle退出0；未加测试专用生产seam、源码文本测试或假Installed。正常入口一次childCommand及先后关系按真实直线代码静态核对，v1精确argv/不可变性与D1/D2拒绝向量、实际未安装Main失败各只证明自身范围，不计获批D2 Main动态阳性或实际降权。证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-command-order-evidence-7743fa52`保留原source/class/log/XML，1448输入按原snapshot/父Git blob核验无错配，唯一改动源与test/style一致；双lsof/identity/SHA/archive核验仅清1个raw scope的2目录、6文件路径、456905逻辑字节，归档保留/data块0。没有重跑ELF2/JNI/NEEDED或改diagnostics/childCommand拒绝，native库仅runner配置；无models/性能或整体Gate提升，真实Linux资格producer与完整16步继续OPEN/active。
+
 ## D2 ELF 成员的原句柄摘要与元数据观察
 
 2026-11-01在父`5bada70b677841e429b1a7a9fc7cd08134f338b6`上，按总体规划会话冻结的范围，在原`SegmentClassicLaunchTrust`接入`verifyLinuxElfMember(int fileIndex, long deadline)`。入口只收原D2表索引和原期限；先要求本owner的production/Installed、原program/image/launcher来源及provider ready，再检查索引和ELF role，之后才构造成员Path、执行原physical字节门及目标I/O。不接caller Path/File/program/parser/资格布尔值，不将D2 String转换成旧File绕过门；非ELF明确拒绝，旧ELF1与cache/config kind边界保持。
