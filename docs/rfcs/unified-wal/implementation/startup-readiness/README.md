@@ -826,6 +826,18 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## D2 单个 DynamicPath 的有界目录列表展开
+
+2026-11-04在父`ef96d51d7ed4d1df5ded03b5f4c531e14e3210b9`上，新增包内`SegmentClassicLinuxDynamicPath.expand`，复用原token helper，对单个原D2 DynamicPath生成有序不可变目录数据。保留原声明对象及absent/present-empty区别；两者均不生成目录。非空raw先按冒号拆分并保留首尾/相邻空段，原始空段生成明确的Kind.CWD/空dirname，不读取或推导进程cwd。分号及替换值产生的冒号保留为dirname字面内容，不再次拆分。
+
+非空段的AVAILABLE空或UNAVAILABLE只略过该段；遇到UNOBSERVED，整组返回该状态和空列表，不暴露已得到的prefix。未使用或被首个UNAVAILABLE短路的token不额外阻断。非空dirname只去掉多余尾slash并补足一个，root保留`/`；内部重复slash、dot/dotdot和相对拼写不normalize。最终dirname按strict UTF8字节精确相等首次顺序去重，不合并物理目录或不同Unicode拼写。原raw由DynamicPath构造检查strict UTF8/NUL/4096字节，全部显式AVAILABLE替换数据先经原token函数验证，单段输出及补尾slash后仍受4096字节上限约束；整次保留原deadline。没有Path或文件系统I/O，不产生来源、Installed或ready资格。
+
+八项新增纯单测全部通过，0失败/错误/跳过，样式退出0；包括absent/empty/冒号、边缘空段及4096个冒号、展开后空、不可用/未观察、替换后冒号/分号、slash/首次去重、不同Unicode拼写、字节及期限边界。原token及旧消费者未改，未重复相同阶段或旧矩阵。1434项源码输入逐项匹配原snapshot/父Git blob，两项code与唯一测试及style快照一致；native库路径属性/SHA核验不计本阶段JNI执行。新规划会话`01a1a6a1-894f-7cf0-a08b-bc1332179d93`只读检查未发现本范围阻塞缺陷。
+
+证据保留在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-dynamic-path-evidence-ef96d51d`。终态RAT退出1/431，未批准路径及字节与父HEAD相同，无新增unknown；原PDF在扫描前排除且未读取。唯一确切raw scope经两次独立lsof及inode/mode/SHA/archive hardlink核验后清理两目录、四文件路径、363,699逻辑字节；归档保留，regular-file数据块回收0。静态依据沿用[glibc 2.39 dl-load.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)的fillin_rpath/decompose_rpath/cache_rpath，原源70348字节及SHA `26345f234ef918c866e40bb86524bdfd4c3beac487af81b3f51668379e671ae0`另存，不计实际vendor loader运行。
+
+此为单tag纯目录数据，实际CWD、ORIGIN/LIB/PLATFORM来源、secure-mode准入、RPATH/RUNPATH优先级、祖先链、cache/hwcap/first-loaded reuse及整体候选选择仍未交付；diagnostics/systemd2及qualification保持后续范围。实际Linux/vendor loader阳性NOT_EXECUTED，本块未执行models/性能；整体parent/child/Main/G1/full-bytes/full16/production Gate保持OPEN，默认OFF/SYSTEM/PARK及advanced disabled不变，完整目标active。
+
 ## D2 token rule1 的有界单字符串机制
 
 2026-11-04在父`9ef2ed244f95027f1d24b3e97036c8361c26fe5c`上，新增包内`SegmentClassicLinuxTokens.expand(raw, origin, lib, platform, deadline)`纯数据函数，供后续搜索逻辑共用。依据[glibc 2.39 dl-load.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)的单字符串DST识别/替换边界实现ORIGIN、LIB、PLATFORM及其curly形式；ASCII标识符尾边界精确处理，未知或不完整的当前`$`按字面保留后继续扫描。替换值不递归扫描，冒号/分号、内部slash和dot字串保持，不作shell、列表或Path处理。
