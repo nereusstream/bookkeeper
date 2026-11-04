@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## D2 token rule1 的有界单字符串机制
+
+2026-11-04在父`9ef2ed244f95027f1d24b3e97036c8361c26fe5c`上，新增包内`SegmentClassicLinuxTokens.expand(raw, origin, lib, platform, deadline)`纯数据函数，供后续搜索逻辑共用。依据[glibc 2.39 dl-load.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)的单字符串DST识别/替换边界实现ORIGIN、LIB、PLATFORM及其curly形式；ASCII标识符尾边界精确处理，未知或不完整的当前`$`按字面保留后继续扫描。替换值不递归扫描，冒号/分号、内部slash和dot字串保持，不作shell、列表或Path处理。
+
+不可变Value只有AVAILABLE、UNAVAILABLE、UNOBSERVED三态；AVAILABLE必须携带非null text且允许空，另外两态不带text。这些只是数据，不证明运行来源或ready。只有实际识别到的已知token消费其Value，左到右首个阻塞项返回原状态，不返回prefix或空路径，也不继续把后续状态推断成整体已观察；未使用的UNOBSERVED不阻断literal输入。原raw空及AVAILABLE空与不可用/未观察明确区分。
+
+完整raw及全部AVAILABLE替换值在输出分配前先检查strict UTF8、NUL和4096字节上限。输出使用固定有界工作区，每次literal/replacement追加前检查展开后的UTF8字节数，超限明确失败而不截断；全部正常状态返回前复核原deadline。不读取cwd、系统属性、filesystem或runtime信息，也不自行推导origin/platform。secure-execution ORIGIN额外准入、真实值来源及完整搜索规则仍由后续消费者负责。
+
+七项纯单测覆盖known/curly/ASCII及Unicode边界、相邻/重复和未知序列中的后续`$`、非递归、两种阻塞排列、未用UNOBSERVED、原空/AVAILABLE空、未知语法、UTF8展开边界/坏surrogate/NUL和期限，全部通过，0失败/错误/跳过；样式退出0。仅新增独立helper和测试，原ELF1及消费者未改，未重跑无变化的旧大矩阵，也未为“final”重复同一组七项。1432项输入逐项匹配原snapshot/父Git blob，两项code与该唯一测试阶段/style快照一致。此为纯逻辑证据；runner的native库路径属性及SHA核验不作本阶段JNI执行证据。
+
+静态原源70348 bytes及SHA `26345f234ef918c866e40bb86524bdfd4c3beac487af81b3f51668379e671ae0`保留在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-token-evidence-9ef2ed24/primary-source`，不是批准vendor loader的实际运行。终态RAT退出1/431，未批准路径及全部字节与父HEAD相同，本次无新增unknown，用户PDF扫描前排除且未读取。单个确切raw scope经两次独立lsof及原inode/mode/SHA/archive hardlink核验后，清理两目录、四文件路径、363,055逻辑字节；归档硬链接保留，regular-file数据块回收0，原测试/源码/class/命令及静态来源分开保存。
+
+下一最小范围按规划裁决为单个D2 DynamicPath到有序目录项的纯数据展开：保留标签presence，区分原始空段的CWD语义、非空段展开为空/不可用及未观察，不按替换后冒号再拆分，按最终dirname首次顺序去重。当前token函数不构成这份列表逻辑、RPATH/RUNPATH优先级、祖先链、候选搜索闭合、cache/hwcap/first-loaded reuse、diagnostics、systemd2或qualification；实际Linux/vendor loader阳性NOT_EXECUTED，各整体Gate继续OPEN，完整16步目标active。未运行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持。
+
 ## D2 候选 context 全集的 owner 内关联观察
 
 2026-11-04接续父`a87ec6e0b743d7da87efc36821f0a19ed0f22276`，原trust owner增加`verifyLinuxCandidateContexts(deadline)`：只从本owner的原D2部署取得files、Loading及全部contexts，先过原source/provider/期限门。每个原context按原序调用既有private路径—owned ELF2关联读取，随后核验固定interpreter；保留context/file原索引和raw logical name，不按physical或SONAME合并，不只读取某个预选winner分支。任何必需项失败，整次失败，不返回部分集合，也不接受caller观察结果补升来源。
