@@ -28,7 +28,7 @@ import java.util.BitSet;
 import java.util.Comparator;
 import java.util.List;
 
-/** Independent bounded glibc 2.39 new-cache 1.1 observations; no lookup, file approval or execution. */
+/** Bounded glibc 2.39 new-cache 1.1 observations and name groups; no file approval, winner or execution. */
 final class SegmentClassicLinuxCache {
     static final int MAX_BYTES = 16 * 1024 * 1024;
     static final int MAX_ENTRIES = 262144;
@@ -49,6 +49,10 @@ final class SegmentClassicLinuxCache {
 
         byte[] bytes() {
             return Arrays.copyOfRange(image, offset, offset + length);
+        }
+
+        int byteLength() {
+            return length;
         }
 
         String utf8() throws IOException {
@@ -317,6 +321,44 @@ final class SegmentClassicLinuxCache {
                 number = 0;
             }
         }
+    }
+
+    /** Query validation before target I/O; numeric runs share the parser's signed-C overflow boundary. */
+    static void validateLookupName(String name, long deadline) throws IOException {
+        lookupText(name, deadline);
+    }
+
+    private static Text lookupText(String name, long deadline) throws IOException {
+        requireTime(deadline);
+        if (name == null || name.isEmpty() || name.length() > 4096 || name.indexOf(0) >= 0
+                || !StandardCharsets.UTF_8.newEncoder().canEncode(name)) {
+            throw new IOException("Unsupported bounded strict UTF8 cache query name");
+        }
+        byte[] bytes = name.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > 4096) {
+            throw new IOException("Cache query name exceeds its original byte bound");
+        }
+        var query = new Text(bytes, 0, bytes.length);
+        validateNumericRuns(query);
+        requireTime(deadline);
+        return query;
+    }
+
+    /** Numeric-equivalent LP64 rows in original order, without capability filtering or winner selection. */
+    static List<Entry> related(Image image, String name, long deadline) throws IOException {
+        var query = lookupText(name, deadline);
+        if (image.entries().size() > MAX_ENTRIES) {
+            throw new IOException("Cache query exceeds the original entry count bound");
+        }
+        var result = new ArrayList<Entry>();
+        for (var entry : image.entries()) {
+            requireTime(deadline);
+            if (entry.lp64() && libraryCompare(query, entry.name()) == 0) {
+                result.add(entry);
+            }
+        }
+        requireTime(deadline);
+        return List.copyOf(result);
     }
 
     private static int libraryCompare(Text left, Text right) {

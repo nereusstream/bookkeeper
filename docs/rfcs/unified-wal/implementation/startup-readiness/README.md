@@ -826,6 +826,22 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## 单条 NEEDED 的 cache 相关行与候选对应
+
+2026-11-05在父`f09a1979a2bb44134b4087fd5738ae8d25e3c86e`上，原trust新增`verifyLinuxNeededCache(ruleIndex, deadline)`，只从本owner原D2/provider/source选择唯一固定`/etc/ld.so.cache`的CACHE规则；独立`readLinuxNeededCache`只供声明子图与真实临时文件，不能产生Installed或typed来源。原table/context/ordinal、cache kind/format/角色/长度和普通NEEDED名称形态在目标I/O前核对；requester经原owned ELF2读取，实际ordinal与声明必须相同。cache复用原hash/parser/实际first-close读取，明确区分受保护的cache缺失、cache存在但无相关行、行存在而目标缺失。
+
+[glibc2.39 search_cache及_dl_cache_libcmp](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-cache.c)使用数字感知名称比较，`libz.so.01`和`libz.so.1`可同组；[x86-64 flags规则](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/sysdeps/x86_64/dl-cache.h)限定`0x303`。新增相关行匹配直接复用原比较器及signed-C intermediate overflow校验，请求也按同一边界拒绝。全部相关原Entry/name/path/ordinal/flags/hwcap/ISA和顺序保留，重复行不合并；不做CPU/hwcap eligibility或winner选择，无关及其他ABI的path不额外解码或查文件。原parser/cache格式接纳范围不变，参考源码不认证实际approved vendor。
+
+相关path保留cache原始字节含义，严格UTF8和有界绝对logical检查后走原lookup，不做DST、冒号分割或dirname/name拼接。只有受保护的实际NoSuchFile可以形成stale行缺失；AccessDenied、目录、未声明alias及其他错误均拒绝。目标存在时，必须先匹配本NeededRule.candidates的exact logicalLoadName＋resolved physical member，才能打开内容；提取复用的private候选体保持原probe→批准→owned ELF2→probe/content identity对应顺序。原base-directory入口仍在之后执行其候选及目录末端复核，没有重入public同步方法清掉initializingThread。
+
+为避免重复路径反复保留完整ELF2及parents，method-local raw Cache.Text map只共享完全相同字节路径的一份不可变lookup/内容事实，各Entry仍逐行返回。不同raw logical path即使同inode也不共享批准；不按name/normalize/resolved合并，无跨调用状态。distinct path首次在decode/Path/目标I/O/展开保留之前，按Text原byteLength向既有LoadingDirectoryBudget收费，复用262144项/64MiB累计路径UTF8字节上限；64MiB不是总堆上限，真实缺失的distinct path不套D2 4096 context数。cache再经原owned hash/parser读取并比较path/identity/parents/SHA，随后每个distinct path末端复核，最后再次检查cache路径/identity；变化、超限或任何失败均整遍退出，不返回prefix或声称跨对象原子快照。缺失行不推导loader会尝试后续行。
+
+首轮最小12项中11通过、1错误来自新增测试误将原vector的非LP64 raw-path行期望纳入结果；夹具显式改为LP64后保留严格production过滤。首样式一行121字符失败另存，换行后样式退出0。资源共享后的13项新增检查全部通过，最终Trust100＋Cache10共110项全部通过，0失败/错误/跳过；110已包含13项，不合计为123个独立用例。覆盖数字等价/能力原文/重复行及单次content open共享事实、无关/其他ABI坏UTF8略过、相关坏path/AccessDenied/目录/未声明alias拒绝、cache缺失/空组/stale＋present区分、同physical另一raw path批准不复用、probe后的同字节换inode/同target换alias、cache A/B变化及最终cache读取期间candidate替换，以及raw预算边界/请求overflow/typed缺source。未造source、observer或Installed，未重跑未变JNI矩阵。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-needed-cache-evidence-f09a1979`。三个测试阶段各1439项输入与原snapshot/父Git blob匹配，最终四code与13项/110项/样式原快照一致，原失败source/class/log/XML保留而不移绑PASS。终态RAT退出1/431，原未批准路径及字节与父HEAD相同，无新增；PDF扫描前排除且未读取。三个确切raw scope双次lsof/identity/SHA/archive hardlink核验后清理6目录、15文件路径、1252374逻辑字节，归档保留、regular-file数据块回收0；三份glibc原源静态归档不作运行证据。
+
+本块只交付一条原NEEDED的尚未按能力筛选的cache相关行与实际候选对应。typed approved Linux/vendor阳性、本块models/性能NOT_EXECUTED；first-loaded复用、RPATH/RUNPATH＋环境＋cache＋default整体顺序、CPU/hwcap选择、helper传递闭包和backend exec语义仍待后续。`requireLinuxDiagnosticsProcessSource()`保持Unsupported，完整16步目标active，各整体Gate OPEN，默认OFF/SYSTEM/PARK及advanced disabled不变。
+
 ## 原 trust owner 的缓存 backend 来源绑定
 
 2026-11-05在父`f6f2554c5212db3b8b8642c349b748c5f187c9ae`上，原owner增加只收原deadline的`verifyLinuxJdkProcess`。A段在monitor内先核对原D2/provider/source，固定同一verifiedProgram、runtime image、provider、descriptor/source digest和原controlled JNI library引用；只用不初始化的Class.forName及原requireBootstrapType检查固定ProcessImpl/enum的bootstrap java.base来源，复核原lib/modules identity/父链及preload材料，再登记本次caller/inFlight/一次性状态。B段完全在monitor外调用原final nativeIo.jdkProcessLaunch，可能初始化或阻塞，不启动Process、不设置property/字段，也不接受caller观察、NativeIO替身或来源参数。

@@ -133,6 +133,19 @@ final class SegmentClassicLaunchTrust {
             LinuxPathObservation directoryPath, LinuxPathObservation path, LinuxLoadPathObservation requester,
             LinuxLoadPathObservation candidate) { }
 
+    /** One numeric-equivalent LP64 cache row, not capability-filtered and never a selected winner. */
+    record LinuxNeededCacheRow(SegmentClassicLinuxCache.Entry entry, String logical, LinuxPathObservation path,
+                               LinuxLoadPathObservation candidate) { }
+
+    /** Cache absence, an empty row group and stale row targets retain distinct observations. */
+    record LinuxNeededCacheObservation(int rule, SegmentClassicLinuxDeploymentV2.NeededRule declaration,
+            String name, LinuxLoadPathObservation requester, LinuxLoaderConfigurationObservation cache,
+            List<LinuxNeededCacheRow> rows) {
+        LinuxNeededCacheObservation {
+            rows = List.copyOf(rows);
+        }
+    }
+
     /** Original declaration indices only, never a selected Process backend or permission to execute. */
     record LinuxJdkHelperReference(int program, int member, int context, String logical) { }
 
@@ -310,8 +323,12 @@ final class SegmentClassicLaunchTrust {
         private int nameBytes;
 
         void retain(String name) throws IOException {
-            int bytes = name.getBytes(StandardCharsets.UTF_8).length;
-            if (entries >= MAX_LOADING_DIRECTORY_ENTRIES || bytes > MAX_LOADING_DIRECTORY_NAME_BYTES - nameBytes) {
+            retain(name.getBytes(StandardCharsets.UTF_8).length);
+        }
+
+        void retain(int bytes) throws IOException {
+            if (bytes < 0 || entries >= MAX_LOADING_DIRECTORY_ENTRIES
+                    || bytes > MAX_LOADING_DIRECTORY_NAME_BYTES - nameBytes) {
                 throw new IOException("Loading directory observations exceed their fixed total name capacity");
             }
             entries++;
@@ -2441,6 +2458,150 @@ final class SegmentClassicLaunchTrust {
         var beforeDirectory = searchDirectoryPath(directory, directoryEntry, aliases, LinuxPathKind.LOOKUP, deadline);
         Path entry = loadingNativePath(logical, deadline);
         var probe = observeLinuxPath(LinuxPathKind.LOOKUP, entry, aliases, false, deadline);
+        var candidate = observeLinuxNeededCandidate(rule, logical, probe, members, loading, aliases, deadline);
+        if (!probe.equals(observeLinuxPath(LinuxPathKind.LOOKUP, entry, aliases, false, deadline))
+                || !beforeDirectory.equals(searchDirectoryPath(directory, directoryEntry, aliases, LinuxPathKind.LOOKUP,
+                        deadline))) {
+            throw new IOException("NEEDED candidate or declared directory changed across its lookup observation");
+        }
+        var result = new LinuxNeededLookupObservation(ruleIndex, directoryIndex, rule, logical, beforeDirectory, probe,
+                requester, candidate);
+        files.requireHealthy();
+        requireTime(deadline);
+        return result;
+    }
+
+    /** Only an original NEEDED rule and deadline; the fixed cache configuration is selected from this owner. */
+    synchronized LinuxNeededCacheObservation verifyLinuxNeededCache(int ruleIndex, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            int cacheRule = fixedLinuxCacheRule(deployment.loading());
+            return observeLinuxNeededCache(deployment.files(), deployment.loading(), ruleIndex, cacheRule, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Independent declaration/file fixture only; it cannot establish typed source, Installed or a loader choice. */
+    synchronized LinuxNeededCacheObservation readLinuxNeededCache(List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, int cacheRule, long deadline)
+            throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxNeededCache(members, loading, ruleIndex, cacheRule, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    static int fixedLinuxCacheRule(SegmentClassicLinuxDeploymentV2.Loading loading) throws IOException {
+        int selected = -1;
+        for (int i = 0; i < loading.configuration().size(); i++) {
+            var rule = loading.configuration().get(i);
+            if (rule.kind() == ConfigurationKind.CACHE && rule.path().equals("/etc/ld.so.cache")) {
+                if (selected != -1) {
+                    throw new IOException("Conflicting original fixed loader cache rules");
+                }
+                selected = i;
+            }
+        }
+        if (selected == -1) {
+            throw new IOException("Unsupported lookup without the original fixed /etc/ld.so.cache CACHE rule");
+        }
+        return selected;
+    }
+
+    private LinuxNeededCacheObservation observeLinuxNeededCache(List<SegmentClassicLinuxDeploymentV2.File> declared,
+            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, int cacheRule, long deadline)
+            throws IOException {
+        var members = fixedLinuxContextMembers(declared, loading, deadline);
+        if (ruleIndex < 0 || ruleIndex >= loading.needed().size()) {
+            throw new IOException("Cache NEEDED index is outside the original rule table");
+        }
+        var configuration = selectLinuxConfiguration(members, loading, cacheRule);
+        if (configuration.kind() != ConfigurationKind.CACHE) {
+            throw new IOException("NEEDED cache lookup requires its original CACHE configuration rule");
+        }
+        var rule = loading.needed().get(ruleIndex);
+        var context = loading.contexts().get(rule.requester());
+        var metadata = linuxElfDeclaration(loading, context.file());
+        String name = metadata.needed().get(rule.ordinal());
+        if (name.isEmpty() || name.indexOf('/') >= 0 || name.indexOf('$') >= 0
+                || name.equals(".") || name.equals("..")) {
+            throw new IOException("Unsupported NEEDED name for an ordinary cache lookup");
+        }
+        SegmentClassicLinuxCache.validateLookupName(name, deadline);
+        var aliases = linuxContextAliases(loading, deadline);
+        var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
+                loading.interpreter(), aliases, deadline);
+        if (!name.equals(requester.content().elf().needed().get(rule.ordinal()))) {
+            throw new IOException("Original cache NEEDED differs from its requester ELF observation");
+        }
+        Path cachePath = linuxMaterialPath(configuration.path(), deadline);
+        var before = observeLoaderConfiguration(members, cacheRule, configuration, cachePath, aliases, deadline);
+        var rows = new ArrayList<LinuxNeededCacheRow>();
+        var paths = new HashMap<SegmentClassicLinuxCache.Text, LinuxNeededCacheRow>();
+        var budget = new LoadingDirectoryBudget();
+        if (before.material() != null) {
+            for (var entry : SegmentClassicLinuxCache.related(before.material().cache(), name, deadline)) {
+                requireTime(deadline);
+                var fact = paths.get(entry.path());
+                if (fact == null) {
+                    budget.retain(entry.path().byteLength());
+                    // Exact raw values share only this pass's fact; no expansion, splitting or path normalization.
+                    String logical = entry.path().utf8();
+                    Path path = loadingNativePath(logical, deadline);
+                    var probe = observeLinuxPath(LinuxPathKind.LOOKUP, path, aliases, false, deadline);
+                    var candidate = observeLinuxNeededCandidate(rule, logical, probe, members, loading, aliases,
+                            deadline);
+                    fact = new LinuxNeededCacheRow(entry, logical, probe, candidate);
+                    paths.put(entry.path(), fact);
+                }
+                rows.add(new LinuxNeededCacheRow(entry, fact.logical(), fact.path(), fact.candidate()));
+            }
+        }
+        var after = observeLoaderConfiguration(members, cacheRule, configuration, cachePath, aliases, deadline);
+        requireLinuxCacheBinding(before, after);
+        for (var row : paths.values()) {
+            var terminal = observeLinuxPath(LinuxPathKind.LOOKUP, loadingNativePath(row.logical(), deadline), aliases,
+                    false, deadline);
+            if (!row.path().equals(terminal)) {
+                throw new IOException("Cache candidate changed across its related-row observation");
+            }
+        }
+        if (!after.path().equals(observeLinuxPath(LinuxPathKind.CONFIGURATION, cachePath, aliases,
+                configuration.file() >= 0, deadline))) {
+            throw new IOException("Original cache path or material identity changed during candidate rechecks");
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+        return new LinuxNeededCacheObservation(ruleIndex, rule, name, requester, after, rows);
+    }
+
+    private static void requireLinuxCacheBinding(LinuxLoaderConfigurationObservation before,
+            LinuxLoaderConfigurationObservation after) throws IOException {
+        if (!before.path().equals(after.path()) || !Objects.equals(before.sha256(), after.sha256())
+                || (before.material() == null) != (after.material() == null)
+                || before.material() != null && (!before.material().identity().equals(after.material().identity())
+                    || !before.material().parents().equals(after.material().parents()))) {
+            throw new IOException("Original cache path, owned identity or hashed material changed across lookup");
+        }
+    }
+
+    private LinuxLoadPathObservation observeLinuxNeededCandidate(SegmentClassicLinuxDeploymentV2.NeededRule rule,
+            String logical, LinuxPathObservation probe, List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, Map<Path, String> aliases, long deadline)
+            throws IOException {
         LinuxLoadPathObservation candidate = null;
         if (probe.identity() != null) {
             if (probe.identity().directory()) {
@@ -2468,16 +2629,7 @@ final class SegmentClassicLaunchTrust {
                 throw new IOException("NEEDED candidate changed between its lookup probe and owned ELF observation");
             }
         }
-        if (!probe.equals(observeLinuxPath(LinuxPathKind.LOOKUP, entry, aliases, false, deadline))
-                || !beforeDirectory.equals(searchDirectoryPath(directory, directoryEntry, aliases, LinuxPathKind.LOOKUP,
-                        deadline))) {
-            throw new IOException("NEEDED candidate or declared directory changed across its lookup observation");
-        }
-        var result = new LinuxNeededLookupObservation(ruleIndex, directoryIndex, rule, logical, beforeDirectory, probe,
-                requester, candidate);
-        files.requireHealthy();
-        requireTime(deadline);
-        return result;
+        return candidate;
     }
 
     private SegmentClassicLinuxDeploymentV2 originalLinuxDeployment(long deadline) throws IOException {
@@ -2533,8 +2685,8 @@ final class SegmentClassicLaunchTrust {
                 var graph = configurationGraph(materials, aliases, path, rule.file(), deadline);
                 result = new LinuxLoaderConfigurationObservation(ruleIndex, rule.kind(), null, null, null, graph);
             } else {
-                var first = observeLoaderConfiguration(deployment, ruleIndex, rule, path, aliases, deadline);
-                var second = observeLoaderConfiguration(deployment, ruleIndex, rule, path, aliases, deadline);
+                var first = observeLoaderConfiguration(deployment.files(), ruleIndex, rule, path, aliases, deadline);
+                var second = observeLoaderConfiguration(deployment.files(), ruleIndex, rule, path, aliases, deadline);
                 if (!first.equals(second)) {
                     throw new IOException("Original loader cache or preload path changed between observations");
                 }
@@ -2551,15 +2703,16 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    private LinuxLoaderConfigurationObservation observeLoaderConfiguration(SegmentClassicLinuxDeploymentV2 deployment,
+    private LinuxLoaderConfigurationObservation observeLoaderConfiguration(
+            List<SegmentClassicLinuxDeploymentV2.File> members,
             int ruleIndex, SegmentClassicLinuxDeploymentV2.Configuration rule, Path path, Map<Path, String> aliases,
             long deadline) throws IOException {
         var observed = observeLinuxPath(LinuxPathKind.CONFIGURATION, path, aliases, rule.file() >= 0, deadline);
         if (rule.file() == -1) {
             return new LinuxLoaderConfigurationObservation(ruleIndex, rule.kind(), observed, null, null, null);
         }
-        var file = deployment.files().get(rule.file());
-        Path physical = linuxPhysicalPath(file.path(), deadline);
+        var file = members.get(rule.file());
+        Path physical = linuxMaterialPath(file.path(), deadline);
         if (!observed.resolved().equals(physical)) {
             throw new IOException("Original cache path differs from its declared physical material");
         }
@@ -2575,7 +2728,13 @@ final class SegmentClassicLaunchTrust {
     /** Mandatory rule/kind/format dispatch only; no Path construction or authority. */
     static SegmentClassicLinuxDeploymentV2.Configuration selectLinuxConfiguration(
             SegmentClassicLinuxDeploymentV2 deployment, int ruleIndex) throws IOException {
-        var rules = deployment.loading().configuration();
+        return selectLinuxConfiguration(deployment.files(), deployment.loading(), ruleIndex);
+    }
+
+    private static SegmentClassicLinuxDeploymentV2.Configuration selectLinuxConfiguration(
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex) throws IOException {
+        var rules = loading.configuration();
         if (ruleIndex < 0 || ruleIndex >= rules.size()) {
             throw new IOException("D2 configuration index is outside the original rule table");
         }
@@ -2584,7 +2743,11 @@ final class SegmentClassicLaunchTrust {
             throw new IOException("Unsupported independent configuration kind or format");
         }
         if (rule.kind() == ConfigurationKind.CACHE && rule.file() >= 0) {
-            long length = deployment.files().get(rule.file()).length();
+            if (rule.file() >= members.size()
+                    || members.get(rule.file()).role() != SegmentClassicLinuxDeployment.Role.LOADER_CACHE) {
+                throw new IOException("Cache rule does not reference its original cache member");
+            }
+            long length = members.get(rule.file()).length();
             if (length < 48 || length > SegmentClassicLinuxCache.MAX_BYTES) {
                 throw new IOException("Declared loader cache length exceeds its supported format bounds");
             }

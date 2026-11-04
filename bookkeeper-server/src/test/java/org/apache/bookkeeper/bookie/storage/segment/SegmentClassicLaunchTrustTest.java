@@ -35,6 +35,7 @@ import static org.mockito.Mockito.spy;
 import com.sun.security.auth.module.UnixSystem;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
@@ -573,8 +574,332 @@ public class SegmentClassicLaunchTrustTest {
         }
     }
 
-    private void neededLookupProbeReplacement(boolean alias) throws Exception {
-        var f = lookupFixture("libz.so.1");
+    private static byte[] cacheLookupBytes(String[] names, byte[][] paths, int[] flags, long[] hwcaps) {
+        assertEquals(names.length, paths.length);
+        assertEquals(names.length, flags.length);
+        assertEquals(names.length, hwcaps.length);
+        int strings = 0;
+        for (int i = 0; i < names.length; i++) {
+            strings += names[i].getBytes(StandardCharsets.UTF_8).length + paths[i].length + 2;
+        }
+        byte[] data = new byte[48 + names.length * 24 + strings];
+        var b = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN);
+        b.put("glibc-ld.so.cache1.1".getBytes(StandardCharsets.US_ASCII));
+        b.putInt(names.length).putInt(strings).put((byte) 2);
+        int cursor = 48 + names.length * 24;
+        for (int i = 0; i < names.length; i++) {
+            byte[] name = names[i].getBytes(StandardCharsets.UTF_8);
+            int key = cursor;
+            System.arraycopy(name, 0, data, cursor, name.length);
+            cursor += name.length + 1;
+            int value = cursor;
+            System.arraycopy(paths[i], 0, data, cursor, paths[i].length);
+            cursor += paths[i].length + 1;
+            b.position(48 + i * 24);
+            b.putInt(flags[i]).putInt(key).putInt(value).putInt(0).putLong(hwcaps[i]);
+        }
+        return data;
+    }
+
+    private CandidateFixture withLookupCache(CandidateFixture original, byte[] bytes) throws Exception {
+        Path path = root.resolve("loader.cache");
+        var files = new java.util.ArrayList<>(original.files());
+        int file = -1;
+        if (bytes == null) {
+            Files.deleteIfExists(path);
+        } else {
+            write(path, bytes);
+            file = files.size();
+            files.add(new SegmentClassicLinuxDeploymentV2.File(path.toString(),
+                    SegmentClassicLinuxDeployment.Role.LOADER_CACHE, bytes.length,
+                    SegmentClassicHandoff.digest(bytes)));
+        }
+        var l = original.loading();
+        var configuration = new SegmentClassicLinuxDeploymentV2.Configuration(path.toString(), file,
+                SegmentClassicLinuxDeploymentV2.ConfigurationKind.CACHE, 1);
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
+                l.aliases(), l.directories(), List.of(configuration), l.policy(), l.elf(), l.contexts(), l.needed(),
+                l.modules());
+        return new CandidateFixture(files, loading);
+    }
+
+    @Test
+    public void neededCacheKeepsNumericEquivalentDuplicateRowsAndLiteralPathsWithoutCapabilityFiltering()
+            throws Exception {
+        var original = lookupFixture("libz.so.1");
+        String logical = original.loading().contexts().get(3).logicalLoadName();
+        byte[] path = logical.getBytes(StandardCharsets.UTF_8);
+        var f = withLookupCache(original, cacheLookupBytes(
+                new String[]{"libz.so.01", "libz.so.1", "libz.so.001", "liba.so.1"},
+                new byte[][]{path, path, {(byte) 0xff}, {(byte) 0xff}},
+                new int[]{0x303, 0x303, 3, 0x303}, new long[]{0, Long.MIN_VALUE, 0, 0}));
+        var owner = owner();
+        owner.initialize();
+        var contentOpens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.files().get(1).path()).equals(invocation.getArgument(0))) {
+                contentOpens.incrementAndGet();
+            }
+            return invocation.callRealMethod();
+        })) {
+            var result = owner.readLinuxNeededCache(f.files(), f.loading(), 1, 0,
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(1, result.rule());
+            assertSame(f.loading().needed().get(1), result.declaration());
+            assertEquals("libz.so.1", result.name());
+            assertEquals(0, result.requester().context());
+            assertEquals(0, result.cache().rule());
+            assertEquals(4, result.cache().material().cache().entries().size());
+            assertEquals(List.of(0, 1), result.rows().stream().map(r -> r.entry().ordinal()).toList());
+            assertEquals(List.of(0L, Long.MIN_VALUE), result.rows().stream().map(r -> r.entry().hwcap()).toList());
+            for (var row : result.rows()) {
+                assertEquals(logical, row.logical());
+                assertEquals(3, row.candidate().context());
+                assertEquals(1, row.candidate().member());
+                assertEquals(row.path(), row.candidate().path());
+                assertEquals(row.path().identity(), row.candidate().content().identity());
+            }
+            assertEquals(1, contentOpens.get());
+            assertSame(result.rows().get(0).path(), result.rows().get(1).path());
+            assertSame(result.rows().get(0).candidate(), result.rows().get(1).candidate());
+            assertThrows(UnsupportedOperationException.class, () -> result.rows().clear());
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededCacheDistinguishesAbsentCacheEmptyGroupAndStaleRowFromPresentTarget() throws Exception {
+        var original = lookupFixture("libz.so.1");
+        String present = original.loading().contexts().get(2).logicalLoadName();
+        byte[] empty = cacheLookupBytes(new String[0], new byte[0][], new int[0], new long[0]);
+        byte[] stale = cacheLookupBytes(new String[]{"libz.so.01", "libz.so.1"},
+                new byte[][]{(root + "/empty/stale.so").getBytes(StandardCharsets.UTF_8),
+                    present.getBytes(StandardCharsets.UTF_8)}, new int[]{0x303, 0x303}, new long[]{0, 0});
+        var cases = Arrays.asList(null, empty, stale);
+        for (int i = 0; i < cases.size(); i++) {
+            var f = withLookupCache(original, cases.get(i));
+            var owner = owner();
+            owner.initialize();
+            try {
+                var result = owner.readLinuxNeededCache(f.files(), f.loading(), 0, 0,
+                        SegmentClassicLinuxElfTest.deadline());
+                assertEquals(i == 0, result.cache().path().identity() == null);
+                assertEquals(i == 0, result.cache().material() == null);
+                if (i < 2) {
+                    assertTrue(result.rows().isEmpty());
+                } else {
+                    assertEquals(2, result.rows().size());
+                    assertNull(result.rows().get(0).candidate());
+                    assertNull(result.rows().get(0).path().identity());
+                    assertEquals(root.resolve("empty/stale.so"), result.rows().get(0).path().absentAt());
+                    assertEquals(2, result.rows().get(1).candidate().context());
+                }
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void neededCacheOtherLogicalApprovalCannotOpenAnExistingCandidate() throws Exception {
+        var original = lookupFixture("libz.so.1");
+        String logical = original.loading().contexts().get(3).logicalLoadName();
+        var f = withLookupCache(original, cacheLookupBytes(new String[]{"libz.so.01", "libz.so.1"},
+                new byte[][]{original.files().get(1).path().getBytes(StandardCharsets.UTF_8),
+                    logical.getBytes(StandardCharsets.UTF_8)}, new int[]{0x303, 0x303}, new long[]{0, 0}));
+        var owner = owner();
+        owner.initialize();
+        var contentOpens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.files().get(1).path()).equals(invocation.getArgument(0))) {
+                if (contentOpens.incrementAndGet() > 1) {
+                    throw new AssertionError("Other raw cache path opened before this rule's logical approval");
+                }
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededCache(f.files(), f.loading(),
+                    0, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("exact approved logical context"));
+            assertEquals(1, contentOpens.get());
+            assertThrows(IOException.class, owner::parsed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededCacheRelatedBadPathsDeniedDirectoriesAndUndeclaredAliasesAreNotAbsence() throws Exception {
+        var original = lookupFixture("libz.so.1");
+        Path library = Path.of(original.files().get(1).path());
+        Path undeclared = Files.createSymbolicLink(root.resolve("undeclared-cache-link"), Path.of("lib/libz.so.1"));
+        var paths = List.of(new byte[]{(byte) 0xff}, "relative.so".getBytes(StandardCharsets.UTF_8),
+                root.resolve("empty").toString().getBytes(StandardCharsets.UTF_8),
+                undeclared.toString().getBytes(StandardCharsets.UTF_8),
+                library.toString().getBytes(StandardCharsets.UTF_8));
+        for (int i = 0; i < paths.size(); i++) {
+            var f = withLookupCache(original, cacheLookupBytes(new String[]{"libz.so.1"},
+                    new byte[][]{paths.get(i)}, new int[]{0x303}, new long[]{0}));
+            var owner = owner();
+            owner.initialize();
+            boolean denied = i == 4;
+            try (var channels = mockStatic(FileChannel.class, invocation -> {
+                if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                        && library.equals(invocation.getArgument(0))) {
+                    throw new AssertionError("Invalid cache target reached content open");
+                }
+                return invocation.callRealMethod();
+            }); var targets = mockStatic(Files.class, invocation -> {
+                if (denied && invocation.getMethod().getName().equals("readAttributes")
+                        && library.equals(invocation.getArgument(0))) {
+                    throw new AccessDeniedException(library.toString());
+                }
+                return invocation.callRealMethod();
+            })) {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededCache(f.files(), f.loading(),
+                        0, 0, SegmentClassicLinuxElfTest.deadline()));
+                if (denied) {
+                    assertTrue(failure instanceof AccessDeniedException);
+                }
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void neededCacheProbeSameByteNewInodeCannotBeHiddenByTheLaterOwnedRead() throws Exception {
+        neededLookupProbeReplacement(false, true);
+    }
+
+    @Test
+    public void neededCacheProbeSameTargetNewAliasCannotBeHiddenByTheLaterOwnedRead() throws Exception {
+        neededLookupProbeReplacement(true, true);
+    }
+
+    private void neededCacheReplacement(boolean replaceCache) throws Exception {
+        var original = lookupFixture("libz.so.1");
+        var f = withLookupCache(original, cacheLookupBytes(new String[]{"libz.so.1"},
+                new byte[][]{original.files().get(1).path().getBytes(StandardCharsets.UTF_8)},
+                new int[]{0x303}, new long[]{0}));
+        Path cache = root.resolve("loader.cache");
+        Path library = Path.of(f.files().get(1).path());
+        var cacheOpens = new AtomicInteger();
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        var owner = owner();
+        owner.initialize();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                Path path = invocation.getArgument(0);
+                boolean replace = replaceCache ? library.equals(path)
+                        : cache.equals(path) && cacheOpens.incrementAndGet() == 2;
+                if (replace) {
+                    var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                    fault.beforeClose = () -> {
+                        try {
+                            Path target = replaceCache ? cache : library;
+                            Path retained = root.resolve("old-cache-race-file");
+                            Files.move(target, retained);
+                            Files.copy(retained, target);
+                        } catch (IOException failure) {
+                            throw new AssertionError(failure);
+                        }
+                    };
+                    captured.set(fault);
+                    return fault;
+                }
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededCache(f.files(), f.loading(),
+                    0, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains(replaceCache
+                    ? "Original cache path, owned identity" : "Cache candidate changed across"));
+            assertEquals(1, captured.get().closes.get());
+            assertFalse(captured.get().actual.isOpen());
+            assertThrows(IOException.class, owner::parsed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertArrayEquals(Files.readAllBytes(root.resolve("old-cache-race-file")),
+                Files.readAllBytes(replaceCache ? cache : library));
+    }
+
+    @Test
+    public void neededCacheSameByteCacheReplacementDuringCandidateReadRejectsThePass() throws Exception {
+        neededCacheReplacement(true);
+    }
+
+    @Test
+    public void neededCacheCandidateReplacementDuringFinalCacheReadRejectsThePass() throws Exception {
+        neededCacheReplacement(false);
+    }
+
+    @Test
+    public void neededCacheFixedRuleAndUnsupportedQueryChecksPrecedeTargetIo() throws Exception {
+        var original = lookupFixture("libz.so.1");
+        var f = withLookupCache(original, cacheLookupBytes(new String[0], new byte[0][], new int[0], new long[0]));
+        var d2 = SegmentClassicLinuxDeployment.decode(
+                SegmentClassicLinuxDeploymentTest.vector("classic-linux-deployment-v2")).versionTwo();
+        int index = SegmentClassicLaunchTrust.fixedLinuxCacheRule(d2.loading());
+        assertEquals("/etc/ld.so.cache", d2.loading().configuration().get(index).path());
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.fixedLinuxCacheRule(f.loading()));
+        var l = f.loading();
+        var metadata = l.elf().stream().map(e -> new SegmentClassicLinuxDeploymentV2.Elf(e.file(),
+                List.of("libz.so.2147483600", "libz.so.1", "liba.so.2", "libb.so.3"), e.rpath(), e.runpath(),
+                e.flags(), e.flags1())).toList();
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
+                l.aliases(), l.directories(), l.configuration(), l.policy(), metadata, l.contexts(), l.needed(),
+                l.modules());
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unsupported cache query reached target I/O");
+        })) {
+            assertThrows(IOException.class, () -> owner.readLinuxNeededCache(f.files(), loading, 0, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void typedNeededCacheWithoutOriginalSourceCannotReachTargetIo() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound typed cache lookup reached target I/O");
+        })) {
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxNeededCache(0, SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
+    @Test
+    public void neededCacheDistinctRawPathBudgetRejectsLengthsBeforeExpandedStateOrIo() throws Exception {
+        var budget = new LoadingDirectoryBudget();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Raw path budget check reached target I/O");
+        })) {
+            budget.retain(64 * 1024 * 1024);
+            assertThrows(IOException.class, () -> budget.retain(1));
+            assertThrows(IOException.class, () -> budget.retain(-1));
+            budget.retain(0);
+        }
+    }
+
+    private void neededLookupProbeReplacement(boolean alias, boolean cacheLookup) throws Exception {
+        var original = lookupFixture("libz.so.1");
+        String logical = original.loading().contexts().get(alias ? 3 : 2).logicalLoadName();
+        var f = cacheLookup ? withLookupCache(original, cacheLookupBytes(new String[]{"libz.so.01"},
+                new byte[][]{logical.getBytes(StandardCharsets.UTF_8)}, new int[]{0x303}, new long[]{0})) : original;
         var owner = owner();
         owner.initialize();
         Path library = Path.of(f.files().get(1).path());
@@ -605,8 +930,15 @@ public class SegmentClassicLaunchTrustTest {
             }
             return actual;
         })) {
-            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededLookup(f.files(), f.loading(),
-                    alias ? 1 : 0, alias ? 3 : 2, SegmentClassicLinuxElfTest.deadline()));
+            var failure = assertThrows(IOException.class, () -> {
+                if (cacheLookup) {
+                    owner.readLinuxNeededCache(f.files(), f.loading(), alias ? 1 : 0, 0,
+                            SegmentClassicLinuxElfTest.deadline());
+                } else {
+                    owner.readLinuxNeededLookup(f.files(), f.loading(), alias ? 1 : 0, alias ? 3 : 2,
+                            SegmentClassicLinuxElfTest.deadline());
+                }
+            });
             assertTrue(failure.getMessage(), failure.getMessage().contains("between its lookup probe and owned ELF"));
             assertTrue(stats.get() >= 3);
             assertEquals(1, captured.get().closes.get());
@@ -622,12 +954,12 @@ public class SegmentClassicLaunchTrustTest {
 
     @Test
     public void neededLookupProbeSameByteNewInodeCannotBeHiddenByStableLaterOwnedRead() throws Exception {
-        neededLookupProbeReplacement(false);
+        neededLookupProbeReplacement(false, false);
     }
 
     @Test
     public void neededLookupProbeSameTargetNewAliasCannotBeHiddenByStableLaterOwnedRead() throws Exception {
-        neededLookupProbeReplacement(true);
+        neededLookupProbeReplacement(true, false);
     }
 
     @Test

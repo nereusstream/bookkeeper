@@ -121,6 +121,37 @@ public class SegmentClassicLinuxCacheTest {
     }
 
     @Test
+    public void relatedRowsUseNumericEquivalenceAndPreserveOriginalOrderAndCapabilities() throws Exception {
+        byte[] value = vector();
+        // The other ABI's equivalent name has an invalid-UTF8 path; group matching must not decode it.
+        bytes(value).putInt(48 + 4 * 24 + 8, bytes(value).getInt(48 + 6 * 24 + 8));
+        bytes(value).putInt(48 + 6 * 24, 0x303); // Keep the unrelated raw-path row in this query's ABI.
+        var image = read(value);
+        var rows = SegmentClassicLinuxCache.related(image, "libz.so.02", SegmentClassicLinuxElfTest.deadline());
+        assertEquals(List.of(1, 2, 3), rows.stream().map(SegmentClassicLinuxCache.Entry::ordinal).toList());
+        assertEquals(image.entries().subList(1, 4), rows);
+        assertEquals(List.of(0, 1, -1), rows.stream().map(SegmentClassicLinuxCache.Entry::hwcapIndex).toList());
+        assertEquals(List.of(2, 3, 0), rows.stream().map(SegmentClassicLinuxCache.Entry::isaLevel).toList());
+        var raw = SegmentClassicLinuxCache.related(image, "liba.so.1", SegmentClassicLinuxElfTest.deadline());
+        assertEquals(6, raw.get(0).ordinal());
+        assertEquals(255, Byte.toUnsignedInt(raw.get(0).path().bytes()[7]));
+        assertThrows(UnsupportedOperationException.class, rows::clear);
+    }
+
+    @Test
+    public void cacheQueriesApplyTheSameSignedCIntermediateOverflowAndStrictByteBounds() throws Exception {
+        var image = read(vector());
+        assertTrue(SegmentClassicLinuxCache.related(image, "libz.so.2147483599",
+                SegmentClassicLinuxElfTest.deadline()).isEmpty());
+        for (String name : Arrays.asList(null, "", "bad\0name", "libz.so.2147483600", "libz.so.2147483647",
+                "libz.so.999999999999999", "\ud800", "雪".repeat(1366), "x".repeat(4097))) {
+            assertThrows(IOException.class, () -> SegmentClassicLinuxCache.related(image, name,
+                    SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, () -> SegmentClassicLinuxCache.related(image, "libz.so.2", System.nanoTime()));
+    }
+
+    @Test
     public void rejectsLegacyUnknownHeadersLengthsAndStringReferences() throws Exception {
         invalid(b -> b.put(0, (byte) 'x'));
         invalid(b -> b.put(19, (byte) '2'));
