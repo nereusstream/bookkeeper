@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## D2 load-context 与 interpreter 的实际路径关联观察
+
+2026-11-04在父`f23b3712960b6b0120c1263d546458edf2e563ed`上，原trust owner新增`verifyLinuxLoadContext(contextIndex, deadline)`与`verifyLinuxInterpreter(deadline)`。前者先过原source/provider/期限门，再从原D2 context表检查索引、ELF role及引用，随后才构造目标Path和执行I/O；普通context的`-1`明确拒绝。后者固定取原`loading.loader/interpreter`，结果中的`context=-1`仅表示该固定interpreter，member仍为原loader index，不作fallback或任意context选择。
+
+每项保留原context/file索引与raw logical load name，通过原alias表和实际readlink bytes逐组件观察logical路径，要求resolved path等于声明physical member；同一次原owned channel完成SHA＋ELF2读取及首次close。关联返回前，前后完整logical path observation（包括alias链摘要）必须相等，前后完整叶子identity还必须都等于本次owned member观察的identity。仅相同字节或相同resolved pathname不充分。原权限/ACL/父链、ELF元数据匹配、资源健康及原deadline保持，不读取依赖winner或展开祖先RPATH。
+
+原ELF member主体抽为private观察函数，原typed member入口复用；context/interpreter在同一原owner操作中调用它，没有嵌套同步公开入口提前清除`initializingThread`。包内data-only seam可消费独立Context/File/Elf及alias声明以复用同一私有I/O实现，但不会保存来源资格、取得Installed/provider ready或向typed入口提供可采纳的既有结果。当前仅逐项关联事实，不构成统一加载环境快照、候选完整性或实际loader选择证明。
+
+真实macOS aarch64/Corretto21.0.10+7-LTS fixture验证原索引7/4和alias/nested-dotdot原logical、引用/physical错配在内容open前拒绝、owned读取及close已完成后同字节换inode无法返回关联、首次close时alias改向拒绝、interpreter执行位与固定marker，以及实际ELF positional read期间自排空拒绝/外部close等待。原首次close失败与其他身份/元数据回归继续复用；不注入ready或伪造Installed。三类首轮80项和最终串行十八类198项全部通过，0失败/错误/跳过，样式退出0；两个阶段各1430源码/资源逐项匹配原snapshot/父Git blob，最终三项code与test/style快照一致。
+
+终态RAT退出1/431，全部未批准路径及字节与父HEAD相同，本次代码无新增unknown；用户PDF在扫描前排除且未读取。两个确切raw scope经两次独立lsof及原inode/mode/SHA/archive hardlink核验后，清理四目录、27文件路径、1,632,767逻辑字节，归档硬链接保留、regular-file数据块回收0。工作区外证据为`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-load-path-evidence-f23b3712`，原阶段不移绑。
+
+本块在用户2026-11-04指定的新规划会话`01a1a6a1-894f-7cf0-a08b-bc1332179d93`完成只读交接与裁决，实施仍为原唯一入口。下一最小范围为原D2候选上下文全集的owner内关联观察：只接原deadline，保留全部contexts、固定interpreter、NEEDED ordinal/名称及module请求原顺序/重复，不因SONAME/file去重丢掉logical context，不只观察预选winner的分支；任一必需项失败整次失败，不出部分集合或接caller结果补升来源。复用原D2引用和固定上限，不新建codec或通用图框架。实际typed Linux阳性仍NOT_EXECUTED，候选搜索闭合、token/祖先RPATH/first-loaded reuse solver、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN，未运行本块models/性能；默认OFF/SYSTEM/PARK及advanced disabled保持，完整目标active。
+
 ## D2 search directories 的整表枚举观察
 
 2026-11-04接续父`866d3d52a8603264c40155c5f40a55e658acd65b`，原`SegmentClassicLaunchTrust.verifyLinuxSearchDirectories(deadline)`一次选择本owner原D2目录清单；原source/provider和期限检查先于目标I/O，目录、alias及预算来自内部，不收caller声明、外部budget或已有结果。观察保留原directory index、raw logical字符串、明确presence、实际路径链及完整成员名。复用原walker、DirectoryStream登记和首次close；原D1目录接口仅适配原事实，共用扫描机制。

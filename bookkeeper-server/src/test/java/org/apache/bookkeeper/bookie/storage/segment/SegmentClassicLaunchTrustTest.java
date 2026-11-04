@@ -363,6 +363,276 @@ public class SegmentClassicLaunchTrustTest {
                 () -> owner.verifyLinuxSearchDirectories(SegmentClassicLinuxElfTest.deadline()));
     }
 
+    private SegmentClassicLinuxDeploymentV2.File loadPathFile(String name, SegmentClassicLinuxDeployment.Role role)
+            throws IOException {
+        byte[] bytes = SegmentClassicLinuxDeploymentTest.vector("classic-linux-elf-v2");
+        Path path = root.resolve(name);
+        write(path, bytes);
+        return new SegmentClassicLinuxDeploymentV2.File(path.toString(), role, bytes.length,
+                SegmentClassicHandoff.digest(bytes));
+    }
+
+    @Test
+    public void loadPathAssociationKeepsOriginalIndicesLogicalSpellingAndTheSameOwnedMember() throws Exception {
+        Files.createDirectories(root.resolve("lib/nested"));
+        var file = loadPathFile("lib/physical.so", SegmentClassicLinuxDeployment.Role.LIBRARY);
+        Path alias = Files.createSymbolicLink(root.resolve("view"), Path.of("lib"));
+        String logical = alias + "/nested/../physical.so";
+        var context = new SegmentClassicLinuxDeploymentV2.Context(4, logical);
+        var owner = owner();
+        owner.initialize();
+        var opens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(file.path()).equals(invocation.getArgument(0))) {
+                opens.incrementAndGet();
+            }
+            return invocation.callRealMethod();
+        })) {
+            var result = owner.readLinuxLoadPath(7, context, file, SegmentClassicLinuxContentTest.expected(),
+                    logical, Map.of(alias, "lib"), SegmentClassicLinuxElfTest.deadline());
+            assertEquals(7, result.context());
+            assertEquals(4, result.member());
+            assertEquals(logical, result.logical());
+            assertEquals(Path.of(file.path()), result.path().resolved());
+            assertEquals(result.path().identity(), result.content().identity());
+            assertEquals(file.sha256(), result.content().sha256());
+            assertEquals(SegmentClassicLinuxContentTest.expected().needed(), result.content().elf().needed());
+            assertEquals(1, opens.get());
+            assertThrows(IOException.class, owner::installed);
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoadContext(7, SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void loadPathReferenceAndPhysicalMismatchCannotOpenUnapprovedContent() throws Exception {
+        var file = loadPathFile("physical.so", SegmentClassicLinuxDeployment.Role.LIBRARY);
+        var mismatched = new SegmentClassicLinuxDeploymentV2.Context(5, file.path());
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Mismatched load reference reached target metadata");
+        })) {
+            assertThrows(IOException.class, () -> owner.readLinuxLoadPath(7, mismatched, file,
+                    SegmentClassicLinuxContentTest.expected(), file.path(), Map.of(),
+                    SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        Path wrong = root.resolve("wrong.so");
+        write(wrong, new byte[]{7});
+        var physicalMismatch = owner();
+        physicalMismatch.initialize();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            throw new AssertionError("Physical mismatch reached content open");
+        })) {
+            var context = new SegmentClassicLinuxDeploymentV2.Context(4, wrong.toString());
+            assertThrows(IOException.class, () -> physicalMismatch.readLinuxLoadPath(7, context, file,
+                    SegmentClassicLinuxContentTest.expected(), file.path(), Map.of(),
+                    SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(physicalMismatch.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void loadPathSameByteReplacementAfterOwnedReadCannotReturnAnAssociation() throws Exception {
+        Files.createDirectory(root.resolve("lib"));
+        var file = loadPathFile("lib/physical.so", SegmentClassicLinuxDeployment.Role.LIBRARY);
+        Path alias = Files.createSymbolicLink(root.resolve("view"), Path.of("lib"));
+        var context = new SegmentClassicLinuxDeploymentV2.Context(4, alias + "/physical.so");
+        var owner = owner();
+        owner.initialize();
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        var changed = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(file.path()).equals(invocation.getArgument(0))) {
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                captured.set(fault);
+                return fault;
+            }
+            return actual;
+        }); var targets = mockStatic(Files.class, invocation -> {
+            var channel = captured.get();
+            if (invocation.getMethod().getName().equals("readAttributes") && alias.equals(invocation.getArgument(0))
+                    && channel != null && channel.closes.get() == 1 && changed.compareAndSet(0, 1)) {
+                Path original = root.resolve("original.so");
+                Files.move(Path.of(file.path()), original);
+                Files.copy(original, Path.of(file.path()));
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxLoadPath(7, context, file,
+                    SegmentClassicLinuxContentTest.expected(), context.logicalLoadName(), Map.of(alias, "lib"),
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("identity changed across the original ELF read"));
+            assertEquals(1, changed.get());
+            assertEquals(1, captured.get().closes.get());
+            assertFalse(captured.get().actual.isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertArrayEquals(Files.readAllBytes(root.resolve("original.so")), Files.readAllBytes(Path.of(file.path())));
+    }
+
+    @Test
+    public void loadPathAliasChangeAtFirstCloseCannotReturnAnAssociation() throws Exception {
+        Files.createDirectory(root.resolve("lib"));
+        Files.createDirectory(root.resolve("other"));
+        var file = loadPathFile("lib/physical.so", SegmentClassicLinuxDeployment.Role.LIBRARY);
+        loadPathFile("other/physical.so", SegmentClassicLinuxDeployment.Role.LIBRARY);
+        Path alias = Files.createSymbolicLink(root.resolve("view"), Path.of("lib"));
+        var context = new SegmentClassicLinuxDeploymentV2.Context(4, alias + "/physical.so");
+        var owner = owner();
+        owner.initialize();
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(file.path()).equals(invocation.getArgument(0))) {
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                fault.beforeClose = () -> {
+                    try {
+                        Files.delete(alias);
+                        Files.createSymbolicLink(alias, Path.of("other"));
+                    } catch (IOException failed) {
+                        throw new AssertionError(failed);
+                    }
+                };
+                captured.set(fault);
+                return fault;
+            }
+            return actual;
+        })) {
+            assertThrows(IOException.class, () -> owner.readLinuxLoadPath(7, context, file,
+                    SegmentClassicLinuxContentTest.expected(), context.logicalLoadName(), Map.of(alias, "lib"),
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertEquals(Path.of("other"), Files.readSymbolicLink(alias));
+            assertEquals(1, captured.get().closes.get());
+            assertFalse(captured.get().actual.isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void interpreterDataUsesOnlyLoaderMarkerAndRequiresExecutePermission() throws Exception {
+        var file = loadPathFile("loader.so", SegmentClassicLinuxDeployment.Role.LOADER);
+        var context = new SegmentClassicLinuxDeploymentV2.Context(4, file.path());
+        var owner = owner();
+        owner.initialize();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            throw new AssertionError("Non-executable interpreter reached content open");
+        })) {
+            assertThrows(IOException.class, () -> owner.readLinuxLoadPath(-1, context, file,
+                    SegmentClassicLinuxContentTest.expected(), file.path(), Map.of(),
+                    SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        Files.setPosixFilePermissions(Path.of(file.path()), PosixFilePermissions.fromString("rwxr-xr-x"));
+        var executable = owner();
+        executable.initialize();
+        try {
+            var result = executable.readLinuxLoadPath(-1, context, file, SegmentClassicLinuxContentTest.expected(),
+                    file.path(), Map.of(), SegmentClassicLinuxElfTest.deadline());
+            assertEquals(-1, result.context());
+            assertEquals(4, result.member());
+            assertEquals(file.path(), result.logical());
+            assertEquals(result.path().identity(), result.content().identity());
+            assertThrows(IOException.class, executable::installed);
+        } finally {
+            assertTrue(executable.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void loadPathReadKeepsSelfDrainRefusalAndExternalCloseWaitsForActualElfRead() throws Exception {
+        var file = loadPathFile("inflight.so", SegmentClassicLinuxDeployment.Role.LIBRARY);
+        var context = new SegmentClassicLinuxDeploymentV2.Context(4, file.path());
+        var owner = owner();
+        owner.initialize();
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var captured = new AtomicReference<FileChannel>();
+        var read = new FutureTask<>(() -> {
+            try (var channels = mockStatic(FileChannel.class, invocation -> {
+                Object actual = invocation.callRealMethod();
+                if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                        && Path.of(file.path()).equals(invocation.getArgument(0))) {
+                    captured.set((FileChannel) actual);
+                    var fault = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
+                    doAnswer(call -> {
+                        assertThrows(IllegalStateException.class, owner::closeAndDrain);
+                        entered.countDown();
+                        assertTrue(release.await(5, TimeUnit.SECONDS));
+                        return call.callRealMethod();
+                    }).when(fault).read(any(ByteBuffer.class), anyLong());
+                    return fault;
+                }
+                return actual;
+            })) {
+                return owner.readLinuxLoadPath(7, context, file, SegmentClassicLinuxContentTest.expected(),
+                        file.path(), Map.of(), SegmentClassicLinuxElfTest.deadline());
+            }
+        });
+        var close = new FutureTask<>(owner::closeAndDrain);
+        Thread reader = new Thread(read);
+        Thread closer = new Thread(close);
+        try {
+            reader.start();
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            closer.start();
+            await().atMost(5, TimeUnit.SECONDS).until(() -> closer.getState() == Thread.State.BLOCKED);
+            assertThrows(TimeoutException.class, () -> close.get(20, TimeUnit.MILLISECONDS));
+            assertTrue(captured.get().isOpen());
+            release.countDown();
+            assertEquals(7, read.get(5, TimeUnit.SECONDS).context());
+            assertTrue(close.get(5, TimeUnit.SECONDS).drained());
+        } finally {
+            release.countDown();
+            reader.join(5000);
+            if (closer.getState() != Thread.State.NEW) {
+                closer.join(5000);
+            }
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertFalse(reader.isAlive());
+        assertFalse(closer.isAlive());
+        assertFalse(captured.get().isOpen());
+    }
+
+    @Test
+    public void typedLoadContextAndInterpreterWithoutOriginalSourceCannotReachTargetIo() throws Exception {
+        for (int index : new int[]{-1, 0, Integer.MAX_VALUE}) {
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Unbound D2 context reached target I/O");
+            })) {
+                assertThrows(IOException.class,
+                        () -> owner.verifyLinuxLoadContext(index, SegmentClassicLinuxElfTest.deadline()));
+            }
+            assertThrows(IOException.class, owner::parsed);
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        var interpreter = owner();
+        interpreter.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound D2 interpreter reached target I/O");
+        })) {
+            assertThrows(IOException.class,
+                    () -> interpreter.verifyLinuxInterpreter(SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, interpreter::parsed);
+        assertTrue(interpreter.closeAndDrain().drained());
+    }
+
     @Test
     public void loadingDirectoriesReturnSortedActualNamesIncludingUnrelatedMembersWithoutFollowingThem()
             throws Exception {

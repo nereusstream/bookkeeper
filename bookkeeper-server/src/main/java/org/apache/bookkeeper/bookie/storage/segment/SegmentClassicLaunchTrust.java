@@ -121,6 +121,10 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Context -1 marks only the fixed interpreter result; it is never a context-selection fallback. */
+    record LinuxLoadPathObservation(int context, int member, String logical, LinuxPathObservation path,
+                                     LinuxElfMemberObservation content) { }
+
     enum LinuxContentKind { NONE, ELF1, ELF2, CACHE, LDCONFIG }
 
     /** Data read from a caller-held channel; no source authority or native close result is implied. */
@@ -1646,27 +1650,156 @@ final class SegmentClassicLaunchTrust {
         try {
             var deployment = originalLinuxDeployment(deadlineNanos);
             var file = selectLinuxElfMember(deployment, fileIndex);
-            Path path = linuxProvider.filesystem().getPath(file.path());
-            requirePhysicalBytes(file.path(), path, linuxProvider, deadlineNanos);
-            boolean executable = file.role() != SegmentClassicLinuxDeployment.Role.LIBRARY
-                    && file.role() != SegmentClassicLinuxDeployment.Role.MODULE;
-            var observed = hashFile(path, file.length(), file.sha256(), executable, LinuxContentKind.ELF2,
-                    deadlineNanos);
-            var elf = observed.content().elf2();
-            var expected = deployment.loading().elf().stream().filter(e -> e.file() == fileIndex)
-                    .findFirst().orElseThrow(() -> new IOException("Original D2 ELF metadata is missing"));
-            requireLinuxElfMetadata(file.role(), deployment.loading().interpreter(), expected, elf);
-            var result = new LinuxElfMemberObservation(fileIndex, observed.identity(), observed.parents(),
-                    observed.content().sha256(), elf);
-            files.requireHealthy();
-            requireTime(deadlineNanos);
-            return result;
+            return observeLinuxElfMember(fileIndex, file, originalLinuxElf(deployment, fileIndex),
+                    deployment.loading().interpreter(), deadlineNanos);
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
             throw failure;
         } finally {
             initializingThread = null;
         }
+    }
+
+    private static SegmentClassicLinuxDeploymentV2.Elf originalLinuxElf(SegmentClassicLinuxDeploymentV2 deployment,
+            int fileIndex) throws IOException {
+        return deployment.loading().elf().stream().filter(e -> e.file() == fileIndex).findFirst()
+                .orElseThrow(() -> new IOException("Original D2 ELF metadata is missing"));
+    }
+
+    private Path linuxElfMaterialPath(SegmentClassicLinuxDeploymentV2.File file, long deadline) throws IOException {
+        requireUtf8LoadingText(file.path(), deadline);
+        if (linuxProvider != null) {
+            return linuxPhysicalPath(file.path(), deadline);
+        }
+        Path path = Path.of(file.path());
+        requireLoadingPathBytes(path, deadline);
+        return path;
+    }
+
+    private LinuxElfMemberObservation observeLinuxElfMember(int fileIndex, SegmentClassicLinuxDeploymentV2.File file,
+            SegmentClassicLinuxDeploymentV2.Elf expected, String interpreter, long deadline) throws IOException {
+        if (fileIndex < 0 || fileIndex >= 1024 || !file.role().elf() || expected.file() != fileIndex) {
+            throw new IOException("ELF material index, role or metadata reference differs");
+        }
+        Path path = linuxElfMaterialPath(file, deadline);
+        boolean executable = file.role() != SegmentClassicLinuxDeployment.Role.LIBRARY
+                && file.role() != SegmentClassicLinuxDeployment.Role.MODULE;
+        var observed = hashFile(path, file.length(), file.sha256(), executable, LinuxContentKind.ELF2, deadline);
+        var elf = observed.content().elf2();
+        requireLinuxElfMetadata(file.role(), interpreter, expected, elf);
+        var result = new LinuxElfMemberObservation(fileIndex, observed.identity(), observed.parents(),
+                observed.content().sha256(), elf);
+        files.requireHealthy();
+        requireTime(deadline);
+        return result;
+    }
+
+    /** Original context index only; a negative index cannot choose the interpreter. */
+    synchronized LinuxLoadPathObservation verifyLinuxLoadContext(int contextIndex, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            var context = selectLinuxLoadContext(deployment, contextIndex);
+            return observeOriginalLinuxLoadPath(deployment, contextIndex, context, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Fixed original loading.loader/interpreter only; context -1 is a result marker. */
+    synchronized LinuxLoadPathObservation verifyLinuxInterpreter(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            var loading = deployment.loading();
+            var context = new SegmentClassicLinuxDeploymentV2.Context(loading.loader(), loading.interpreter());
+            return observeOriginalLinuxLoadPath(deployment, -1, context, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxLoadPathObservation observeOriginalLinuxLoadPath(SegmentClassicLinuxDeploymentV2 deployment,
+            int contextIndex, SegmentClassicLinuxDeploymentV2.Context context, long deadline) throws IOException {
+        var file = selectLinuxElfMember(deployment, context.file());
+        var expected = originalLinuxElf(deployment, context.file());
+        requireLinuxLoadReference(contextIndex, context, file, expected);
+        return observeLinuxLoadPath(contextIndex, context, file, expected, deployment.loading().interpreter(),
+                originalLinuxAliases(deployment, deadline), deadline);
+    }
+
+    /** Independent declaration data only; results cannot establish this owner's original D2 source or readiness. */
+    synchronized LinuxLoadPathObservation readLinuxLoadPath(int contextIndex,
+            SegmentClassicLinuxDeploymentV2.Context context, SegmentClassicLinuxDeploymentV2.File file,
+            SegmentClassicLinuxDeploymentV2.Elf expected, String interpreter, Map<Path, String> aliases, long deadline)
+            throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxLoadPath(contextIndex, context, file, expected, interpreter, aliases, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private static void requireLinuxLoadReference(int contextIndex, SegmentClassicLinuxDeploymentV2.Context context,
+            SegmentClassicLinuxDeploymentV2.File file, SegmentClassicLinuxDeploymentV2.Elf expected)
+            throws IOException {
+        if (contextIndex < -1 || contextIndex >= 4096 || context.file() < 0 || context.file() >= 1024
+                || expected.file() != context.file() || !file.role().elf()
+                || contextIndex == -1 && file.role() != SegmentClassicLinuxDeployment.Role.LOADER) {
+            throw new IOException("Load path context, ELF member role or metadata reference differs");
+        }
+    }
+
+    private LinuxLoadPathObservation observeLinuxLoadPath(int contextIndex,
+            SegmentClassicLinuxDeploymentV2.Context context,
+            SegmentClassicLinuxDeploymentV2.File file, SegmentClassicLinuxDeploymentV2.Elf expected, String interpreter,
+            Map<Path, String> aliasDeclarations, long deadline) throws IOException {
+        requireTime(deadline);
+        requireLinuxLoadReference(contextIndex, context, file, expected);
+        var aliases = fixedLoadingAliases(aliasDeclarations, deadline);
+        Path entry = loadingNativePath(context.logicalLoadName(), deadline);
+        Path physical = linuxElfMaterialPath(file, deadline);
+        LinuxPathKind kind = contextIndex == -1 ? LinuxPathKind.INTERPRETER : LinuxPathKind.LOOKUP;
+        var before = observeLinuxPath(kind, entry, aliases, true, deadline);
+        if (before.identity() == null || before.identity().directory() || !before.resolved().equals(physical)) {
+            throw new IOException("Logical load path differs from its declared physical ELF member");
+        }
+        var member = observeLinuxElfMember(context.file(), file, expected, interpreter, deadline);
+        var after = observeLinuxPath(kind, entry, aliases, true, deadline);
+        if (!before.equals(after) || !before.identity().equals(member.identity())
+                || !after.identity().equals(member.identity())) {
+            throw new IOException("Load path, alias chain or member identity changed across the original ELF read");
+        }
+        var result = new LinuxLoadPathObservation(contextIndex, context.file(), context.logicalLoadName(), before,
+                member);
+        files.requireHealthy();
+        requireTime(deadline);
+        return result;
+    }
+
+    /** Pure bounded original table selection only. Source/provider checks are still required before I/O. */
+    static SegmentClassicLinuxDeploymentV2.Context selectLinuxLoadContext(SegmentClassicLinuxDeploymentV2 deployment,
+            int contextIndex) throws IOException {
+        if (contextIndex < 0 || contextIndex >= deployment.loading().contexts().size()) {
+            throw new IOException("D2 context index is outside the original context table");
+        }
+        var context = deployment.loading().contexts().get(contextIndex);
+        selectLinuxElfMember(deployment, context.file());
+        return context;
     }
 
     private SegmentClassicLinuxDeploymentV2 originalLinuxDeployment(long deadline) throws IOException {

@@ -63,7 +63,7 @@ public class SegmentClassicLinuxContentTest {
         return SegmentClassicLinuxDeploymentTest.vector("classic-linux-elf-v2");
     }
 
-    private static Elf expected() {
+    static Elf expected() {
         return new Elf(4, List.of("libz.so.1", "libz.so.1", "../${LIB}/lib雪.so", "$ORIGIN/deps/libx.so"),
                 new DynamicPath(true, "$ORIGIN/../lib::relative:${LIB}/x:${PLATFORM}/p;/literal"),
                 new DynamicPath(true, ""), 0x1b, 0x08000889);
@@ -161,6 +161,19 @@ public class SegmentClassicLinuxContentTest {
                 assertThrows(IOException.class,
                         () -> SegmentClassicLaunchTrust.selectLinuxElfMember(deployment, index));
             }
+        }
+    }
+
+    @Test
+    public void originalContextSelectionRetainsItsPairAndNeverTreatsMinusOneAsInterpreter() throws Exception {
+        var deployment = SegmentClassicLinuxDeployment.decode(
+                SegmentClassicLinuxDeploymentTest.vector("classic-linux-deployment-v2")).versionTwo();
+        for (int i = 0; i < deployment.loading().contexts().size(); i++) {
+            assertSame(deployment.loading().contexts().get(i),
+                    SegmentClassicLaunchTrust.selectLinuxLoadContext(deployment, i));
+        }
+        for (int index : new int[]{-1, deployment.loading().contexts().size(), Integer.MAX_VALUE}) {
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.selectLinuxLoadContext(deployment, index));
         }
     }
 
