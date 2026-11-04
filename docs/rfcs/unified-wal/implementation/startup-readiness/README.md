@@ -896,6 +896,22 @@ relative＋CWD UNAVAILABLE为已知origin不可用，UNOBSERVED不给出prefix�
 
 实际parent环境、nonsecure、effective CLI/env选择、初始化main/rtld身份与origin来源仍OPEN，不能从给定Value或纯结果补认。完整namespace/BFS/祖先与递归helper/backend、批准Linux/vendor/Unix及parent/child/Main/G1/full-bytes/full16/生产Gate仍未验收；diagnostics unconditional Unsupported与完整目标active保持，默认OFF/SYSTEM/PARK和advanced disabled不变。
 
+## Cache 之前的条件目录来源计划
+
+2026-11-05在父`c459d0910c13dd16f37f1f2aac0b16bfb17175b1`上，原SearchStages新增包内plan，输入保留原NeededName.AfterMiss及原requester/ordinal/raw批准键；仅接DIRECTORY_SEARCH、非空无slash的first lookup name，链首context须匹配原requester。显式requester→ancestors链与origin map在复制前及遍历中受4096/deadline限制，所有提供Value非null、AVAILABLE文字按原strict UTF8/4096校验；selected source必须有明确origin项，未知可显式给定，未选祖先不要求提供。这些校验不证明实际name miss、l_loader历史或对象来源。
+
+复用原SearchStages.select，不另写优先级；每个selected Source按opaque owner object identity取自己的origin，同context不同object不会合并。输出DirectoryPlan固定为RPATH blocks→一个LibraryPath→RUNPATH blocks，TagBlock保留原Source的owner/context/tag/raw declaration、给定origin及不可变目录。library-path继续使用独立初始化origin，不从requester/main origin表猜出它。原tag presence/empty、有效llp的NULL/whole-empty可辨认；每个来源内部沿原DynamicPath精确去重，跨来源即使dirname或physical相同也不合并。依据仍是[glibc2.39 dl-load.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)的pre-cache次序、tag拥有者展开及独立路径初始化。
+
+任一必要展开UNOBSERVED时，整份计划显式UNOBSERVED，两个tag block列表为空、library=null，只保留原请求及声明头，没有可消费的目录prefix。unused UNOBSERVED、UNAVAILABLE token的省略和present-empty规则沿原helper，不新增secure判断。AVAILABLE仅表示在给定nonsecure有效library-path、链、各origin等前提下数据齐备，不认证真实name miss或实际来源，也不是尝试日志/winner。相对目录与CWD保留数据原文，不补absolute或改变realname/ORIGIN。
+
+直接复用原LoadingDirectoryBudget跨三阶段累计，保留新block前逐dirname计费；固定262144个目录关联、64MiB累计UTF8 dirname字节，CWD计一项/0字节、跨来源重复照计，超限整次失败无prefix。这是本次计划的关联/字节界，不是总heap保证，没有新可调预算或通用计费框架。cache/default、CPU/hwcap筛选、文件lookup与实际namespace/BFS/l_loader采集均不在本片，原owner目录/文件批准不被纯plan替代。
+
+新5项全部通过；最终SearchStages11（新5＋原选择器6）、DynamicPath14、Tokens7共32项全部通过，0失败/错误/跳过，包含同新5而非再累计。覆盖child→ancestor→main各自ORIGIN、同context不同object、独立初始化origin、RUNPATH包括空值的抑制/位置、跨source重复、unknown无whole-plan prefix、未用unknown、原requester/显式origin错误与deadline。容量反例构造4000来源×（65目录＋CWD）=264000关联；忽略CWD只260000或全局去重均不会触发上限，测试必须取得原容量异常而非deadline。首次style因六处测试长行退出1，原失败保留；仅换行后final Spotless/Checkstyle退出0。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-directory-plan-evidence-c459d091`分开保留最小/最终两阶段原source/class/日志/XML及首style失败；各1448输入按原snapshot/父Git blob绑定无错配，最终两code与两测试/final style一致。同版dl-load.c原70348字节、SHA-256 `26345f234ef918c866e40bb86524bdfd4c3beac487af81b3f51668379e671ae0`单列为静态依据，不计vendor运行。两个确切raw scope经两次独立lsof/identity/SHA/archive hardlink核验清理4目录、10文件路径、825207逻辑字节，归档保留、regular-file数据块回收0，共享target与用户文件不清理。
+
+未扩大owner/JNI/Cache等矩阵，原生库仅为runner配置属性、不计调用；本片无models/性能。实际环境/CLI/nonsecure、main/rtld与tag对象/chain/origin来源、完整loader及递归helper/backend和批准Linux/vendor/Unix资格仍OPEN/NOT_EXECUTED。diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，完整目标active，默认OFF/SYSTEM/PARK及advanced disabled保持。
+
 ## 已给定文件身份的已加载对象复用
 
 2026-11-05在父`fcd63e2a1c6f1b1ebf2426e272e9e801cc4ebe1b`上，原LoadedNames新增FileId(device,inode)、FileObject(原ObjectData,fileId)及纯lookupFile。输入是明确原序的base-namespace对象/已给定file-id、本次已给定opened id、原map-from-fd request name和deadline；只描述普通非OPENEXEC分支的局部规则，无fd参数/操作或owner入口，不证明前面名称查找已经未命中。query继续非空strictUTF8/无NUL/≤4096，slash/$原文保留；没有mode策略、跨namespace镜像、NOLOAD或文件映射器。

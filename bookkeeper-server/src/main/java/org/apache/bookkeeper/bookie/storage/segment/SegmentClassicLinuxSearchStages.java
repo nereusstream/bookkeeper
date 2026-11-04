@@ -20,8 +20,15 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LoadingDirectoryBudget;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeploymentV2.DynamicPath;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDynamicPath.Directory;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDynamicPath.LibraryPath;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxNeededName.AfterMiss;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxTokens.State;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxTokens.Value;
 
 /** Dynamic-tag source stages for an explicit base-namespace chain, already in the directory-search branch. */
 final class SegmentClassicLinuxSearchStages {
@@ -47,6 +54,34 @@ final class SegmentClassicLinuxSearchStages {
         Stages {
             rpathBeforeEnvironment = List.copyOf(rpathBeforeEnvironment);
             runpathAfterEnvironment = List.copyOf(runpathAfterEnvironment);
+        }
+    }
+
+    /** One selected tag's given owner origin and complete directories; equal directories in other blocks remain. */
+    record TagBlock(Source source, Value origin, List<Directory> directories) {
+        TagBlock {
+            Objects.requireNonNull(source, "source");
+            Objects.requireNonNull(origin, "origin");
+            directories = List.copyOf(directories);
+        }
+    }
+
+    /** Fixed order is RPATH blocks, library path, RUNPATH blocks. Unknown plans expose no usable blocks. */
+    record DirectoryPlan(AfterMiss request, Stages sources, Value effectiveLibraryPath, Value initializationOrigin,
+                         State state, List<TagBlock> rpathBeforeLibrary, LibraryPath libraryPath,
+                         List<TagBlock> runpathAfterLibrary) {
+        DirectoryPlan {
+            Objects.requireNonNull(request, "request");
+            Objects.requireNonNull(sources, "sources");
+            Objects.requireNonNull(effectiveLibraryPath, "effectiveLibraryPath");
+            Objects.requireNonNull(initializationOrigin, "initializationOrigin");
+            Objects.requireNonNull(state, "state");
+            rpathBeforeLibrary = List.copyOf(rpathBeforeLibrary);
+            runpathAfterLibrary = List.copyOf(runpathAfterLibrary);
+            if (state == State.UNAVAILABLE || (state == State.AVAILABLE) != (libraryPath != null)
+                    || state == State.UNOBSERVED && (!rpathBeforeLibrary.isEmpty() || !runpathAfterLibrary.isEmpty())) {
+                throw new IllegalArgumentException("A directory plan is complete or unobserved without a prefix");
+            }
         }
     }
 
@@ -96,6 +131,127 @@ final class SegmentClassicLinuxSearchStages {
         }
         requireTime(deadline);
         return result;
+    }
+
+    /** Given-data pre-cache plan only; the caller must establish actual name miss, chain and all source facts. */
+    static DirectoryPlan plan(AfterMiss request, List<ObjectData> requesterToAncestors, ObjectData main,
+                              Map<Long, Value> origins, Value effectiveLibraryPath, Value initializationOrigin,
+                              Value lib, Value platform, long deadline) throws IOException {
+        requireTime(deadline);
+        if (request == null || request.branch() != SegmentClassicLinuxNeededName.Branch.DIRECTORY_SEARCH
+                || request.lookup().state() != SegmentClassicLinuxNeededName.State.LOOKUP_NAME
+                || request.lookup().name().isEmpty() || request.lookup().name().indexOf('/') >= 0
+                || request.lookup().request().declaration() == null) {
+            throw new IOException("An explicit original directory-search request is required");
+        }
+        SegmentClassicLinuxTokens.utf8Length(request.lookup().name(), deadline);
+        var original = request.lookup().request();
+        SegmentClassicLinuxTokens.utf8Length(original.name(), deadline);
+        if (original.name().isEmpty() || original.declaration().requester() < 0
+                || original.declaration().requester() >= MAX_OBJECTS || original.declaration().ordinal() < 0
+                || original.declaration().ordinal() >= SegmentClassicLinuxDeploymentV2.MAX_REQUESTS) {
+            throw new IOException("A bounded original requester/NEEDED ordinal and raw name are required");
+        }
+        if (requesterToAncestors == null || requesterToAncestors.isEmpty()
+                || requesterToAncestors.size() > MAX_OBJECTS) {
+            throw new IOException("An explicit bounded requester chain is required");
+        }
+        var chain = new ArrayList<ObjectData>();
+        for (ObjectData object : requesterToAncestors) {
+            requireTime(deadline);
+            if (chain.size() == MAX_OBJECTS || object == null) {
+                throw new IOException("Invalid or excessive requester-chain data");
+            }
+            chain.add(object);
+        }
+        Stages sources = select(chain, main, deadline);
+        if (chain.get(0).context() != original.declaration().requester()) {
+            throw new IOException("The chain head differs from the original requester context");
+        }
+        if (origins == null || origins.size() > MAX_OBJECTS) {
+            throw new IOException("An explicit bounded object-origin table is required");
+        }
+        var byIdentity = new HashMap<Long, Value>();
+        for (var entry : origins.entrySet()) {
+            requireTime(deadline);
+            if (byIdentity.size() == MAX_OBJECTS || entry.getKey() == null) {
+                throw new IOException("Invalid or excessive object-origin data");
+            }
+            validateValue(entry.getValue(), deadline);
+            byIdentity.put(entry.getKey(), entry.getValue());
+        }
+        for (Source source : sources.rpathBeforeEnvironment()) {
+            requireOrigin(source, byIdentity, deadline);
+        }
+        for (Source source : sources.runpathAfterEnvironment()) {
+            requireOrigin(source, byIdentity, deadline);
+        }
+        validateValue(effectiveLibraryPath, deadline);
+        validateValue(initializationOrigin, deadline);
+        validateValue(lib, deadline);
+        validateValue(platform, deadline);
+        var budget = new LoadingDirectoryBudget();
+        var rpaths = new ArrayList<TagBlock>();
+        var runpaths = new ArrayList<TagBlock>();
+        for (Source source : sources.rpathBeforeEnvironment()) {
+            var expanded = SegmentClassicLinuxDynamicPath.expand(source.declaration(), byIdentity.get(source.owner()),
+                    lib, platform, deadline);
+            if (expanded.state() == State.UNOBSERVED) {
+                return unobserved(request, sources, effectiveLibraryPath, initializationOrigin, deadline);
+            }
+            retain(expanded.directories(), budget, deadline);
+            rpaths.add(new TagBlock(source, byIdentity.get(source.owner()), expanded.directories()));
+        }
+        var library = SegmentClassicLinuxDynamicPath.expandLibraryPath(effectiveLibraryPath, initializationOrigin,
+                lib, platform, deadline);
+        if (library.state() == State.UNOBSERVED) {
+            return unobserved(request, sources, effectiveLibraryPath, initializationOrigin, deadline);
+        }
+        retain(library.directories(), budget, deadline);
+        for (Source source : sources.runpathAfterEnvironment()) {
+            var expanded = SegmentClassicLinuxDynamicPath.expand(source.declaration(), byIdentity.get(source.owner()),
+                    lib, platform, deadline);
+            if (expanded.state() == State.UNOBSERVED) {
+                return unobserved(request, sources, effectiveLibraryPath, initializationOrigin, deadline);
+            }
+            retain(expanded.directories(), budget, deadline);
+            runpaths.add(new TagBlock(source, byIdentity.get(source.owner()), expanded.directories()));
+        }
+        requireTime(deadline);
+        return new DirectoryPlan(request, sources, effectiveLibraryPath, initializationOrigin, State.AVAILABLE, rpaths,
+                library, runpaths);
+    }
+
+    private static void validateValue(Value value, long deadline) throws IOException {
+        requireTime(deadline);
+        if (value == null) {
+            throw new IOException("Explicit token or effective library-path data is required");
+        }
+        if (value.state() == State.AVAILABLE) {
+            SegmentClassicLinuxTokens.utf8Length(value.text(), deadline);
+        }
+    }
+
+    private static void requireOrigin(Source source, Map<Long, Value> origins, long deadline) throws IOException {
+        requireTime(deadline);
+        if (!origins.containsKey(source.owner())) {
+            throw new IOException("A selected tag has no explicit origin for its original object identity");
+        }
+    }
+
+    private static void retain(List<Directory> directories, LoadingDirectoryBudget budget, long deadline)
+            throws IOException {
+        for (Directory directory : directories) {
+            requireTime(deadline);
+            budget.retain(directory.dirname());
+        }
+    }
+
+    private static DirectoryPlan unobserved(AfterMiss request, Stages sources, Value effectiveLibraryPath,
+                                            Value initializationOrigin, long deadline) throws IOException {
+        requireTime(deadline);
+        return new DirectoryPlan(request, sources, effectiveLibraryPath, initializationOrigin, State.UNOBSERVED,
+                List.of(), null, List.of());
     }
 
     private static void retainRpath(ObjectData object, List<Source> sources) {
