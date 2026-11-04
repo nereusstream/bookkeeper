@@ -98,8 +98,9 @@ final class SegmentClassicLinuxDynamicPath {
         return result;
     }
 
-    private static String dirname(String text, long deadline) throws IOException {
-        // The token helper has already validated Unicode and bounded this exact expansion to 4096 UTF8 bytes.
+    /** Callers supply nonempty strict UTF8 bounded by the token helper or an original D2 Directory declaration. */
+    static String dirname(String text, long deadline) throws IOException {
+        requireTime(deadline);
         int bytes = text.getBytes(StandardCharsets.UTF_8).length;
         int end = text.length();
         while (end > 1 && text.charAt(end - 1) == '/') {

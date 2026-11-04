@@ -127,6 +127,12 @@ final class SegmentClassicLaunchTrust {
 
     record LinuxNeededContextObservation(SegmentClassicLinuxDeploymentV2.NeededRule declaration, String name) { }
 
+    /** One base-directory lookup only. A null candidate records reliable absence, never a search winner. */
+    record LinuxNeededLookupObservation(int rule, int directory,
+            SegmentClassicLinuxDeploymentV2.NeededRule declaration, String logical,
+            LinuxPathObservation directoryPath, LinuxPathObservation path, LinuxLoadPathObservation requester,
+            LinuxLoadPathObservation candidate) { }
+
     /** Entire declared context set only; no cross-object snapshot, search closure or loader winner is implied. */
     record LinuxCandidateContextObservation(List<LinuxLoadPathObservation> contexts,
             LinuxLoadPathObservation interpreter, List<LinuxNeededContextObservation> needed,
@@ -1856,23 +1862,8 @@ final class SegmentClassicLaunchTrust {
     private LinuxCandidateContextObservation observeLinuxCandidateContexts(
             List<SegmentClassicLinuxDeploymentV2.File> declarations, SegmentClassicLinuxDeploymentV2.Loading loading,
             long deadline) throws IOException {
-        requireTime(deadline);
-        var members = List.copyOf(declarations);
-        if (members.size() > 1024) {
-            throw new IOException("Candidate context file table exceeds its original bound");
-        }
-        try {
-            SegmentClassicLinuxDeploymentV2.requireInterpreterReference(members, loading);
-            SegmentClassicLinuxDeploymentV2.requireContextReferences(members, loading);
-        } catch (IllegalArgumentException invalid) {
-            throw new IOException("Invalid candidate context subgraph or fixed interpreter reference", invalid);
-        }
-        requireTime(deadline);
-        Map<Path, String> aliasDeclarations = new HashMap<>();
-        for (var alias : loading.aliases()) {
-            aliasDeclarations.put(linuxMaterialPath(alias.link(), deadline), alias.target());
-        }
-        var aliases = fixedLoadingAliases(aliasDeclarations, deadline);
+        var members = fixedLinuxContextMembers(declarations, loading, deadline);
+        var aliases = linuxContextAliases(loading, deadline);
         var contexts = new ArrayList<LinuxLoadPathObservation>();
         for (int i = 0; i < loading.contexts().size(); i++) {
             requireTime(deadline);
@@ -1891,6 +1882,139 @@ final class SegmentClassicLaunchTrust {
             needed.add(new LinuxNeededContextObservation(rule, name));
         }
         var result = new LinuxCandidateContextObservation(contexts, loader, needed, loading.modules());
+        files.requireHealthy();
+        requireTime(deadline);
+        return result;
+    }
+
+    private List<SegmentClassicLinuxDeploymentV2.File> fixedLinuxContextMembers(
+            List<SegmentClassicLinuxDeploymentV2.File> declarations, SegmentClassicLinuxDeploymentV2.Loading loading,
+            long deadline) throws IOException {
+        requireTime(deadline);
+        var members = List.copyOf(declarations);
+        if (members.size() > 1024) {
+            throw new IOException("Candidate context file table exceeds its original bound");
+        }
+        try {
+            SegmentClassicLinuxDeploymentV2.requireInterpreterReference(members, loading);
+            SegmentClassicLinuxDeploymentV2.requireContextReferences(members, loading);
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Invalid candidate context subgraph or fixed interpreter reference", invalid);
+        }
+        requireTime(deadline);
+        return members;
+    }
+
+    private Map<Path, String> linuxContextAliases(SegmentClassicLinuxDeploymentV2.Loading loading, long deadline)
+            throws IOException {
+        Map<Path, String> aliasDeclarations = new HashMap<>();
+        for (var alias : loading.aliases()) {
+            aliasDeclarations.put(linuxMaterialPath(alias.link(), deadline), alias.target());
+        }
+        return fixedLoadingAliases(aliasDeclarations, deadline);
+    }
+
+    /** Only original rule/directory indices; no caller name, Path, candidate or previous observation. */
+    synchronized LinuxNeededLookupObservation verifyLinuxNeededLookup(int ruleIndex, int directoryIndex, long deadline)
+            throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            return observeLinuxNeededLookup(deployment.files(), deployment.loading(), ruleIndex, directoryIndex,
+                    deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Independent original-table data only, never provider/source readiness or a complete deployment proof. */
+    synchronized LinuxNeededLookupObservation readLinuxNeededLookup(List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, int directoryIndex, long deadline)
+            throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxNeededLookup(members, loading, ruleIndex, directoryIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxNeededLookupObservation observeLinuxNeededLookup(List<SegmentClassicLinuxDeploymentV2.File> declared,
+            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, int directoryIndex, long deadline)
+            throws IOException {
+        var members = fixedLinuxContextMembers(declared, loading, deadline);
+        if (ruleIndex < 0 || ruleIndex >= loading.needed().size()
+                || directoryIndex < 0 || directoryIndex >= loading.directories().size()) {
+            throw new IOException("NEEDED lookup index is outside the original rule or directory table");
+        }
+        var rule = loading.needed().get(ruleIndex);
+        var context = loading.contexts().get(rule.requester());
+        var metadata = linuxElfDeclaration(loading, context.file());
+        String name = metadata.needed().get(rule.ordinal());
+        if (name.isEmpty() || name.indexOf('/') >= 0 || name.indexOf('$') >= 0
+                || name.equals(".") || name.equals("..")) {
+            throw new IOException("Unsupported NEEDED name for an ordinary base-directory lookup");
+        }
+        var declaredDirectory = loading.directories().get(directoryIndex);
+        String dirname = SegmentClassicLinuxDynamicPath.dirname(declaredDirectory.path(), deadline);
+        if (name.getBytes(StandardCharsets.UTF_8).length > 4096 - dirname.getBytes(StandardCharsets.UTF_8).length) {
+            throw new IOException("NEEDED candidate path exceeds its fixed UTF8 byte bound");
+        }
+        String logical = dirname + name;
+        var aliases = linuxContextAliases(loading, deadline);
+        var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
+                loading.interpreter(), aliases, deadline);
+        if (!name.equals(requester.content().elf().needed().get(rule.ordinal()))) {
+            throw new IOException("Original NEEDED name differs from the requester ELF observation");
+        }
+        var directory = new LinuxSearchDirectory(directoryIndex, declaredDirectory.path(), declaredDirectory.present());
+        Path directoryEntry = loadingNativePath(directory.logical(), deadline);
+        var beforeDirectory = searchDirectoryPath(directory, directoryEntry, aliases, LinuxPathKind.LOOKUP, deadline);
+        Path entry = loadingNativePath(logical, deadline);
+        var probe = observeLinuxPath(LinuxPathKind.LOOKUP, entry, aliases, false, deadline);
+        LinuxLoadPathObservation candidate = null;
+        if (probe.identity() != null) {
+            if (probe.identity().directory()) {
+                throw new IOException("NEEDED candidate is a directory, not an approved ELF member");
+            }
+            int approved = -1;
+            for (int index : rule.candidates()) {
+                requireTime(deadline);
+                var target = loading.contexts().get(index);
+                if (target.logicalLoadName().equals(logical)
+                        && probe.resolved().equals(linuxMaterialPath(members.get(target.file()).path(), deadline))) {
+                    if (approved != -1) {
+                        throw new IOException("NEEDED lookup has ambiguous approved logical contexts");
+                    }
+                    approved = index;
+                }
+            }
+            if (approved == -1) {
+                throw new IOException("Present NEEDED candidate lacks this rule's exact approved logical context");
+            }
+            var target = loading.contexts().get(approved);
+            candidate = observeLinuxLoadPath(approved, target, members.get(target.file()),
+                    linuxElfDeclaration(loading, target.file()), loading.interpreter(), aliases, deadline);
+            if (!probe.equals(candidate.path()) || !probe.identity().equals(candidate.content().identity())) {
+                throw new IOException("NEEDED candidate changed between its lookup probe and owned ELF observation");
+            }
+        }
+        if (!probe.equals(observeLinuxPath(LinuxPathKind.LOOKUP, entry, aliases, false, deadline))
+                || !beforeDirectory.equals(searchDirectoryPath(directory, directoryEntry, aliases, LinuxPathKind.LOOKUP,
+                        deadline))) {
+            throw new IOException("NEEDED candidate or declared directory changed across its lookup observation");
+        }
+        var result = new LinuxNeededLookupObservation(ruleIndex, directoryIndex, rule, logical, beforeDirectory, probe,
+                requester, candidate);
         files.requireHealthy();
         requireTime(deadline);
         return result;

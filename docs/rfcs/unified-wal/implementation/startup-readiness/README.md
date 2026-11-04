@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## D2 单个普通 NEEDED base 查找点的实际批准对应
+
+2026-11-04在父`1dd01a8dfab7944ee3cc51206148ae51d8ce7079`上，原trust owner新增`verifyLinuxNeededLookup(ruleIndex, directoryIndex, deadline)`。typed入口先过原source/provider/期限门，只从本owner原D2选择NeededRule和Directory，不接caller name、Path、alias或已有观察。单独的`readLinuxNeededLookup(files, Loading, ...)`只供独立子图真实文件夹具，复用同一private实现，不签发来源或ready。既有context全集方法的文件/引用校验和alias固定只作小提取，不重入public同步入口，首次关闭/失败留存及原owner排空语义不变。
+
+原索引、全部context/固定interpreter引用和本片name形状在相关目标I/O前核对；仅支持非空、无`/`和`$`且不是`.`/`..`的普通名字，其他形状明确Unsupported，不冒充absence。目录raw字符串仅复用DynamicPath的尾slash整理，不经过token/list展开；dirname＋name的完整UTF8字节数在Path和目标读取前检查4096上限。冒号、分号、Unicode、目录字面`$`及内部slash/dot原文保留为精确logical查询。随后从requester原context的owned hash＋ELF2观察按原ordinal取得实际name并验证元数据一致，未以caller字符串代替真实读取。
+
+复用原严格walker检查声明目录的实际presence/owner/ACL/保护及精确candidate probe。只有其受保护父链下的NoSuchFile事实、前后复核稳定，才返回该点缺失；权限/读取异常、目录代替文件及未声明alias均失败，不混为无候选。存在时，必须在候选内容open前同时属于本NeededRule.candidates、精确匹配原context.logicalLoadName并对应实际resolved physical成员；同physical/同SHA的另一logical或其他规则批准不能补认。匹配后才调用原private context关联和owned ELF2读取，并将其完整path及内容identity与最初probe比较，再复核candidate与目录末端观察。后一次读取自身稳定不能掩盖probe后的同字节换inode或同target换alias。结果保留原rule/directory/声明、logical、requester及本次路径/内容事实；成功返回的null candidate仅表示probe的可靠缺失，不使用selected/winner命名。
+
+Trust类74项（含11项新增）和受影响DynamicPath 8项合计82项实际全部通过，0失败/错误/跳过，样式退出0；只执行这一相关测试阶段。新夹具为合成ELF2的真实文件/alias/owned channel/JNI ACL/readlink路径，覆盖批准命中与原索引、精确logical拒绝且未open候选、保护目录和显式目录缺失、probe后两类替换、内容关闭时目录变化、absence转present、AccessDenied/目录/未声明link，以及unsupported/越界/拼接字节/typed缺source的pre-I/O拒绝。既有Trust关闭/期限覆盖继续执行，不重复无关旧矩阵。1436项源码输入与原snapshot/父Git blob无错配，三code与该唯一测试及style快照一致；新规划会话只读检查未发现冻结范围内阻塞缺陷。
+
+证据保留在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-needed-lookup-evidence-1dd01a8d`，包括原源码/class/log/XML/native属性和库SHA绑定。终态RAT退出1/431，未批准路径及字节与父HEAD相同，无新增unknown；用户PDF扫描前排除且未读取。唯一确切raw scope经两次独立lsof及inode/mode/SHA/archive hardlink核验后，清理两目录、五文件路径、423,138逻辑字节；归档保留，regular-file数据块回收0。[glibc 2.39 dl-load.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)的open_path仅作为dirname＋空cap suffix＋name位置的静态依据；本块不模拟其完整接受/继续搜索策略，三份既有原源静态归档不计实际vendor执行。
+
+交付只证明普通NEEDED在一个原声明base目录中的实际查找与批准对应，不证明该目录实际进入搜索、其他位置缺失或整体winner。所有请求/目录全集、hwcap/cache/NODEFLIB/default闭合、token/slash请求、实际namespace/l_loader链、first-loaded reuse、diagnostics/systemd2及qualification仍待后续。typed Linux阳性和实际vendor运行NOT_EXECUTED，本块models/性能未执行；完整16步目标active，parent/child/Main/G1/full-bytes/full16/production Gate保持OPEN，默认OFF/SYSTEM/PARK及advanced disabled不变。
+
 ## D2 目录搜索分支的动态标签来源阶段
 
 2026-11-04在父`91f91b9c9e068cd40109617a63ca694e76213504`上，新增包内`SegmentClassicLinuxSearchStages.select(requesterToAncestors, main, deadline)`纯数据函数。调用方必须明确提供非空requester→l_loader祖先有序对象链和main对象；不从D2的file/logical Context或NEEDED候选图推导链。ObjectData的opaque identity与physical文件、context、SONAME及PID/inode无关，context保留原0..4095索引，不同对象共享context允许且不合并。链与链外main合计最多4096个不同identity；先有界固定输入并检查链内重复identity/循环、main完整数据冲突及总数，再选择来源。链内main数据完全一致时复用，不重复计数或补入。

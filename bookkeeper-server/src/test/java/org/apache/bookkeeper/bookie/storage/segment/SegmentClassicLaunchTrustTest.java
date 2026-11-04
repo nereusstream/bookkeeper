@@ -20,6 +20,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -35,10 +36,12 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.util.Arrays;
@@ -416,6 +419,363 @@ public class SegmentClassicLaunchTrustTest {
             List<SegmentClassicLinuxDeploymentV2.ModuleRequest> modules) {
         return new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), loader, interpreter, l.aliases(),
                 l.directories(), l.configuration(), l.policy(), l.elf(), l.contexts(), needed, modules);
+    }
+
+    private CandidateFixture lookupFixture(String name) throws Exception {
+        var original = candidateFixture();
+        var l = original.loading();
+        byte[] image = SegmentClassicLinuxDeploymentTest.vector("classic-linux-elf-v2");
+        byte[] before = "libz.so.1".getBytes(StandardCharsets.UTF_8);
+        byte[] after = name.getBytes(StandardCharsets.UTF_8);
+        assertEquals(before.length, after.length);
+        int changed = 0;
+        for (int i = 0; i <= image.length - before.length; i++) {
+            if (Arrays.equals(before, Arrays.copyOfRange(image, i, i + before.length))) {
+                System.arraycopy(after, 0, image, i, after.length);
+                changed++;
+            }
+        }
+        assertTrue(changed > 0);
+        Path library = root.resolve("lib").resolve(name);
+        Files.move(Path.of(original.files().get(1).path()), library);
+        var members = new java.util.ArrayList<SegmentClassicLinuxDeploymentV2.File>();
+        for (int i = 0; i < 2; i++) {
+            Path path = i == 0 ? Path.of(original.files().get(0).path()) : library;
+            write(path, image);
+            members.add(new SegmentClassicLinuxDeploymentV2.File(path.toString(), i == 0
+                    ? SegmentClassicLinuxDeployment.Role.LOADER : SegmentClassicLinuxDeployment.Role.LIBRARY,
+                    image.length, SegmentClassicHandoff.digest(image)));
+        }
+        Files.setPosixFilePermissions(Path.of(members.get(0).path()), PosixFilePermissions.fromString("rwxr-xr-x"));
+        Path literal = Files.createSymbolicLink(root.resolve("view:$HOME;雪"), Path.of("lib"));
+        var aliases = new java.util.ArrayList<>(l.aliases());
+        aliases.add(new SegmentClassicLinuxDeploymentV2.Alias(literal.toString(), "lib"));
+        aliases.sort(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Alias::link));
+        var directories = List.of(new SegmentClassicLinuxDeploymentV2.Directory(root + "/absent", false),
+                new SegmentClassicLinuxDeploymentV2.Directory(Files.createDirectory(root.resolve("empty")).toString(),
+                        true), new SegmentClassicLinuxDeploymentV2.Directory(root + "/lib", true),
+                new SegmentClassicLinuxDeploymentV2.Directory(literal.toString(), true));
+        var contexts = List.of(l.contexts().get(0), l.contexts().get(1),
+                new SegmentClassicLinuxDeploymentV2.Context(1, library.toString()),
+                new SegmentClassicLinuxDeploymentV2.Context(1, literal + "/" + name));
+        var metadata = l.elf().stream().map(e -> new SegmentClassicLinuxDeploymentV2.Elf(e.file(),
+                e.needed().stream().map(n -> n.equals("libz.so.1") ? name : n).toList(), e.rpath(), e.runpath(),
+                e.flags(), e.flags1())).toList();
+        var needed = new java.util.ArrayList<SegmentClassicLinuxDeploymentV2.NeededRule>();
+        for (int context = 0; context < contexts.size(); context++) {
+            for (int ordinal = 0; ordinal < 4; ordinal++) {
+                needed.add(new SegmentClassicLinuxDeploymentV2.NeededRule(context, ordinal,
+                        List.of(ordinal == 1 ? 3 : 2)));
+            }
+        }
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(), aliases,
+                directories, l.configuration(), l.policy(), metadata, contexts, needed, List.of());
+        return new CandidateFixture(members, loading);
+    }
+
+    @Test
+    public void neededLookupKeepsExactRuleDirectoryContextAndLiteralDirectorySpelling() throws Exception {
+        var f = lookupFixture("libz.so.1");
+        var owner = owner();
+        owner.initialize();
+        try {
+            for (int rule = 0; rule < 2; rule++) {
+                int directory = rule + 2;
+                var result = owner.readLinuxNeededLookup(f.files(), f.loading(), rule, directory,
+                        SegmentClassicLinuxElfTest.deadline());
+                assertEquals(rule, result.rule());
+                assertEquals(directory, result.directory());
+                assertSame(f.loading().needed().get(rule), result.declaration());
+                assertEquals(f.loading().directories().get(directory).path() + "/libz.so.1", result.logical());
+                assertEquals(0, result.requester().context());
+                assertEquals(rule + 2, result.candidate().context());
+                assertEquals(1, result.candidate().member());
+                assertEquals(result.path(), result.candidate().path());
+                assertEquals(result.path().identity(), result.candidate().content().identity());
+                assertEquals(Path.of(f.files().get(1).path()), result.path().resolved());
+            }
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededLookupPreservesColonSemicolonUnicodeAndRawDotSlashQuery() throws Exception {
+        String name = "lib:;雪x";
+        var f = lookupFixture(name);
+        var l = f.loading();
+        var directories = new java.util.ArrayList<>(l.directories());
+        String raw = root + "/lib//./../lib///";
+        directories.set(2, new SegmentClassicLinuxDeploymentV2.Directory(raw, true));
+        var contexts = new java.util.ArrayList<>(l.contexts());
+        String logical = root + "/lib//./../lib/" + name;
+        contexts.set(2, new SegmentClassicLinuxDeploymentV2.Context(1, logical));
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
+                l.aliases(), directories, l.configuration(), l.policy(), l.elf(), contexts, l.needed(), l.modules());
+        var owner = owner();
+        owner.initialize();
+        try {
+            var result = owner.readLinuxNeededLookup(f.files(), loading, 0, 2, SegmentClassicLinuxElfTest.deadline());
+            assertEquals(logical, result.logical());
+            assertEquals(name, result.requester().content().elf().needed().get(0));
+            assertEquals(2, result.candidate().context());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededLookupRecordsProtectedMissingFileAndDeclaredAbsentDirectory() throws Exception {
+        var f = lookupFixture("libz.so.1");
+        var owner = owner();
+        owner.initialize();
+        try {
+            for (int directory = 0; directory < 2; directory++) {
+                var result = owner.readLinuxNeededLookup(f.files(), f.loading(), 0, directory,
+                        SegmentClassicLinuxElfTest.deadline());
+                assertNull(result.candidate());
+                assertNull(result.path().identity());
+                assertEquals(directory == 0, result.directoryPath().identity() == null);
+                assertEquals(directory == 0 ? root.resolve("absent") : root.resolve("empty/libz.so.1"),
+                        result.path().absentAt());
+                assertEquals(0, result.requester().context());
+            }
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededLookupPresentSamePhysicalButOtherLogicalApprovalRejectsBeforeCandidateOpen() throws Exception {
+        var f = lookupFixture("libz.so.1");
+        var owner = owner();
+        owner.initialize();
+        var requesterOpens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                if (Path.of(f.files().get(1).path()).equals(invocation.getArgument(0))) {
+                    throw new AssertionError("Candidate content opened without this rule's exact logical approval");
+                }
+                if (Path.of(f.files().get(0).path()).equals(invocation.getArgument(0))) {
+                    requesterOpens.incrementAndGet();
+                }
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededLookup(f.files(), f.loading(),
+                    0, 3, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("exact approved logical context"));
+            assertEquals(1, requesterOpens.get());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    private void neededLookupProbeReplacement(boolean alias) throws Exception {
+        var f = lookupFixture("libz.so.1");
+        var owner = owner();
+        owner.initialize();
+        Path library = Path.of(f.files().get(1).path());
+        Path view = Path.of(f.loading().directories().get(3).path());
+        var stats = new AtomicInteger();
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && library.equals(invocation.getArgument(0))) {
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                captured.set(fault);
+                return fault;
+            }
+            return actual;
+        }); var targets = mockStatic(Files.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("readAttributes") && library.equals(invocation.getArgument(0))
+                    && "unix:*".equals(invocation.getArgument(1)) && stats.incrementAndGet() == 3) {
+                // The probe's raw identity and both ACL-guarded identities have already been captured.
+                if (alias) {
+                    Files.delete(view);
+                    Files.createSymbolicLink(view, Path.of("lib"));
+                } else {
+                    Files.move(library, root.resolve("original-needed.so"));
+                    Files.copy(root.resolve("original-needed.so"), library);
+                }
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededLookup(f.files(), f.loading(),
+                    alias ? 1 : 0, alias ? 3 : 2, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("between its lookup probe and owned ELF"));
+            assertTrue(stats.get() >= 3);
+            assertEquals(1, captured.get().closes.get());
+            assertFalse(captured.get().actual.isOpen());
+            assertThrows(IOException.class, owner::parsed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        if (!alias) {
+            assertArrayEquals(Files.readAllBytes(root.resolve("original-needed.so")), Files.readAllBytes(library));
+        }
+    }
+
+    @Test
+    public void neededLookupProbeSameByteNewInodeCannotBeHiddenByStableLaterOwnedRead() throws Exception {
+        neededLookupProbeReplacement(false);
+    }
+
+    @Test
+    public void neededLookupProbeSameTargetNewAliasCannotBeHiddenByStableLaterOwnedRead() throws Exception {
+        neededLookupProbeReplacement(true);
+    }
+
+    @Test
+    public void neededLookupDirectoryChangeAtContentCloseCannotReturnLookupFacts() throws Exception {
+        var f = lookupFixture("libz.so.1");
+        var owner = owner();
+        owner.initialize();
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.files().get(1).path()).equals(invocation.getArgument(0))) {
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                fault.beforeClose = () -> {
+                    try {
+                        write(root.resolve("lib/extra"), new byte[]{7});
+                        Files.setLastModifiedTime(root.resolve("lib"), FileTime.fromMillis(1));
+                    } catch (IOException failed) {
+                        throw new AssertionError(failed);
+                    }
+                };
+                captured.set(fault);
+                return fault;
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededLookup(f.files(), f.loading(),
+                    0, 2, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("directory changed across its lookup observation"));
+            assertEquals(1, captured.get().closes.get());
+            assertFalse(captured.get().actual.isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededLookupAbsentProbeChangedToPresentCannotReturnAbsence() throws Exception {
+        var f = lookupFixture("libz.so.1");
+        var owner = owner();
+        owner.initialize();
+        Path missing = root.resolve("empty/libz.so.1");
+        var changed = new AtomicInteger();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            try {
+                return invocation.callRealMethod();
+            } catch (java.nio.file.NoSuchFileException absent) {
+                if (invocation.getMethod().getName().equals("readAttributes")
+                        && missing.equals(invocation.getArgument(0)) && changed.compareAndSet(0, 1)) {
+                    write(missing, new byte[]{7});
+                }
+                throw absent;
+            }
+        })) {
+            assertThrows(IOException.class, () -> owner.readLinuxNeededLookup(f.files(), f.loading(), 0, 1,
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertEquals(1, changed.get());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededLookupDeniedDirectoryAndUndeclaredAliasAreNeverAbsenceOrContentReads() throws Exception {
+        var f = lookupFixture("libz.so.1");
+        Path library = Path.of(f.files().get(1).path());
+        for (int kind = 0; kind < 3; kind++) {
+            if (kind == 1) {
+                Files.delete(library);
+                Files.createDirectory(library);
+            } else if (kind == 2) {
+                Files.delete(library);
+                Files.createSymbolicLink(library, Path.of("loader.so"));
+            }
+            var owner = owner();
+            owner.initialize();
+            boolean denied = kind == 0;
+            try (var channels = mockStatic(FileChannel.class, invocation -> {
+                if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                        && library.equals(invocation.getArgument(0))) {
+                    throw new AssertionError("Uncertain or non-file candidate reached content open");
+                }
+                return invocation.callRealMethod();
+            }); var targets = mockStatic(Files.class, invocation -> {
+                if (denied && invocation.getMethod().getName().equals("readAttributes")
+                        && library.equals(invocation.getArgument(0))) {
+                    throw new AccessDeniedException(library.toString());
+                }
+                return invocation.callRealMethod();
+            })) {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededLookup(f.files(), f.loading(),
+                        0, 2, SegmentClassicLinuxElfTest.deadline()));
+                if (denied) {
+                    assertTrue(failure instanceof AccessDeniedException);
+                }
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void neededLookupUnsupportedNamesIndicesAndJoinedByteBoundsRejectBeforeTargetIo() throws Exception {
+        var f = lookupFixture("libz.so.1");
+        var l = f.loading();
+        record LookupCase(SegmentClassicLinuxDeploymentV2.Loading loading, int rule, int directory) { }
+        var cases = new java.util.ArrayList<LookupCase>();
+        for (int[] indices : List.of(new int[]{2, 2}, new int[]{3, 2}, new int[]{-1, 2},
+                new int[]{l.needed().size(), 2}, new int[]{0, -1}, new int[]{0, l.directories().size()})) {
+            cases.add(new LookupCase(l, indices[0], indices[1]));
+        }
+        for (String name : List.of(".", "..")) {
+            var metadata = l.elf().stream().map(e -> new SegmentClassicLinuxDeploymentV2.Elf(e.file(),
+                    List.of(name, name, e.needed().get(2), e.needed().get(3)), e.rpath(), e.runpath(), e.flags(),
+                    e.flags1())).toList();
+            cases.add(new LookupCase(new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(),
+                    l.interpreter(), l.aliases(), l.directories(), l.configuration(), l.policy(), metadata,
+                    l.contexts(), l.needed(), l.modules()), 0, 2));
+        }
+        var excessive = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
+                l.aliases(), List.of(new SegmentClassicLinuxDeploymentV2.Directory("/" + "x".repeat(4087), true)),
+                l.configuration(), l.policy(), l.elf(), l.contexts(), l.needed(), l.modules());
+        cases.add(new LookupCase(excessive, 0, 0));
+        for (var input : cases) {
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Unsupported or invalid lookup data reached target I/O");
+            })) {
+                assertThrows(IOException.class, () -> owner.readLinuxNeededLookup(f.files(), input.loading(),
+                        input.rule(), input.directory(), SegmentClassicLinuxElfTest.deadline()));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void typedNeededLookupWithoutOriginalProviderSourceCannotReachTargetIo() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound typed NEEDED lookup reached target I/O");
+        })) {
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxNeededLookup(0, 0, SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        assertTrue(owner.closeAndDrain().drained());
     }
 
     @Test
