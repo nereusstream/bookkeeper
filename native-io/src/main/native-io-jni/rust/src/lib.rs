@@ -24,7 +24,7 @@
 //! This library provides POSIX file I/O operations via JNI for high-performance direct I/O.
 //! It is a Rust implementation of the original C native_io_jni.c
 
-use jni::objects::{JClass, JObject, JString, JThrowable};
+use jni::objects::{JByteArray, JClass, JObject, JString, JThrowable};
 use jni::sys::{jint, jlong, jlongArray};
 use jni::JNIEnv;
 use std::ffi::{c_void, CString};
@@ -81,6 +81,149 @@ fn throw_exception(env: &mut JNIEnv, message: &str) {
 // ============================================================================
 // JNI exported functions
 // ============================================================================
+
+/// Fixed bootstrap data only. Static field lookup may initialize classes; no process or property mutation.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn jdk_process_launch<'local>(env: &mut JNIEnv<'local>) -> jni::errors::Result<JObject<'local>> {
+    let process = env.find_class("java/lang/ProcessImpl")?;
+    let enum_class = env.find_class("java/lang/ProcessImpl$LaunchMechanism")?;
+    let object = env.find_class("java/lang/Object")?;
+    let base = env
+        .call_method(&object, "getModule", "()Ljava/lang/Module;", &[])?
+        .l()?;
+    for class in [&process, &enum_class] {
+        let loader = env
+            .call_method(class, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+            .l()?;
+        let module = env
+            .call_method(class, "getModule", "()Ljava/lang/Module;", &[])?
+            .l()?;
+        if !loader.is_null() || !env.is_same_object(&module, &base)? {
+            throw_exception_with_error_code(
+                env,
+                "Unsupported ProcessImpl bootstrap source",
+                libc::ENOTSUP,
+            );
+            return Ok(JObject::null());
+        }
+    }
+    let mechanism = env
+        .get_static_field(
+            &process,
+            "launchMechanism",
+            "Ljava/lang/ProcessImpl$LaunchMechanism;",
+        )?
+        .l()?;
+    if mechanism.is_null() {
+        throw_exception_with_error_code(env, "Missing cached ProcessImpl mechanism", libc::ENOTSUP);
+        return Ok(JObject::null());
+    }
+    let actual = env.get_object_class(&mechanism)?;
+    if !env.is_same_object(&actual, &enum_class)? {
+        throw_exception_with_error_code(
+            env,
+            "Unsupported cached ProcessImpl enum class",
+            libc::ENOTSUP,
+        );
+        return Ok(JObject::null());
+    }
+    let ordinal = env.call_method(&mechanism, "ordinal", "()I", &[])?.i()?;
+    let name = JString::from(
+        env.call_method(&mechanism, "name", "()Ljava/lang/String;", &[])?
+            .l()?,
+    );
+    if name.is_null() || env.call_method(&name, "length", "()I", &[])?.i()? > 11 {
+        throw_exception_with_error_code(env, "Invalid cached ProcessImpl enum name", libc::ENOTSUP);
+        return Ok(JObject::null());
+    }
+    let expected: &[u8] = match ordinal {
+        0 => b"FORK",
+        1 => b"POSIX_SPAWN",
+        2 => b"VFORK",
+        _ => {
+            throw_exception_with_error_code(
+                env,
+                "Unknown cached ProcessImpl ordinal",
+                libc::ENOTSUP,
+            );
+            return Ok(JObject::null());
+        }
+    };
+    if env.get_string(&name)?.to_bytes() != expected {
+        throw_exception_with_error_code(
+            env,
+            "Conflicting cached ProcessImpl mechanism",
+            libc::ENOTSUP,
+        );
+        return Ok(JObject::null());
+    }
+    let helper = env.get_static_field(&process, "helperpath", "[B")?.l()?;
+    if helper.is_null() {
+        throw_exception_with_error_code(
+            env,
+            "Missing cached ProcessImpl helper bytes",
+            libc::ENOTSUP,
+        );
+        return Ok(JObject::null());
+    }
+    let helper = JByteArray::from(helper);
+    let length = env.get_array_length(&helper)?;
+    if !(2..=4097).contains(&length) {
+        throw_exception_with_error_code(
+            env,
+            "Excessive or empty cached ProcessImpl helper bytes",
+            libc::ENOTSUP,
+        );
+        return Ok(JObject::null());
+    }
+    let bytes = env.convert_byte_array(&helper)?;
+    if bytes.last() != Some(&0) || bytes[..bytes.len() - 1].contains(&0) {
+        throw_exception_with_error_code(
+            env,
+            "Invalid cached ProcessImpl helper terminator",
+            libc::ENOTSUP,
+        );
+        return Ok(JObject::null());
+    }
+    let copy = env.byte_array_from_slice(&bytes)?;
+    env.new_object(
+        "org/apache/bookkeeper/common/util/nativeio/NativeIO$JdkProcessLaunchObservation",
+        "(Ljava/lang/String;I[B)V",
+        &[(&name).into(), ordinal.into(), (&copy).into()],
+    )
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_jdkProcessLaunch(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jni::sys::jobject {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        match jdk_process_launch(&mut env) {
+            Ok(value) => value.into_raw(),
+            Err(_) => {
+                if !env.exception_check().unwrap_or(true) {
+                    throw_exception_with_error_code(
+                        &mut env,
+                        "Unsupported cached ProcessImpl layout or read failure",
+                        libc::ENOTSUP,
+                    );
+                }
+                ptr::null_mut()
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "ProcessImpl cache observation unsupported",
+            libc::ENOSYS,
+        );
+        ptr::null_mut()
+    }
+}
 
 /// This process only. Saved credentials and exec/dropper authority remain external obligations.
 #[no_mangle]

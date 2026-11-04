@@ -153,6 +153,43 @@ public class NativeIOImpl implements NativeIO {
     }
 
     @Override
+    public JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException {
+        try {
+            var type = Class.forName("java.lang.ProcessImpl", false, null);
+            var mechanism = Class.forName("java.lang.ProcessImpl$LaunchMechanism", false, null);
+            if (type.getClassLoader() != null || mechanism.getClassLoader() != null
+                    || type.getModule() != Object.class.getModule() || mechanism.getModule() != Object.class.getModule()
+                    || !mechanism.isEnum()) {
+                throw new NativeIOException("Unsupported ProcessImpl outside bootstrap java.base");
+            }
+            // Explicitly acknowledge initialization before the native static-field read; this can block or fail.
+            try {
+                Class.forName("java.lang.ProcessImpl", true, null);
+            } catch (VirtualMachineError | ThreadDeath fatal) {
+                throw fatal;
+            } catch (Error initialization) {
+                // ProcessImpl may throw a plain Error for an unsupported selection during initialization.
+                var failure = new NativeIOException("Cached JDK process launch initialization failed");
+                failure.initCause(initialization);
+                throw failure;
+            }
+            var result = NativeIOJni.jdkProcessLaunch();
+            if (result == null) {
+                throw new NativeIOException("Unknown cached JDK process launch observation outcome");
+            }
+            return result;
+        } catch (ClassNotFoundException | LinkageError unavailable) {
+            var failure = new NativeIOException("Cached JDK process launch observation is unavailable");
+            failure.initCause(unavailable);
+            throw failure;
+        } catch (IllegalArgumentException invalid) {
+            var failure = new NativeIOException("Invalid cached JDK process launch observation");
+            failure.initCause(invalid);
+            throw failure;
+        }
+    }
+
+    @Override
     public UnixPeerCredentials unixPeerCredentials(java.nio.channels.SocketChannel channel) throws NativeIOException {
         try {
             long[] observed = NativeIOJni.unixPeerCredentials(channel);

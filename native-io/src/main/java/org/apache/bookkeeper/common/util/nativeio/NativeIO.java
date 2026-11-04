@@ -28,6 +28,36 @@ import java.util.TreeSet;
  */
 public interface NativeIO {
 
+    /** Cached JDK data only, not backend approval. The copied helper bytes retain their one final NUL byte. */
+    record JdkProcessLaunchObservation(String mechanism, int ordinal, byte[] helperPath) {
+        public JdkProcessLaunchObservation {
+            String expected = switch (ordinal) {
+                case 0 -> "FORK";
+                case 1 -> "POSIX_SPAWN";
+                case 2 -> "VFORK";
+                default -> throw new IllegalArgumentException("Unknown cached JDK process launch ordinal");
+            };
+            if (!expected.equals(mechanism) || helperPath == null || helperPath.length < 2
+                    || helperPath.length > 4097) {
+                throw new IllegalArgumentException("Invalid bounded JDK process launch observation");
+            }
+            helperPath = helperPath.clone();
+            if (helperPath[helperPath.length - 1] != 0) {
+                throw new IllegalArgumentException("JDK helper path lacks a final NUL");
+            }
+            for (int i = 0; i < helperPath.length - 1; i++) {
+                if (helperPath[i] == 0) {
+                    throw new IllegalArgumentException("JDK helper path contains an interior NUL");
+                }
+            }
+        }
+
+        @Override
+        public byte[] helperPath() {
+            return helperPath.clone();
+        }
+    }
+
     /** Connection-time Linux SO_PEERCRED data in the caller's namespaces, never service/operation qualification. */
     record UnixPeerCredentials(long pid, long uid, long gid) {
         public UnixPeerCredentials {
@@ -154,6 +184,15 @@ public interface NativeIO {
     /** Direct getuid/geteuid/getgid/getegid/getgroups observations; no external PID or credential input. */
     default ProcessCredentials currentProcessCredentials() throws NativeIOException {
         throw new NativeIOException("Current process credential query is unsupported");
+    }
+
+    /**
+     * Read only the fixed bootstrap ProcessImpl's cached mechanism and helper bytes. May initialize that class and
+     * wait for class initialization; callers must not hold a trust monitor or infer termination from a timeout.
+     * Never sets a property/field, starts a process, selects a backend or approves its execution dependencies.
+     */
+    default JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException {
+        throw new NativeIOException("Cached JDK process launch observation is unsupported");
     }
 
     /**

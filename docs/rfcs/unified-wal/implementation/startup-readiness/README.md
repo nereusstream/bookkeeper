@@ -826,6 +826,18 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## 固定 ProcessImpl 缓存的只读 JNI 观察
+
+2026-11-05在父`a2e52a21693a0b48fc7320195c4aee4e717ef516`上，既有NativeIO/Impl/Jni及原Rust库增加无参数`jdkProcessLaunch()`。只定位bootstrap java.base的固定ProcessImpl及LaunchMechanism，取得实际static缓存的机制name/ordinal和helperpath原bytes；不接受caller类/字段/路径/机制，不设置属性或字段，不调用start/fork/exec。未知类来源、布局、枚举或缺失数据明确失败，不回退到可变属性或推算路径。Java默认接口仍拒绝未实现能力，旧库缺新增symbol由明确NativeIOException保留原LinkageError。
+
+helper数组先检查2..4097长度再复制，唯一末NUL和全部不透明路径bytes保留，不经过字符替换解码；数据对象在有界复制后验证内容，构造与访问均防修改。[JNI GetStaticFieldID规范](https://docs.oracle.com/en/java/javase/21/docs/specs/jni/functions.html#getstaticfieldid)允许触发类初始化；Java入口显式初始化固定类，这可能等待或失败，不能持trust monitor或以超时声称native/class-init已终结。本块尚未接入trust同步段。初始化时普通Error包装为NativeIOException，VM级致命错误和ThreadDeath继续抛出；没有改变JVM选项或module opens。参考[OpenJDK21u ProcessImpl](https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.10-ga/src/java.base/unix/classes/java/lang/ProcessImpl.java)只解释读取对象，不认证实际批准vendor布局。
+
+实际构建新Mac aarch64 Rust release库，退出0；新增JNI symbol存在，库长度337024、SHA-256 `75e596843fedb8fdd5542787ee2be2b562e1a8e35827114692d1642b4b4504eb`。Amazon JDK21.0.10独立JVM在`-Xcheck:jni`下实际调用新增符号：初始化前分别选择FORK/POSIX_SPAWN，初始化后把属性改为非法值仍返回原缓存；另一个JVM初始非法选择和随后的错误初始化状态均拒绝。新增4项全部通过，0失败/错误/跳过，包含opaque bytes、复制与固定边界。首轮4项中的1失败复现本机JDK直接抛plain Error，原source/class/log/XML保留；修正后不移绑旧PASS。实际旧库探针验证旧credentials符号成功、新symbol明确拒绝。既有NativeIO七类38项中36通过、2项按平台条件跳过（Linux proc magic link和close/descriptor复用），无失败/错误；样式退出0。Linux x86_64 `cargo check`退出0，仅为编译检查，没有链接/运行Linux库。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/jdk-process-cache-evidence-a2e52a21`。三个测试阶段各自1437/1437/1438项输入与原snapshot/父Git blob无错配，最终五code与修正测试、回归及样式相同；实际JNI调用及新旧库SHA分别绑定。首份RAT输入文件误复制首轮三个旧源码SHA，原报告保留但不作当前源码绑定；修正runner并在当前源码及两份文档快照下重跑的最终RAT退出1/431，原未批准路径及字节为父HEAD既有，无新增；用户PDF在扫描前排除且未读取。三个raw scope经两次lsof/identity/SHA/archive hardlink核验后清理6目录、18文件路径、834512逻辑字节，归档保留、regular-file数据块回收0；两处本次Cargo target在独立双次核验后清理447文件路径、91265437逻辑字节，保留原构建源码/log及新库，未测量物理回收量。共享target、旧sealed库和用户文件未清理。
+
+这份观察仅证明测试环境的实际缓存事实，不是原program批准来源、helper路径对应、backend许可或传递依赖闭合。`requireLinuxDiagnosticsProcessSource()`仍Unsupported，该观察入口不执行helper或解除生产启动拒绝；独立JVM的测试启动不计受控部署helper执行或资格，原owner的锁外初始化/前后来源绑定待后续接线。实际批准Linux/vendor阳性、本块models/性能NOT_EXECUTED；完整16步目标active，parent/child/Main/G1/full-bytes/full16/production Gate保持OPEN，默认OFF/SYSTEM/PARK及advanced disabled不变。
+
 ## D2 固定 JDK helper 的原批准材料与 PT_INTERP 关联
 
 2026-11-05在父`01e86496e84dae85dbca47904788faf0deb39fdb`上，原trust owner增加`verifyLinuxJdkHelper(deadline)`，只从本owner原verifiedProgram raw javaHome/files与原D2取得声明，不读可变java.home/launchMechanism或查替代helper。固定原文形成`lib/jspawnhelper`位置，先匹配唯一program/member/context原索引：program成员须含JDK位，不机械要求NATIVE位；同路径D2成员必须是START_CHAIN，长度/SHA一致，context须精确匹配该file与执行logical name，不能以同physical的另一个alias替代。路径canonical语法、固定拼接4096字节及4096 program/1024 D2表上限先于目标I/O；program列表固定快照，重复匹配明确拒绝，不用findFirst掩盖冲突。
