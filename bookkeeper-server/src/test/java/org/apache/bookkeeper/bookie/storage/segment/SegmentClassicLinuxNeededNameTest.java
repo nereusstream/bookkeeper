@@ -35,7 +35,7 @@ import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxNeededNam
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxTokens.Value;
 import org.junit.Test;
 
-/** Given-data stage contracts, not an ELF/source, name-miss, namespace or secure-mode qualification. */
+/** Given-data stage decisions, not actual ELF/source, namespace, audit or secure-mode qualification. */
 public class SegmentClassicLinuxNeededNameTest {
     private static long deadline() {
         return SegmentClassicLinuxElfTest.deadline();
@@ -54,6 +54,128 @@ public class SegmentClassicLinuxNeededNameTest {
             throws IOException {
         var absent = SegmentClassicLinuxLoadedNames.lookup(List.of(), first.name(), deadline());
         return SegmentClassicLinuxNeededName.afterNameMiss(first, absent, origin, lib, platform, deadline());
+    }
+
+    @Test
+    public void decideNameRejectsFirstUnapprovedSonameRatherThanPrefilteringToALaterApprovedPrimary()
+            throws Exception {
+        var early = new ObjectData(11, 5, "/early.so", List.of("early"), "libx.so", false, false, false);
+        var late = new ObjectData(22, 4, "libx.so", List.of("late"), null, false, false, false);
+        var namespace = List.of(early, late);
+        var unknown = Value.unobserved();
+        var rejected = request(3, "libx.so");
+        var failure = assertThrows(IOException.class, () -> SegmentClassicLinuxNeededName.decideName(rejected,
+                namespace, unknown, unknown, unknown, Secure.NON_SECURE, deadline()));
+        assertTrue(failure.getMessage().contains("First loaded-name match"));
+        var approved = new LinuxNeededContextObservation(new NeededRule(2, 4, List.of(5)), "libx.so");
+        var result = SegmentClassicLinuxNeededName.decideName(approved, namespace, unknown, unknown, unknown,
+                Secure.NON_SECURE, deadline());
+        assertSame(approved, result.first().request());
+        assertEquals(4, result.first().request().declaration().ordinal());
+        assertEquals(0, result.reuse().ordinal());
+        assertEquals(SegmentClassicLinuxLoadedNames.State.REUSED_SONAME, result.reuse().state());
+        var remembered = result.reuse().replacement();
+        assertEquals(11L, remembered.identity());
+        assertEquals(5, remembered.context());
+        assertEquals(List.of("early", "libx.so"), remembered.names());
+        assertTrue(remembered.sonameAdded());
+        assertNull(result.afterMiss());
+        assertSame(early, namespace.get(0));
+        assertEquals(List.of("early"), early.names());
+        assertFalse(early.sonameAdded());
+        assertThrows(UnsupportedOperationException.class, () -> remembered.names().clear());
+    }
+
+    @Test
+    public void decideNameApprovesTheHitContextNotItsOrdinalAndDoesNotExpandAgainAfterANameHit() throws Exception {
+        var unknown = Value.unobserved();
+        var request = request(3, "$ORIGIN");
+        var decoy = new ObjectData(10, 4, "/unrelated.so", List.of("other"), null, false, false, false);
+        var hit = new ObjectData(20, 8, "$PLATFORM/lib.so", List.of("original"), null, false, false, false);
+        var result = SegmentClassicLinuxNeededName.decideName(request, List.of(decoy, hit),
+                Value.available(hit.name()), unknown, unknown, Secure.NON_SECURE, deadline());
+        assertSame(request, result.first().request());
+        assertEquals("$ORIGIN", result.first().request().name());
+        assertEquals(hit.name(), result.first().name());
+        assertEquals(1, result.reuse().ordinal());
+        assertEquals(8, result.reuse().replacement().context());
+        assertEquals(20L, result.reuse().replacement().identity());
+        assertEquals(SegmentClassicLinuxLoadedNames.State.REUSED_NAME, result.reuse().state());
+        assertEquals(hit, result.reuse().replacement());
+        assertEquals(List.of("original"), hit.names());
+        assertNull(result.afterMiss());
+    }
+
+    @Test
+    public void decideNameKnownEmptyTableMissUsesThisFirstLookupAndTheSameTokenValues() throws Exception {
+        var unknown = Value.unobserved();
+        var directory = SegmentClassicLinuxNeededName.decideName(request(3, "$ORIGIN"), List.of(),
+                Value.available("$LIB"), Value.available("lib64"), unknown, Secure.NON_SECURE, deadline());
+        assertEquals(SegmentClassicLinuxLoadedNames.State.NO_REUSE, directory.reuse().state());
+        assertEquals(-1, directory.reuse().ordinal());
+        assertNull(directory.reuse().replacement());
+        assertSame(directory.first(), directory.afterMiss().lookup());
+        assertEquals("$LIB", directory.first().name());
+        assertEquals(Branch.DIRECTORY_SEARCH, directory.afterMiss().branch());
+        assertNull(directory.afterMiss().directPath());
+        var libraries = List.of(Value.available("lib64"), Value.unavailable(), unknown);
+        for (int i = 0; i < libraries.size(); i++) {
+            var direct = SegmentClassicLinuxNeededName.decideName(request(3, "$ORIGIN"), List.of(),
+                    Value.available("$LIB/x.so"), libraries.get(i), unknown, Secure.NON_SECURE, deadline());
+            assertEquals(SegmentClassicLinuxLoadedNames.State.NO_REUSE, direct.reuse().state());
+            assertSame(direct.first(), direct.afterMiss().lookup());
+            assertEquals("$LIB/x.so", direct.first().name());
+            assertEquals(i == 2 ? Branch.UNOBSERVED : Branch.DIRECT_PATH, direct.afterMiss().branch());
+            assertEquals(i == 0 ? "lib64/x.so" : i == 1 ? "" : null, direct.afterMiss().directPath());
+        }
+    }
+
+    @Test
+    public void decideNameFirstStopDoesNotReadNamespaceWhileALookupRequiresAnExplicitTable() throws Exception {
+        var unknown = Value.unobserved();
+        List<ObjectData> unreadable = new java.util.AbstractList<>() {
+            @Override
+            public ObjectData get(int index) {
+                throw new AssertionError("Stopped first preparation must not read the namespace");
+            }
+
+            @Override
+            public int size() {
+                throw new AssertionError("Stopped first preparation must not inspect the namespace");
+            }
+        };
+        for (Value origin : List.of(Value.unavailable(), unknown)) {
+            for (int mode = 0; mode < 2; mode++) {
+                var result = SegmentClassicLinuxNeededName.decideName(request(3, "$ORIGIN"),
+                        mode == 0 ? null : unreadable, origin, unknown, unknown, Secure.NON_SECURE, deadline());
+                assertEquals(origin == unknown ? State.UNOBSERVED : State.SKIPPED_EMPTY, result.first().state());
+                assertNull(result.first().name());
+                assertNull(result.reuse());
+                assertNull(result.afterMiss());
+            }
+        }
+        assertThrows(IOException.class, () -> SegmentClassicLinuxNeededName.decideName(request(3, "plain"), null,
+                unknown, unknown, unknown, Secure.NON_SECURE, deadline()));
+    }
+
+    @Test
+    public void decideNameChecksTheProfileCandidateBoundAndKeepsWholeNamespaceValidation() throws Exception {
+        var unknown = Value.unobserved();
+        var last = new ObjectData(11, 4095, "plain", List.of("plain"), null, false, false, false);
+        var valid = new LinuxNeededContextObservation(new NeededRule(2, 3, List.of(4095)), "plain");
+        var result = SegmentClassicLinuxNeededName.decideName(valid, List.of(last), unknown, unknown, unknown,
+                Secure.NON_SECURE, deadline());
+        assertEquals(4095, result.reuse().replacement().context());
+        var invalid = new LinuxNeededContextObservation(new NeededRule(2, 3, List.of(4, 4096)), "plain");
+        var approved = new ObjectData(22, 4, "plain", List.of("plain"), null, false, false, false);
+        var failure = assertThrows(IOException.class, () -> SegmentClassicLinuxNeededName.decideName(invalid,
+                List.of(approved), unknown, unknown, unknown, Secure.NON_SECURE, deadline()));
+        assertTrue(failure.getMessage().contains("candidate context exceeds"));
+        var badLater = new ObjectData(33, 4096, "/later", List.of("later"), null, false, false, false);
+        assertThrows(IOException.class, () -> SegmentClassicLinuxNeededName.decideName(request(3, "plain"),
+                List.of(approved, badLater), unknown, unknown, unknown, Secure.NON_SECURE, deadline()));
+        assertThrows(IOException.class, () -> SegmentClassicLinuxNeededName.decideName(valid, List.of(last),
+                unknown, unknown, unknown, Secure.NON_SECURE, System.nanoTime()));
     }
 
     @Test

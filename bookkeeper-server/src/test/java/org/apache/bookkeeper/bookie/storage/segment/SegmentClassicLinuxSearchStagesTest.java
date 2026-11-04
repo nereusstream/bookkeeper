@@ -63,14 +63,10 @@ public class SegmentClassicLinuxSearchStagesTest {
     }
 
     private static AfterMiss request(String raw) throws IOException {
-        var first = SegmentClassicLinuxNeededName.prepare(
-                new LinuxNeededContextObservation(new NeededRule(2, 3, List.of(4)), raw), Value.unobserved(),
-                Value.unobserved(), Value.unobserved(), SegmentClassicLinuxNeededName.Secure.NON_SECURE,
-                SegmentClassicLinuxElfTest.deadline());
-        var miss = SegmentClassicLinuxLoadedNames.lookup(List.of(), first.name(),
-                SegmentClassicLinuxElfTest.deadline());
-        return SegmentClassicLinuxNeededName.afterNameMiss(first, miss, Value.unobserved(), Value.unobserved(),
-                Value.unobserved(), SegmentClassicLinuxElfTest.deadline());
+        return SegmentClassicLinuxNeededName.decideName(
+                new LinuxNeededContextObservation(new NeededRule(2, 3, List.of(4)), raw), List.of(),
+                Value.unobserved(), Value.unobserved(), Value.unobserved(),
+                SegmentClassicLinuxNeededName.Secure.NON_SECURE, SegmentClassicLinuxElfTest.deadline()).afterMiss();
     }
 
     private static DirectoryPlan plan(AfterMiss request, List<ObjectData> chain, ObjectData main,

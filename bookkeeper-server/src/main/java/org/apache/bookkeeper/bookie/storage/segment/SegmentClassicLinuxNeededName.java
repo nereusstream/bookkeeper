@@ -17,12 +17,14 @@
 package org.apache.bookkeeper.bookie.storage.segment;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Objects;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LinuxNeededContextObservation;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxLoadedNames.ObjectData;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxLoadedNames.Reuse;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxTokens.Value;
 
-/** Given-data ordinary DT_NEEDED name preparation only; no source, name-miss proof or loader permission. */
+/** Given-data ordinary DT_NEEDED name decisions; no actual namespace/source or loader permission. */
 final class SegmentClassicLinuxNeededName {
     enum Secure { NON_SECURE, SECURE, UNOBSERVED }
 
@@ -53,7 +55,35 @@ final class SegmentClassicLinuxNeededName {
         }
     }
 
+    /** Stopped first: both null. Name hit: reuse only. Given-table miss: reuse and conditional AfterMiss. */
+    record NameDecision(Lookup first, Reuse reuse, AfterMiss afterMiss) { }
+
     private SegmentClassicLinuxNeededName() { }
+
+    /** One original request and one given namespace lookup; the miss branch assumes no audit name rewrite. */
+    static NameDecision decideName(LinuxNeededContextObservation request, List<ObjectData> baseNamespace,
+                                   Value origin, Value lib, Value platform, Secure secure, long deadline)
+            throws IOException {
+        var first = prepare(request, origin, lib, platform, secure, deadline);
+        var candidates = request.declaration().candidates();
+        // NeededRule already owns a nonempty, immutable, ascending bounded list of nonnegative indices.
+        if (candidates.get(candidates.size() - 1) >= SegmentClassicLinuxLoadedNames.MAX_OBJECTS) {
+            throw new IOException("Original NEEDED candidate context exceeds the profile bound");
+        }
+        if (first.state() != State.LOOKUP_NAME) {
+            return new NameDecision(first, null, null);
+        }
+        var reuse = SegmentClassicLinuxLoadedNames.lookup(baseNamespace, first.name(), deadline);
+        if (reuse.state() == SegmentClassicLinuxLoadedNames.State.NO_REUSE) {
+            return new NameDecision(first, reuse, afterNameMiss(first, reuse, origin, lib, platform, deadline));
+        }
+        // Approve the actual first hit after lookup; never prefilter or continue to a later approved object.
+        if (!candidates.contains(reuse.replacement().context())) {
+            throw new IOException("First loaded-name match is outside the original NEEDED candidate contexts");
+        }
+        requireTime(deadline);
+        return new NameDecision(first, reuse, null);
+    }
 
     static Lookup prepare(LinuxNeededContextObservation request, Value origin, Value lib, Value platform,
                           Secure secure, long deadline) throws IOException {

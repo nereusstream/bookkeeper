@@ -868,6 +868,18 @@ Trust私有hashFile仅在ELF2分支，于同一owned channel的SHA/解析前取�
 
 实际token/secure及原ELF关联、namespace/main/loader/l_loader、BFS/祖先/RPATH环境、完整递归helper/backend执行和批准Linux/vendor/Unix资格仍OPEN/NOT_EXECUTED，普通base/cache/default/四位置owner入口范围没有扩大。diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，未执行models/性能；完整目标active，默认OFF/SYSTEM/PARK及advanced disabled保持。
 
+## 同一原请求的首名查找与候选批准
+
+2026-11-05在父`1b4ae87842d89a27f5f0f40c3c6f1558021ac3b5`上，原SegmentClassicLinuxNeededName新增decideName，接原LinuxNeededContextObservation、稳定给定的base namespace原序表、同组ORIGIN/LIB/PLATFORM Value、secure及deadline；不接另造Lookup、外部Reuse/miss、candidate index或替换查找回调。保留同一原request/declaration/requester/ordinal/raw与首次展开名，复用prepare、LoadedNames.lookup及afterNameMiss，未新增匹配算法、状态会话、缓存或全表副本。
+
+首次SKIPPED_EMPTY/UNOBSERVED在名称查找前停止，无Reuse/AfterMiss且不访问namespace；可用首名必须有显式表，null不当空，已知空表才能由算法产生miss。原序全表仅查一次，不按批准集合预滤/排序/合并。REUSED_NAME/REUSED_SONAME核对真正首个命中replacement.context是否属于本NeededRule.candidates，未批准立即拒绝，不继续后面的批准对象，也不转为文件搜索。批准命中保留原ordinal/opaque identity/context及既有不可变记名结果，不执行第二次DST。只有本次NO_REUSE进入旧afterNameMiss，使用同一first/Value/deadline；目录仍保留first.name，slash二次展开的UNAVAILABLE空direct文本和UNOBSERVED保持可辨。NeededRule已有非空/非负/有界升序列表保证，组合仅检查最大candidate小于4096，不补认完整D2表或真实namespace来源。
+
+新5项与最终NeededName13、LoadedNames10、Tokens7、SearchStages11共41项全部通过，0失败/错误/跳过，新5包含其中；Spotless/Checkstyle退出0。关键反例为早期未批准SONAME、晚期已批准primary同名，必须拒绝；同raw不同ordinal可批准不同context。批准命中的context刻意不同于namespace ordinal，检查SONAME记名/输入不变，首次名还含第二层DST且第二层来源未知时仍能直接命中。显式空表、缺表、首次停止不读取表、二次available/unavailable/unobserved、candidate4095/4096及坏后项不能被早命中遮蔽均覆盖。SearchStages原request fixture现从该组合的空表miss取得AfterMiss，原条件函数和既有词法/容量矩阵未重写。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-name-decision-evidence-1b4ae878`保留两阶段原source/class/log/XML与style；各1448输入按原snapshot/父Git blob核验无错配，3个改动文件与两测试/style一致。glibc2.39 dl-deps.c与dl-load.c沿用原静态字节及SHA，分别17592/70348字节；名称查找顺序是glibc规则，命中后的候选批准是本项目D2限制。两个raw scope经双lsof/identity/SHA/archive hardlink核验清理4目录、11文件路径、871083逻辑字节，归档保留、regular-file数据块回收0，共享target及用户文件未清理。
+
+本片是纯给定数据计算，无file/JNI/Process调用；精确原JNI库仅为runner配置，不计调用或旧PASS重绑，未重跑owner/Elf/native/部署矩阵或models/性能。命中发生在audit前，miss后的分支以audit未改写为条件；真实初始namespace/运行时顺序、secure/token/audit及helper/backend来源仍OPEN，Linux/vendor/Unix阳性NOT_EXECUTED。diagnostics unconditional Unsupported和parent/child/Main/G1/full-bytes/full16/生产Gate不提升，完整目标active，默认OFF/SYSTEM/PARK与advanced disabled保持。
+
 ## 新对象 realname 的词法 ORIGIN
 
 2026-11-05在父`251f1433f7f010cf91d99ac9e8aa89ffc8d1560e`上，包内SegmentClassicLinuxOrigin.compute仅接原realname、显式CWD Value与原deadline，返回保存同一原realname/CWD及四种状态的不可变数据。依据[glibc2.39 _dl_new_object](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-object.c)，输入是创建对象的realname，不是随后可能变为空串的l_name，也不是D2 physical文件的parent。没有实际对象创建、getcwd、System.user.dir、环境、/proc、Path/filesystem、JNI/Process或typed owner接线。
