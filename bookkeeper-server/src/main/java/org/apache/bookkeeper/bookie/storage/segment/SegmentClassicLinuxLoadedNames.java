@@ -31,7 +31,12 @@ final class SegmentClassicLinuxLoadedNames {
     record ObjectData(long identity, int context, String name, List<String> names, String soname,
                       boolean sonameAdded, boolean faked, boolean removed) { }
 
-    enum State { NO_REUSE, REUSED_NAME, REUSED_SONAME }
+    record FileId(long device, long inode) { }
+
+    /** Explicit supplied file id, never proof of fstat on an owned open fd. */
+    record FileObject(ObjectData object, FileId fileId) { }
+
+    enum State { NO_REUSE, REUSED_NAME, REUSED_SONAME, REUSED_FILE_ID }
 
     /** Replace only this ordinal with this immutable-name snapshot for a subsequent pure lookup. */
     record Reuse(State state, int ordinal, ObjectData replacement) { }
@@ -39,30 +44,11 @@ final class SegmentClassicLinuxLoadedNames {
     private SegmentClassicLinuxLoadedNames() { }
 
     static Reuse lookup(List<ObjectData> objects, String query, long deadline) throws IOException {
-        requireTime(deadline);
-        text(query, deadline);
-        if (query.isEmpty() || objects == null || objects.size() > MAX_OBJECTS) {
-            throw new IOException("Explicit bounded loaded-object table and nonempty lookup name required");
-        }
+        begin(objects, query, deadline);
         var identities = new HashSet<Long>();
         int references = 0;
-        // Validate the entire supplied table before selecting or copying/updating any name list.
         for (ObjectData object : objects) {
-            requireTime(deadline);
-            if (identities.size() == MAX_OBJECTS || object == null || object.context() < 0
-                    || object.context() >= MAX_OBJECTS || !identities.add(object.identity())
-                    || object.names() == null || object.names().isEmpty()
-                    || object.names().size() > MAX_NAME_REFERENCES - references) {
-                throw new IOException("Invalid, repeated or excessive loaded-object/name data");
-            }
-            references += object.names().size();
-            text(object.name(), deadline);
-            if (object.soname() != null) {
-                text(object.soname(), deadline);
-            }
-            for (String name : object.names()) {
-                text(name, deadline);
-            }
+            references = validate(object, identities, references, deadline);
         }
         for (int i = 0; i < objects.size(); i++) {
             requireTime(deadline);
@@ -70,34 +56,100 @@ final class SegmentClassicLinuxLoadedNames {
             if (object.faked() || object.removed()) {
                 continue;
             }
-            boolean direct = query.equals(object.name());
-            if (!direct) {
-                for (String name : object.names()) {
-                    requireTime(deadline);
-                    if (query.equals(name)) {
-                        direct = true;
-                        break;
-                    }
-                }
-            }
+            boolean direct = query.equals(object.name()) || hasAlias(object, query, deadline);
             boolean soname = !direct && !object.sonameAdded() && query.equals(object.soname());
             if (direct || soname) {
-                if (soname && references == MAX_NAME_REFERENCES) {
-                    throw new IOException("SONAME recording exceeds the loaded-name association bound");
-                }
-                var names = new ArrayList<>(object.names());
-                if (soname) {
-                    names.add(object.soname());
-                }
-                var replacement = new ObjectData(object.identity(), object.context(), object.name(),
-                        List.copyOf(names), object.soname(), object.sonameAdded() || soname,
-                        object.faked(), object.removed());
-                requireTime(deadline);
+                var replacement = remember(object, soname ? object.soname() : null,
+                        object.sonameAdded() || soname, references, deadline);
                 return new Reuse(direct ? State.REUSED_NAME : State.REUSED_SONAME, i, replacement);
             }
         }
         requireTime(deadline);
         return new Reuse(State.NO_REUSE, -1, null);
+    }
+
+    /** Ordinary non-OPENEXEC branch only. No fd is opened/closed, and no preceding name miss is proved. */
+    static Reuse lookupFile(List<FileObject> objects, FileId opened, String query, long deadline) throws IOException {
+        begin(objects, query, deadline);
+        if (opened == null) {
+            throw new IOException("Explicit opened-file id data is required");
+        }
+        var identities = new HashSet<Long>();
+        int references = 0;
+        for (FileObject object : objects) {
+            requireTime(deadline);
+            if (object == null || object.fileId() == null) {
+                throw new IOException("Missing loaded-object file id data");
+            }
+            references = validate(object.object(), identities, references, deadline);
+        }
+        for (int i = 0; i < objects.size(); i++) {
+            requireTime(deadline);
+            FileObject file = objects.get(i);
+            ObjectData object = file.object();
+            // glibc's file-id branch skips removed, but does not additionally skip faked.
+            if (!object.removed() && file.fileId().equals(opened)) {
+                var replacement = remember(object, hasAlias(object, query, deadline) ? null : query,
+                        object.sonameAdded(), references, deadline);
+                return new Reuse(State.REUSED_FILE_ID, i, replacement);
+            }
+        }
+        requireTime(deadline);
+        return new Reuse(State.NO_REUSE, -1, null);
+    }
+
+    private static void begin(List<?> objects, String query, long deadline) throws IOException {
+        requireTime(deadline);
+        text(query, deadline);
+        if (query.isEmpty() || objects == null || objects.size() > MAX_OBJECTS) {
+            throw new IOException("Explicit bounded loaded-object table and nonempty lookup name required");
+        }
+    }
+
+    /** Entire table is validated before selecting or copying/updating any name list in either branch. */
+    private static int validate(ObjectData object, HashSet<Long> identities, int references, long deadline)
+            throws IOException {
+        requireTime(deadline);
+        if (identities.size() == MAX_OBJECTS || object == null || object.context() < 0
+                || object.context() >= MAX_OBJECTS || !identities.add(object.identity())
+                || object.names() == null || object.names().isEmpty()
+                || object.names().size() > MAX_NAME_REFERENCES - references) {
+            throw new IOException("Invalid, repeated or excessive loaded-object/name data");
+        }
+        references += object.names().size();
+        text(object.name(), deadline);
+        if (object.soname() != null) {
+            text(object.soname(), deadline);
+        }
+        for (String name : object.names()) {
+            text(name, deadline);
+        }
+        return references;
+    }
+
+    private static boolean hasAlias(ObjectData object, String query, long deadline) throws IOException {
+        for (String name : object.names()) {
+            requireTime(deadline);
+            if (query.equals(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static ObjectData remember(ObjectData object, String addition, boolean sonameAdded, int references,
+                                       long deadline) throws IOException {
+        if (addition != null && references == MAX_NAME_REFERENCES) {
+            throw new IOException("Alias recording exceeds the loaded-name association bound");
+        }
+        var names = new ArrayList<>(object.names());
+        if (addition != null) {
+            names.add(addition);
+        }
+        var replacement = new ObjectData(object.identity(), object.context(), object.name(), List.copyOf(names),
+                object.soname(), sonameAdded, object.faked(), object.removed());
+        requireTime(deadline);
+        return replacement;
     }
 
     private static void text(String value, long deadline) throws IOException {

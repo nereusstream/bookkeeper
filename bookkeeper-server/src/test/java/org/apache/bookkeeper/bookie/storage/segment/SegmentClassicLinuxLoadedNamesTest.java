@@ -27,6 +27,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxLoadedNames.FileId;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxLoadedNames.FileObject;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxLoadedNames.ObjectData;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxLoadedNames.State;
 import org.junit.Test;
@@ -41,6 +43,87 @@ public class SegmentClassicLinuxLoadedNamesTest {
     private static SegmentClassicLinuxLoadedNames.Reuse lookup(List<ObjectData> objects, String query)
             throws IOException {
         return SegmentClassicLinuxLoadedNames.lookup(objects, query, SegmentClassicLinuxElfTest.deadline());
+    }
+
+    private static SegmentClassicLinuxLoadedNames.Reuse file(List<FileObject> objects, FileId id, String query)
+            throws IOException {
+        return SegmentClassicLinuxLoadedNames.lookupFile(objects, id, query, SegmentClassicLinuxElfTest.deadline());
+    }
+
+    @Test
+    public void fileIdReuseKeepsFirstOriginalObjectAndSkipsRemovedWithoutSkippingFaked() throws Exception {
+        var id = new FileId(9, 21);
+        var removed = new FileObject(object(1, "/removed", List.of("removed"), null, false, false, true), id);
+        var fake = new FileObject(new ObjectData(8, 27, "/old/path", List.of("old"), "soname", false, true, false), id);
+        var later = new FileObject(object(2, "/different/path", List.of("later"), null, false, false, false), id);
+        var result = file(List.of(removed, fake, later), id, "/new/$literal");
+        assertEquals(State.REUSED_FILE_ID, result.state());
+        assertEquals(1, result.ordinal());
+        assertEquals(8, result.replacement().identity());
+        assertEquals(27, result.replacement().context());
+        assertEquals("/old/path", result.replacement().name());
+        assertEquals("soname", result.replacement().soname());
+        assertEquals(List.of("old", "/new/$literal"), result.replacement().names());
+        assertTrue(result.replacement().faked());
+        assertFalse(result.replacement().sonameAdded());
+    }
+
+    @Test
+    public void fileIdentityRequiresBothRaw64BitFieldsAndExplicitZeroIsNotMissing() throws Exception {
+        var loaded = object(1, "same-name", List.of("alias"), null, false, false, false);
+        for (FileId different : List.of(new FileId(3, 8), new FileId(2, 9))) {
+            var result = file(List.of(new FileObject(loaded, new FileId(2, 8))), different, "same-name");
+            assertEquals(State.NO_REUSE, result.state());
+            assertEquals(-1, result.ordinal());
+            assertNull(result.replacement());
+        }
+        for (FileId raw : List.of(new FileId(0, 0), new FileId(Long.MIN_VALUE, -1))) {
+            assertEquals(State.REUSED_FILE_ID, file(List.of(new FileObject(loaded, raw)), raw, "alias").state());
+        }
+        assertEquals(State.NO_REUSE, file(List.of(), new FileId(0, 0), "name").state());
+    }
+
+    @Test
+    public void fileHitAppendsOnlyOriginalRequestAliasWithoutUsingMainNameOrSonameAndKeepsFlag() throws Exception {
+        var id = new FileId(2, 3);
+        for (boolean added : List.of(false, true)) {
+            var names = new ArrayList<>(List.of("original"));
+            var loaded = object(1, "/main-name", names, "soname", added, false, false);
+            for (String query : List.of("/main-name", "soname", "$ORIGIN/new")) {
+                var result = file(List.of(new FileObject(loaded, id)), id, query);
+                assertEquals(List.of("original", query), result.replacement().names());
+                assertEquals(added, result.replacement().sonameAdded());
+                assertEquals(State.REUSED_NAME, lookup(List.of(result.replacement()), query).state());
+                assertEquals(List.of("original"), loaded.names());
+                assertThrows(UnsupportedOperationException.class, () -> result.replacement().names().clear());
+            }
+            var unchanged = file(List.of(new FileObject(loaded, id)), id, "original");
+            assertEquals(loaded, unchanged.replacement());
+            names.clear();
+            assertEquals(List.of("original"), unchanged.replacement().names());
+        }
+    }
+
+    @Test
+    public void fileIdAndAllLaterDataAreRequiredAndOnlyNewAliasesConsumeCapacity() throws Exception {
+        var id = new FileId(1, 2);
+        var first = new FileObject(object(1, "main", List.of("alias"), null, false, false, false), id);
+        for (FileObject invalid : Arrays.asList(null, new FileObject(first.object(), null),
+                new FileObject(null, id), new FileObject(first.object(), id),
+                new FileObject(object(2, "bad\0", List.of("alias"), null, false, false, true), id))) {
+            assertThrows(IOException.class, () -> file(Arrays.asList(first, invalid), id, "alias"));
+        }
+        assertThrows(IOException.class, () -> file(List.of(first), null, "alias"));
+        assertThrows(IOException.class, () -> file(null, id, "alias"));
+        var full = new FileObject(object(1, "main", Collections.nCopies(12288, "alias"), "soname",
+                false, false, false), id);
+        assertEquals(12288, file(List.of(full), id, "alias").replacement().names().size());
+        assertThrows(IOException.class, () -> file(List.of(full), id, "main"));
+        assertThrows(IOException.class, () -> file(List.of(full), id, "soname"));
+        assertEquals(12288, full.object().names().size());
+        assertFalse(full.object().sonameAdded());
+        assertThrows(IOException.class,
+                () -> SegmentClassicLinuxLoadedNames.lookupFile(List.of(first), id, "alias", System.nanoTime()));
     }
 
     @Test

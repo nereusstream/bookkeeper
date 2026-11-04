@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## 已给定文件身份的已加载对象复用
+
+2026-11-05在父`fcd63e2a1c6f1b1ebf2426e272e9e801cc4ebe1b`上，原LoadedNames新增FileId(device,inode)、FileObject(原ObjectData,fileId)及纯lookupFile。输入是明确原序的base-namespace对象/已给定file-id、本次已给定opened id、原map-from-fd request name和deadline；只描述普通非OPENEXEC分支的局部规则，无fd参数/操作或owner入口，不证明前面名称查找已经未命中。query继续非空strictUTF8/无NUL/≤4096，slash/$原文保留；没有mode策略、跨namespace镜像、NOLOAD或文件映射器。
+
+[glibc2.39 _dl_map_object_from_fd](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)约889–935在普通分支从原fd取file id，再按namespace原序找第一个非removed匹配对象；[POSIX file-id比较](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/sysdeps/posix/dl-fileid.h)只比较设备号与inode。本算法因此仅按两个raw64位值精确相等，不比较path/hash/mtime/ctime/context/object identity；负long保留高位模式，明确(0,0)与null未观察不同。所有对象id及opened id缺失均拒绝，不补零；原路径Identity不是fd fstat证明。OPENEXEC在原代码中跳过该比较块，本方法不适用，不用人工零id模拟。
+
+此处仅跳过removed，不额外沿用名称分支的faked排除；不同object identity的同file-id可保留，原顺序决定首个对象。命中复用原identity/context/l_name/SONAME及标志，只检查原l_libname是否包含本次原query：已包含不追加，否则在尾部追加query。即使query等于l_name或SONAME，也不能据此省掉名单检查；不追加resolved path，不改变sonameAdded。返回REUSED_FILE_ID、原ordinal及不可变名称替换对象，供后次纯查找接续，原输入不改；无匹配仍NO_REUSE，不表示新对象已创建、文件不存在或搜索结束。
+
+复用原完整前置校验、4096对象/context、12288名称关联、单串界与deadline，仅提取共用private begin/validate/hasAlias/remember。file wrapper/null id及坏后项不能被早命中遮蔽，只有确实追加才占新关联；已有alias在满额时可复用，新alias满额拒绝。原name lookup仍逐对象direct再SONAME，direct不改flag、仅SONAME分支置flag，缺失/空SONAME和skip规则保持。纯结果不执行glibc匹配后close-fd再记名的资源动作，不能冒充close/drain；实际fd来源和首次关闭继续由原owner负责，未新增缓存/线程/通用budget或事件日志。
+
+当前LoadedNames整类10项全部通过，0失败/错误/跳过，包含新增4项与原6项，不累计为14 unique；Spotless/Checkstyle首轮退出0，规划只读评审无新增阻塞。新增覆盖不同path/name同file-id复用并保留原identity/context、两字段任一不同不匹配及raw负/零值、removed/faked差异及多个同id原序、仅主名/SONAME相等仍追加query且flag不变、接续name lookup、输入与结果隔离、缺id/坏后项、满额已有alias成功而新增失败及deadline；原6检验共享私有提取。1443项输入与原snapshot/父Git blob无错配，两当前code与test/style一致；未改owner/Cache/Diagnostics/SearchStages/JNI矩阵未重跑，旧PASS不移绑。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-file-id-evidence-fcd63e2a`，保留source/class/命令/log/XML及两份glibc静态源。单个确切raw scope双lsof/identity/SHA/archive hardlink核验后清理2目录、4文件路径、365627逻辑字节，归档保留/regular-file数据块回收0。给定表和id的局部计算不证明真实fd/fstat/close、初始namespace/loader/main及l_loader来源、加载BFS/祖先链、RPATH环境或完整递归helper/backend exec；typed Linux/vendor阳性及本片models/性能NOT_EXECUTED。diagnostics unconditional Unsupported、完整16步目标active、整体Gate OPEN及默认OFF/SYSTEM/PARK、advanced disabled保持。
+
 ## 显式已加载对象表的名称复用与 SONAME 记名
 
 2026-11-05在父`8102eb35c8e59cd4c7cdfec2ba1bebba6606a47f`上，新增包内SegmentClassicLinuxLoadedNames，仅接原顺序的显式base-namespace对象表、原lookup name和deadline，无Path/文件/Process/JNI或owner入口。每对象保留opaque identity、原context、l_name、l_libname列表、null/empty可区分的SONAME，以及added/faked/removed标志；同context不同identity不合并，重复identity拒绝，不从D2候选边、physical、SONAME或context排序推断加载顺序。
