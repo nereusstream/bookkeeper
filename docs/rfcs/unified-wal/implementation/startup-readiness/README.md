@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## D2 目录搜索分支的动态标签来源阶段
+
+2026-11-04在父`91f91b9c9e068cd40109617a63ca694e76213504`上，新增包内`SegmentClassicLinuxSearchStages.select(requesterToAncestors, main, deadline)`纯数据函数。调用方必须明确提供非空requester→l_loader祖先有序对象链和main对象；不从D2的file/logical Context或NEEDED候选图推导链。ObjectData的opaque identity与physical文件、context、SONAME及PID/inode无关，context保留原0..4095索引，不同对象共享context允许且不合并。链与链外main合计最多4096个不同identity；先有界固定输入并检查链内重复identity/循环、main完整数据冲突及总数，再选择来源。链内main数据完全一致时复用，不重复计数或补入。
+
+requester的RUNPATH标签只要present（包括空值），就屏蔽整个RPATH链及main fallback，结果仅保留requester自己的原RUNPATH来源；不会因目录展开为空、不可用或未观察而改用RPATH。requester无RUNPATH时，按链原顺序保留各对象有效RPATH；祖先自身有RUNPATH只屏蔽自身RPATH，不截断更远祖先，也不继承祖先RUNPATH。main不在链内时最后考虑其有效RPATH。present-empty RPATH仍作为原标签来源数据保留，后续展开产生零目录；不同对象相同标签/dirname不跨对象去重。静态语义核对自[glibc 2.39 dl-load.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)、[get-dynamic-info.h](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/get-dynamic-info.h)及[dl-object.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-object.c)，不是实际批准vendor运行。
+
+输出只包含原(tag, owner identity, context, DynamicPath)引用的不可变`rpathBeforeEnvironment`和`runpathAfterEnvironment`列表。中间环境路径阶段仍未观察，不能当作已验证为空；本块不求值token或目录，不生成context×目录×候选矩阵。原deadline贯穿结构校验、来源遍历及正常返回。D2 schema/codec/LoaderPolicy和所有消费者未改；记录只供包内纯数据调用，不表达真实已加载namespace、Installed或ready资格。
+
+六项新增纯测试全部通过，0失败/错误/跳过，覆盖present-empty RUNPATH屏蔽、祖先次序和仅屏蔽自身、main链内/链外及冲突、共享context/标签不合并、4096总对象边界、不变来源/结果及期限。首次样式因测试四行LineLength退出1，保留原source/log，只有换行修正后style-final退出0，再执行唯一六项测试；原失败不移绑。1436项源码输入逐项匹配原snapshot/父Git blob，两code与该唯一测试及style-final快照相同。旧token/DynamicPath/ELF1和消费者未改，未重跑旧矩阵或重复相同源码测试；native路径属性及SHA核验不计本阶段JNI执行。新规划会话只读核对未发现冻结范围内阻塞缺陷。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-search-stages-evidence-91f91b9c`，三份静态原源及各自SHA另存。终态RAT退出1/431，未批准路径及字节与父HEAD相同，无新增unknown；用户PDF扫描前排除且未读取。唯一确切raw scope经两次独立lsof及inode/mode/SHA/archive hardlink核验后清理两目录、四文件路径、363,731逻辑字节，归档保留，regular-file数据块回收0。
+
+交付仅为已经进入目录搜索分支、base namespace普通请求上的显式数据来源阶段。真实identity/祖先/main来源、首次已加载复用、name/slash/DST分流、secure-mode/ld_inhibit_rpath、CWD/ORIGIN/platform、环境/cache/NODEFLIB/default/hwcap及实际winner仍待接线；diagnostics/systemd2与完整qualification未闭合。实际Linux/vendor阳性NOT_EXECUTED，本块models/性能未运行；完整16步目标active，parent/child/Main/G1/full-bytes/full16/production Gate保持OPEN，默认OFF/SYSTEM/PARK及advanced disabled不变。
+
 ## D2 单个 DynamicPath 的有界目录列表展开
 
 2026-11-04在父`ef96d51d7ed4d1df5ded03b5f4c531e14e3210b9`上，新增包内`SegmentClassicLinuxDynamicPath.expand`，复用原token helper，对单个原D2 DynamicPath生成有序不可变目录数据。保留原声明对象及absent/present-empty区别；两者均不生成目录。非空raw先按冒号拆分并保留首尾/相邻空段，原始空段生成明确的Kind.CWD/空dirname，不读取或推导进程cwd。分号及替换值产生的冒号保留为dirname字面内容，不再次拆分。
