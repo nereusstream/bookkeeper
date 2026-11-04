@@ -60,6 +60,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LinuxSearchDirectory;
@@ -4090,6 +4091,239 @@ public class SegmentClassicLaunchTrustTest {
         assertFalse(owner.closeAndDrain().drained());
     }
 
+    private static byte[] launcherDropperImage(SegmentClassicLinuxDeploymentV2.Elf metadata, String interpreter) {
+        var strings = new ByteArrayOutputStream();
+        strings.write(0);
+        var entries = new java.util.ArrayList<long[]>();
+        for (String name : metadata.needed()) {
+            entries.add(tagText(strings, 1, name));
+        }
+        if (metadata.rpath().present()) {
+            entries.add(tagText(strings, 15, metadata.rpath().value()));
+        }
+        if (metadata.runpath().present()) {
+            entries.add(tagText(strings, 29, metadata.runpath().value()));
+        }
+        entries.add(new long[]{30, metadata.flags()});
+        entries.add(new long[]{0x6ffffffbL, metadata.flags1()});
+        byte[] image = SegmentClassicLinuxElfTest.dynamicImage(entries, strings.toByteArray());
+        if (interpreter == null) {
+            ByteBuffer.wrap(image).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(64, 0);
+            return image;
+        }
+        byte[] text = (interpreter + '\0').getBytes(StandardCharsets.UTF_8);
+        int offset = image.length;
+        image = Arrays.copyOf(image, offset + text.length);
+        var buffer = ByteBuffer.wrap(image).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+        buffer.putLong(72, offset).putLong(80, 0x400000L + offset);
+        buffer.putLong(96, text.length).putLong(104, text.length);
+        buffer.putLong(152, image.length).putLong(160, image.length);
+        buffer.position(offset).put(text);
+        return image;
+    }
+
+    private CandidateFixture replaceLauncherDropperImage(CandidateFixture original, byte[] image) throws IOException {
+        Path path = Path.of(original.files().get(1).path());
+        write(path, image);
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwxr-xr-x"));
+        var members = new java.util.ArrayList<>(original.files());
+        members.set(1, new SegmentClassicLinuxDeploymentV2.File(path.toString(),
+                SegmentClassicLinuxDeployment.Role.DROPPER, image.length, SegmentClassicHandoff.digest(image)));
+        return new CandidateFixture(members, original.loading());
+    }
+
+    private CandidateFixture launcherDropperFixture(String interpreter) throws IOException {
+        var original = candidateFixture();
+        var l = original.loading();
+        var contexts = new java.util.ArrayList<>(l.contexts());
+        contexts.set(2, new SegmentClassicLinuxDeploymentV2.Context(1, root + "/view-b/module.so"));
+        var needed = l.needed().stream().map(r -> new SegmentClassicLinuxDeploymentV2.NeededRule(r.requester(),
+                r.ordinal(), List.of(0, 1))).toList();
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
+                l.aliases(), l.directories(), l.configuration(), l.policy(), l.elf(), contexts, needed, List.of());
+        return replaceLauncherDropperImage(new CandidateFixture(original.files(), loading),
+                launcherDropperImage(l.elf().get(1), interpreter));
+    }
+
+    @Test
+    public void launcherDropperFullOwnedElfAndExactInterpreterUseOneDropperOpenWithoutAPhysicalContext()
+            throws Exception {
+        var f = launcherDropperFixture(root + "/fixed-loader");
+        var owner = owner();
+        owner.initialize();
+        var dropperOpens = new AtomicInteger();
+        var loaderOpens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                Path path = invocation.getArgument(0);
+                if (path.equals(Path.of(f.files().get(1).path()))) {
+                    dropperOpens.incrementAndGet();
+                } else if (path.equals(Path.of(f.files().get(0).path()))) {
+                    loaderOpens.incrementAndGet();
+                }
+            }
+            return invocation.callRealMethod();
+        })) {
+            var result = owner.readLinuxLauncherDropper(f.files(), f.loading(), 1,
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(1, result.member());
+            assertEquals(f.files().get(1).sha256(), result.sha256());
+            assertEquals(f.loading().interpreter(), result.elf().interpreter());
+            assertEquals(f.loading().elf().get(1).needed(), result.elf().needed());
+            assertEquals(f.loading().elf().get(1).rpath(), result.elf().rpath());
+            assertEquals(f.loading().elf().get(1).runpath(), result.elf().runpath());
+            assertEquals(f.loading().elf().get(1).flags1(), result.elf().flags1());
+            assertEquals(1, dropperOpens.get());
+            assertEquals(1, loaderOpens.get());
+            assertTrue(f.loading().contexts().stream().noneMatch(c -> c.file() == 1
+                    && c.logicalLoadName().equals(f.files().get(1).path())));
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void launcherDropperOldShortHeaderAndMismatchedOriginalNeededDoNotPassTheFullOwnedReader()
+            throws Exception {
+        var original = launcherDropperFixture(root + "/fixed-loader");
+        byte[] complete = launcherDropperImage(original.loading().elf().get(1), original.loading().interpreter());
+        for (int mode = 0; mode < 2; mode++) {
+            // Keep the old accepted 32-byte prefix and D2's 64-byte minimum, but omit the program table.
+            var f = replaceLauncherDropperImage(original, mode == 0 ? Arrays.copyOf(complete, 64) : complete);
+            if (mode == 1) {
+                var l = f.loading();
+                var old = l.elf().get(1);
+                var names = new java.util.ArrayList<>(old.needed());
+                names.set(0, "different.so");
+                var metadata = new java.util.ArrayList<>(l.elf());
+                metadata.set(1, new SegmentClassicLinuxDeploymentV2.Elf(1, names, old.rpath(), old.runpath(),
+                        old.flags(), old.flags1()));
+                f = new CandidateFixture(f.files(), new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(),
+                        l.loader(), l.interpreter(), l.aliases(), l.directories(), l.configuration(), l.policy(),
+                        metadata, l.contexts(), l.needed(), l.modules()));
+            }
+            var fixture = f;
+            var owner = owner();
+            owner.initialize();
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxLauncherDropper(fixture.files(),
+                    fixture.loading(), 1, SegmentClassicLinuxElfTest.deadline()));
+            if (mode == 1) {
+                assertTrue(failure.getMessage().contains("Original D2 ELF metadata"));
+            }
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void launcherDropperInterpreterMustMatchLiterallyAndAbsentInterpreterDoesNotSuppressNeeded()
+            throws Exception {
+        var original = launcherDropperFixture(root + "/fixed-loader");
+        for (int mode = 0; mode < 2; mode++) {
+            String interpreter = mode == 0 ? root + "/view-a/loader.so" : null;
+            var f = replaceLauncherDropperImage(original, launcherDropperImage(original.loading().elf().get(1),
+                    interpreter));
+            var owner = owner();
+            owner.initialize();
+            try (var paths = mockStatic(Files.class, invocation -> {
+                if (invocation.getArgument(0) instanceof Path path
+                        && (path.equals(Path.of(f.files().get(0).path()))
+                        || path.equals(Path.of(f.loading().interpreter())))) {
+                    throw new AssertionError("Mismatched or absent PT_INTERP must not probe the loader");
+                }
+                return invocation.callRealMethod();
+            })) {
+                if (mode == 0) {
+                    var failure = assertThrows(IOException.class, () -> owner.readLinuxLauncherDropper(f.files(),
+                            f.loading(), 1, SegmentClassicLinuxElfTest.deadline()));
+                    assertTrue(failure.getMessage().contains("PT_INTERP differs"));
+                } else {
+                    var result = owner.readLinuxLauncherDropper(f.files(), f.loading(), 1,
+                            SegmentClassicLinuxElfTest.deadline());
+                    assertNull(result.elf().interpreter());
+                    assertFalse(result.elf().needed().isEmpty());
+                    assertEquals(f.loading().elf().get(1).needed(), result.elf().needed());
+                }
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void launcherDropperInterpreterReadCannotHideReplacementOfTheEarlierSameByteDropper() throws Exception {
+        var f = launcherDropperFixture(root + "/fixed-loader");
+        Path dropper = Path.of(f.files().get(1).path());
+        Path loader = Path.of(f.files().get(0).path());
+        var owner = owner();
+        owner.initialize();
+        var dropperRaw = new AtomicReference<FileChannel>();
+        var loaderRaw = new AtomicReference<FileChannel>();
+        var changed = new AtomicBoolean();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                Path path = invocation.getArgument(0);
+                if (dropper.equals(path)) {
+                    dropperRaw.set((FileChannel) actual);
+                } else if (loader.equals(path)) {
+                    loaderRaw.set((FileChannel) actual);
+                }
+            }
+            return actual;
+        }); var paths = mockStatic(Files.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("readAttributes") && loader.equals(invocation.getArgument(0))
+                    && "unix:*".equals(invocation.getArgument(1)) && loaderRaw.get() != null
+                    && loaderRaw.get().isOpen() && changed.compareAndSet(false, true)) {
+                assertNotNull(dropperRaw.get());
+                assertFalse(dropperRaw.get().isOpen());
+                Path old = dropper.resolveSibling("previous-dropper");
+                Files.move(dropper, old);
+                Files.copy(old, dropper);
+                Files.setPosixFilePermissions(dropper, PosixFilePermissions.fromString("rwxr-xr-x"));
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxLauncherDropper(f.files(), f.loading(),
+                    1, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("Dropper material changed during interpreter verification"));
+            assertTrue(changed.get());
+            assertFalse(loaderRaw.get().isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void launcherDropperOriginalRoleIndicesReferencesAndDeadlineRejectBeforeTargetIo() throws Exception {
+        var f = launcherDropperFixture(root + "/fixed-loader");
+        for (int mode = 0; mode < 5; mode++) {
+            var members = new java.util.ArrayList<>(f.files());
+            var loading = f.loading();
+            if (mode == 2) {
+                var file = members.get(1);
+                members.set(1, new SegmentClassicLinuxDeploymentV2.File(file.path(),
+                        SegmentClassicLinuxDeployment.Role.MODULE, file.length(), file.sha256()));
+            } else if (mode == 3) {
+                loading = candidateLoading(loading, 1, loading.interpreter(), loading.needed(), loading.modules());
+            }
+            int index = mode == 0 ? -1 : mode == 1 ? 2 : 1;
+            long deadline = mode == 4 ? System.nanoTime() : SegmentClassicLinuxElfTest.deadline();
+            var original = loading;
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Dropper preflight reached target I/O");
+            })) {
+                assertThrows(IOException.class, () -> owner.readLinuxLauncherDropper(members, original, index,
+                        deadline));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
     @Test
     public void dropperFileHashAndExactNativeHeadersRejectScriptsClassFilesAndWrongArchitectures() throws Exception {
         Path executable = root.resolve("exec-dropper");
@@ -4184,9 +4418,14 @@ public class SegmentClassicLaunchTrustTest {
     public void callerConstructedD2InputCannotReachDropperIoWithoutTheOriginalProviderBinding() throws Exception {
         var owner = owner();
         owner.initialize();
-        IOException refusal = assertThrows(IOException.class, () -> owner.verifyLauncherDropper(
-                SegmentClassicLinuxProviderTest.schemaTwoInput(), SegmentClassicLinuxProviderTest.deadline()));
-        assertTrue(refusal.getMessage().contains("original provider/source binding"));
+        var input = SegmentClassicLinuxProviderTest.schemaTwoInput();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound D2 dropper reached target I/O");
+        })) {
+            IOException refusal = assertThrows(IOException.class, () -> owner.verifyLauncherDropper(input,
+                    SegmentClassicLinuxProviderTest.deadline()));
+            assertTrue(refusal.getMessage().contains("original provider/source binding"));
+        }
         assertThrows(IOException.class, owner::parsed);
         assertTrue(owner.closeAndDrain().drained());
     }

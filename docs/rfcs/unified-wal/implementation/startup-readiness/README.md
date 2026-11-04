@@ -1218,6 +1218,22 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## Launcher 的 D2 dropper 与第一条解释器材料关联
+
+2026-11-05在父`a14d1025595a91e7a306a5bcdeb86cd69f405d4b`上，现有SegmentClassicLauncher.startup在原verifyLinuxProvider之后、loadPrivateKey之前调用的verifyLauncherDropper，其D2分支改接已有owned ELF2。分支同时检查owner原descriptor和caller的schema，任一为D2都必须先匹配同一原input引用，再通过originalLinuxDeployment/provider/source/原deadline及recipe；原owner绑定D2后，另一个legacy或同值重解码descriptor不能降级。公共dropper path/length/SHA继续由原Inputs构造绑定固定isolation.dropper，不建立第二份权威。旧v1及旧deployment schema一保留原Linux/Mach短头合同和流程。
+
+固定物理DROPPER member经原表引用/role预检，使用原索引和ELF声明，沿observeLinuxElfMember同一个owned fd完成完整SHA、ELF2、前后fstat、首次真实close及原身份/父链/权限/单链接/长度检查；D2不再另开fd读32字节。原ELF64 little-endian x86-64、type/非零entry、NEEDED顺序、两tag及flags合同保持。不按dropper的alias Context挑执行路径，也不创造context=-1代表dropper。
+
+从本次实际ELF2读取PT_INTERP。存在时须字面等于原loading.interpreter，不能仅resolved或同inode相同；不符在解释器I/O前拒绝。匹配后沿既有固定interpreter context=-1、loading.loader、aliases和owned ELF2取得第一条材料关联。缺PT_INTERP不探测loader，但仍保留并核对原NEEDED，不判断自包含。跨文件读取后复查原dropper physical的完整identity/父链，及解释器原logical/alias摘要/叶identity，再健康/期限。独立原members/Loading/index seam共用同一private主体，只返回既有member观察，不发布来源、Installed或新资格字段。[Linux v6.6 PT_INTERP→open_exec](https://raw.githubusercontent.com/torvalds/linux/v6.6/fs/binfmt_elf.c)仅作直接依赖的静态依据。
+
+修正后新5项全部通过；最终Trust131、LauncherInputs6、DeploymentV2 11、Provider3、Launcher3共154项全部通过，0失败/错误/跳过，包含同新5；最终Spotless/Checkstyle退出0。新用例使用真实临时ELF、普通owner/未包装FileChannel及精确sealed70bb JNI，覆盖一次dropper open且只有alias Context、截断程序表及原NEEDED不符、同physical不同PT_INTERP原文、无PT_INTERP仍保留NEEDED、前置index/role/reference/deadline/source拒绝。解释器实际fd仍开且dropper fd已关时保留旧文件并复制same-byte新inode，必须取得本次跨文件末端专属拒绝。未改Elf parser/builder或重跑未改native/Process矩阵，没有执行dropper或loader。
+
+原失败分别保留：首轮缺AtomicBoolean测试import导致testCompile失败/零测试；补import后5项中4通过、1项32-byte夹具被既有D2最小64构造约束拒绝，未到reader。负例改为保留旧可接受prefix的64-byte ELF头、缺少所声明程序表，才验证完整reader拒绝。首轮154中153通过，既有cache probe替换用例在native ACL errno35处提前拒绝、未到指定probe→owned异常；相同源码/JNI单项1及终态154通过，未改该断言/native或生产代码。native既可透传OS错误，也会在身份/ctime变化时主动EAGAIN；当前未定位具体路径/原因，不将其标为已修复或确定的环境故障。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-launcher-dropper-evidence-a14d1025`保留六测试阶段原source/class/log/XML及三个style；各1448输入按各原snapshot/父Git blob核验无错配，最终两code与reader/两次完整回归/单项复查及terminal style一致，生产源在全部阶段未变。编译失败阶段的旧test class库存不算新编译或PASS。原JNI SHA-256 `70bb629fc8afedddb757729f6b79d35fec28b596406f8b6cd4a0d99e815513ee`未重建；本机仍为Mac OS X aarch64/Amazon JDK21。静态binfmt_elf.c为58870字节、SHA-256 `31d4f4f0cf8aa5f1742b54c68808eca14dbe27c8d7509e6a8756deda1e5abc81`，不是批准kernel/vendor运行。六raw scope双lsof/identity/SHA/archive hardlink核验后清理12目录、31文件路径、2569485逻辑字节，归档保留、regular-file数据块回收0，共享target及用户文件未清理。
+
+正常D2原provider/source阳性及其绑定owner后替换descriptor的动态验证在本机NOT_EXECUTED，路由只作实际入口静态核对；缺来源的typed拒绝实际测试，未反射预置owner或假Installed。该增量只增强已有normal consumer的材料拒绝，不证明exec/open_exec、降权、cgroup、Unix交接或传递依赖闭合。私钥/ZK/supervisor/Process顺序、childCommand的qualification拒绝和diagnostics unconditional Unsupported保持；真实JDK helper/父环境、完整启动与parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，models/性能未执行，完整目标active，默认OFF/SYSTEM/PARK及advanced disabled不变。
+
 ## D2 ELF 成员的原句柄摘要与元数据观察
 
 2026-11-01在父`5bada70b677841e429b1a7a9fc7cd08134f338b6`上，按总体规划会话冻结的范围，在原`SegmentClassicLaunchTrust`接入`verifyLinuxElfMember(int fileIndex, long deadline)`。入口只收原D2表索引和原期限；先要求本owner的production/Installed、原program/image/launcher来源及provider ready，再检查索引和ELF role，之后才构造成员Path、执行原physical字节门及目标I/O。不接caller Path/File/program/parser/资格布尔值，不将D2 String转换成旧File绕过门；非ELF明确拒绝，旧ELF1与cache/config kind边界保持。

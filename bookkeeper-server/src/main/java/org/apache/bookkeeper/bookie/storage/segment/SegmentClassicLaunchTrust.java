@@ -857,9 +857,18 @@ final class SegmentClassicLaunchTrust {
         initializingThread = Thread.currentThread();
         try {
             requireBoundDeadline(deadlineNanos);
-            if (input.linuxDeployment() != null && input.linuxDeployment().schema() == 2
-                    && (linuxProvider == null || input != launcherInput)) {
-                throw new IOException("D2 dropper I/O requires this owner's original provider/source binding");
+            boolean originalD2 = launcherInput != null && launcherInput.linuxDeployment() != null
+                    && launcherInput.linuxDeployment().schema() == 2;
+            if (originalD2 || input.linuxDeployment() != null && input.linuxDeployment().schema() == 2) {
+                if (input != launcherInput) {
+                    throw new IOException("D2 dropper I/O requires this owner's original provider/source binding");
+                }
+                var deployment = originalLinuxDeployment(deadlineNanos);
+                input.requireRecipe(parsed);
+                // The original Inputs constructor binds its public dropper path/length/SHA to this fixed member.
+                observeLinuxLauncherDropper(deployment.files(), deployment.loading(),
+                        deployment.isolation().dropper(), deadlineNanos);
+                return;
             }
             input.requireRecipe(parsed);
             var file = input.dropper();
@@ -900,6 +909,62 @@ final class SegmentClassicLaunchTrust {
         } finally {
             initializingThread = null;
         }
+    }
+
+    /** Independent original-table data only; it cannot bind the launcher's source/provider or qualify execution. */
+    synchronized LinuxElfMemberObservation readLinuxLauncherDropper(
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int dropperIndex, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxLauncherDropper(members, loading, dropperIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxElfMemberObservation observeLinuxLauncherDropper(
+            List<SegmentClassicLinuxDeploymentV2.File> declared, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int dropperIndex, long deadline) throws IOException {
+        var members = fixedLinuxContextMembers(declared, loading, deadline);
+        if (dropperIndex < 0 || dropperIndex >= members.size()
+                || members.get(dropperIndex).role() != SegmentClassicLinuxDeployment.Role.DROPPER) {
+            throw new IOException("Original launcher dropper index must identify its DROPPER member");
+        }
+        var file = members.get(dropperIndex);
+        var metadata = linuxElfDeclaration(loading, dropperIndex);
+        var dropper = observeLinuxElfMember(dropperIndex, file, metadata, loading.interpreter(), deadline);
+        LinuxLoadPathObservation interpreter = null;
+        Map<Path, String> aliases = null;
+        if (dropper.elf().interpreter() != null) {
+            if (!dropper.elf().interpreter().equals(loading.interpreter())) {
+                throw new IOException("Original dropper PT_INTERP differs from the declared interpreter literal");
+            }
+            aliases = linuxContextAliases(loading, deadline);
+            var context = new SegmentClassicLinuxDeploymentV2.Context(loading.loader(), loading.interpreter());
+            interpreter = observeLinuxLoadPath(-1, context, members.get(loading.loader()),
+                    linuxElfDeclaration(loading, loading.loader()), loading.interpreter(), aliases, deadline);
+        }
+        Path physical = linuxMaterialPath(file.path(), deadline);
+        if (!dropper.identity().equals(checked(physical)) || !dropper.parents().equals(chain(physical))) {
+            throw new IOException("Dropper material changed during interpreter verification");
+        }
+        if (interpreter != null) {
+            var terminal = observeLinuxPath(LinuxPathKind.INTERPRETER,
+                    loadingNativePath(interpreter.logical(), deadline), aliases, true, deadline);
+            if (!interpreter.path().equals(terminal)
+                    || !interpreter.content().identity().equals(terminal.identity())) {
+                throw new IOException("Original dropper interpreter path changed during verification");
+            }
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+        return dropper;
     }
 
     private byte[] readLauncherPrivate(String leaf, int minimum, int maximum) throws IOException {
