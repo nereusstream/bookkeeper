@@ -27,13 +27,16 @@ import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 
-/** Bounded glibc 2.39 new-cache 1.1 observations and name groups; no file approval, winner or execution. */
+/** Bounded glibc 2.39 new-cache 1.1 data algorithms; no source qualification, file approval or execution. */
 final class SegmentClassicLinuxCache {
     static final int MAX_BYTES = 16 * 1024 * 1024;
     static final int MAX_ENTRIES = 262144;
     private static final byte[] MAGIC = "glibc-ld.so.cache1.1".getBytes(StandardCharsets.US_ASCII);
     private static final int EXTENSION_MAGIC = 0xeaa42174;
+    private static final long PLATFORM_MASK = 0xfL << 48;
+    private static final List<String> BUILTIN_HWCAPS = List.of("x86-64-v4", "x86-64-v3", "x86-64-v2");
 
     /** Immutable slice of the one privately read image. No per-reference copy of long shared suffix strings. */
     static final class Text {
@@ -95,6 +98,15 @@ final class SegmentClassicLinuxCache {
             hwcaps = List.copyOf(hwcaps);
         }
     }
+
+    /** Explicit assumed data, not an observation of the running loader. Empty platform means observed absence. */
+    record Capabilities(long dlHwcap, long hwcapMask, Optional<String> platform, long isa1,
+                        List<String> activeHwcaps) { }
+
+    enum SelectionState { NO_MATCH, SELECTED, REJECTED_NODEFLIB }
+
+    /** Retains the original row even when its selected path is subsequently excluded. */
+    record Selection(SelectionState state, Entry entry) { }
 
     private record Region(int offset, int size) { }
 
@@ -359,6 +371,135 @@ final class SegmentClassicLinuxCache {
         }
         requireTime(deadline);
         return List.copyOf(result);
+    }
+
+    /** Pure single-row selection followed by raw compiled-prefix NODEFLIB filtering; never probes a path. */
+    static Selection select(Image image, String name, Capabilities capabilities, long requesterFlags1,
+                            List<String> systemDirectories, long deadline) throws IOException {
+        requireTime(deadline);
+        if (capabilities == null || capabilities.platform() == null || capabilities.isa1() < 0
+                || capabilities.isa1() > 0xffffffffL || capabilities.activeHwcaps() == null
+                || capabilities.activeHwcaps().size() > BUILTIN_HWCAPS.size()) {
+            throw new IOException("Missing or unsupported explicit cache capability facts");
+        }
+        var active = new ArrayList<String>();
+        int previous = -1;
+        for (String hwcap : capabilities.activeHwcaps()) {
+            requireTime(deadline);
+            int position = hwcap == null ? -1 : BUILTIN_HWCAPS.indexOf(hwcap);
+            if (position <= previous) {
+                throw new IOException("Active cache hwcaps must be an ordered subsequence of v4/v3/v2");
+            }
+            active.add(hwcap);
+            previous = position;
+        }
+        long platform = 0;
+        if (capabilities.platform().isPresent()) {
+            String value = capabilities.platform().get();
+            strictFactBytes(value);
+            platform = switch (value) {
+                case "haswell" -> 1L << 50;
+                case "xeon_phi" -> 1L << 51;
+                default -> 0;
+            };
+        }
+        if (systemDirectories == null || systemDirectories.isEmpty() || systemDirectories.size() > 64) {
+            throw new IOException("Missing or unsupported explicit compiled system_dirs table");
+        }
+        var prefixes = new ArrayList<byte[]>();
+        for (String directory : systemDirectories) {
+            requireTime(deadline);
+            byte[] prefix = strictFactBytes(directory);
+            if (prefix.length == 0 || prefix[0] != '/' || prefix[prefix.length - 1] != '/') {
+                throw new IOException("Compiled system_dirs prefix must be absolute and end in slash");
+            }
+            prefixes.add(prefix);
+        }
+        long exclude = ~((capabilities.dlHwcap() & capabilities.hwcapMask()) | PLATFORM_MASK | Long.MIN_VALUE);
+        Entry best = null;
+        int bestPriority = 0;
+        for (var entry : related(image, name, deadline)) {
+            requireTime(deadline);
+            if (entry.hwcapIndex() >= 0) {
+                // glibc uses signed C `1 << index`; index 31 and wider have no supported defined result.
+                if (entry.isaLevel() < 0 || entry.isaLevel() >= 31) {
+                    throw new IOException("Unsupported reached cache ISA bit index");
+                }
+                if ((capabilities.isa1() & (1L << entry.isaLevel())) == 0) {
+                    continue;
+                }
+                int priority = activePriority(image.hwcaps().get(entry.hwcapIndex()), active);
+                if (priority == 0 || best != null && priority >= bestPriority) {
+                    continue;
+                }
+                best = entry;
+                bestPriority = priority;
+            } else {
+                // Named rows precede legacy rows. An existing named best ends the search before legacy checks.
+                if (best != null) {
+                    break;
+                }
+                if ((entry.hwcap() & exclude) != 0 || (entry.hwcap() & PLATFORM_MASK) != 0
+                        && (entry.hwcap() & PLATFORM_MASK) != platform) {
+                    continue;
+                }
+                best = entry;
+                break;
+            }
+        }
+        SelectionState state = best == null ? SelectionState.NO_MATCH : SelectionState.SELECTED;
+        if (best != null && (requesterFlags1 & 0x800L) != 0) {
+            for (byte[] prefix : prefixes) {
+                requireTime(deadline);
+                if (startsWith(best.path(), prefix)) {
+                    state = SelectionState.REJECTED_NODEFLIB;
+                    break;
+                }
+            }
+        }
+        requireTime(deadline);
+        return new Selection(state, best);
+    }
+
+    private static byte[] strictFactBytes(String value) throws IOException {
+        if (value == null || value.length() > 4096 || value.indexOf(0) >= 0
+                || !StandardCharsets.UTF_8.newEncoder().canEncode(value)) {
+            throw new IOException("Unsupported bounded strict UTF8 cache selection fact");
+        }
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > 4096) {
+            throw new IOException("Cache selection fact exceeds its original byte bound");
+        }
+        return bytes;
+    }
+
+    private static int activePriority(Text name, List<String> active) {
+        for (int i = 0; i < active.size(); i++) {
+            String candidate = active.get(i);
+            if (name.length != candidate.length()) {
+                continue;
+            }
+            int p = 0;
+            while (p < name.length && name.at(p) == candidate.charAt(p)) {
+                p++;
+            }
+            if (p == name.length) {
+                return i + 1;
+            }
+        }
+        return 0;
+    }
+
+    private static boolean startsWith(Text text, byte[] prefix) {
+        if (text.length < prefix.length) {
+            return false;
+        }
+        for (int i = 0; i < prefix.length; i++) {
+            if (text.at(i) != prefix[i]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static int libraryCompare(Text left, Text right) {

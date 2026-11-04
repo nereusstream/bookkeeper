@@ -826,6 +826,18 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## Cache 单行选择与选后 NODEFLIB 的纯数据算法
+
+2026-11-05在父`f41ba00a625e45ca80b4d4e6c7bbccc03278a200`上，原SegmentClassicLinuxCache增加包内`select`，复用既有有界new-cache1.1 Image、原LP64 flags303及数字等价组。它只计算显式假定的raw64 dl_hwcap/hwcap_mask、platform观测值或明确缺失、uint32 isa_1、有序active内置hwcaps、requester flags1及编译system_dirs前缀；不取得实际CPU/loader事实，不接trust typed入口或执行放行。null/缺事实不能变成0/空表或NO_MATCH；明确空active合法，platform的Optional.empty表示已知缺失，未知平台值只产生不匹配。active只支持v4/v3/v2的有序无重复子序列，不从ISA或名称互相推断。
+
+依据[glibc2.39 cache选择](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-cache.c)及[x86 ISA检查](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/sysdeps/x86/dl-isa-level.h)，named行先执行ISA单bit成员检查，再按原扩展名raw bytes取active优先级；较低priority优先，同级保留首行，不解码未知名称。ISA是位索引；parser仍保留0..1023，只有实际到达的named行索引≥31明确Unsupported，避免将signed-C移位未定义行为伪造成Java掩码移位结果。无关名称、其他ABI及停止后的行不执行该语义检查。已有named best时遇legacy先停止；否则按raw64能力mask、TLS bit63及platform mask筛选首个合格legacy行并停止，忽略osversion_unused。x86-64只接受haswell bit50、xeon_phi bit51，未知/明确缺失平台不匹配任何非零platform字段。
+
+选出唯一原Entry后，才按requester flags1位0x800作[system_dirs原字节前缀排除](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)。显式表限1..64条，每条严格UTF8、无NUL、以/开头及结尾、≤4096字节，/本身合法；这是本profile支持边界，不声称所有glibc构建均不能含零长度项。不trim/normalize/去重或把D2默认目录认证成编译表；前缀只编码一次，raw path不逐行复制或解码。返回NO_MATCH、SELECTED或REJECTED_NODEFLIB；后者保留同一Entry/ordinal/Text，绝不重扫组内后行。/lib/不匹配/lib64/，alias/dot和文件存在性不参与纯计算，选中路径陈旧/缺失也不会使本算法改选。原related/owner cache/default/四位置方法及全部格式不变。
+
+当前Cache16项全部通过、0失败/错误/跳过，含6个新增算法测试；Spotless/Checkstyle首轮退出0。复用原固定向量及轻量独立legacy字节镜像，经实际FileChannel parser取得Image；覆盖named优先级/同级首行、active与ISA独立、明确空active、legacy平台/TLS/mask/首行、数字等价及其他ABI、ISA30与31/32/1023执行边界、raw非UTF8名称和选中path、NODEFLIB选后排除不fallback及raw prefix/alias/dot、缺事实/空表/4096字节及deadline。规划会话只读评审无新增阻塞。1439项测试输入与原snapshot/父Git blob无错配，两个当前code与测试/style快照一致；未改owner/JNI矩阵不重跑，旧PASS不移绑。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-cache-selection-evidence-f41ba00a`，保留原source/class/命令/log/XML及7份glibc静态源。单个确切raw scope经双次lsof/identity/SHA/archive hardlink核验后清理2目录、4文件路径、366684逻辑字节，归档保留、regular-file数据块回收0。实际能力与编译表的原owner来源、active capstr/prepend/mask、前序环境/祖先/ORIGIN、first-loaded/递归solver/helper闭包/backend exec与typed Linux/vendor阳性仍OPEN/NOT_EXECUTED，本片未执行models/性能。diagnostics unconditional Unsupported、完整16步目标active、整体Gate OPEN及默认OFF/SYSTEM/PARK和advanced disabled保持。
+
 ## 有序默认目录阶段与真实 requester NODEFLIB
 
 2026-11-05在父`55c51ce5ce4ca4042879f6fdf4acf9b1b7203b3b`上，原trust新增`verifyLinuxNeededDefaults(ruleIndex, deadline)`，只从本owner原D2/source/provider绑定取rule、requester/context/ordinal和LoaderPolicy.defaultDirectories。原full constructor的默认目录引用约束提取为共用纯`defaultDirectoryIndices`：按policy原raw顺序精确匹配Directory索引，缺失或歧义在目标I/O前拒绝，不按目录表排序、物理路径或normalize重排。原格式、编码及旧单目录/base/cache入口语义不变；独立read seam仍只提供声明/真实文件观察，不制造Installed/source。
