@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## 单个声明目录的固定内置四位置候选对应
+
+2026-11-05在父`b012a5b711d162f3f652c5cc24ec6b88718f1476`上，原trust新增`verifyLinuxNeededDirectoryPositions(ruleIndex, directoryIndex, deadline)`，原D2/source/provider/owner门后，只从原policy的hwcaps rule1、requester原NEEDED ordinal及一个原Directory导出固定v4/v3/v2/base四位置。依据[glibc2.39 x86-64内置顺序](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/sysdeps/x86_64/dl-hwcaps-subdirs.c)、[suffix生成及空base](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-hwcaps.c)和[open_path拼接](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)，依次观察`glibc-hwcaps/x86-64-v4/`、v3、v2及空suffix。该集合尚未按实际能力筛选，不是当前capstr，不接受caller suffix/CPU/mask或额外目录。独立read seam只消费声明子图及真实临时文件，不建立Installed/source。
+
+原普通name形态、indices/policy和全部四条完整logical的strict UTF8/4096字节界在requester/目录/候选目标I/O前预检；固定suffix全为ASCII，其length按字节收费。dirname复用原尾slash规则，内部dot/slash与字面`$`原文保持，不做DST或列表展开。requester只经一次private owned ELF2/实际ordinal绑定；所选原base Directory presence/protection先后核对，三个派生位置直接经原walker检查完整父链、alias、保护及实际缺失，不要求为本方法额外增加派生Directory行，也不替代已有Directory整表观察。
+
+每位置先probe，存在时须本NeededRule的exact logicalLoadName＋resolved physical context批准后，才复用原private候选体读取owned ELF2并关联probe/content identity；可靠NoSuchFile才记录缺失，AccessDenied、非文件、未知alias或内容/身份错误均整遍拒绝。前面有文件仍继续全部四项；返回保留原rule/directory、固定position/suffix、logical/path/absence及context/member。所有位置读取后逐项复核完整path/identity/alias-chain，再核对原目录，后面的读取不能用新事实覆盖先前已观察身份。不是原子快照或实际loader的尝试/失败继续算法；旧base-only/cache入口及共享候选体未变，不嵌套public同步方法，不增加预算、重试、线程、缓存或跨调用状态。
+
+首6项全部通过后，只修正一行121字符测试行的换行；原style失败及6项source/class/log/XML保留。最终当前两code的Trust106项全部通过，0失败/错误/跳过，style-final退出0；106已含6新增，不相加为112独立用例。新增真实文件夹具覆盖混合存在/缺失和固定顺序、单次requester读取、v4 alias指向base实体但仍需新exact context、raw Unicode/字面`$`及dot/slash、base批准不能放行现存hwcap logical且内容未open、最后base读取close期间同target替换先前v4 alias被终端复核拒绝，以及base路径恰4096而最长suffix超界时pre-I/O拒绝、typed缺source。原base/cache的Trust相关覆盖同时执行；未改Cache独立类和JNI矩阵未重跑，其原PASS不移绑。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-builtin-positions-evidence-b012a5b7`。两测试阶段各1439项输入与原snapshot/父Git blob无错配，最终两code与106项/style-final快照相同；生产源也与首6项相同，首测试源仅换行前版本独立保留。终态RAT退出1/431，原未批准路径及字节与父HEAD相同，无新增，PDF扫描前排除且未读取。两个确切raw scope经双次lsof/identity/SHA/archive hardlink核验后清理4目录、8文件路径、748704逻辑字节，归档保留、regular-file数据块回收0；三份glibc原源静态归档不认证实际vendor执行。
+
+本块只对应一个原目录的四个固定内置位置，不证明该目录实际进入搜索，也不是所有运行prepend/mask输入下的完整宇宙。实际active/capstr、prepend/mask来源、cache ISA优先、NODEFLIB、RPATH/env/default整体顺序、first-loaded/递归solver、helper闭包及backend exec仍待后续；typed Linux/vendor阳性、本块models/性能NOT_EXECUTED。`requireLinuxDiagnosticsProcessSource()`保持unconditional Unsupported，完整16步目标active，各整体Gate OPEN，默认OFF/SYSTEM/PARK及advanced disabled不变。
+
 ## 单条 NEEDED 的 cache 相关行与候选对应
 
 2026-11-05在父`f09a1979a2bb44134b4087fd5738ae8d25e3c86e`上，原trust新增`verifyLinuxNeededCache(ruleIndex, deadline)`，只从本owner原D2/provider/source选择唯一固定`/etc/ld.so.cache`的CACHE规则；独立`readLinuxNeededCache`只供声明子图与真实临时文件，不能产生Installed或typed来源。原table/context/ordinal、cache kind/format/角色/长度和普通NEEDED名称形态在目标I/O前核对；requester经原owned ELF2读取，实际ordinal与声明必须相同。cache复用原hash/parser/实际first-close读取，明确区分受保护的cache缺失、cache存在但无相关行、行存在而目标缺失。

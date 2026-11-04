@@ -574,6 +574,227 @@ public class SegmentClassicLaunchTrustTest {
         }
     }
 
+    private CandidateFixture builtinLookupFixture() throws Exception {
+        var original = lookupFixture("libz.so.1");
+        var l = original.loading();
+        Path cap4 = Files.createDirectories(root.resolve("lib/glibc-hwcaps/x86-64-v4"));
+        Path cap2 = Files.createDirectories(root.resolve("lib/glibc-hwcaps/x86-64-v2"));
+        Path link = Files.createSymbolicLink(cap4.resolve("libz.so.1"), Path.of("../../libz.so.1"));
+        Path file = cap2.resolve("libz.so.1");
+        byte[] bytes = Files.readAllBytes(Path.of(original.files().get(1).path()));
+        write(file, bytes);
+        var members = new java.util.ArrayList<>(original.files());
+        members.add(new SegmentClassicLinuxDeploymentV2.File(file.toString(),
+                SegmentClassicLinuxDeployment.Role.LIBRARY, bytes.length, SegmentClassicHandoff.digest(bytes)));
+        var aliases = new java.util.ArrayList<>(l.aliases());
+        aliases.add(new SegmentClassicLinuxDeploymentV2.Alias(link.toString(), "../../libz.so.1"));
+        aliases.sort(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Alias::link));
+        var contexts = new java.util.ArrayList<>(l.contexts());
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(1, link.toString()));
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(1,
+                root + "/view:$HOME;雪/glibc-hwcaps/x86-64-v4/libz.so.1"));
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(2, file.toString()));
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(2,
+                root + "/view:$HOME;雪/glibc-hwcaps/x86-64-v2/libz.so.1"));
+        contexts.sort(Comparator.comparingInt(SegmentClassicLinuxDeploymentV2.Context::file)
+                .thenComparing(SegmentClassicLinuxDeploymentV2.Context::logicalLoadName));
+        var metadata = new java.util.ArrayList<>(l.elf());
+        var expected = metadata.get(1);
+        metadata.add(new SegmentClassicLinuxDeploymentV2.Elf(2, expected.needed(), expected.rpath(), expected.runpath(),
+                expected.flags(), expected.flags1()));
+        var needed = new java.util.ArrayList<SegmentClassicLinuxDeploymentV2.NeededRule>();
+        var candidates = java.util.stream.IntStream.range(0, contexts.size()).filter(i -> contexts.get(i).file() != 0)
+                .boxed().toList();
+        for (int i = 0; i < contexts.size(); i++) {
+            for (int ordinal = 0; ordinal < 4; ordinal++) {
+                needed.add(new SegmentClassicLinuxDeploymentV2.NeededRule(i, ordinal, candidates));
+            }
+        }
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(), aliases,
+                l.directories(), l.configuration(), l.policy(), metadata, contexts, needed, l.modules());
+        return new CandidateFixture(members, loading);
+    }
+
+    @Test
+    public void builtinPositionsKeepFourUnfilteredLocationsMixedAbsenceAndOneRequesterRead() throws Exception {
+        var f = builtinLookupFixture();
+        var owner = owner();
+        owner.initialize();
+        var requesterOpens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.files().get(0).path()).equals(invocation.getArgument(0))) {
+                requesterOpens.incrementAndGet();
+            }
+            return invocation.callRealMethod();
+        })) {
+            var result = owner.readLinuxNeededDirectoryPositions(f.files(), f.loading(), 0, 2,
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(0, result.rule());
+            assertEquals(2, result.directory());
+            assertSame(f.loading().needed().get(0), result.declaration());
+            assertEquals("libz.so.1", result.name());
+            assertEquals(1, requesterOpens.get());
+            assertEquals(List.of(0, 1, 2, 3), result.positions().stream().map(p -> p.position()).toList());
+            assertEquals(List.of("glibc-hwcaps/x86-64-v4/", "glibc-hwcaps/x86-64-v3/",
+                    "glibc-hwcaps/x86-64-v2/", ""), result.positions().stream().map(p -> p.suffix()).toList());
+            assertEquals(1, result.positions().get(0).candidate().member());
+            assertEquals(Path.of(f.files().get(1).path()), result.positions().get(0).path().resolved());
+            assertNull(result.positions().get(1).candidate());
+            assertNull(result.positions().get(1).path().identity());
+            assertEquals(root.resolve("lib/glibc-hwcaps/x86-64-v3"), result.positions().get(1).path().absentAt());
+            assertEquals(2, result.positions().get(2).candidate().member());
+            assertEquals(1, result.positions().get(3).candidate().member());
+            for (var position : result.positions()) {
+                assertEquals(root + "/lib/" + position.suffix() + result.name(), position.logical());
+                if (position.candidate() != null) {
+                    assertEquals(position.logical(), f.loading().contexts().get(position.candidate().context())
+                            .logicalLoadName());
+                    assertEquals(position.path().identity(), position.candidate().content().identity());
+                }
+            }
+            assertThrows(UnsupportedOperationException.class, () -> result.positions().clear());
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void builtinPositionsPreserveRawDirectoryDotsSlashesAndLiteralAliasText() throws Exception {
+        var f = builtinLookupFixture();
+        var l = f.loading();
+        String prefix = root + "/view:$HOME;雪/";
+        String raw = root + "/view:$HOME;雪//./";
+        var directories = new java.util.ArrayList<>(l.directories());
+        directories.set(3, new SegmentClassicLinuxDeploymentV2.Directory(raw, true));
+        var contexts = l.contexts().stream().map(c -> c.logicalLoadName().startsWith(prefix)
+                ? new SegmentClassicLinuxDeploymentV2.Context(c.file(),
+                        raw + c.logicalLoadName().substring(prefix.length()))
+                : c).toList();
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
+                l.aliases(), directories, l.configuration(), l.policy(), l.elf(), contexts, l.needed(), l.modules());
+        var owner = owner();
+        owner.initialize();
+        try {
+            var result = owner.readLinuxNeededDirectoryPositions(f.files(), loading, 0, 3,
+                    SegmentClassicLinuxElfTest.deadline());
+            for (var position : result.positions()) {
+                assertEquals(raw + position.suffix() + "libz.so.1", position.logical());
+                if (position.candidate() != null) {
+                    assertEquals(position.logical(), position.candidate().logical());
+                }
+            }
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void builtinPositionsBaseApprovalDoesNotPermitAnExistingHwcapLogicalPath() throws Exception {
+        var f = builtinLookupFixture();
+        var l = f.loading();
+        int base = l.contexts().indexOf(new SegmentClassicLinuxDeploymentV2.Context(1, f.files().get(1).path()));
+        assertTrue(base >= 0);
+        var needed = new java.util.ArrayList<>(l.needed());
+        needed.set(0, new SegmentClassicLinuxDeploymentV2.NeededRule(0, 0, List.of(base)));
+        var loading = candidateLoading(l, l.loader(), l.interpreter(), needed, l.modules());
+        var owner = owner();
+        owner.initialize();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.files().get(1).path()).equals(invocation.getArgument(0))) {
+                throw new AssertionError("Base approval was used to open an unapproved built-in logical path");
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededDirectoryPositions(f.files(),
+                    loading, 0, 2, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("exact approved logical context"));
+            assertThrows(IOException.class, owner::parsed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void builtinPositionsLaterBaseReadCannotHideEarlierAliasReplacement() throws Exception {
+        var f = builtinLookupFixture();
+        Path earlier = root.resolve("lib/glibc-hwcaps/x86-64-v4/libz.so.1");
+        var opens = new AtomicInteger();
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        var owner = owner();
+        owner.initialize();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.files().get(1).path()).equals(invocation.getArgument(0))
+                    && opens.incrementAndGet() == 2) {
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                fault.beforeClose = () -> {
+                    try {
+                        Files.delete(earlier);
+                        Files.createSymbolicLink(earlier, Path.of("../../libz.so.1"));
+                    } catch (IOException failure) {
+                        throw new AssertionError(failure);
+                    }
+                };
+                captured.set(fault);
+                return fault;
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededDirectoryPositions(f.files(),
+                    f.loading(), 0, 2, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("Fixed built-in candidate changed across"));
+            assertEquals(2, opens.get());
+            assertEquals(1, captured.get().closes.get());
+            assertFalse(captured.get().actual.isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void builtinPositionsLongestSuffixRejectsAnOtherwiseBoundedBasePathBeforeIo() throws Exception {
+        var f = lookupFixture("libz.so.1");
+        var l = f.loading();
+        String prefix = root + "/lib/";
+        int bytes = 4096 - "libz.so.1".length() - 1;
+        String directory = prefix + "x".repeat(bytes - prefix.getBytes(StandardCharsets.UTF_8).length);
+        assertEquals(4096, (directory + "/libz.so.1").getBytes(StandardCharsets.UTF_8).length);
+        var directories = new java.util.ArrayList<>(l.directories());
+        directories.set(2, new SegmentClassicLinuxDeploymentV2.Directory(directory, true));
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
+                l.aliases(), directories, l.configuration(), l.policy(), l.elf(), l.contexts(), l.needed(),
+                l.modules());
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Overlong built-in path reached requester/directory/candidate I/O");
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededDirectoryPositions(f.files(),
+                    loading, 0, 2, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("Fixed built-in candidate path exceeds"));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void typedBuiltinPositionsWithoutOriginalSourceCannotReachTargetIo() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound typed built-in positions reached target I/O");
+        })) {
+            assertThrows(IOException.class, () -> owner.verifyLinuxNeededDirectoryPositions(0, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
     private static byte[] cacheLookupBytes(String[] names, byte[][] paths, int[] flags, long[] hwcaps) {
         assertEquals(names.length, paths.length);
         assertEquals(names.length, flags.length);

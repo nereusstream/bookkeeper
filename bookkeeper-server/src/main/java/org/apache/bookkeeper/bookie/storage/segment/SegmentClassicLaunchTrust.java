@@ -70,6 +70,8 @@ final class SegmentClassicLaunchTrust {
             .getBytes(StandardCharsets.US_ASCII);
     private static final int MAX_LOADING_DIRECTORY_ENTRIES = 262144;
     private static final int MAX_LOADING_DIRECTORY_NAME_BYTES = 64 * 1024 * 1024;
+    private static final List<String> BUILTIN_HWCAP_SUFFIXES = List.of("glibc-hwcaps/x86-64-v4/",
+            "glibc-hwcaps/x86-64-v3/", "glibc-hwcaps/x86-64-v2/", "");
 
     record Recipe(String recipeId, String deployment, String keyName, SegmentClassicHandoff.Digest signerKeyId,
                   SegmentClassicHandoff.Digest program, SegmentClassicHandoff.Digest configuration,
@@ -132,6 +134,19 @@ final class SegmentClassicLaunchTrust {
             SegmentClassicLinuxDeploymentV2.NeededRule declaration, String logical,
             LinuxPathObservation directoryPath, LinuxPathObservation path, LinuxLoadPathObservation requester,
             LinuxLoadPathObservation candidate) { }
+
+    /** Fixed built-in position only, not an active CPU capability or a loader attempt/winner. */
+    record LinuxNeededDirectoryPosition(int position, String suffix, String logical, LinuxPathObservation path,
+                                        LinuxLoadPathObservation candidate) { }
+
+    /** All four unfiltered built-in positions for one original directory; no custom prepend/mask is observed. */
+    record LinuxNeededDirectoryObservation(int rule, int directory,
+            SegmentClassicLinuxDeploymentV2.NeededRule declaration, String name, LinuxPathObservation directoryPath,
+            LinuxLoadPathObservation requester, List<LinuxNeededDirectoryPosition> positions) {
+        LinuxNeededDirectoryObservation {
+            positions = List.copyOf(positions);
+        }
+    }
 
     /** One numeric-equivalent LP64 cache row, not capability-filtered and never a selected winner. */
     record LinuxNeededCacheRow(SegmentClassicLinuxCache.Entry entry, String logical, LinuxPathObservation path,
@@ -2469,6 +2484,104 @@ final class SegmentClassicLaunchTrust {
         files.requireHealthy();
         requireTime(deadline);
         return result;
+    }
+
+    /** Only original indices and deadline; this is the fixed unfiltered rule-one set, never actual capstr. */
+    synchronized LinuxNeededDirectoryObservation verifyLinuxNeededDirectoryPositions(int ruleIndex,
+            int directoryIndex, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            return observeLinuxNeededDirectoryPositions(deployment.files(), deployment.loading(), ruleIndex,
+                    directoryIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Independent declaration/file fixture only; does not create source, Installed or capability evidence. */
+    synchronized LinuxNeededDirectoryObservation readLinuxNeededDirectoryPositions(
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex, int directoryIndex, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxNeededDirectoryPositions(members, loading, ruleIndex, directoryIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxNeededDirectoryObservation observeLinuxNeededDirectoryPositions(
+            List<SegmentClassicLinuxDeploymentV2.File> declared, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex, int directoryIndex, long deadline) throws IOException {
+        var members = fixedLinuxContextMembers(declared, loading, deadline);
+        if (loading.policy().hwcaps() != 1 || ruleIndex < 0 || ruleIndex >= loading.needed().size()
+                || directoryIndex < 0 || directoryIndex >= loading.directories().size()) {
+            throw new IOException("Unsupported built-in hwcap rule or original NEEDED/directory index");
+        }
+        var rule = loading.needed().get(ruleIndex);
+        var context = loading.contexts().get(rule.requester());
+        var metadata = linuxElfDeclaration(loading, context.file());
+        String name = metadata.needed().get(rule.ordinal());
+        if (name.isEmpty() || name.indexOf('/') >= 0 || name.indexOf('$') >= 0
+                || name.equals(".") || name.equals("..")) {
+            throw new IOException("Unsupported NEEDED name for fixed built-in directory positions");
+        }
+        var declaredDirectory = loading.directories().get(directoryIndex);
+        String dirname = SegmentClassicLinuxDynamicPath.dirname(declaredDirectory.path(), deadline);
+        int bytes = dirname.getBytes(StandardCharsets.UTF_8).length + name.getBytes(StandardCharsets.UTF_8).length;
+        var logicals = new ArrayList<String>(BUILTIN_HWCAP_SUFFIXES.size());
+        for (String suffix : BUILTIN_HWCAP_SUFFIXES) {
+            requireTime(deadline);
+            if (bytes > 4096 - suffix.length()) {
+                throw new IOException("Fixed built-in candidate path exceeds its UTF8 byte bound");
+            }
+            String logical = dirname + suffix + name;
+            SegmentClassicLinuxGlob.requireLogicalText(logical);
+            logicals.add(logical);
+        }
+        var aliases = linuxContextAliases(loading, deadline);
+        var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
+                loading.interpreter(), aliases, deadline);
+        if (!name.equals(requester.content().elf().needed().get(rule.ordinal()))) {
+            throw new IOException("Original built-in NEEDED differs from its requester ELF observation");
+        }
+        var directory = new LinuxSearchDirectory(directoryIndex, declaredDirectory.path(), declaredDirectory.present());
+        Path directoryEntry = loadingNativePath(directory.logical(), deadline);
+        var beforeDirectory = searchDirectoryPath(directory, directoryEntry, aliases, LinuxPathKind.LOOKUP, deadline);
+        var positions = new ArrayList<LinuxNeededDirectoryPosition>(BUILTIN_HWCAP_SUFFIXES.size());
+        for (int i = 0; i < logicals.size(); i++) {
+            String logical = logicals.get(i);
+            Path entry = loadingNativePath(logical, deadline);
+            var probe = observeLinuxPath(LinuxPathKind.LOOKUP, entry, aliases, false, deadline);
+            var candidate = observeLinuxNeededCandidate(rule, logical, probe, members, loading, aliases, deadline);
+            positions.add(new LinuxNeededDirectoryPosition(i, BUILTIN_HWCAP_SUFFIXES.get(i), logical, probe,
+                    candidate));
+        }
+        for (var position : positions) {
+            var terminal = observeLinuxPath(LinuxPathKind.LOOKUP, loadingNativePath(position.logical(), deadline),
+                    aliases, false, deadline);
+            if (!position.path().equals(terminal)) {
+                throw new IOException("Fixed built-in candidate changed across its directory observation");
+            }
+        }
+        if (!beforeDirectory.equals(searchDirectoryPath(directory, directoryEntry, aliases, LinuxPathKind.LOOKUP,
+                deadline))) {
+            throw new IOException("Original base directory changed across its built-in position observation");
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+        return new LinuxNeededDirectoryObservation(ruleIndex, directoryIndex, rule, name, beforeDirectory,
+                requester, positions);
     }
 
     /** Only an original NEEDED rule and deadline; the fixed cache configuration is selected from this owner. */
