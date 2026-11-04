@@ -36,6 +36,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.withSettings;
 
 import com.sun.security.auth.module.UnixSystem;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -63,6 +64,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LinuxSearchDirectory;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LoadingDirectoryBudget;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLinuxDeploymentV2.DynamicPath;
 import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOException;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
@@ -1012,6 +1014,308 @@ public class SegmentClassicLaunchTrustTest {
         var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(), aliases,
                 l.directories(), l.configuration(), l.policy(), metadata, contexts, needed, l.modules());
         return new CandidateFixture(members, loading);
+    }
+
+    private static long[] tagText(ByteArrayOutputStream strings, long tag, String value) {
+        int offset = strings.size();
+        strings.writeBytes(value.getBytes(StandardCharsets.UTF_8));
+        strings.write(0);
+        return new long[]{tag, offset};
+    }
+
+    private CandidateFixture withRequesterTags(CandidateFixture original, DynamicPath rpath, DynamicPath runpath)
+            throws IOException {
+        var l = original.loading();
+        var old = l.elf().get(0);
+        var strings = new ByteArrayOutputStream();
+        strings.write(0);
+        var entries = new java.util.ArrayList<long[]>();
+        for (String name : old.needed()) {
+            entries.add(tagText(strings, 1, name));
+        }
+        if (rpath.present()) {
+            entries.add(tagText(strings, 15, rpath.value()));
+        }
+        if (runpath.present()) {
+            entries.add(tagText(strings, 29, runpath.value()));
+        }
+        entries.add(new long[]{0x6ffffffbL, 0x800});
+        byte[] image = SegmentClassicLinuxElfTest.dynamicImage(entries, strings.toByteArray());
+        Path path = Path.of(original.files().get(0).path());
+        write(path, image);
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwxr-xr-x"));
+        var members = new java.util.ArrayList<>(original.files());
+        members.set(0, new SegmentClassicLinuxDeploymentV2.File(path.toString(), members.get(0).role(), image.length,
+                SegmentClassicHandoff.digest(image)));
+        var metadata = new java.util.ArrayList<>(l.elf());
+        metadata.set(0, new SegmentClassicLinuxDeploymentV2.Elf(0, old.needed(), rpath, runpath, 0, 0x800));
+        return new CandidateFixture(members, new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(),
+                l.interpreter(), l.aliases(), l.directories(), l.configuration(), l.policy(), metadata, l.contexts(),
+                l.needed(), l.modules()));
+    }
+
+    private static CandidateFixture tagDirectories(CandidateFixture original,
+            List<SegmentClassicLinuxDeploymentV2.Directory> declarations) {
+        var l = original.loading();
+        var sorted = declarations.stream().sorted(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Directory::path))
+                .toList();
+        return new CandidateFixture(original.files(), new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(),
+                l.loader(), l.interpreter(), l.aliases(), sorted, l.configuration(), l.policy(), l.elf(), l.contexts(),
+                l.needed(), l.modules()));
+    }
+
+    private CandidateFixture requesterTagFixture() throws Exception {
+        var original = builtinLookupFixture();
+        var l = original.loading();
+        Path alias = Files.createSymbolicLink(root.resolve("tag-view-$HOME;雪"), Path.of("lib"));
+        var aliases = new java.util.ArrayList<>(l.aliases());
+        aliases.add(new SegmentClassicLinuxDeploymentV2.Alias(alias.toString(), "lib"));
+        aliases.sort(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Alias::link));
+        var directories = new java.util.ArrayList<>(l.directories());
+        directories.add(new SegmentClassicLinuxDeploymentV2.Directory(alias.toString(), true));
+        directories.sort(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Directory::path));
+        var contexts = new java.util.ArrayList<>(l.contexts());
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(1, alias + "/libz.so.1"));
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(1,
+                alias + "/glibc-hwcaps/x86-64-v4/libz.so.1"));
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(2,
+                alias + "/glibc-hwcaps/x86-64-v2/libz.so.1"));
+        contexts.sort(Comparator.comparingInt(SegmentClassicLinuxDeploymentV2.Context::file)
+                .thenComparing(SegmentClassicLinuxDeploymentV2.Context::logicalLoadName));
+        var candidates = java.util.stream.IntStream.range(0, contexts.size())
+                .filter(i -> contexts.get(i).file() != 0).boxed().toList();
+        var needed = new java.util.ArrayList<SegmentClassicLinuxDeploymentV2.NeededRule>();
+        for (int i = 0; i < contexts.size(); i++) {
+            for (int ordinal = 0; ordinal < l.elf().get(contexts.get(i).file()).needed().size(); ordinal++) {
+                needed.add(new SegmentClassicLinuxDeploymentV2.NeededRule(i, ordinal, candidates));
+            }
+        }
+        return new CandidateFixture(original.files(), new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(),
+                l.loader(), l.interpreter(), aliases, directories, l.configuration(), l.policy(), l.elf(), contexts,
+                needed, l.modules()));
+    }
+
+    @Test
+    public void neededRequesterTagRpathOwnsDirectoryOrderAndOneRequesterDespiteNodeflib() throws Exception {
+        String alias = root + "/tag-view-$HOME;雪";
+        String raw = alias + ':' + root + "/lib///:" + alias + '/';
+        var original = requesterTagFixture();
+        var declarations = new java.util.ArrayList<>(original.loading().directories());
+        declarations.add(new SegmentClassicLinuxDeploymentV2.Directory("/" + "z".repeat(4095), false));
+        var f = withRequesterTags(tagDirectories(original, declarations), new DynamicPath(true, raw),
+                new DynamicPath(false, ""));
+        var owner = owner();
+        owner.initialize();
+        var opens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.files().get(0).path()).equals(invocation.getArgument(0))) {
+                opens.incrementAndGet();
+            }
+            return invocation.callRealMethod();
+        })) {
+            var result = owner.readLinuxNeededRequesterTag(f.files(), f.loading(), 0,
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(SegmentClassicLaunchTrust.LinuxRequesterTag.RPATH, result.tag());
+            assertSame(f.loading().elf().get(0).rpath(), result.tagDeclaration());
+            assertEquals(raw, result.tagDeclaration().value());
+            assertEquals(List.of(alias, root + "/lib"), result.directories().stream()
+                    .map(d -> f.loading().directories().get(d.directory()).path()).toList());
+            assertTrue(result.directories().get(0).directory() > result.directories().get(1).directory());
+            assertEquals(1, opens.get());
+            assertEquals(0x800, result.requester().content().elf().flags1());
+            for (var directory : result.directories()) {
+                assertSame(result.requester(), directory.requester());
+                assertEquals(4, directory.positions().size());
+                for (var position : directory.positions()) {
+                    if (position.candidate() != null) {
+                        assertEquals(position.logical(), f.loading().contexts().get(position.candidate().context())
+                                .logicalLoadName());
+                        assertEquals(position.path().identity(), position.candidate().content().identity());
+                    }
+                }
+                assertNotNull(directory.positions().get(0).candidate());
+                assertNull(directory.positions().get(1).candidate());
+                assertNotNull(directory.positions().get(2).candidate());
+                assertNotNull(directory.positions().get(3).candidate());
+            }
+            assertThrows(UnsupportedOperationException.class, () -> result.directories().clear());
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededRequesterTagRunpathEvenEmptySuppressesUnknownRpathAndNoneStillReadsActualRequester()
+            throws Exception {
+        var original = builtinLookupFixture();
+        for (int kind = 0; kind < 4; kind++) {
+            var rpath = new DynamicPath(kind < 3, kind < 2 ? "$ORIGIN/$LIB" : "");
+            var runpath = new DynamicPath(kind < 2, kind == 1 ? root + "/empty" : "");
+            var f = withRequesterTags(original, rpath, runpath);
+            var owner = owner();
+            owner.initialize();
+            int mode = kind;
+            var opens = new AtomicInteger();
+            try (var channels = mockStatic(FileChannel.class, invocation -> {
+                if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                        && Path.of(f.files().get(0).path()).equals(invocation.getArgument(0))) {
+                    opens.incrementAndGet();
+                }
+                return invocation.callRealMethod();
+            }); var targets = mockStatic(Files.class, invocation -> {
+                if (mode != 1 && invocation.getMethod().getName().equals("readAttributes")
+                        && root.resolve("empty").equals(invocation.getArgument(0))) {
+                    throw new AssertionError("Empty or absent tag read a search directory");
+                }
+                return invocation.callRealMethod();
+            })) {
+                var result = owner.readLinuxNeededRequesterTag(f.files(), f.loading(), 0,
+                        SegmentClassicLinuxElfTest.deadline());
+                assertEquals(kind < 2 ? SegmentClassicLaunchTrust.LinuxRequesterTag.RUNPATH
+                        : kind == 2 ? SegmentClassicLaunchTrust.LinuxRequesterTag.RPATH
+                        : SegmentClassicLaunchTrust.LinuxRequesterTag.NONE, result.tag());
+                assertEquals(kind == 1 ? 1 : 0, result.directories().size());
+                assertEquals(1, opens.get());
+                assertEquals(rpath, result.requester().content().elf().rpath());
+                assertEquals(runpath, result.requester().content().elf().runpath());
+                if (kind == 3) {
+                    assertNull(result.tagDeclaration());
+                } else {
+                    assertSame(kind < 2 ? runpath : rpath, result.tagDeclaration());
+                    assertTrue(result.tagDeclaration().present());
+                }
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void neededRequesterTagEveryLateSyntaxMappingAndJoinedBoundRejectsBeforeRequesterOrPrefixIo()
+            throws Exception {
+        var original = builtinLookupFixture();
+        String prefix = root + "/lib";
+        for (int kind = 0; kind < 6; kind++) {
+            var declarations = new java.util.ArrayList<>(original.loading().directories());
+            String raw;
+            if (kind == 0) {
+                raw = prefix + ":$ORIGIN";
+            } else if (kind == 1) {
+                raw = prefix + ':';
+            } else if (kind == 2) {
+                raw = prefix + ":relative";
+            } else if (kind == 3) {
+                raw = prefix + ':' + root + "/undeclared";
+            } else if (kind == 4) {
+                raw = prefix;
+                declarations.add(new SegmentClassicLinuxDeploymentV2.Directory(prefix + '/', true));
+            } else {
+                String large = "/" + "q".repeat(4064);
+                raw = "/:" + large;
+                declarations.add(new SegmentClassicLinuxDeploymentV2.Directory("/", true));
+                declarations.add(new SegmentClassicLinuxDeploymentV2.Directory(large, false));
+            }
+            var f = withRequesterTags(tagDirectories(original, declarations), new DynamicPath(true, raw),
+                    new DynamicPath(false, ""));
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("A late requester-tag failure exposed target I/O");
+            })) {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededRequesterTag(f.files(),
+                        f.loading(), 0, SegmentClassicLinuxElfTest.deadline()));
+                if (kind == 5) {
+                    assertTrue(failure.getMessage(), failure.getMessage().contains("UTF8 byte bound"));
+                }
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void neededRequesterTagLaterDirectoryCannotHideReplacementOfTheOriginalRequesterAlias() throws Exception {
+        var f = withRequesterTags(builtinLookupFixture(), new DynamicPath(true, root + "/lib:" + root + "/empty"),
+                new DynamicPath(false, ""));
+        var owner = owner();
+        owner.initialize();
+        var captured = new AtomicReference<FileChannel>();
+        var changed = new AtomicInteger();
+        Path alias = root.resolve("view-a");
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && Path.of(f.files().get(0).path()).equals(invocation.getArgument(0))) {
+                captured.set((FileChannel) actual);
+            }
+            return actual;
+        }); var targets = mockStatic(Files.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            var channel = captured.get();
+            if (channel != null && !channel.isOpen() && invocation.getMethod().getName().equals("readAttributes")
+                    && root.resolve("empty").equals(invocation.getArgument(0))
+                    && "unix:*".equals(invocation.getArgument(1)) && changed.compareAndSet(0, 1)) {
+                Files.move(alias, root.resolve("previous-requester-view"));
+                Files.createSymbolicLink(alias, Path.of("lib"));
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededRequesterTag(f.files(),
+                    f.loading(), 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("requester path changed during"));
+            assertEquals(1, changed.get());
+            assertNotNull(captured.get());
+            assertFalse(captured.get().isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededRequesterTagTypedSourceIndicesBasenameAndDeadlineRejectBeforeTargetIo() throws Exception {
+        var original = candidateFixture();
+        for (String name : List.of("relative/entry", "$UNKNOWN.so", ".", "..")) {
+            var f = withDirectNeeded(original, name, List.of(2));
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Unsupported tag NEEDED reached target I/O");
+            })) {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededRequesterTag(f.files(),
+                        f.loading(), 0, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage().contains("Unsupported NEEDED name"));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+        var valid = withRequesterTags(original, new DynamicPath(false, ""), new DynamicPath(false, ""));
+        for (int kind = 0; kind < 4; kind++) {
+            var owner = owner();
+            owner.initialize();
+            int mode = kind;
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Requester-tag source/index/deadline refusal reached target I/O");
+            })) {
+                var failure = assertThrows(IOException.class, () -> {
+                    if (mode == 3) {
+                        owner.verifyLinuxNeededRequesterTag(0, SegmentClassicLinuxElfTest.deadline());
+                    } else {
+                        owner.readLinuxNeededRequesterTag(valid.files(), valid.loading(), mode == 0 ? -1
+                                : mode == 1 ? valid.loading().needed().size() : 0,
+                                mode == 2 ? System.nanoTime() : SegmentClassicLinuxElfTest.deadline());
+                    }
+                });
+                if (mode == 3) {
+                    assertTrue(failure.getMessage().contains("original provider/source binding"));
+                } else if (mode == 2) {
+                    assertTrue(failure.getMessage().contains("deadline elapsed"));
+                }
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
     }
 
     @Test

@@ -166,7 +166,18 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    private record LinuxDefaultPlan(int directory, List<String> logicals) { }
+    private record LinuxDirectoryPlan(int directory, List<String> logicals) { }
+
+    enum LinuxRequesterTag { NONE, RPATH, RUNPATH }
+
+    /** This requester's own tag facts only; stage reachability, inhibition and active positions remain unobserved. */
+    record LinuxNeededRequesterTagObservation(int rule, SegmentClassicLinuxDeploymentV2.NeededRule declaration,
+            String name, LinuxRequesterTag tag, SegmentClassicLinuxDeploymentV2.DynamicPath tagDeclaration,
+            LinuxLoadPathObservation requester, List<LinuxNeededDirectoryObservation> directories) {
+        LinuxNeededRequesterTagObservation {
+            directories = List.copyOf(directories);
+        }
+    }
 
     /** One numeric-equivalent LP64 cache row, not capability-filtered and never a selected winner. */
     record LinuxNeededCacheRow(SegmentClassicLinuxCache.Entry entry, String logical, LinuxPathObservation path,
@@ -2695,6 +2706,123 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Only the original rule/deadline; never caller directories, token values, chain or a directory plan. */
+    synchronized LinuxNeededRequesterTagObservation verifyLinuxNeededRequesterTag(int ruleIndex, long deadline)
+            throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            return observeLinuxNeededRequesterTag(deployment.files(), deployment.loading(), ruleIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Original-table file fixture only, not source, stage reachability or runtime search qualification. */
+    synchronized LinuxNeededRequesterTagObservation readLinuxNeededRequesterTag(
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxNeededRequesterTag(members, loading, ruleIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxNeededRequesterTagObservation observeLinuxNeededRequesterTag(
+            List<SegmentClassicLinuxDeploymentV2.File> declared, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex, long deadline) throws IOException {
+        var members = fixedLinuxContextMembers(declared, loading, deadline);
+        if (loading.policy().hwcaps() != 1 || ruleIndex < 0 || ruleIndex >= loading.needed().size()) {
+            throw new IOException("Unsupported requester-tag policy or original NEEDED index");
+        }
+        var rule = loading.needed().get(ruleIndex);
+        var context = loading.contexts().get(rule.requester());
+        var metadata = linuxElfDeclaration(loading, context.file());
+        String name = metadata.needed().get(rule.ordinal());
+        if (name.isEmpty() || name.indexOf('/') >= 0 || name.indexOf('$') >= 0
+                || name.equals(".") || name.equals("..")) {
+            throw new IOException("Unsupported NEEDED name for this requester's directory tag");
+        }
+        LinuxRequesterTag tag = metadata.runpath().present() ? LinuxRequesterTag.RUNPATH
+                : metadata.rpath().present() ? LinuxRequesterTag.RPATH : LinuxRequesterTag.NONE;
+        var declaration = tag == LinuxRequesterTag.RUNPATH ? metadata.runpath()
+                : tag == LinuxRequesterTag.RPATH ? metadata.rpath() : null;
+        var plans = new ArrayList<LinuxDirectoryPlan>();
+        if (declaration != null) {
+            var unknown = SegmentClassicLinuxTokens.Value.unobserved();
+            var expanded = SegmentClassicLinuxDynamicPath.expand(declaration, unknown, unknown, unknown, deadline);
+            if (expanded.state() != SegmentClassicLinuxTokens.State.AVAILABLE) {
+                throw new IOException("Unsupported requester tag depends on unobserved token sources");
+            }
+            for (var directory : expanded.directories()) {
+                requireTime(deadline);
+                if (directory.kind() != SegmentClassicLinuxDynamicPath.Kind.DIRECTORY
+                        || !directory.dirname().startsWith("/")) {
+                    throw new IOException("Unsupported requester tag contains CWD or a relative directory");
+                }
+                int index = requesterTagDirectory(loading, directory.dirname(), deadline);
+                plans.add(new LinuxDirectoryPlan(index, builtinLogicalPaths(loading, index, name, deadline)));
+            }
+        }
+        // Complete all tag/mapping/joined-path preflight before even the requester is opened.
+        var aliases = linuxContextAliases(loading, deadline);
+        var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
+                loading.interpreter(), aliases, deadline);
+        if (!name.equals(requester.content().elf().needed().get(rule.ordinal()))) {
+            throw new IOException("Original tag NEEDED differs from its requester ELF observation");
+        }
+        var directories = new ArrayList<LinuxNeededDirectoryObservation>();
+        for (var plan : plans) {
+            directories.add(observeLinuxDirectoryPositions(ruleIndex, plan.directory(), requester, plan.logicals(),
+                    members, loading, aliases, deadline));
+        }
+        for (var directory : directories) {
+            recheckLinuxDirectoryPositions(directory, loading, aliases, deadline);
+        }
+        var terminal = observeLinuxPath(LinuxPathKind.LOOKUP, loadingNativePath(requester.logical(), deadline),
+                aliases, true, deadline);
+        if (!requester.path().equals(terminal) || !requester.content().identity().equals(terminal.identity())) {
+            throw new IOException("Original requester path changed during its tag observations");
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+        return new LinuxNeededRequesterTagObservation(ruleIndex, rule, name, tag, declaration, requester, directories);
+    }
+
+    private static int requesterTagDirectory(SegmentClassicLinuxDeploymentV2.Loading loading, String dirname,
+                                              long deadline) throws IOException {
+        int found = -1;
+        for (int i = 0; i < loading.directories().size(); i++) {
+            requireTime(deadline);
+            String raw = loading.directories().get(i).path();
+            // Such an unrelated declaration cannot equal any supported <=4096-byte expanded dirname.
+            if (SegmentClassicLinuxTokens.utf8Length(raw, deadline) == 4096 && !raw.endsWith("/")) {
+                continue;
+            }
+            if (dirname.equals(SegmentClassicLinuxDynamicPath.dirname(raw, deadline))) {
+                if (found != -1) {
+                    throw new IOException("Requester tag dirname has ambiguous original directory declarations");
+                }
+                found = i;
+            }
+        }
+        if (found == -1) {
+            throw new IOException("Requester tag dirname lacks an original directory declaration");
+        }
+        return found;
+    }
+
     /** Only an original rule and deadline; policy order and requester flags come from this original owner. */
     synchronized LinuxNeededDefaultObservation verifyLinuxNeededDefaults(int ruleIndex, long deadline)
             throws IOException {
@@ -2750,10 +2878,10 @@ final class SegmentClassicLaunchTrust {
                 || name.equals(".") || name.equals("..")) {
             throw new IOException("Unsupported NEEDED name for an ordinary default-directory stage");
         }
-        var plans = new ArrayList<LinuxDefaultPlan>();
+        var plans = new ArrayList<LinuxDirectoryPlan>();
         if ((metadata.flags1() & DF_1_NODEFLIB) == 0) {
             for (int directory : indices) {
-                plans.add(new LinuxDefaultPlan(directory, builtinLogicalPaths(loading, directory, name, deadline)));
+                plans.add(new LinuxDirectoryPlan(directory, builtinLogicalPaths(loading, directory, name, deadline)));
             }
         }
         // Pure alias declaration Paths may be prepared here; only the requester's actual chain is probed.

@@ -928,6 +928,20 @@ Spotless/Checkstyle退出0。精确复用已封存353664字节JNI库，SHA-256 `
 
 本片不把DirectoryPlan或fixture参数提升为来源资格；真实name reuse/audit历史、环境/ORIGIN/chain、namespace/BFS、完整递归helper/backend与实际执行仍OPEN。diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，完整目标active，默认OFF/SYSTEM/PARK与advanced disabled不变。
 
+## 本请求者标签与原声明目录的条件观察
+
+2026-11-05在父`f34c9fae942092aa5ec42400c81f496d11075d49`上，原Trust新增包内verifyLinuxNeededRequesterTag，仅收原rule index与deadline；typed入口先验证原source/provider/deadline，独立原members＋Loading fixture共用private主体，不接caller Path、DirectoryPlan、chain/main、替换值或既有观察。仅支持现有普通目录NEEDED范围：非空、无slash/dollar且非点或双点。原requester的RUNPATH只要present就优先，包括present-empty；否则取present RPATH，双absent明确NONE。保留所选原tag种类及presence/value，空标签与双absent可区分，被压下的RPATH不要求token来源，NODEFLIB不抑制本对象标签。
+
+所选tag复用DynamicPath.expand，ORIGIN/LIB/PLATFORM均显式UNOBSERVED；只消费完整AVAILABLE的绝对DIRECTORY结果。已知DST所需来源未知、CWD空段、相对项或后项无法配对均整次拒绝，unknown dollar及分号仍为字面。展开dirname按原尾slash键唯一对应loading.directories，保留tag顺序和同来源首次去重；缺失或多个原声明折成同键都拒绝，不按physical/normalize配对。无尾slash的4096字节无关声明不能匹配任何支持的dirname，不重新解释它。所有四位置拼接及4096字节边界在requester/搜索目录/候选I/O前完整预检，原default raw-exact合同保持。
+
+随后实际owned读取requester一次，核对原NEEDED ordinal及两tag的presence/value，包括空标签和NONE。匹配目录复用原presence/protection与未过滤v4/v3/v2/base四位置观察，candidate沿原rule的exact logical＋resolved physical批准及同次ELF2/SHA/fd/首次close合同；所有目录共享该requester。读取完全部目录后再复查全部目录/位置，并复查原requester logical的alias摘要、叶identity与本次owned观察相等，最后检查健康和期限。私有directory/logicals record复用于默认目录计划，未改变默认算法或新增预算。
+
+首轮新5项通过；只读评审指出目录表排序的固定下标断言依赖临时根位置，改为从返回原index回查path并断言tag原序及相反D2索引序。首轮test/style保留原snapshot，不将其PASS移绑修正源。最终Trust126、DynamicPath14、Tokens7共147项全部通过，0失败/错误/跳过，包含同新5；最终Spotless/Checkstyle退出0。覆盖tag顺序/去重、RUNPATH空值优先、NONE、NODEFLIB、晚项语法/映射/拼接拒绝前无目标I/O、typed source/index/deadline，以及读取第二目录期间替换原requester alias后取得新末端复查专属异常。新文件阳性及竞争用普通owner、真实FileChannel和原JNI；未改Elf构造器或重复其整类矩阵。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-requester-tag-evidence-f34c9fae`保留各阶段原source/class/log/XML，两测试阶段各1448输入按原snapshot/父Git blob核验，最终两code与final test/style一致。精确复用sealed JNI SHA-256 `70bb629fc8afedddb757729f6b79d35fec28b596406f8b6cd4a0d99e815513ee`，未重建native或移绑旧矩阵；实际运行仍为Mac OS X aarch64/Amazon JDK21。glibc2.39 dl-load.c原70348字节、SHA-256 `26345f234ef918c866e40bb86524bdfd4c3beac487af81b3f51668379e671ae0`仅作静态规则依据。两raw scope经双lsof/identity/SHA/archive hardlink核验清理4目录、10文件路径、848304逻辑字节，归档保留、regular-file数据块回收0，共享target和用户文件未清理。
+
+该观察以原名未被复用或audit改写、已到达本对象未受inhibit-rpath抑制的阶段为条件；这些前提、实际CPU位置、open_verify/mapping/winner未证明。没有父RPATH/library-path/cache/default搜索或实际ELF执行；Linux/vendor/Unix typed阳性、完整来源/namespace/helper/backend仍OPEN/NOT_EXECUTED。diagnostics unconditional Unsupported及parent/child/Main/G1/full-bytes/full16/生产Gate保持，完整目标active，默认OFF/SYSTEM/PARK与advanced disabled不变。
+
 ## 已给定文件身份的已加载对象复用
 
 2026-11-05在父`fcd63e2a1c6f1b1ebf2426e272e9e801cc4ebe1b`上，原LoadedNames新增FileId(device,inode)、FileObject(原ObjectData,fileId)及纯lookupFile。输入是明确原序的base-namespace对象/已给定file-id、本次已给定opened id、原map-from-fd request name和deadline；只描述普通非OPENEXEC分支的局部规则，无fd参数/操作或owner入口，不证明前面名称查找已经未命中。query继续非空strictUTF8/无NUL/≤4096，slash/$原文保留；没有mode策略、跨namespace镜像、NOLOAD或文件映射器。
