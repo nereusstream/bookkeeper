@@ -3057,7 +3057,24 @@ final class SegmentClassicLaunchTrust {
             if (channel.size() != declaredLength) {
                 throw new IOException("Program file length changed during open");
             }
+            NativeIO.FileIdentity held = null;
+            if (kind == LinuxContentKind.ELF2) {
+                requireTime(deadlineNanos);
+                held = files.fileIdentity(channel, nativeIo);
+                requireTime(deadlineNanos);
+                if (held.device() != before.device() || held.inode() != before.inode()) {
+                    throw new IOException("Original ELF2 fd identity differs from its checked material path");
+                }
+            }
             content = readLinuxContent(channel, declaredLength, kind, deadlineNanos);
+            if (kind == LinuxContentKind.ELF2) {
+                requireTime(deadlineNanos);
+                var after = files.fileIdentity(channel, nativeIo);
+                requireTime(deadlineNanos);
+                if (!held.equals(after)) {
+                    throw new IOException("Original ELF2 fd identity changed during its hash/parser read");
+                }
+            }
             if (channel.size() != declaredLength || !before.equals(checked(path))) {
                 throw new IOException("Program file changed during its stream hash");
             }

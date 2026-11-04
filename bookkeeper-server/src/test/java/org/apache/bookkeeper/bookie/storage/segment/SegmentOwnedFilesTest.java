@@ -24,8 +24,12 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -35,12 +39,15 @@ import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -48,6 +55,91 @@ import org.junit.rules.TemporaryFolder;
 public class SegmentOwnedFilesTest {
     @Rule
     public final TemporaryFolder temporary = new TemporaryFolder();
+
+    @Test
+    public void originalOwnedWrapperQueriesActualFdAndRejectsForeignRawAndClosedBeforeTheOperator() throws Exception {
+        Path path = temporary.newFile().toPath();
+        Files.write(path, new byte[]{1, 2, 3});
+        var files = new SegmentOwnedFiles();
+        var other = new SegmentOwnedFiles();
+        NativeIO io = new NativeIOImpl();
+        NativeIO forbidden = mock(NativeIO.class, call -> {
+            throw new AssertionError("Invalid wrapper reached the native operator");
+        });
+        try (FileChannel owned = SegmentOwnedFiles.open(files, path, StandardOpenOption.READ);
+             FileChannel foreign = SegmentOwnedFiles.open(other, path, StandardOpenOption.READ);
+             FileChannel raw = FileChannel.open(path, StandardOpenOption.READ)) {
+            owned.position(1);
+            var id = files.fileIdentity(owned, io);
+            assertEquals(((Number) Files.getAttribute(path, "unix:dev")).longValue(), id.device());
+            assertEquals(((Number) Files.getAttribute(path, "unix:ino")).longValue(), id.inode());
+            assertEquals(1, owned.position());
+            ByteBuffer value = ByteBuffer.allocate(1);
+            assertEquals(1, owned.read(value));
+            assertEquals(2, value.get(0));
+            assertTrue(owned.isOpen());
+            assertThrows(IOException.class, () -> files.fileIdentity(foreign, forbidden));
+            assertThrows(IOException.class, () -> files.fileIdentity(raw, forbidden));
+            assertThrows(IOException.class, () -> files.fileIdentity(null, forbidden));
+            owned.close();
+            assertThrows(IOException.class, () -> files.fileIdentity(owned, forbidden));
+        } finally {
+            assertTrue(files.drain().drained());
+            assertTrue(other.drain().drained());
+        }
+    }
+
+    @Test
+    public void actualIdentityBodyBlocksNativeCloseAndRejectsSelfDrainAndLatePublication() throws Exception {
+        Path path = temporary.newFile().toPath();
+        var files = new SegmentOwnedFiles();
+        FileChannel channel = SegmentOwnedFiles.open(files, path, StandardOpenOption.READ);
+        NativeIO io = spy(new NativeIOImpl());
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var raw = new AtomicReference<FileChannel>();
+        var kernel = new AtomicReference<NativeIO.FileIdentity>();
+        doAnswer(call -> {
+            raw.set(call.getArgument(0));
+            assertThrows(IllegalStateException.class, files::drain);
+            assertThrows(IllegalStateException.class, () -> files.fileIdentity(channel, io));
+            entered.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            var actual = (NativeIO.FileIdentity) call.callRealMethod();
+            kernel.set(actual);
+            return actual;
+        }).when(io).fileIdentity(any(FileChannel.class));
+        var query = new FutureTask<>(() -> files.fileIdentity(channel, io));
+        var drain = new FutureTask<>(files::drain);
+        Thread reader = new Thread(query);
+        Thread closer = new Thread(drain);
+        try {
+            reader.start();
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertEquals(0, files.result().opening());
+            closer.start();
+            await().atMost(5, TimeUnit.SECONDS).until(() -> closer.getState() == Thread.State.BLOCKED);
+            assertFalse(drain.isDone());
+            assertFalse(files.result().drained());
+            assertFalse(files.result().retained().get(0).closeStarted());
+            assertTrue(raw.get().isOpen());
+            release.countDown();
+            var failed = assertThrows(ExecutionException.class, () -> query.get(5, TimeUnit.SECONDS));
+            assertTrue(failed.getCause() instanceof IOException);
+            assertTrue(drain.get(5, TimeUnit.SECONDS).drained());
+            assertNotNull(kernel.get()); // The delayed operator still made the real JNI call, never a fake id.
+            assertEquals(((Number) Files.getAttribute(path, "unix:ino")).longValue(), kernel.get().inode());
+            assertFalse(raw.get().isOpen());
+            assertEquals(List.of(), files.result().retained());
+        } finally {
+            release.countDown();
+            reader.join(5000);
+            closer.join(5000);
+            assertFalse(reader.isAlive());
+            assertFalse(closer.isAlive());
+            assertTrue(files.drain().drained());
+        }
+    }
 
     @Test
     public void atomicNewWritesWorkButReadOnlyCreateNewStillRejectsProtectedInodes() throws Exception {

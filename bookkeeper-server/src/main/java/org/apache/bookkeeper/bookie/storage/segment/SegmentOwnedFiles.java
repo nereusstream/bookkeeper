@@ -37,6 +37,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 
 /** Native file lifetime for the explicit control owner. Callers stop actual file users before draining. */
 final class SegmentOwnedFiles {
@@ -114,6 +115,14 @@ final class SegmentOwnedFiles {
         try (FileChannel channel = open(owner, directory, StandardOpenOption.READ)) {
             channel.force(true);
         }
+    }
+
+    /** Only this owner's exact original wrapper can query its private resource; no raw channel is exposed. */
+    NativeIO.FileIdentity fileIdentity(FileChannel channel, NativeIO nativeIo) throws IOException {
+        if (nativeIo == null || !(channel instanceof SegmentOwnedFiles.Channel owned) || !owned.ownedBy(this)) {
+            throw new IOException("Original file identity requires this owner's channel wrapper");
+        }
+        return owned.entry.fileIdentity(owned, nativeIo);
     }
 
     private Entry begin(Path path) throws IOException {
@@ -206,6 +215,9 @@ final class SegmentOwnedFiles {
                 if (entry.closingThread == Thread.currentThread()) {
                     throw new IllegalStateException("Control file close cannot await itself");
                 }
+                if (entry.queryingThread == Thread.currentThread()) {
+                    throw new IllegalStateException("Control file identity query cannot await itself");
+                }
             }
             closing = true;
             while (opening != 0) {
@@ -252,9 +264,38 @@ final class SegmentOwnedFiles {
         volatile boolean closeReturned;
         volatile Throwable failure;
         volatile Thread closingThread;
+        volatile Thread queryingThread;
 
         Entry(Path path) {
             this.path = path;
+        }
+
+        private void requireIdentityQuery(Channel caller, FileChannel expected) throws IOException {
+            requireUsable();
+            if (wrapper != caller || !caller.isOpen() || resource == null || !resource.isOpen()
+                    || closeStarted || failure != null
+                    || expected != null && resource != expected) {
+                throw new IOException("Original owned file is closed, closing or no longer the same resource");
+            }
+        }
+
+        synchronized NativeIO.FileIdentity fileIdentity(Channel caller, NativeIO nativeIo) throws IOException {
+            if (queryingThread != null) {
+                throw new IllegalStateException("Control file identity query cannot reenter itself");
+            }
+            requireIdentityQuery(caller, null);
+            FileChannel original = resource;
+            queryingThread = Thread.currentThread();
+            try {
+                var identity = nativeIo.fileIdentity(original);
+                if (identity == null) {
+                    throw new IOException("Unknown original file-channel identity outcome");
+                }
+                requireIdentityQuery(caller, original);
+                return identity;
+            } finally {
+                queryingThread = null;
+            }
         }
 
         synchronized void missingClose() {
@@ -267,6 +308,9 @@ final class SegmentOwnedFiles {
         }
 
         synchronized void close() throws IOException {
+            if (queryingThread == Thread.currentThread()) {
+                throw new IllegalStateException("Control file identity query cannot close itself");
+            }
             if (closeStarted) {
                 if (!closeReturned) {
                     throw new IllegalStateException("Control file native close is still executing");
@@ -314,6 +358,10 @@ final class SegmentOwnedFiles {
 
         Channel(Entry entry) {
             this.entry = entry;
+        }
+
+        private boolean ownedBy(SegmentOwnedFiles owner) {
+            return SegmentOwnedFiles.this == owner;
         }
 
         private FileChannel raw() throws IOException {

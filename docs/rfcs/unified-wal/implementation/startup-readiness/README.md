@@ -842,6 +842,18 @@ host release构建和Linux x86_64 cargo check均退出0；后者未链接或执�
 
 实际owner来源边仍OPEN：SegmentOwnedFiles.open返回私有Channel包装，raw FileChannel只在Entry内部；本片没有public unwrap或把wrapper误作bootstrap channel，也未把fd身份绑定同一次hash/ELF读。实际namespace/loader/main/l_loader及BFS/祖先/DST来源、完整递归helper/backend exec、typed Linux/vendor/Unix/parent/child/Main/G1/full-bytes/full16/生产Gate仍未验收。原DT_NEEDED在dl-deps中先DST展开再传lookup name的区别保留为后续组合边界。本片不撤unconditional Unsupported，整体目标active，默认OFF/SYSTEM/PARK及advanced disabled保持。
 
+## 私有 Entry 与同次 ELF2 读取的 fd 身份绑定
+
+2026-11-05在父`c5cfb872ceddfc2d05483c9e253a5d454e942f80`上，SegmentOwnedFiles增加包内fileIdentity桥，仅接受本owner发行的原private Channel与对应Entry；实际查询对象始终是Entry内原resource。查询前后核对wrapper仍open、owner可用、同一resource及无close/failure，不公开raw channel/fd/unwrap或接受调用方身份结果。同步Entry monitor覆盖整个NativeIO调用体，与实际首次close互斥；JNI期间不持全局gate、不算新open。调用线程在finally清除，查询重入及自drain拒绝；外部drain可以设置closing并观察retained状态，但须等查询返回才能实际close/退休，关闭已开始的late结果拒绝。原首次关闭失败及unknown保留、不重试语义保持。
+
+Trust私有hashFile仅在ELF2分支，于同一owned channel的SHA/解析前取实际fd dev/ino并对应本次原路径Identity，读取后及首次close前再次查询且须相同。原完整路径身份、父链、权限/ACL、长度、SHA、metadata、probe、首次关闭后检查和deadline不删减；失败保留在原launcherFailure。NONE/program、ELF1、CACHE/LDCONFIG、NativeIOBootstrap及纯static readLinuxContent没有增加fd来源许可。现有ELF2 observation的identity由这条私有读取路径获得对应，不新增permit/ready或观察注入入口。
+
+新增OwnedFiles两项与Trust三项全部通过；最终OwnedFiles7、Trust115、Content8共130项全部通过，0失败/错误/跳过，包含同新5项。真实未包装owner阳性对照path dev/ino并保持position/read/open；foreign/raw/null/closed在operator前拒绝。真实JNI查询体挂起时自drain/重入拒绝，外部drain实际BLOCKED且无提前close/drained，释放后late结果拒绝、原fd实际关闭。另以同字节不同inode的真实fd替代声明文件open，content barrier确认在任何SHA/parser前拒绝并实际close；post-content查询原异常在实际首次close后仍保留。旧ELF2 FaultChannel故障测试只在隔离helper内取已知actual后调用真实JNI，保留全部旧故障断言；这类注入不计为未包装原始来源阳性，legacy路径不使用适配，生产不unwrap或跳过查询。
+
+本次精确复用已封存353664字节host库、SHA-256 `70bb629fc8afedddb757729f6b79d35fec28b596406f8b6cd4a0d99e815513ee`，运行环境Mac OS X aarch64、Amazon JDK21.0.10+7-LTS；未重建native或重跑未改的native/纯加载算法矩阵。首次style一处StandardCopyOption/Open import次序失败保留，修正后Spotless/Checkstyle退出0。证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-owned-fd-evidence-c5cfb872`分开保留两测试阶段原source/class/日志/XML及style失败、原库checkpoint引用；各1444输入按原快照或父Git blob核对无错配，最终四code与测试和final style一致。两个确切raw scope经两次独立lsof、inode/mode/SHA/archive hardlink核验后清理4目录、11文件路径、890456逻辑字节，归档保留、regular-file数据块回收0，共享target及用户文件未清理。
+
+本片只加强这次held fd与原路径/内容的对应；不证明查询后永久不变、先前名称未命中或真实已加载对象/namespace/l_loader历史。DST lookup-name展开、BFS/祖先链、完整递归helper/backend执行与批准Linux/vendor/Unix资格仍OPEN/NOT_EXECUTED；diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，未执行models/性能。完整16步目标active，默认OFF/SYSTEM/PARK与advanced disabled不变。
+
 ## 已给定文件身份的已加载对象复用
 
 2026-11-05在父`fcd63e2a1c6f1b1ebf2426e272e9e801cc4ebe1b`上，原LoadedNames新增FileId(device,inode)、FileObject(原ObjectData,fileId)及纯lookupFile。输入是明确原序的base-namespace对象/已给定file-id、本次已给定opened id、原map-from-fd request name和deadline；只描述普通非OPENEXEC分支的局部规则，无fd参数/操作或owner入口，不证明前面名称查找已经未命中。query继续非空strictUTF8/无NUL/≤4096，slash/$原文保留；没有mode策略、跨namespace镜像、NOLOAD或文件映射器。

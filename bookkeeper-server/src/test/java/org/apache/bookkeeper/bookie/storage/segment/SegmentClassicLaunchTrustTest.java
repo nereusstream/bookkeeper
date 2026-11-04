@@ -28,10 +28,12 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.withSettings;
 
 import com.sun.security.auth.module.UnixSystem;
 import java.io.IOException;
@@ -44,6 +46,7 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.FileTime;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
@@ -60,6 +63,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LinuxSearchDirectory;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicLaunchTrust.LoadingDirectoryBudget;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOException;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.apache.commons.lang3.SystemUtils;
 import org.junit.Before;
 import org.junit.Rule;
@@ -117,6 +123,105 @@ public class SegmentClassicLaunchTrustTest {
 
     private SegmentClassicLaunchTrust owner() {
         return SegmentClassicLaunchTrust.forMaterialIoTests(root, "classic-1", uid);
+    }
+
+    /** Only isolated old fault wrappers are adapted; the production bridge/JNI never unwraps them. */
+    private SegmentClassicLaunchTrust faultOwner() {
+        NativeIO actual = new NativeIOImpl();
+        try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                (mock, context) -> doAnswer(call -> {
+                    FileChannel channel = call.getArgument(0);
+                    return actual.fileIdentity(channel instanceof SegmentDataFileLockTest.FaultChannel fault
+                            ? fault.actual : channel);
+                }).when(mock).fileIdentity(any(FileChannel.class)))) {
+            return owner();
+        }
+    }
+
+    private SegmentClassicLaunchTrust.LinuxLoadPathObservation readFdMember(SegmentClassicLaunchTrust owner,
+            CandidateFixture fixture) throws IOException {
+        var file = fixture.files().get(1);
+        return owner.readLinuxLoadPath(1, new SegmentClassicLinuxDeploymentV2.Context(1, file.path()), file,
+                fixture.loading().elf().get(1), fixture.loading().interpreter(), Map.of(),
+                SegmentClassicLinuxElfTest.deadline());
+    }
+
+    @Test
+    public void ownedElf2HashAndParserBindTheActualOriginalFdWithoutAnObservationPermit() throws Exception {
+        var fixture = candidateFixture();
+        var owner = owner();
+        owner.initialize();
+        try {
+            var observed = readFdMember(owner, fixture);
+            Path path = Path.of(fixture.files().get(1).path());
+            assertEquals(((Number) Files.getAttribute(path, "unix:dev")).longValue(),
+                    observed.content().identity().device());
+            assertEquals(((Number) Files.getAttribute(path, "unix:ino")).longValue(),
+                    observed.content().identity().inode());
+            assertArrayEquals(fixture.files().get(1).sha256().value(), observed.content().sha256().value());
+            assertEquals(fixture.loading().elf().get(1).needed(), observed.content().elf().needed());
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void sameByteDifferentFdRejectsBeforeAnyContentReadDespiteAnUnchangedDeclaredPath() throws Exception {
+        var fixture = candidateFixture();
+        Path path = Path.of(fixture.files().get(1).path());
+        Path other = Files.copy(path, root.resolve("other-same-elf"));
+        assertFalse(Files.isSameFile(path, other));
+        var owner = owner();
+        owner.initialize();
+        try (FileChannel wrong = FileChannel.open(other, StandardOpenOption.READ);
+             var channels = mockStatic(FileChannel.class, call -> {
+                 if (call.getMethod().getName().equals("open") && call.getMethod().getParameterCount() == 3
+                         && path.equals(call.getArgument(0))) {
+                     return wrong;
+                 }
+                 return call.callRealMethod();
+             }); var contents = mockStatic(SegmentClassicLaunchTrust.class, call -> {
+                 if (call.getMethod().getName().equals("readLinuxContent")) {
+                     throw new AssertionError("Mismatched fd reached the content reader");
+                 }
+                 return call.callRealMethod();
+             })) {
+            var failure = assertThrows(IOException.class, () -> readFdMember(owner, fixture));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("fd identity differs"));
+            assertFalse(wrong.isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertArrayEquals(Files.readAllBytes(path), Files.readAllBytes(other));
+    }
+
+    @Test
+    public void postContentFdQueryFailureRemainsTheOriginalFailureAfterActualFirstClose() throws Exception {
+        var fixture = candidateFixture();
+        NativeIO actual = new NativeIOImpl();
+        var queries = new AtomicInteger();
+        var failure = new NativeIOException("ELF2 post-fstat injected failure");
+        SegmentClassicLaunchTrust owner;
+        try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                (mock, context) -> doAnswer(call -> {
+                    if (queries.incrementAndGet() == 2) {
+                        throw failure;
+                    }
+                    return actual.fileIdentity(call.getArgument(0));
+                }).when(mock).fileIdentity(any(FileChannel.class)))) {
+            owner = owner();
+        }
+        owner.initialize();
+        try {
+            assertSame(failure, assertThrows(NativeIOException.class, () -> readFdMember(owner, fixture)));
+            assertEquals(2, queries.get());
+        } finally {
+            var drained = owner.closeAndDrain();
+            assertTrue(drained.drained());
+            assertSame(failure, drained.launcherFailure());
+            assertNull(drained.files().closeFailure());
+        }
     }
 
     private Path launcherDirectory() throws Exception {
@@ -724,7 +829,7 @@ public class SegmentClassicLaunchTrustTest {
         Path earlier = root.resolve("lib/glibc-hwcaps/x86-64-v4/libz.so.1");
         var opens = new AtomicInteger();
         var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         try (var channels = mockStatic(FileChannel.class, invocation -> {
             Object actual = invocation.callRealMethod();
@@ -954,7 +1059,7 @@ public class SegmentClassicLaunchTrustTest {
         Path earlier = root.resolve("view:$HOME;雪");
         var opens = new AtomicInteger();
         var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         try (var channels = mockStatic(FileChannel.class, invocation -> {
             Object actual = invocation.callRealMethod();
@@ -1244,7 +1349,7 @@ public class SegmentClassicLaunchTrustTest {
         Path library = Path.of(f.files().get(1).path());
         var cacheOpens = new AtomicInteger();
         var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         try (var channels = mockStatic(FileChannel.class, invocation -> {
             Object actual = invocation.callRealMethod();
@@ -1354,7 +1459,7 @@ public class SegmentClassicLaunchTrustTest {
         String logical = original.loading().contexts().get(alias ? 3 : 2).logicalLoadName();
         var f = cacheLookup ? withLookupCache(original, cacheLookupBytes(new String[]{"libz.so.01"},
                 new byte[][]{logical.getBytes(StandardCharsets.UTF_8)}, new int[]{0x303}, new long[]{0})) : original;
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         Path library = Path.of(f.files().get(1).path());
         Path view = Path.of(f.loading().directories().get(3).path());
@@ -1419,7 +1524,7 @@ public class SegmentClassicLaunchTrustTest {
     @Test
     public void neededLookupDirectoryChangeAtContentCloseCannotReturnLookupFacts() throws Exception {
         var f = lookupFixture("libz.so.1");
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
         try (var channels = mockStatic(FileChannel.class, invocation -> {
@@ -1774,7 +1879,7 @@ public class SegmentClassicLaunchTrustTest {
     @Test
     public void jdkHelperOtherInterpreterTextForSamePhysicalLoaderRejectsBeforeItsOpen() throws Exception {
         var f = jdkHelperFixture(true, false);
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
         try (var channels = mockStatic(FileChannel.class, invocation -> {
@@ -1803,7 +1908,7 @@ public class SegmentClassicLaunchTrustTest {
     @Test
     public void jdkHelperChangedDuringLaterInterpreterReadCannotReturnAssociation() throws Exception {
         var f = jdkHelperFixture(true, true);
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         Path helper = Path.of(f.members().get(1).path());
         var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
@@ -1840,7 +1945,7 @@ public class SegmentClassicLaunchTrustTest {
     @Test
     public void jdkHelperRecheckCannotHideInterpreterReplacementAfterItsStableRead() throws Exception {
         var f = jdkHelperFixture(true, true);
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         Path helper = Path.of(f.members().get(1).path());
         Path loader = Path.of(f.members().get(0).path());
@@ -2083,7 +2188,7 @@ public class SegmentClassicLaunchTrustTest {
         byte[] damaged = Files.readAllBytes(module);
         damaged[damaged.length - 1] ^= 1;
         write(module, damaged);
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         var loaderOpens = new AtomicInteger();
         var moduleChannel = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
@@ -2230,7 +2335,7 @@ public class SegmentClassicLaunchTrustTest {
         var file = loadPathFile("lib/physical.so", SegmentClassicLinuxDeployment.Role.LIBRARY);
         Path alias = Files.createSymbolicLink(root.resolve("view"), Path.of("lib"));
         var context = new SegmentClassicLinuxDeploymentV2.Context(4, alias + "/physical.so");
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
         var changed = new AtomicInteger();
@@ -2274,7 +2379,7 @@ public class SegmentClassicLaunchTrustTest {
         loadPathFile("other/physical.so", SegmentClassicLinuxDeployment.Role.LIBRARY);
         Path alias = Files.createSymbolicLink(root.resolve("view"), Path.of("lib"));
         var context = new SegmentClassicLinuxDeploymentV2.Context(4, alias + "/physical.so");
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
         try (var channels = mockStatic(FileChannel.class, invocation -> {
@@ -2341,7 +2446,7 @@ public class SegmentClassicLaunchTrustTest {
     public void loadPathReadKeepsSelfDrainRefusalAndExternalCloseWaitsForActualElfRead() throws Exception {
         var file = loadPathFile("inflight.so", SegmentClassicLinuxDeployment.Role.LIBRARY);
         var context = new SegmentClassicLinuxDeploymentV2.Context(4, file.path());
-        var owner = owner();
+        var owner = faultOwner();
         owner.initialize();
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
