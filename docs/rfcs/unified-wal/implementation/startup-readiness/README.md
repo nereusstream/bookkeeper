@@ -868,6 +868,20 @@ Trust私有hashFile仅在ELF2分支，于同一owned channel的SHA/解析前取�
 
 实际token/secure及原ELF关联、namespace/main/loader/l_loader、BFS/祖先/RPATH环境、完整递归helper/backend执行和批准Linux/vendor/Unix资格仍OPEN/NOT_EXECUTED，普通base/cache/default/四位置owner入口范围没有扩大。diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，未执行models/性能；完整目标active，默认OFF/SYSTEM/PARK及advanced disabled保持。
 
+## 新对象 realname 的词法 ORIGIN
+
+2026-11-05在父`251f1433f7f010cf91d99ac9e8aa89ffc8d1560e`上，包内SegmentClassicLinuxOrigin.compute仅接原realname、显式CWD Value与原deadline，返回保存同一原realname/CWD及四种状态的不可变数据。依据[glibc2.39 _dl_new_object](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-object.c)，输入是创建对象的realname，不是随后可能变为空串的l_name，也不是D2 physical文件的parent。没有实际对象创建、getcwd、System.user.dir、环境、/proc、Path/filesystem、JNI/Process或typed owner接线。
+
+Tokens仅开放原strict UTF8长度校验的包内可见性，算法与原caller不变；本片不识别或展开realname的$。raw及可用CWD先核对无NUL/strict UTF8/4096界，可用CWD须非空绝对文字。非空绝对realname不依赖CWD是否观察/可用；相对名称只有CWD AVAILABLE才按末尾已有slash与否拼接，对完整joined先检查4096界，再只移除最后slash及后缀，首slash保留。dot、重复slash、尾slash、colon/semicolon/Unicode均按原文处理：`/a/../b/lib.so`→`/a/../b`、`/a//lib.so`及`/a//`→`/a/`、`/lib.so`→`/`；没有normalize或DynamicPath.dirname的尾slash整理。即使最终origin很短，也不能绕过完整拼接界。
+
+relative＋CWD UNAVAILABLE为已知origin不可用，UNOBSERVED不给出prefix；empty realname单列DEFERRED_GET_ORIGIN，不能由CWD/physical/helper路径补全，也没有自动toTokenValue转换。[Linux后续_get_origin来源](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/sysdeps/unix/sysv/linux/dl-origin.c)须另取/proc/self/exe或LD_ORIGIN_PATH，本片未实施或假定这些事实。给定realname词法计算不证明新对象实际创建；复用已有对象须保留原origin，不能按新发现路径重算，该组合仍待实现。
+
+新Origin6项全部通过；最终Origin6、Tokens7、DynamicPath8、NeededName8共29项全部通过，0失败/错误/跳过，包含同新6而非再累计。覆盖绝对输入不被未知CWD阻止、根/内部dot/重复与尾slash/字面$和Unicode、相对拼接与状态、empty deferred、strict输入与完整拼接4096/deadline界；一个NeededName小组合明确logical alias realname计算结果与physical parent不同。Spotless/Checkstyle退出0。未重跑未改owner/JNI/Cache/diagnostics/LoadedNames整套，原生库仅保留runner配置属性、不计JNI执行，无models/性能。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-origin-evidence-251f1433`保留最小/最终两个阶段原source/class/日志/XML与style；各1448输入按原snapshot/父Git blob绑定无错配，最终三code与两测试/style一致。两份静态原源分开保留：dl-object.c为7929字节、SHA-256 `ebe8d023c06d2c36fdb0fd03b61ce06134ab14d044bac17f569ac18c6c968126`；Linux dl-origin.c为2251字节、SHA-256 `36723ef4224cde0739f1f522ecb16a7c4506fc263ed150b84448c5c5269cec30`，不计批准vendor运行。两个确切raw scope经两次独立lsof/identity/SHA/archive hardlink核验清理4目录、11文件路径、868533逻辑字节，归档保留、regular-file数据块回收0，共享target及用户文件不清理。
+
+实际realname/CWD/main-origin与原owned ELF关联、namespace/main/loader/l_loader/BFS/祖先/environment、完整递归helper/backend执行和批准Linux/vendor/Unix资格仍OPEN/NOT_EXECUTED。diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，完整目标active，默认OFF/SYSTEM/PARK与advanced disabled不变。
+
 ## 已给定文件身份的已加载对象复用
 
 2026-11-05在父`fcd63e2a1c6f1b1ebf2426e272e9e801cc4ebe1b`上，原LoadedNames新增FileId(device,inode)、FileObject(原ObjectData,fileId)及纯lookupFile。输入是明确原序的base-namespace对象/已给定file-id、本次已给定opened id、原map-from-fd request name和deadline；只描述普通非OPENEXEC分支的局部规则，无fd参数/操作或owner入口，不证明前面名称查找已经未命中。query继续非空strictUTF8/无NUL/≤4096，slash/$原文保留；没有mode策略、跨namespace镜像、NOLOAD或文件映射器。

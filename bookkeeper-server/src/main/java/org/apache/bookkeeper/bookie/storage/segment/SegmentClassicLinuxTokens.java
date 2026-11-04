@@ -141,7 +141,8 @@ final class SegmentClassicLinuxTokens {
                 || value >= '0' && value <= '9' || value == '_';
     }
 
-    private static int utf8Length(String text, long deadline) throws IOException {
+    /** Strict bounded text validation only; this does not recognize or substitute dollar expressions. */
+    static int utf8Length(String text, long deadline) throws IOException {
         if (text == null || text.length() > MAX_BYTES) {
             throw new IOException("Unsupported bounded UTF8 token text");
         }
