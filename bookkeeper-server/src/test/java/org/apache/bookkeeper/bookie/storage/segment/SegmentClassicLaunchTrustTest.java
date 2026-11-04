@@ -581,6 +581,299 @@ public class SegmentClassicLaunchTrustTest {
         return new CandidateFixture(members, loading);
     }
 
+    private CandidateFixture withDirectNeeded(CandidateFixture original, String name, List<Integer> candidates)
+            throws IOException {
+        return withDirectNeeded(original, name, candidates, original.loading().aliases(),
+                original.loading().contexts());
+    }
+
+    private CandidateFixture withDirectNeeded(CandidateFixture original, String name, List<Integer> candidates,
+            List<SegmentClassicLinuxDeploymentV2.Alias> aliases, List<SegmentClassicLinuxDeploymentV2.Context> contexts)
+            throws IOException {
+        byte[] text = name.getBytes(StandardCharsets.UTF_8);
+        byte[] strings = new byte[text.length + 2];
+        System.arraycopy(text, 0, strings, 1, text.length);
+        byte[] image = SegmentClassicLinuxElfTest.dynamicImage(List.of(new long[]{1, 1}), strings);
+        var first = original.files().get(0);
+        Path requester = Path.of(first.path());
+        write(requester, image);
+        Files.setPosixFilePermissions(requester, PosixFilePermissions.fromString("rwxr-xr-x"));
+        var members = List.of(new SegmentClassicLinuxDeploymentV2.File(first.path(), first.role(), image.length,
+                SegmentClassicHandoff.digest(image)), original.files().get(1));
+        var metadata = List.of(new SegmentClassicLinuxDeploymentV2.Elf(0, List.of(name),
+                new SegmentClassicLinuxDeploymentV2.DynamicPath(false, ""),
+                new SegmentClassicLinuxDeploymentV2.DynamicPath(false, ""), 0, 0), original.loading().elf().get(1));
+        var needed = new java.util.ArrayList<SegmentClassicLinuxDeploymentV2.NeededRule>();
+        for (int context = 0; context < contexts.size(); context++) {
+            for (int ordinal = 0; ordinal < metadata.get(contexts.get(context).file()).needed().size(); ordinal++) {
+                needed.add(new SegmentClassicLinuxDeploymentV2.NeededRule(context, ordinal, candidates));
+            }
+        }
+        var l = original.loading();
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(), aliases,
+                l.directories(), l.configuration(), l.policy(), metadata, contexts, needed, l.modules());
+        return new CandidateFixture(members, loading);
+    }
+
+    private CandidateFixture directAliasFixture(String suffix) throws IOException {
+        var original = candidateFixture();
+        Files.createDirectory(root.resolve("lib/nested"));
+        Path alias = Files.createSymbolicLink(root.resolve("view-direct:$ORIGIN_suffix;雪"), Path.of("lib"));
+        String logical = alias + suffix;
+        var aliases = new java.util.ArrayList<>(original.loading().aliases());
+        aliases.add(new SegmentClassicLinuxDeploymentV2.Alias(alias.toString(), "lib"));
+        aliases.sort(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Alias::link));
+        var contexts = new java.util.ArrayList<>(original.loading().contexts());
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(1, logical));
+        return withDirectNeeded(original, logical, List.of(3), aliases, contexts);
+    }
+
+    @Test
+    public void neededDirectUsesActualOwnedFdAndPreservesAbsoluteAliasDotUnicodeAndUnknownDollar() throws Exception {
+        var f = directAliasFixture("//nested/.././module.so");
+        String logical = f.loading().elf().get(0).needed().get(0);
+        var owner = owner();
+        owner.initialize();
+        var captured = new AtomicReference<FileChannel>();
+        var requesterOpens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                if (Path.of(f.files().get(1).path()).equals(invocation.getArgument(0))) {
+                    captured.set((FileChannel) actual);
+                } else if (Path.of(f.files().get(0).path()).equals(invocation.getArgument(0))) {
+                    requesterOpens.incrementAndGet();
+                }
+            }
+            return actual;
+        })) {
+            var result = owner.readLinuxNeededDirect(f.files(), f.loading(), 0, SegmentClassicLinuxElfTest.deadline());
+            assertEquals(0, result.rule());
+            assertSame(f.loading().needed().get(0), result.declaration());
+            assertEquals(logical, result.name());
+            assertEquals(logical, result.requester().content().elf().needed().get(0));
+            assertEquals(0, result.requester().context());
+            assertEquals(3, result.candidate().context());
+            assertEquals(1, result.candidate().member());
+            assertEquals(logical, result.candidate().logical());
+            assertEquals(result.path().identity(), result.candidate().content().identity());
+            assertEquals(1, requesterOpens.get());
+            assertNotNull(captured.get());
+            assertFalse(captured.get().isOpen());
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededDirectReliableMissingAndOtherLogicalApprovalRemainDistinctBeforeCandidateOpen() throws Exception {
+        var original = directAliasFixture("/module.so");
+        String logical = original.loading().elf().get(0).needed().get(0);
+        Path missing = root.resolve("missing-direct.so");
+        var absent = withDirectNeeded(original, missing.toString(), List.of(2));
+        var absenceOwner = owner();
+        absenceOwner.initialize();
+        try {
+            var result = absenceOwner.readLinuxNeededDirect(absent.files(), absent.loading(), 0,
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(missing.toString(), result.name());
+            assertNull(result.candidate());
+            assertNull(result.path().identity());
+            assertEquals(missing, result.path().absentAt());
+        } finally {
+            assertTrue(absenceOwner.closeAndDrain().drained());
+        }
+        var mismatched = withDirectNeeded(original, logical, List.of(2));
+        var owner = owner();
+        owner.initialize();
+        var requesterOpens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                if (Path.of(mismatched.files().get(1).path()).equals(invocation.getArgument(0))) {
+                    throw new AssertionError("Other logical approval reached direct candidate content");
+                }
+                if (Path.of(mismatched.files().get(0).path()).equals(invocation.getArgument(0))) {
+                    requesterOpens.incrementAndGet();
+                }
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededDirect(mismatched.files(),
+                    mismatched.loading(), 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("exact approved logical context"));
+            assertEquals(1, requesterOpens.get());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void neededDirectDenialDirectoryUndeclaredAliasAndNonDirectoryComponentAreNeverAbsence() throws Exception {
+        var original = candidateFixture();
+        Path target = Path.of(original.files().get(1).path());
+        byte[] bytes = Files.readAllBytes(target);
+        for (int kind = 0; kind < 4; kind++) {
+            if (kind == 1) {
+                Files.delete(target);
+                Files.createDirectory(target);
+            } else if (kind == 2) {
+                Files.delete(target);
+                Files.createSymbolicLink(target, Path.of("loader.so"));
+            } else if (kind == 3) {
+                Files.delete(target);
+                write(target, bytes);
+            }
+            var f = withDirectNeeded(original, target + (kind == 3 ? "/child.so" : ""), List.of(2));
+            var owner = owner();
+            owner.initialize();
+            boolean denied = kind == 0;
+            try (var channels = mockStatic(FileChannel.class, invocation -> {
+                if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                        && target.equals(invocation.getArgument(0))) {
+                    throw new AssertionError("Uncertain/non-file direct target reached content open");
+                }
+                return invocation.callRealMethod();
+            }); var targets = mockStatic(Files.class, invocation -> {
+                if (denied && invocation.getMethod().getName().equals("readAttributes")
+                        && target.equals(invocation.getArgument(0))) {
+                    throw new AccessDeniedException(target.toString());
+                }
+                return invocation.callRealMethod();
+            })) {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededDirect(f.files(), f.loading(),
+                        0, SegmentClassicLinuxElfTest.deadline()));
+                if (denied) {
+                    assertTrue(failure instanceof AccessDeniedException);
+                }
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void neededDirectIndexSyntaxKnownDstSourceAndDeadlineRejectBeforeRelatedIo() throws Exception {
+        var original = candidateFixture();
+        for (String name : List.of("libx.so", "relative/lib.so", root + "/$ORIGIN/module.so",
+                root + "/${LIB}/module.so")) {
+            var f = withDirectNeeded(original, name, List.of(2));
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Unsupported direct syntax reached target I/O");
+            })) {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededDirect(f.files(), f.loading(),
+                        0, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage().contains("Unsupported NEEDED name"));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+        var f = withDirectNeeded(original, original.files().get(1).path(), List.of(2));
+        for (int kind = 0; kind < 4; kind++) {
+            var owner = owner();
+            owner.initialize();
+            int mode = kind;
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Direct index/source/deadline refusal reached target I/O");
+            })) {
+                var failure = assertThrows(IOException.class, () -> {
+                    if (mode == 3) {
+                        owner.verifyLinuxNeededDirect(0, SegmentClassicLinuxElfTest.deadline());
+                    } else {
+                        owner.readLinuxNeededDirect(f.files(), f.loading(), mode == 0 ? -1
+                                : mode == 1 ? f.loading().needed().size() : 0,
+                                mode == 2 ? System.nanoTime() : SegmentClassicLinuxElfTest.deadline());
+                    }
+                });
+                if (mode == 3) {
+                    assertTrue(failure.getMessage().contains("original provider/source binding"));
+                }
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void neededDirectProbeSameByteNewInodeCannotBeHiddenByTheLaterActualFdRead() throws Exception {
+        var original = candidateFixture();
+        Path target = Path.of(original.files().get(1).path());
+        var f = withDirectNeeded(original, target.toString(), List.of(2));
+        var owner = owner();
+        owner.initialize();
+        var captured = new AtomicReference<FileChannel>();
+        var stats = new AtomicInteger();
+        Path previous = root.resolve("previous-direct.so");
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && target.equals(invocation.getArgument(0))) {
+                captured.set((FileChannel) actual);
+            }
+            return actual;
+        }); var targets = mockStatic(Files.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("readAttributes") && target.equals(invocation.getArgument(0))
+                    && "unix:*".equals(invocation.getArgument(1)) && stats.incrementAndGet() == 3) {
+                Files.move(target, previous);
+                Files.copy(previous, target);
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededDirect(f.files(), f.loading(), 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("between its lookup probe and owned ELF"));
+            assertNotNull(captured.get());
+            assertFalse(captured.get().isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertArrayEquals(Files.readAllBytes(previous), Files.readAllBytes(target));
+        assertFalse(Files.getAttribute(previous, "unix:ino").equals(Files.getAttribute(target, "unix:ino")));
+    }
+
+    @Test
+    public void neededDirectTerminalAliasReplacementAfterTheClosedFdReadCannotReturnAnAssociation() throws Exception {
+        var f = directAliasFixture("/module.so");
+        Path target = Path.of(f.files().get(1).path());
+        Path alias = root.resolve("view-direct:$ORIGIN_suffix;雪");
+        var owner = owner();
+        owner.initialize();
+        var captured = new AtomicReference<FileChannel>();
+        var afterCloseStats = new AtomicInteger();
+        var changed = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && target.equals(invocation.getArgument(0))) {
+                captured.set((FileChannel) actual);
+            }
+            return actual;
+        }); var targets = mockStatic(Files.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            var channel = captured.get();
+            if (channel != null && !channel.isOpen() && invocation.getMethod().getName().equals("readAttributes")
+                    && alias.equals(invocation.getArgument(0)) && "unix:*".equals(invocation.getArgument(1))
+                    && afterCloseStats.incrementAndGet() == 2 && changed.compareAndSet(0, 1)) {
+                // Return the actual last old stat, then let only the new direct terminal probe see the replacement.
+                Files.move(alias, root.resolve("previous-direct-alias"));
+                Files.createSymbolicLink(alias, Path.of("lib"));
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededDirect(f.files(), f.loading(), 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("direct path changed across"));
+            assertEquals(1, changed.get());
+            assertNotNull(captured.get());
+            assertFalse(captured.get().isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
     @Test
     public void neededLookupKeepsExactRuleDirectoryContextAndLiteralDirectorySpelling() throws Exception {
         var f = lookupFixture("libz.so.1");

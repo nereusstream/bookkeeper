@@ -245,7 +245,7 @@ public class SegmentClassicLinuxElfTest {
     }
 
     /** Independent synthetic dynamic table, with all strings in one unambiguous file-backed load mapping. */
-    private static byte[] dynamicImage(List<long[]> entries, byte[] strings) {
+    static byte[] dynamicImage(List<long[]> entries, byte[] strings) {
         int dynamicBytes = (entries.size() + 3) * 16;
         int stringOffset = (512 + dynamicBytes + 63) & ~63;
         int length = Math.max(1536, stringOffset + strings.length);

@@ -130,6 +130,10 @@ final class SegmentClassicLaunchTrust {
 
     record LinuxNeededContextObservation(SegmentClassicLinuxDeploymentV2.NeededRule declaration, String name) { }
 
+    /** Conditional literal absolute slash branch only; no preceding name miss, mapping or winner is proved. */
+    record LinuxNeededDirectObservation(int rule, SegmentClassicLinuxDeploymentV2.NeededRule declaration, String name,
+            LinuxLoadPathObservation requester, LinuxPathObservation path, LinuxLoadPathObservation candidate) { }
+
     /** One base-directory lookup only. A null candidate records reliable absence, never a search winner. */
     record LinuxNeededLookupObservation(int rule, int directory,
             SegmentClassicLinuxDeploymentV2.NeededRule declaration, String logical,
@@ -2420,6 +2424,69 @@ final class SegmentClassicLaunchTrust {
             aliasDeclarations.put(linuxMaterialPath(alias.link(), deadline), alias.target());
         }
         return fixedLoadingAliases(aliasDeclarations, deadline);
+    }
+
+    /** Only the original rule index/deadline; no caller name, Path, candidate or previous observation. */
+    synchronized LinuxNeededDirectObservation verifyLinuxNeededDirect(int ruleIndex, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            return observeLinuxNeededDirect(deployment.files(), deployment.loading(), ruleIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Independent original-table data only; actual name-reuse and audit history remain unobserved. */
+    synchronized LinuxNeededDirectObservation readLinuxNeededDirect(List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxNeededDirect(members, loading, ruleIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxNeededDirectObservation observeLinuxNeededDirect(List<SegmentClassicLinuxDeploymentV2.File> declared,
+            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, long deadline) throws IOException {
+        var members = fixedLinuxContextMembers(declared, loading, deadline);
+        if (ruleIndex < 0 || ruleIndex >= loading.needed().size()) {
+            throw new IOException("Direct NEEDED index is outside the original rule table");
+        }
+        var rule = loading.needed().get(ruleIndex);
+        var context = loading.contexts().get(rule.requester());
+        var metadata = linuxElfDeclaration(loading, context.file());
+        String name = metadata.needed().get(rule.ordinal());
+        boolean knownToken = SegmentClassicLinuxTokens.hasKnownToken(name, deadline);
+        if (name.isEmpty() || name.charAt(0) != '/' || knownToken) {
+            throw new IOException("Unsupported NEEDED name for a literal absolute direct-path observation");
+        }
+        var aliases = linuxContextAliases(loading, deadline);
+        var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
+                loading.interpreter(), aliases, deadline);
+        if (!name.equals(requester.content().elf().needed().get(rule.ordinal()))) {
+            throw new IOException("Original direct NEEDED name differs from its requester ELF observation");
+        }
+        Path entry = loadingNativePath(name, deadline);
+        var probe = observeLinuxPath(LinuxPathKind.LOOKUP, entry, aliases, false, deadline);
+        var candidate = observeLinuxNeededCandidate(rule, name, probe, members, loading, aliases, deadline);
+        if (!probe.equals(observeLinuxPath(LinuxPathKind.LOOKUP, entry, aliases, false, deadline))) {
+            throw new IOException("NEEDED direct path changed across its observation");
+        }
+        var result = new LinuxNeededDirectObservation(ruleIndex, rule, name, requester, probe, candidate);
+        files.requireHealthy();
+        requireTime(deadline);
+        return result;
     }
 
     /** Only original rule/directory indices; no caller name, Path, candidate or previous observation. */

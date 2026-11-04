@@ -912,6 +912,22 @@ relative＋CWD UNAVAILABLE为已知origin不可用，UNOBSERVED不给出prefix�
 
 未扩大owner/JNI/Cache等矩阵，原生库仅为runner配置属性、不计调用；本片无models/性能。实际环境/CLI/nonsecure、main/rtld与tag对象/chain/origin来源、完整loader及递归helper/backend和批准Linux/vendor/Unix资格仍OPEN/NOT_EXECUTED。diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，完整目标active，默认OFF/SYSTEM/PARK及advanced disabled保持。
 
+## 无已知 DST 的绝对 NEEDED 关联观察
+
+2026-11-05在父`e2d6082c68dfdda715ce486f179b34c908a54a0d`上，原Trust新增包内verifyLinuxNeededDirect，仅收原rule index与deadline，沿原source/provider/原deadline门后才接触目标；独立readLinuxNeededDirect数据fixture共用private主体，不接调用方Path、替换名、candidate、AfterMiss或已有观察，不产生Installed/ready。复用fixedLinuxContextMembers取原NeededRule→requester Context→原ELF metadata→NEEDED ordinal，复用Tokens.hasKnownToken的strict UTF8/无NUL/4096及同一matcher；仅支持非空首字符`/`且无已知DST。相对slash、无slash与known DST在requester/目标I/O前Unsupported，unknown/不完整/标识符边界不匹配的`$`按字面保留，不一概拒绝美元符号。
+
+主体owned读取requester一次，核对实际ELF2同ordinal原名；原字符串作为logical/批准键保留dot、重复slash、alias、colon/semicolon、Unicode和unknown `$`，路径解析沿原loadingNativePath/LOOKUP observer，未改其语义。present候选只通过原observeLinuxNeededCandidate按本rule.candidates中的exact logical＋resolved physical context打开，同physical的其它logical批准不能借用；同次owned SHA/parser、真实fd前后身份、完整path/alias/parent/权限及首次close合同保持。结果返回前再次观察原logical path且须与初probe完全相等，再健康/deadline检查；返回保留rule/declaration/name、原requester及候选context/member。
+
+可靠protected NoSuchFile才可candidate=null；拒绝、非目录组件、目录目标、坏ELF或未声明alias不当缺失。该观察以「原名未被已加载对象复用、未被audit改写而进入direct分支」为条件；这些前提、实际open_verify/mapping/winner均未证明，不伪造NO_REUSE，也不更新namespace。没有目录/cache/default/hwcap搜索，不扩大相对或known-DST owner范围。[glibc2.39 dl-deps.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-deps.c)与[dl-load.c](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)仅作静态规则依据。
+
+新direct6项全部通过；最终Trust121、Tokens7、Elf13共141项全部通过，0失败/错误/跳过，包含同新6而非再累计。共享ElfTest.dynamicImage只开放测试包可见性、body不变，以真实可变长字符串表承载绝对路径，原9字节lookup夹具不放宽。新阳性及两替换反例均用普通owner、真实FileChannel与JNI，不依赖FaultChannel适配；验证unknown `$ORIGIN_suffix`与真实known DST的区分、原alias/dot/重复slash/Unicode原名、可靠缺失/错误logical批准前拒绝open，以及拒绝/目录/未声明alias/非目录组件、index/source/deadline先拒绝。same-byte不同inode反例实际读取并关闭新fd后须落在probe→owned绑定拒绝；terminal反例在实际fd已关后返回最后一次真实旧stat再换同target alias，须取得direct末端复查专属异常，不能冒用早期共享检查覆盖。
+
+Spotless/Checkstyle退出0。精确复用已封存353664字节JNI库，SHA-256 `70bb629fc8afedddb757729f6b79d35fec28b596406f8b6cd4a0d99e815513ee`，新路径实际在Mac OS X aarch64、Amazon JDK21.0.10+7-LTS执行文件/NativeIO观察；旧故障测试的隔离适配不计为未包装来源阳性。未重建native或重跑未改OwnedFiles/Content/Cache矩阵，没有执行或装载该合成ELF，不计批准Linux/vendor typed阳性，无models/性能。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-direct-needed-evidence-e2d6082c`保留两测试阶段原source/class/日志/XML及style，精确原JNI checkpoint另引用而不重绑旧PASS；各1448输入按原snapshot/父Git blob核验无错配，最终三code与两测试/style一致。静态原dl-load.c（70348字节，SHA-256 `26345f234ef918c866e40bb86524bdfd4c3beac487af81b3f51668379e671ae0`）与dl-deps.c（17592字节，SHA-256 `47a1cb0f16d2073e2992af1a17c5aa269ffdd08b606a5a7e627bbfe6988d8fb1`）分别保留。两个确切raw scope双lsof/identity/SHA/archive hardlink核验后清理4目录、10文件路径、846893逻辑字节，归档保留、regular-file数据块回收0，共享target/用户文件不清理。
+
+本片不把DirectoryPlan或fixture参数提升为来源资格；真实name reuse/audit历史、环境/ORIGIN/chain、namespace/BFS、完整递归helper/backend与实际执行仍OPEN。diagnostics unconditional Unsupported、parent/child/Main/G1/full-bytes/full16/生产Gate不提升，完整目标active，默认OFF/SYSTEM/PARK与advanced disabled不变。
+
 ## 已给定文件身份的已加载对象复用
 
 2026-11-05在父`fcd63e2a1c6f1b1ebf2426e272e9e801cc4ebe1b`上，原LoadedNames新增FileId(device,inode)、FileObject(原ObjectData,fileId)及纯lookupFile。输入是明确原序的base-namespace对象/已给定file-id、本次已给定opened id、原map-from-fd request name和deadline；只描述普通非OPENEXEC分支的局部规则，无fd参数/操作或owner入口，不证明前面名称查找已经未命中。query继续非空strictUTF8/无NUL/≤4096，slash/$原文保留；没有mode策略、跨namespace镜像、NOLOAD或文件映射器。
