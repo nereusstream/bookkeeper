@@ -826,6 +826,22 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## 原始 JDK FileChannel 的只读 fd 身份观察
+
+2026-11-05在父`81e43187399c7237d11b13a6dd7baf74a50d4fad`上，既有NativeIO/Impl/Jni/Rust新增fileIdentity(FileChannel)，只返回不可变raw dev/ino。默认实现与旧JNI缺符号明确拒绝，未知返回/布局及closed不变成零或absent；高位long/明确零值作为数据保留。JNI只支持exact bootstrap java.base FileChannelImpl及其固定FileDescriptor/fd布局，wrapper/null/替代实现拒绝，不递归unwrap，不接Path/raw fd/调用方结果，不用Java setAccessible/module-open。不修改SegmentOwnedFiles、Trust、Bootstrap、LoadedNames或diagnostics guard。
+
+依据[参考JDK21 FileChannelImpl](https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.10-ga/src/java.base/share/classes/sun/nio/ch/FileChannelImpl.java)和[FileDescriptor同步关闭/设置](https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.10-ga/src/java.base/share/classes/java/io/FileDescriptor.java)，在准备固定class/field/method及错误类后，对同一真实descriptor显式MonitorEnter/Exit。锁内检查原channel final isOpen与descriptor.closed/fd，执行本平台libc::fstat，再检查open/closed/fd一致；所有正常/错误/pending异常均释放已取得monitor，取锁/退出失败不返回身份，errno先保存，结果数组在锁外分配。父流closeAll和FileChannel自身Closer均经过该descriptor monitor，不加parent-null限制，也不叠加channel closeLock或回调用户对象。JNI实参及局部引用保留原channel/descriptor；这一固定JDK生命周期的核对和host测试不认证其他vendor。
+
+[glibc的fd file-id来源](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/sysdeps/posix/dl-fileid.h)与本原语均直接fstat原fd，仅保留dev/ino原位模式；不dup、按路径重开/stat、改position/权限、关闭/转交原fd或重试未知失败。支持Linux/macOS对应libc ABI，其余明确拒绝。原语可阻塞，没有deadline线程或取消伪造终态，返回也不保证之后channel仍开着。关闭已开始或观察中逻辑关闭时拒绝；未来owner须在原deadline/inFlight/首次关闭合同内使用，不能把本结果当close/drain。
+
+host release构建和Linux x86_64 cargo check均退出0；后者未链接或执行，不计Linux阳性。新库353664字节、SHA-256 `70bb629fc8afedddb757729f6b79d35fec28b596406f8b6cd4a0d99e815513ee`，实际运行环境Mac OS X aarch64、Amazon JDK21.0.10+7-LTS。新4项全部通过、0跳过：真实FileChannel与当时path dev/ino对照，rename并替换pathname后仍取原id且区别新pathname、position/read/open保持；null/closed/真实wrapper拒绝；公开FileInputStream.getFD monitor内令查询实际BLOCKED，再开始close并观察逻辑关闭，释放后查询拒绝且实际close结束；另检验default拒绝与DTO原位模式。fixture不把失败/未终结线程伪称drained，无反射或生产回调。
+
+相关native八类42项为40通过/2平台跳过，0失败/错误；跳过为Linux proc magic-link及Linux peer close/reallocation。加新4共46个当前unique用例，44通过/2跳过。独立-Xcheck:jni重复同新4项通过、无JNI warning，不再累计4个unique；另一独立JVM载原sealed旧库75e59684，实际凭据查询仍成功，新符号带LinkageError cause拒绝、原channel保持open。未改server纯算法/owner矩阵不重跑；本片未执行models/性能。首style因新wrapper15个单行布局退出1，仅修测试格式后final Spotless/Checkstyle退出0，原失败快照保留；只格式化新增Rust片段，不宣称全Rust样式通过。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/native-channel-file-id-evidence-81e43187`，两Maven阶段各1444输入与原snapshot/父Git blob无错配，当前五code与两阶段/final style一致；两native构建各4个原始Rust输入、独立probe原class/library/source绑定核验。保留host库、原source/class/日志/XML及8份参考（3在线源码＋5本机src.zip条目），静态参考不冒充批准installed vendor。两个确切raw scope双lsof/identity/SHA/archive核验清理4目录/15文件路径/591023逻辑字节，归档保留/regular-file数据块回收0；两个自有Cargo target双lsof/identity/SHA核验清理447文件路径/91357886逻辑字节，库/日志/源码保留，物理回收未测，共享target/cache/toolchain不清理。
+
+实际owner来源边仍OPEN：SegmentOwnedFiles.open返回私有Channel包装，raw FileChannel只在Entry内部；本片没有public unwrap或把wrapper误作bootstrap channel，也未把fd身份绑定同一次hash/ELF读。实际namespace/loader/main/l_loader及BFS/祖先/DST来源、完整递归helper/backend exec、typed Linux/vendor/Unix/parent/child/Main/G1/full-bytes/full16/生产Gate仍未验收。原DT_NEEDED在dl-deps中先DST展开再传lookup name的区别保留为后续组合边界。本片不撤unconditional Unsupported，整体目标active，默认OFF/SYSTEM/PARK及advanced disabled保持。
+
 ## 已给定文件身份的已加载对象复用
 
 2026-11-05在父`fcd63e2a1c6f1b1ebf2426e272e9e801cc4ebe1b`上，原LoadedNames新增FileId(device,inode)、FileObject(原ObjectData,fileId)及纯lookupFile。输入是明确原序的base-namespace对象/已给定file-id、本次已给定opened id、原map-from-fd request name和deadline；只描述普通非OPENEXEC分支的局部规则，无fd参数/操作或owner入口，不证明前面名称查找已经未命中。query继续非空strictUTF8/无NUL/≤4096，slash/$原文保留；没有mode策略、跨namespace镜像、NOLOAD或文件映射器。

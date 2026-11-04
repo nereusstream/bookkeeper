@@ -209,4 +209,19 @@ public class NativeIOImpl implements NativeIO {
             throw failure;
         }
     }
+
+    @Override
+    public FileIdentity fileIdentity(java.nio.channels.FileChannel channel) throws NativeIOException {
+        try {
+            long[] observed = NativeIOJni.fileIdentity(channel);
+            if (observed == null || observed.length != 2) {
+                throw new NativeIOException("Unknown original file-channel identity outcome");
+            }
+            return new FileIdentity(observed[0], observed[1]);
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Original file-channel identity is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
 }

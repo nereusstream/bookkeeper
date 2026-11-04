@@ -28,6 +28,9 @@ import java.util.TreeSet;
  */
 public interface NativeIO {
 
+    /** Actual descriptor facts only; every raw dev/ino bit pattern, including zero, is valid data. */
+    record FileIdentity(long device, long inode) { }
+
     /** Cached JDK data only, not backend approval. The copied helper bytes retain their one final NUL byte. */
     record JdkProcessLaunchObservation(String mechanism, int ordinal, byte[] helperPath) {
         public JdkProcessLaunchObservation {
@@ -202,5 +205,14 @@ public interface NativeIO {
      */
     default UnixPeerCredentials unixPeerCredentials(SocketChannel channel) throws NativeIOException {
         throw new NativeIOException("Linux Unix peer credential query is unsupported");
+    }
+
+    /**
+     * Read dev/ino from the original fixed bootstrap JDK FileChannelImpl descriptor under its monitor.
+     * No path lookup, duplicate, position change or close. Unknown providers/layouts and closed channels reject.
+     * May block; return is not proof the channel remains open afterwards or that its owner has drained.
+     */
+    default FileIdentity fileIdentity(java.nio.channels.FileChannel channel) throws NativeIOException {
+        throw new NativeIOException("Original file-channel identity query is unsupported");
     }
 }

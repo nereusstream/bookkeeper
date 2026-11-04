@@ -58,6 +58,8 @@ class NativeIOJni {
 
     static native long[] unixPeerCredentials(java.nio.channels.SocketChannel channel) throws NativeIOException;
 
+    static native long[] fileIdentity(java.nio.channels.FileChannel channel) throws NativeIOException;
+
     static {
         NativeIOBootstrap.initializeJni();
     }

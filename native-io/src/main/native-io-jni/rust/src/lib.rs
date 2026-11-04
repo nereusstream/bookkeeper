@@ -25,6 +25,7 @@
 //! It is a Rust implementation of the original C native_io_jni.c
 
 use jni::objects::{JByteArray, JClass, JObject, JString, JThrowable};
+use jni::signature::{Primitive, ReturnType};
 use jni::sys::{jint, jlong, jlongArray};
 use jni::JNIEnv;
 use std::ffi::{c_void, CString};
@@ -261,6 +262,200 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
         throw_exception(&mut env, "Current process credential query is unsupported");
         ptr::null_mut()
     }
+}
+
+/// Original descriptor identity only; never opens, duplicates, repositions or closes a descriptor.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_fileIdentity(
+    mut env: JNIEnv,
+    _class: JClass,
+    channel: JObject,
+) -> jlongArray {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let values = match original_file_identity(&mut env, &channel) {
+            Ok(Some(value)) => value,
+            Ok(None) => return ptr::null_mut(),
+            Err(error) => {
+                if !env.exception_check().unwrap_or(true) {
+                    throw_exception(
+                        &mut env,
+                        &format!("Original file-channel identity failed: {error}"),
+                    );
+                }
+                return ptr::null_mut();
+            }
+        };
+        let array = match env.new_long_array(2) {
+            Ok(value) => value,
+            Err(_) => return ptr::null_mut(),
+        };
+        if env.set_long_array_region(&array, 0, &values).is_err() {
+            return ptr::null_mut();
+        }
+        array.into_raw()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "File-channel identity is unsupported",
+            libc::ENOTSUP,
+        );
+        ptr::null_mut()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn original_file_identity(
+    env: &mut JNIEnv,
+    channel: &JObject,
+) -> jni::errors::Result<Option<[jlong; 2]>> {
+    if channel.is_null() {
+        throw_exception_with_error_code(env, "Original file channel is null", libc::EINVAL);
+        return Ok(None);
+    }
+    let actual = env.get_object_class(channel)?;
+    let expected = env.find_class("sun/nio/ch/FileChannelImpl")?;
+    if !env.is_same_object(&actual, &expected)? {
+        throw_exception_with_error_code(
+            env,
+            "Unsupported original file-channel provider",
+            libc::ENOTSUP,
+        );
+        return Ok(None);
+    }
+    let channel_fd = env.get_field_id(&expected, "fd", "Ljava/io/FileDescriptor;")?;
+    let descriptor = env
+        .get_field_unchecked(channel, channel_fd, ReturnType::Object)?
+        .l()?;
+    if descriptor.is_null() {
+        throw_exception_with_error_code(
+            env,
+            "Original file descriptor is unavailable",
+            libc::EBADF,
+        );
+        return Ok(None);
+    }
+    let descriptor_class = env.get_object_class(&descriptor)?;
+    let expected_descriptor = env.find_class("java/io/FileDescriptor")?;
+    if !env.is_same_object(&descriptor_class, &expected_descriptor)? {
+        throw_exception_with_error_code(
+            env,
+            "Unsupported original file-descriptor type",
+            libc::ENOTSUP,
+        );
+        return Ok(None);
+    }
+    let object = env.find_class("java/lang/Object")?;
+    let base = env
+        .call_method(&object, "getModule", "()Ljava/lang/Module;", &[])?
+        .l()?;
+    for class in [&actual, &descriptor_class] {
+        let loader = env
+            .call_method(class, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+            .l()?;
+        let module = env
+            .call_method(class, "getModule", "()Ljava/lang/Module;", &[])?
+            .l()?;
+        if !loader.is_null() || !env.is_same_object(&module, &base)? {
+            throw_exception_with_error_code(
+                env,
+                "File identity requires bootstrap java.base",
+                libc::ENOTSUP,
+            );
+            return Ok(None);
+        }
+    }
+    // Resolve fixed layout and error types before taking the descriptor monitor. No caller callback or close.
+    let fd_field = env.get_field_id(&expected_descriptor, "fd", "I")?;
+    let closed_field = env.get_field_id(&expected_descriptor, "closed", "Z")?;
+    let open_method = env.get_method_id(&expected, "isOpen", "()Z")?;
+    env.find_class("org/apache/bookkeeper/common/util/nativeio/NativeIOException")?;
+    let raw = env.get_raw();
+    let entered = unsafe { ((**raw).MonitorEnter.unwrap())(raw, descriptor.as_raw()) };
+    if entered != 0 {
+        if !env.exception_check().unwrap_or(true) {
+            throw_exception(env, "Original file-descriptor monitor acquisition failed");
+        }
+        return Ok(None);
+    }
+    let observed = (|| -> jni::errors::Result<Option<[jlong; 2]>> {
+        if env.exception_check()? {
+            return Ok(None);
+        }
+        // isOpen is final in the fixed bootstrap superclass; it only reads the logical closed flag.
+        let open = unsafe {
+            env.call_method_unchecked(
+                channel,
+                open_method,
+                ReturnType::Primitive(Primitive::Boolean),
+                &[],
+            )?
+        }
+        .z()?;
+        let fd = env
+            .get_field_unchecked(&descriptor, fd_field, ReturnType::Primitive(Primitive::Int))?
+            .i()?;
+        let closed = env
+            .get_field_unchecked(
+                &descriptor,
+                closed_field,
+                ReturnType::Primitive(Primitive::Boolean),
+            )?
+            .z()?;
+        if !open || closed || fd < 0 {
+            throw_exception_with_error_code(
+                env,
+                "Original file channel is closed or closing",
+                libc::EBADF,
+            );
+            return Ok(None);
+        }
+        let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, status.as_mut_ptr()) } != 0 {
+            throw_exception_with_errno(env, "Original file-descriptor fstat failed");
+            return Ok(None);
+        }
+        let status = unsafe { status.assume_init() };
+        let final_fd = env
+            .get_field_unchecked(&descriptor, fd_field, ReturnType::Primitive(Primitive::Int))?
+            .i()?;
+        let final_closed = env
+            .get_field_unchecked(
+                &descriptor,
+                closed_field,
+                ReturnType::Primitive(Primitive::Boolean),
+            )?
+            .z()?;
+        let final_open = unsafe {
+            env.call_method_unchecked(
+                channel,
+                open_method,
+                ReturnType::Primitive(Primitive::Boolean),
+                &[],
+            )?
+        }
+        .z()?;
+        if !final_open || final_closed || final_fd != fd {
+            throw_exception_with_error_code(
+                env,
+                "Original file channel closed during fstat",
+                libc::EBADF,
+            );
+            return Ok(None);
+        }
+        Ok(Some([status.st_dev as jlong, status.st_ino as jlong]))
+    })();
+    // MonitorExit is permitted with a pending exception; never strand a descriptor on any failure branch.
+    let exited = unsafe { ((**raw).MonitorExit.unwrap())(raw, descriptor.as_raw()) };
+    if exited != 0 || env.exception_check().unwrap_or(true) {
+        if !env.exception_check().unwrap_or(true) {
+            throw_exception(env, "Original file-descriptor monitor release failed");
+        }
+        return Ok(None);
+    }
+    observed
 }
 
 /// Numeric Linux peer data only. The original channel owner excludes concurrent close and retains the channel.
