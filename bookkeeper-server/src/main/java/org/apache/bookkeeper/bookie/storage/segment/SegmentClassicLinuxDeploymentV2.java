@@ -378,9 +378,7 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
                 throw new IllegalArgumentException("Final files cannot use a system alias");
             }
         }
-        if (!resolve(loading.interpreter(), loading.aliases()).equals(files.get(loading.loader()).path())) {
-            throw new IllegalArgumentException("Interpreter differs from the approved loader");
-        }
+        requireInterpreterReference(files, loading);
         Map<String, Configuration> configuration = new HashMap<>();
         Set<Integer> materials = new HashSet<>();
         for (Configuration entry : loading.configuration()) {
@@ -432,6 +430,11 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
                 throw new IllegalArgumentException("Default search directory lacks its explicit presence rule");
             }
         }
+        requireContextReferences(files, loading);
+    }
+
+    /** Pure context-subgraph check only; the complete constructor retains all other deployment checks. */
+    static void requireContextReferences(List<File> files, Loading loading) {
         Map<Integer, Elf> elf = new HashMap<>();
         long needed = 0;
         for (Elf entry : loading.elf()) {
@@ -476,6 +479,14 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
         for (ModuleRequest request : loading.modules()) {
             reference(request.requester(), loading.contexts().size());
             candidates(files, loading.contexts(), request.candidates(), true);
+        }
+    }
+
+    /** Fixed interpreter reference only, never complete deployment validity or startup authority. */
+    static void requireInterpreterReference(List<File> files, Loading loading) {
+        role(files, loading.loader(), Role.LOADER);
+        if (!resolve(loading.interpreter(), loading.aliases()).equals(files.get(loading.loader()).path())) {
+            throw new IllegalArgumentException("Interpreter differs from the approved loader");
         }
     }
 

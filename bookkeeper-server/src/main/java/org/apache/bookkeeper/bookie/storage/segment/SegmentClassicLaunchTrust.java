@@ -125,6 +125,19 @@ final class SegmentClassicLaunchTrust {
     record LinuxLoadPathObservation(int context, int member, String logical, LinuxPathObservation path,
                                      LinuxElfMemberObservation content) { }
 
+    record LinuxNeededContextObservation(SegmentClassicLinuxDeploymentV2.NeededRule declaration, String name) { }
+
+    /** Entire declared context set only; no cross-object snapshot, search closure or loader winner is implied. */
+    record LinuxCandidateContextObservation(List<LinuxLoadPathObservation> contexts,
+            LinuxLoadPathObservation interpreter, List<LinuxNeededContextObservation> needed,
+            List<SegmentClassicLinuxDeploymentV2.ModuleRequest> modules) {
+        LinuxCandidateContextObservation {
+            contexts = List.copyOf(contexts);
+            needed = List.copyOf(needed);
+            modules = List.copyOf(modules);
+        }
+    }
+
     enum LinuxContentKind { NONE, ELF1, ELF2, CACHE, LDCONFIG }
 
     /** Data read from a caller-held channel; no source authority or native close result is implied. */
@@ -1662,16 +1675,22 @@ final class SegmentClassicLaunchTrust {
 
     private static SegmentClassicLinuxDeploymentV2.Elf originalLinuxElf(SegmentClassicLinuxDeploymentV2 deployment,
             int fileIndex) throws IOException {
-        return deployment.loading().elf().stream().filter(e -> e.file() == fileIndex).findFirst()
+        return linuxElfDeclaration(deployment.loading(), fileIndex);
+    }
+
+    private static SegmentClassicLinuxDeploymentV2.Elf linuxElfDeclaration(
+            SegmentClassicLinuxDeploymentV2.Loading loading,
+            int fileIndex) throws IOException {
+        return loading.elf().stream().filter(e -> e.file() == fileIndex).findFirst()
                 .orElseThrow(() -> new IOException("Original D2 ELF metadata is missing"));
     }
 
-    private Path linuxElfMaterialPath(SegmentClassicLinuxDeploymentV2.File file, long deadline) throws IOException {
-        requireUtf8LoadingText(file.path(), deadline);
+    private Path linuxMaterialPath(String original, long deadline) throws IOException {
+        requireUtf8LoadingText(original, deadline);
         if (linuxProvider != null) {
-            return linuxPhysicalPath(file.path(), deadline);
+            return linuxPhysicalPath(original, deadline);
         }
-        Path path = Path.of(file.path());
+        Path path = Path.of(original);
         requireLoadingPathBytes(path, deadline);
         return path;
     }
@@ -1681,7 +1700,7 @@ final class SegmentClassicLaunchTrust {
         if (fileIndex < 0 || fileIndex >= 1024 || !file.role().elf() || expected.file() != fileIndex) {
             throw new IOException("ELF material index, role or metadata reference differs");
         }
-        Path path = linuxElfMaterialPath(file, deadline);
+        Path path = linuxMaterialPath(file.path(), deadline);
         boolean executable = file.role() != SegmentClassicLinuxDeployment.Role.LIBRARY
                 && file.role() != SegmentClassicLinuxDeployment.Role.MODULE;
         var observed = hashFile(path, file.length(), file.sha256(), executable, LinuxContentKind.ELF2, deadline);
@@ -1772,7 +1791,7 @@ final class SegmentClassicLaunchTrust {
         requireLinuxLoadReference(contextIndex, context, file, expected);
         var aliases = fixedLoadingAliases(aliasDeclarations, deadline);
         Path entry = loadingNativePath(context.logicalLoadName(), deadline);
-        Path physical = linuxElfMaterialPath(file, deadline);
+        Path physical = linuxMaterialPath(file.path(), deadline);
         LinuxPathKind kind = contextIndex == -1 ? LinuxPathKind.INTERPRETER : LinuxPathKind.LOOKUP;
         var before = observeLinuxPath(kind, entry, aliases, true, deadline);
         if (before.identity() == null || before.identity().directory() || !before.resolved().equals(physical)) {
@@ -1800,6 +1819,81 @@ final class SegmentClassicLaunchTrust {
         var context = deployment.loading().contexts().get(contextIndex);
         selectLinuxElfMember(deployment, context.file());
         return context;
+    }
+
+    /** Whole original candidate context set only; never accepts a caller observation or a selected winner. */
+    synchronized LinuxCandidateContextObservation verifyLinuxCandidateContexts(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            return observeLinuxCandidateContexts(deployment.files(), deployment.loading(), deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Independent context-subgraph data only; it cannot establish a complete D2 deployment or typed source. */
+    synchronized LinuxCandidateContextObservation readLinuxCandidateContexts(
+            List<SegmentClassicLinuxDeploymentV2.File> files,
+            SegmentClassicLinuxDeploymentV2.Loading loading, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxCandidateContexts(files, loading, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxCandidateContextObservation observeLinuxCandidateContexts(
+            List<SegmentClassicLinuxDeploymentV2.File> declarations, SegmentClassicLinuxDeploymentV2.Loading loading,
+            long deadline) throws IOException {
+        requireTime(deadline);
+        var members = List.copyOf(declarations);
+        if (members.size() > 1024) {
+            throw new IOException("Candidate context file table exceeds its original bound");
+        }
+        try {
+            SegmentClassicLinuxDeploymentV2.requireInterpreterReference(members, loading);
+            SegmentClassicLinuxDeploymentV2.requireContextReferences(members, loading);
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Invalid candidate context subgraph or fixed interpreter reference", invalid);
+        }
+        requireTime(deadline);
+        Map<Path, String> aliasDeclarations = new HashMap<>();
+        for (var alias : loading.aliases()) {
+            aliasDeclarations.put(linuxMaterialPath(alias.link(), deadline), alias.target());
+        }
+        var aliases = fixedLoadingAliases(aliasDeclarations, deadline);
+        var contexts = new ArrayList<LinuxLoadPathObservation>();
+        for (int i = 0; i < loading.contexts().size(); i++) {
+            requireTime(deadline);
+            var context = loading.contexts().get(i);
+            var file = members.get(context.file());
+            contexts.add(observeLinuxLoadPath(i, context, file, linuxElfDeclaration(loading, context.file()),
+                    loading.interpreter(), aliases, deadline));
+        }
+        var interpreter = new SegmentClassicLinuxDeploymentV2.Context(loading.loader(), loading.interpreter());
+        var loader = observeLinuxLoadPath(-1, interpreter, members.get(loading.loader()),
+                linuxElfDeclaration(loading, loading.loader()), loading.interpreter(), aliases, deadline);
+        var needed = new ArrayList<LinuxNeededContextObservation>();
+        for (var rule : loading.needed()) {
+            requireTime(deadline);
+            String name = contexts.get(rule.requester()).content().elf().needed().get(rule.ordinal());
+            needed.add(new LinuxNeededContextObservation(rule, name));
+        }
+        var result = new LinuxCandidateContextObservation(contexts, loader, needed, loading.modules());
+        files.requireHealthy();
+        requireTime(deadline);
+        return result;
     }
 
     private SegmentClassicLinuxDeploymentV2 originalLinuxDeployment(long deadline) throws IOException {

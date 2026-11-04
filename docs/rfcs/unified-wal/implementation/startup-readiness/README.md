@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## D2 候选 context 全集的 owner 内关联观察
+
+2026-11-04接续父`a87ec6e0b743d7da87efc36821f0a19ed0f22276`，原trust owner增加`verifyLinuxCandidateContexts(deadline)`：只从本owner的原D2部署取得files、Loading及全部contexts，先过原source/provider/期限门。每个原context按原序调用既有private路径—owned ELF2关联读取，随后核验固定interpreter；保留context/file原索引和raw logical name，不按physical或SONAME合并，不只读取某个预选winner分支。任何必需项失败，整次失败，不返回部分集合，也不接受caller观察结果补升来源。
+
+NEEDED结果按原requester/ordinal从已经成功观察的Image2取得实际name，保留原NeededRule及candidate context索引；重复名称的不同ordinal独立存在。原ModuleRequest顺序、重复和candidate索引不改。全部context、固定interpreter、资源健康及原deadline通过后才构造不可变结果；每项仍要求前后完整logical路径观察及identity与同次owned hash/ELF2成员一致。当前只把原声明全集接到实际关联数据，不证明跨对象原子快照、实际搜索候选闭合或loader选择。
+
+原D2构造器的context子图检查提成包内pure `requireContextReferences`，固定loader/interpreter检查也局部复用；完整构造器仍执行原alias/file冲突、config/default directories、systemctl/units等全部检查，wire/codec不变。独立data-only入口只接files＋Loading，先固定原file索引并限制1024项，在首次目标I/O前核对loader role/interpreter物理对应、ELF metadata覆盖和全部context/needed/module引用。Loading沿用4096 contexts、needed＋modules合计8192、candidate memberships合计262144上限。alias map只从同一Loading.aliases内部派生，不提供第二份caller alias声明；helper不返回完整deployment valid、permit或ready。
+
+真实macOS aarch64/Corretto21.0.10+7-LTS fixture使用两个physical ELF、三个logical contexts（同loader的两个alias view）及固定interpreter，验证全集不丢项、重复NEEDED不同ordinal与module请求顺序/重复、无module请求时损坏第二NEEDED候选仍触发实际读取/首次close及整次失败，以及子图缺ordinal、错误loader role/interpreter对应、超1024 file表和缺原source在目标I/O前拒绝。fixture仅构造Loading子图，不伪造完整system/service部署；沿用既有关闭/deadline覆盖。首轮三类82项、最终串行十八类202项全部通过，0失败/错误/跳过，样式退出0；两个阶段各1430源码/资源逐项匹配原snapshot/父Git blob，最终三项code与test/style一致。
+
+终态RAT退出1/431，未批准路径及全部字节与父HEAD相同，本次代码无新增unknown，用户PDF扫描前排除且未读取。两个确切raw scope经两次独立lsof及原inode/mode/SHA/archive hardlink核验后，清理四目录、27文件路径、1,634,102逻辑字节；归档硬链接保留、regular-file数据块回收0。工作区外证据为`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-context-universe-evidence-a87ec6e0`。
+
+新规划会话只读检查未发现本切片阻塞缺口，下一最小范围按裁决进入D2 token rule1的有界词法识别与单字符串替换纯数据机制，不再增加集合包装。实际typed Linux阳性NOT_EXECUTED；统一快照、实际候选搜索闭合、RPATH/first-loaded reuse solver、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。本块未运行models/性能，默认OFF/SYSTEM/PARK与advanced disabled保持，完整目标active。
+
 ## D2 load-context 与 interpreter 的实际路径关联观察
 
 2026-11-04在父`f23b3712960b6b0120c1263d546458edf2e563ed`上，原trust owner新增`verifyLinuxLoadContext(contextIndex, deadline)`与`verifyLinuxInterpreter(deadline)`。前者先过原source/provider/期限门，再从原D2 context表检查索引、ELF role及引用，随后才构造目标Path和执行I/O；普通context的`-1`明确拒绝。后者固定取原`loading.loader/interpreter`，结果中的`context=-1`仅表示该固定interpreter，member仍为原loader index，不作fallback或任意context选择。

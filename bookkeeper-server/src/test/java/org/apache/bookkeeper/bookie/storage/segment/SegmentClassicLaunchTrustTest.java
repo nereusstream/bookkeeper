@@ -372,6 +372,175 @@ public class SegmentClassicLaunchTrustTest {
                 SegmentClassicHandoff.digest(bytes));
     }
 
+    private record CandidateFixture(List<SegmentClassicLinuxDeploymentV2.File> files,
+                                    SegmentClassicLinuxDeploymentV2.Loading loading) { }
+
+    private CandidateFixture candidateFixture() throws IOException {
+        Files.createDirectory(root.resolve("lib"));
+        var loader = loadPathFile("lib/loader.so", SegmentClassicLinuxDeployment.Role.LOADER);
+        Files.setPosixFilePermissions(Path.of(loader.path()), PosixFilePermissions.fromString("rwxr-xr-x"));
+        var module = loadPathFile("lib/module.so", SegmentClassicLinuxDeployment.Role.MODULE);
+        Path fixed = Files.createSymbolicLink(root.resolve("fixed-loader"), Path.of("lib/loader.so"));
+        Path first = Files.createSymbolicLink(root.resolve("view-a"), Path.of("lib"));
+        Path second = Files.createSymbolicLink(root.resolve("view-b"), Path.of("lib"));
+        var aliases = List.of(new SegmentClassicLinuxDeploymentV2.Alias(fixed.toString(), "lib/loader.so"),
+                new SegmentClassicLinuxDeploymentV2.Alias(first.toString(), "lib"),
+                new SegmentClassicLinuxDeploymentV2.Alias(second.toString(), "lib"));
+        var contexts = List.of(new SegmentClassicLinuxDeploymentV2.Context(0, first + "/loader.so"),
+                new SegmentClassicLinuxDeploymentV2.Context(0, second + "/loader.so"),
+                new SegmentClassicLinuxDeploymentV2.Context(1, module.path()));
+        var expected = SegmentClassicLinuxContentTest.expected();
+        var metadata = List.of(new SegmentClassicLinuxDeploymentV2.Elf(0, expected.needed(), expected.rpath(),
+                expected.runpath(), expected.flags(), expected.flags1()),
+                new SegmentClassicLinuxDeploymentV2.Elf(1, expected.needed(), expected.rpath(), expected.runpath(),
+                        expected.flags(), expected.flags1()));
+        var needed = new java.util.ArrayList<SegmentClassicLinuxDeploymentV2.NeededRule>();
+        for (int context = 0; context < contexts.size(); context++) {
+            for (int ordinal = 0; ordinal < expected.needed().size(); ordinal++) {
+                needed.add(new SegmentClassicLinuxDeploymentV2.NeededRule(context, ordinal, List.of(1, 2)));
+            }
+        }
+        var modules = List.of(new SegmentClassicLinuxDeploymentV2.ModuleRequest(1, "second", List.of(2)),
+                new SegmentClassicLinuxDeploymentV2.ModuleRequest(0, "repeated", List.of(2)),
+                new SegmentClassicLinuxDeploymentV2.ModuleRequest(0, "repeated", List.of(2)));
+        var original = SegmentClassicLinuxDeployment.decode(
+                SegmentClassicLinuxDeploymentTest.vector("classic-linux-deployment-v2")).versionTwo();
+        // This independent Loading subtree does not assert systemctl/config/unit or full deployment qualification.
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(0, 0, fixed.toString(), aliases, List.of(), List.of(),
+                original.loading().policy(), metadata, contexts, needed, modules);
+        return new CandidateFixture(List.of(loader, module), loading);
+    }
+
+    private static SegmentClassicLinuxDeploymentV2.Loading candidateLoading(SegmentClassicLinuxDeploymentV2.Loading l,
+            int loader, String interpreter, List<SegmentClassicLinuxDeploymentV2.NeededRule> needed,
+            List<SegmentClassicLinuxDeploymentV2.ModuleRequest> modules) {
+        return new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), loader, interpreter, l.aliases(),
+                l.directories(), l.configuration(), l.policy(), l.elf(), l.contexts(), needed, modules);
+    }
+
+    @Test
+    public void candidateContextSetKeepsEveryLogicalViewOriginalOrdinalAndRepeatedModuleRequest() throws Exception {
+        var fixture = candidateFixture();
+        var owner = owner();
+        owner.initialize();
+        try {
+            var result = owner.readLinuxCandidateContexts(fixture.files(), fixture.loading(),
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(List.of(0, 1, 2), result.contexts().stream().map(c -> c.context()).toList());
+            assertEquals(List.of(0, 0, 1), result.contexts().stream().map(c -> c.member()).toList());
+            assertEquals(fixture.loading().contexts().stream().map(c -> c.logicalLoadName()).toList(),
+                    result.contexts().stream().map(c -> c.logical()).toList());
+            assertEquals(result.contexts().get(0).path().resolved(), result.contexts().get(1).path().resolved());
+            assertFalse(result.contexts().get(0).logical().equals(result.contexts().get(1).logical()));
+            assertEquals(-1, result.interpreter().context());
+            assertEquals(0, result.interpreter().member());
+            assertEquals(fixture.loading().interpreter(), result.interpreter().logical());
+            assertEquals(12, result.needed().size());
+            assertEquals("libz.so.1", result.needed().get(0).name());
+            assertEquals(result.needed().get(0).name(), result.needed().get(1).name());
+            assertEquals(0, result.needed().get(0).declaration().ordinal());
+            assertEquals(1, result.needed().get(1).declaration().ordinal());
+            for (int i = 0; i < result.needed().size(); i++) {
+                assertSame(fixture.loading().needed().get(i), result.needed().get(i).declaration());
+            }
+            assertEquals(fixture.loading().modules(), result.modules());
+            assertSame(fixture.loading().modules().get(2), result.modules().get(2));
+            assertEquals(List.of(1, 0, 0), result.modules().stream().map(m -> m.requester()).toList());
+            assertThrows(UnsupportedOperationException.class, () -> result.contexts().clear());
+            assertThrows(UnsupportedOperationException.class, () -> result.needed().clear());
+            assertThrows(UnsupportedOperationException.class, () -> result.modules().clear());
+            assertThrows(IOException.class, owner::installed);
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxCandidateContexts(SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void candidateContextFailureInUnselectedCandidateCannotReturnAPartialCollection() throws Exception {
+        var fixture = candidateFixture();
+        var l = fixture.loading();
+        var noModules = candidateLoading(l, l.loader(), l.interpreter(), l.needed(), List.of());
+        Path module = Path.of(fixture.files().get(1).path());
+        byte[] damaged = Files.readAllBytes(module);
+        damaged[damaged.length - 1] ^= 1;
+        write(module, damaged);
+        var owner = owner();
+        owner.initialize();
+        var loaderOpens = new AtomicInteger();
+        var moduleChannel = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                if (Path.of(fixture.files().get(0).path()).equals(invocation.getArgument(0))) {
+                    loaderOpens.incrementAndGet();
+                } else if (module.equals(invocation.getArgument(0))) {
+                    var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                    moduleChannel.set(fault);
+                    return fault;
+                }
+            }
+            return actual;
+        })) {
+            assertThrows(IOException.class, () -> owner.readLinuxCandidateContexts(fixture.files(), noModules,
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(loaderOpens.get() > 0);
+            assertEquals(1, moduleChannel.get().closes.get());
+            assertFalse(moduleChannel.get().actual.isOpen());
+            assertThrows(IOException.class, owner::parsed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void candidateSubgraphAndFixedLoaderReferencesRejectBeforeAnyTargetIo() throws Exception {
+        var fixture = candidateFixture();
+        var l = fixture.loading();
+        var invalid = List.of(candidateLoading(l, l.loader(), l.interpreter(),
+                        l.needed().subList(0, l.needed().size() - 1), l.modules()),
+                candidateLoading(l, 1, l.interpreter(), l.needed(), l.modules()),
+                candidateLoading(l, l.loader(), fixture.files().get(1).path(), l.needed(), l.modules()));
+        for (var loading : invalid) {
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Invalid candidate references reached target I/O");
+            })) {
+                assertThrows(IOException.class, () -> owner.readLinuxCandidateContexts(fixture.files(), loading,
+                        SegmentClassicLinuxElfTest.deadline()));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Oversized candidate file table reached target I/O");
+        })) {
+            var excessive = java.util.Collections.nCopies(1025, fixture.files().get(0));
+            assertThrows(IOException.class, () -> owner.readLinuxCandidateContexts(excessive, l,
+                    SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void typedCandidateUniverseWithoutOriginalSourceCannotReachTargetIo() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound candidate context set reached target I/O");
+        })) {
+            assertThrows(IOException.class,
+                    () -> owner.verifyLinuxCandidateContexts(SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
     @Test
     public void loadPathAssociationKeepsOriginalIndicesLogicalSpellingAndTheSameOwnedMember() throws Exception {
         Files.createDirectories(root.resolve("lib/nested"));
