@@ -826,6 +826,20 @@ SegmentClassicLinuxElf只读有界ELF64 little-endian x86-64：程序头/LOAD文
 
 规划会话已接受持续决策授权，原launcher service与批准target须分kind，新方向关系与安装链接用新LinuxDeployment schema表达，旧schema/constraint1不补认缺失关系；尚未实施该schema。实际Linux依赖闭合、连续systemd/cgroup隔离、dropper、v2启动/UDS/Ctl和Unix交接仍OPEN/NOT_EXECUTED，本增量未执行TLA、性能或qualified阳性。完整16步目标active，各整体Gate与默认OFF/SYSTEM/PARK、disabled保持原边界。
 
+## 显式已加载对象表的名称复用与 SONAME 记名
+
+2026-11-05在父`8102eb35c8e59cd4c7cdfec2ba1bebba6606a47f`上，新增包内SegmentClassicLinuxLoadedNames，仅接原顺序的显式base-namespace对象表、原lookup name和deadline，无Path/文件/Process/JNI或owner入口。每对象保留opaque identity、原context、l_name、l_libname列表、null/empty可区分的SONAME，以及added/faked/removed标志；同context不同identity不合并，重复identity拒绝，不从D2候选边、physical、SONAME或context排序推断加载顺序。
+
+依据[glibc2.39 _dl_map_object及add_name_to_object](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)和[_dl_name_match_p](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-misc.c)，逐对象按原顺序先跳过faked/removed，再精确比较该对象l_name及名称列表；仅未直接命中且sonameAdded=false、SONAME存在时再比较其SONAME。命中立即返回，早先对象SONAME优先于后面对象主名，不能分两遍扫描名称/SONAME。strict UTF8下原字符串精确相等，不用cache数字比较，不normalize路径/Unicode、展开slash/$/token或按inode合并；查询非空、无NUL、≤4096字节，对象单串同界但空串合法，缺SONAME与present-empty保留。
+
+direct命中不改变added或别名。仅SONAME分支追加该名字到本对象名称列表尾并置added；此前同对象名称已确认不匹配，不重复追加。返回Reuse(state, ordinal, replacement)，replacement的names是不可变副本，可按原ordinal替换后供下一次纯lookup；其他对象和顺序由调用方原表保留，原输入不变，不建owner缓存/事件日志或模拟glibc锁。sonameAdded=true不再独立补查或修复SONAME，即使给定表缺对应别名。明确NO_REUSE返回-1/null，仅表示本表没有可复用对象，不表示库不存在或后续搜索已经失败。
+
+选择及任何列表复制/更新前核验全表：对象/context限4096，l_libname全表关联数限4096＋原D2.MAX_REQUESTS(8192)=12288，每对象原名称列表须非空（元素可空），所有对象/名字/SONAME严格检查。坏后项、重复身份或总关联超限不能被早先命中遮蔽，faked/removed对象也不免结构检查；SONAME追加不能越过总界，失败不改输入。明确空表可NO_REUSE，null表/列表不当空表，原deadline保留；无新可调预算或通用状态机。
+
+新6项纯数据测试全部通过，0失败/错误/跳过；Spotless/Checkstyle首轮退出0，规划只读评审无新增阻塞。覆盖早SONAME/晚主名顺序、同context独立身份、首次记名后重查只保留一份alias、输入及结果隔离、direct flag不变、faked/removed、.01与.1/slash/$/Unicode字面、added/absent/empty、坏后项、4096对象/12288全表及追加界/UTF8恰4096和deadline。1443项输入与原snapshot/父Git blob无错配，两个当前code与test/style快照一致；未改owner/Cache/Diagnostics/SearchStages/JNI矩阵未重跑，旧PASS不移绑。
+
+证据位于工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-loaded-names-evidence-8102eb35`，保留原source/class/命令/log/XML与两份glibc静态源；单个确切raw scope双次lsof/identity/SHA/archive hardlink核验后清理2目录、4文件路径、364821逻辑字节，归档保留/regular-file数据块回收0。此为稳定给定数据的算法与替换结果，不是实际namespace/并发快照。初始namespace及l_loader来源、文件映射后的inode复用、RPATH环境、DFS/BFS加载顺序、完整递归solver/helper/backend exec和typed Linux/vendor阳性仍OPEN/NOT_EXECUTED；本片models/性能未执行。diagnostics unconditional Unsupported、完整16步目标active、整体Gate OPEN及默认OFF/SYSTEM/PARK、advanced disabled保持。
+
 ## Loader diagnostics 的有界纯数据解析
 
 2026-11-05在父`5fb81cdee7c38064780dc7c7926836239e832605`上，新增包内SegmentClassicLinuxDiagnostics，仅接supplied byte[]及原absolute deadline；在clone前检查非空及原stdout 64KiB上限，一次私有副本保留原文，raw accessor再复制。按ASCII字节与LF扫描label[hex-index].subfield=value，不宽松UTF8解码、不构造Path或做I/O/Process/JNI。canonical小写0x整数/索引拒绝前导零异写，数值保留uint64位模式；原始NUL/非打印ASCII、坏引号/escape、溢出、重复字段及残缺末行均拒绝。所有未知字段仍检查行语法并保留在原bytes，不为全部CPU/env/uname构造对象树；扫描/记录规模受原64KiB及deadline限制，无新可调预算。
