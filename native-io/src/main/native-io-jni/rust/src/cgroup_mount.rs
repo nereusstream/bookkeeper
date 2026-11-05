@@ -23,6 +23,8 @@ use super::{
     read_thread_namespace_links, ProcIdentityResult,
 };
 
+mod membership;
+
 const CGROUP_PATH: &[u8] = b"/sys/fs/cgroup";
 const MAX_MOUNTINFO_BYTES: usize = 1024 * 1024;
 const MAX_MOUNTINFO_LINE: usize = 64 * 1024;
@@ -295,7 +297,24 @@ fn read_mountinfo(
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn observe(fd: libc::c_int, original: &libc::stat) -> ProcIdentityResult<[u32; 3]> {
+pub(super) struct Member {
+    pub(super) path: String,
+    pub(super) device: u64,
+    pub(super) inode: u64,
+}
+
+#[cfg(target_os = "linux")]
+pub(super) struct Observation {
+    pub(super) mount: [u32; 3],
+    pub(super) member: Option<Member>,
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn observe(
+    fd: libc::c_int,
+    original: &libc::stat,
+    include_membership: bool,
+) -> ProcIdentityResult<Observation> {
     let held = query_statx(fd, b"\0", libc::AT_EMPTY_PATH)?;
     let (major, minor) = unsafe { (libc::major(original.st_dev), libc::minor(original.st_dev)) };
     if original.st_mode & libc::S_IFMT != libc::S_IFDIR
@@ -330,6 +349,11 @@ pub(super) fn observe(fd: libc::c_int, original: &libc::stat) -> ProcIdentityRes
         require_initial_cgroup_namespace(namespaces)
             .map_err(|error| ("cgroup mount requires the initial cgroup namespace", error))?;
         let parent = read_mountinfo(root, &root_stat, held)?;
+        let member = if include_membership {
+            Some(membership::observe(fd, held, root, &root_stat)?)
+        } else {
+            None
+        };
         require_fixed_path(held)?;
         let after_namespaces = read_thread_namespace_links(root, &root_stat, LINKS)?;
         let after = proc_identity_root(root)?;
@@ -342,7 +366,10 @@ pub(super) fn observe(fd: libc::c_int, original: &libc::stat) -> ProcIdentityRes
                 libc::EAGAIN,
             ));
         }
-        Ok([held.mount_id, parent, namespaces[1]])
+        Ok(Observation {
+            mount: [held.mount_id, parent, namespaces[1]],
+            member,
+        })
     })();
     close_proc_identity_fd(root, outcome)
 }

@@ -441,7 +441,7 @@ final class SegmentClassicLaunchTrust {
     }
 
     private record HeldCgroupRoot(Path path, FileChannel channel, NativeIO.DirectoryFileSystem facts,
-                                  NativeIO.LinuxCgroupMount mount, List<Identity> identities) { }
+                                  NativeIO.LinuxCgroupMembership membership, List<Identity> identities) { }
 
     private final Path root;
     private final String recipeId;
@@ -963,13 +963,13 @@ final class SegmentClassicLaunchTrust {
         if (!matchesDirectoryIdentity(facts, before.get(0)) || held != null && !held.facts().equals(facts)) {
             throw new IOException("Original cgroup directory fd differs from its path or previous observation");
         }
-        NativeIO.LinuxCgroupMount mount = null;
+        NativeIO.LinuxCgroupMembership membership = null;
         if (production) {
             requireLinuxCgroupRootType(facts.type());
             requireTime(deadline);
-            mount = files.linuxCgroupMount(channel, nativeIo);
-            if (held != null && !held.mount().equals(mount)) {
-                throw new IOException("Original cgroup mount or namespace changed during startup");
+            membership = files.linuxCgroupMembership(channel, nativeIo);
+            if (held != null && !held.membership().equals(membership)) {
+                throw new IOException("Original cgroup mount, namespace or thread membership changed during startup");
             }
         }
         if (!before.equals(cgroupPathIdentities(directory, deadline))) {
@@ -978,7 +978,7 @@ final class SegmentClassicLaunchTrust {
         files.requireHealthy();
         requireTime(deadline);
         if (held == null) {
-            linuxCgroupRoot = new HeldCgroupRoot(directory, channel, facts, mount, before);
+            linuxCgroupRoot = new HeldCgroupRoot(directory, channel, facts, membership, before);
         }
         return facts;
     }

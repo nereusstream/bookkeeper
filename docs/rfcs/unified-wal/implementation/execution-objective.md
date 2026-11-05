@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+正常 D2 两轮启动检查在同一次原 cgroup 挂载观察中读取调用线程的 unified membership，并从原 fd 相对解析实际成员目录。每轮两次冷读必须给出相同原路径，首个成员 fd 持有期间重新解析的目录必须匹配。33 项定向 JUnit 和 10 项宿主 Rust 检查通过，2 项 Linux 实读跳过。批准 Linux 实读、进程与 manager 对照、episode 成员关系与排空仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的调用线程-cgroup-成员关系)。
+
 正常 D2 两轮启动检查将原 cgroup 目录 fd、固定路径和调用线程的实际 mountinfo 记录绑定。独立 JNI 核对普通 mount ID，并在初始 cgroup namespace 下要求 cgroup2 层级根。33 项 JUnit 通过，2 项 Linux 实读跳过，另有 7 项宿主 Rust 解析与值检查通过。批准 Linux 上的真实挂载、episode 成员关系和排空仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-绑定原-cgroup-挂载记录)。
 
 正常 D2 launcher 由原 trust owner 持有固定 `/sys/fs/cgroup` 目录，并在后续启动检查中复核同一 fd。各 sysfs 父目录使用自己的短期 fd 检查类型和身份，`/` 沿用通用 ACL 检查。26 项定向回归、Java 样式、旧库缺符号检查与 Linux x86_64 交叉检查通过。批准 Linux 实读、episode cgroup 与实际排空仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-持有并复核-cgroup-目录)。

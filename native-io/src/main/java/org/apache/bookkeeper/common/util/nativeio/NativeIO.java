@@ -329,4 +329,12 @@ public interface NativeIO {
     default LinuxCgroupMount linuxCgroupMount(java.nio.channels.FileChannel channel) throws NativeIOException {
         throw new NativeIOException("Original Linux cgroup mount query is unsupported");
     }
+
+    /** Observed calling-thread path, its resolved directory, and the original mount facts. */
+    record LinuxCgroupMembership(LinuxCgroupMount mount, FileIdentity directory, String path) { }
+
+    /** Cold observations of this calling thread from the original cgroup root's mount view. */
+    default LinuxCgroupMembership linuxCgroupMembership(java.nio.channels.FileChannel root) throws NativeIOException {
+        throw new NativeIOException("Original Linux cgroup membership query is unsupported");
+    }
 }

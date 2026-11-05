@@ -199,15 +199,15 @@ public class SegmentOwnedFilesTest {
     }
 
     @Test
-    public void failedMountObservationLeavesTheOriginalDirectoryWithItsOwnerUntilDrain() throws Exception {
+    public void failedMembershipObservationLeavesTheOriginalDirectoryWithItsOwnerUntilDrain() throws Exception {
         Path path = temporary.newFolder().toPath();
         var files = new SegmentOwnedFiles();
         var channel = SegmentOwnedFiles.open(files, path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
         var io = new NativeIOImpl();
         try (var raw = FileChannel.open(path, StandardOpenOption.READ)) {
-            assertThrows(IOException.class, () -> files.linuxCgroupMount(raw, io));
+            assertThrows(IOException.class, () -> files.linuxCgroupMembership(raw, io));
             var original = files.directoryFileSystem(channel, io);
-            assertThrows(IOException.class, () -> files.linuxCgroupMount(channel, io));
+            assertThrows(IOException.class, () -> files.linuxCgroupMembership(channel, io));
             assertTrue(channel.isOpen());
             assertEquals(original, files.directoryFileSystem(channel, io));
             assertEquals(1, files.result().retained().size());
@@ -215,7 +215,7 @@ public class SegmentOwnedFilesTest {
             assertTrue(files.drain().drained());
         }
         assertFalse(channel.isOpen());
-        assertThrows(IOException.class, () -> files.linuxCgroupMount(channel, io));
+        assertThrows(IOException.class, () -> files.linuxCgroupMembership(channel, io));
     }
 
     @Test

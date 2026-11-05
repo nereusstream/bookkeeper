@@ -1450,6 +1450,18 @@ D2 present cache在原`observeLoaderConfiguration`路径上复用私有Entry及s
 
 证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-preload-evidence-c48530e7`，保留原源码/class/日志/XML及静态rtld.c原字节（88632 bytes，SHA-256 `03681f7c7cea6f542a6416e3478a8c6bfe6c3a7969d1bb081dbba4f18395ed49`）。正常D2消费点与先后顺序按实际直线代码静态确认；临时树动态测试不是原批准D2 typed阳性，实际Linux/vendor启动仍NOT_EXECUTED。检查仅表示此时系统preload路径的受保护缺失，不证明已运行父JVM的历史、helper的LD_PRELOAD/--preload、未来exec时不变或完整加载闭包。boot身份的可信procfs来源仍待设计，不能把普通路径UUID读数补成authority；原childCommand/diagnostics拒绝和整体parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled及持续目标active保持。
 
+## 正常 D2 launcher 的调用线程 cgroup 成员关系
+
+两轮原 cgroup 启动检查均在已有 source、provider、deadline、目录类型及保护链核验后，从同一个 held root 取得组合观察。原 JNI mount 查询仍独立可用。组合 JNI 只扫描一次 mountinfo，并在同一个验证过的 procfs 根下两次冷开固定 `thread-self/cgroup`，沿用初始 cgroup namespace 和 mount namespace 前后核验。
+
+每次读至实际 EOF，只接受一行完整的 `0::/…` 加 LF。路径最多 4095 字节，组件最多 255 字节，限受控 systemd 名称字符及字面的 `\xNN`。冒号和字面反斜线保持原值。额外 hierarchy、非规范路径、截断、deleted 后缀和超限均拒绝。内核按读取线程的 cgroup namespace 写出原路径。 [Linux cgroup 源码](https://raw.githubusercontent.com/torvalds/linux/v6.17/kernel/cgroup/cgroup.c)
+
+除借用原根的 `/` 特例外，每次均从 held root fd 以 `openat2` 相对打开成员目录，禁止越界、符号链接和跨挂载解析。成员 fd 必须报告实际目录、完整 cgroup2 magic，并通过设备、inode 和原普通 mount ID 核验。两次 proc 读取的路径须一致。首个成员 fd 仍持有时再次解析同一路径并核对目录身份，临时 fd 首次关闭成功后才返回。原 trust 留存首轮的路径、目录和挂载观察，末轮不匹配时记录失败。 [Linux openat2 UAPI](https://raw.githubusercontent.com/torvalds/linux/v6.17/include/uapi/linux/openat2.h)
+
+定向 JUnit 35 项中 33 项通过、2 项 Linux 实读跳过。宿主 Rust 解析与值检查 10 项通过，覆盖根路径、冒号、字面转义、额外 hierarchy、截断和路径长度边界。Checked JNI、旧库缺新符号拒绝、Java 样式与 Linux x86_64 交叉检查通过。实际 Linux membership、成员目录 rename/迁移、bind/符号链接故障和完整 D2 启动均为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-d2-cgroup-membership-evidence-383bd4d5`。
+
+结果限定于执行 JNI 的线程及两轮采样。成员目录 fd 的持有区间限于一次观察。整个进程的成员关系、systemd ControlGroup、episode 长期持有与排空、retirement 和生产 Gate 仍待独立验证。 [cgroup v2 的线程模式](https://docs.kernel.org/admin-guide/cgroup-v2.html#threads)
+
 ## 正常 D2 launcher 绑定原 cgroup 挂载记录
 
 首次取得固定 cgroup 目录与后续复核时，原 trust owner 先完成目录类型、保护链和 dev/ino 检查，再从同一个原 fd 取得挂载观察。独立 JNI 在原 FileDescriptor monitor 内用 `statx(AT_EMPTY_PATH)` 要求目录类型、inode 和普通 `STATX_MNT_ID`，并和同 fd 的 `fstat` 对照设备与 inode。固定 `/sys/fs/cgroup` 在观察窗口前后各做一次 NOFOLLOW、NO_AUTOMOUNT 的路径 statx，必须与原 fd 的设备、inode 和 mount ID 一致。同 inode 的另一挂载不能替换原对象。 [Linux statx](https://man7.org/linux/man-pages/man2/statx.2.html)

@@ -128,9 +128,9 @@ final class SegmentOwnedFiles {
         return owned.entry.directoryFileSystem(owned, nativeIo);
     }
 
-    NativeIO.LinuxCgroupMount linuxCgroupMount(FileChannel channel, NativeIO nativeIo) throws IOException {
+    NativeIO.LinuxCgroupMembership linuxCgroupMembership(FileChannel channel, NativeIO nativeIo) throws IOException {
         Channel owned = originalWrapper(channel, nativeIo);
-        return owned.entry.linuxCgroupMount(owned, nativeIo);
+        return owned.entry.linuxCgroupMembership(owned, nativeIo);
     }
 
     private Channel originalWrapper(FileChannel channel, NativeIO nativeIo) throws IOException {
@@ -332,12 +332,14 @@ final class SegmentOwnedFiles {
             }
         }
 
-        synchronized NativeIO.LinuxCgroupMount linuxCgroupMount(Channel caller, NativeIO nativeIo) throws IOException {
+        synchronized NativeIO.LinuxCgroupMembership linuxCgroupMembership(Channel caller, NativeIO nativeIo)
+                throws IOException {
             FileChannel original = beginIdentityQuery(caller);
             try {
-                var observation = nativeIo.linuxCgroupMount(original);
-                if (observation == null) {
-                    throw new IOException("Unknown original cgroup mount outcome");
+                var observation = nativeIo.linuxCgroupMembership(original);
+                if (observation == null || observation.mount() == null || observation.directory() == null
+                        || observation.path() == null) {
+                    throw new IOException("Unknown original cgroup membership outcome");
                 }
                 requireIdentityQuery(caller, original);
                 return observation;

@@ -95,6 +95,7 @@ public class NativeIOCgroupRootTest {
         var failure = assertThrows(NativeIOException.class, unsupported::currentCgroupRootFileSystemType);
         assertTrue(failure.getMessage().contains("unsupported"));
         assertThrows(NativeIOException.class, () -> unsupported.directoryFileSystem(null));
+        assertThrows(NativeIOException.class, () -> unsupported.linuxCgroupMembership(null));
     }
 
     @Test
@@ -142,10 +143,13 @@ public class NativeIOCgroupRootTest {
             var io = new NativeIOImpl();
             var identity = io.fileIdentity(channel);
             var failure = assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(channel));
+            var membershipFailure = assertThrows(NativeIOException.class, () -> io.linuxCgroupMembership(channel));
             if (!SystemUtils.IS_OS_LINUX) {
                 assertTrue(failure.getMessage(), failure.getMessage().contains("unsupported"));
+                assertTrue(membershipFailure.getMessage(), membershipFailure.getMessage().contains("unsupported"));
                 if (SystemUtils.IS_OS_MAC) {
                     assertEquals(45, failure.getErrno()); // Darwin ENOTSUP.
+                    assertEquals(45, membershipFailure.getErrno());
                 }
                 System.out.println("CGROUP_MOUNT_NATIVE_UNSUPPORTED errno=" + failure.getErrno());
             }
@@ -166,6 +170,7 @@ public class NativeIOCgroupRootTest {
             String cgroup = Files.readSymbolicLink(proc.resolve("ns/cgroup")).toString();
             if (!cgroup.equals("cgroup:[4026531835]")) {
                 assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(channel));
+                assertThrows(NativeIOException.class, () -> io.linuxCgroupMembership(channel));
                 return;
             }
             List<String[]> rows = Files.readAllLines(proc.resolve("mountinfo"), StandardCharsets.ISO_8859_1).stream()
@@ -184,10 +189,30 @@ public class NativeIOCgroupRootTest {
             assertEquals(new NativeIO.LinuxCgroupMount(Long.parseLong(expected[0]), Long.parseLong(expected[1]),
                     namespace), observed);
             assertEquals(observed, io.linuxCgroupMount(channel));
+            assertActualMembership(root, proc, channel, io, observed);
             channel.close();
             assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(channel));
+            assertThrows(NativeIOException.class, () -> io.linuxCgroupMembership(channel));
             System.out.println("ACTUAL_LINUX_FIXED_CGROUP_MOUNT " + observed);
         }
+    }
+
+    private static void assertActualMembership(Path root, Path proc, FileChannel channel, NativeIO io,
+                                                NativeIO.LinuxCgroupMount mount) throws Exception {
+        String row = Files.readString(proc.resolve("cgroup"), StandardCharsets.ISO_8859_1);
+        if (!row.matches("0::/(?:[A-Za-z0-9:_.@/-]|\\\\x[0-9A-Fa-f]{2})*\n")) {
+            assertThrows(NativeIOException.class, () -> io.linuxCgroupMembership(channel));
+            return;
+        }
+        String path = row.substring(3, row.length() - 1);
+        var member = io.linuxCgroupMembership(channel);
+        assertEquals(path, member.path());
+        assertEquals(mount, member.mount());
+        Path directory = root.resolve(path.substring(1));
+        assertEquals(Files.getAttribute(directory, "unix:dev"), member.directory().device());
+        assertEquals(Files.getAttribute(directory, "unix:ino"), member.directory().inode());
+        assertEquals(member, io.linuxCgroupMembership(channel));
+        System.out.println("ACTUAL_LINUX_CALLING_THREAD_CGROUP_MEMBERSHIP " + member);
     }
 
     private static void assertDirectoryFacts(Path binary, Path directory) throws Exception {
@@ -268,6 +293,22 @@ public class NativeIOCgroupRootTest {
                 assertEquals(directory, io.directoryFileSystem(channel));
             }
             System.out.println("OLD_JNI_CGROUP_MOUNT_UNSUPPORTED");
+        }
+    }
+
+    /** The old library has the directory and mount symbols, and lacks the combined membership symbol. */
+    public static final class OldMembershipLibraryProbe {
+        public static void main(String[] args) throws Exception {
+            var io = new NativeIOImpl();
+            try (FileChannel channel = FileChannel.open(Path.of(args[0]), StandardOpenOption.READ)) {
+                var directory = io.directoryFileSystem(channel);
+                var mountFailure = assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(channel));
+                assertTrue(!(mountFailure.getCause() instanceof LinkageError));
+                var failure = assertThrows(NativeIOException.class, () -> io.linuxCgroupMembership(channel));
+                assertTrue(failure.getCause() instanceof UnsatisfiedLinkError);
+                assertEquals(directory, io.directoryFileSystem(channel));
+            }
+            System.out.println("OLD_JNI_CGROUP_MEMBERSHIP_UNSUPPORTED");
         }
     }
 }

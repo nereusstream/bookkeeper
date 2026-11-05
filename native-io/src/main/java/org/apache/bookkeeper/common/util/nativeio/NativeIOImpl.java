@@ -406,17 +406,38 @@ public class NativeIOImpl implements NativeIO {
     public LinuxCgroupMount linuxCgroupMount(java.nio.channels.FileChannel channel) throws NativeIOException {
         try {
             long[] values = NativeIOJni.linuxCgroupMount(channel);
-            if (values == null || values.length != 3
-                    || values[0] <= 0 || values[0] > Integer.MAX_VALUE
-                    || values[1] <= 0 || values[1] > Integer.MAX_VALUE
-                    || values[2] <= 0 || values[2] > 0xffff_ffffL) {
-                throw new NativeIOException("Invalid original Linux cgroup mount observation");
-            }
-            return new LinuxCgroupMount(values[0], values[1], values[2]);
+            return decodeCgroupMount(values, 3);
         } catch (LinkageError unavailable) {
             var failure = new NativeIOException("Original Linux cgroup mount is unavailable in this JNI library");
             failure.initCause(unavailable);
             throw failure;
         }
+    }
+
+    @Override
+    public LinuxCgroupMembership linuxCgroupMembership(java.nio.channels.FileChannel root) throws NativeIOException {
+        try {
+            Object[] observed = NativeIOJni.linuxCgroupMembership(root);
+            if (observed == null || observed.length != 2 || !(observed[0] instanceof long[] values)
+                    || !(observed[1] instanceof String path) || !path.startsWith("/") || path.length() > 4095) {
+                throw new NativeIOException("Invalid original Linux cgroup membership observation");
+            }
+            var mount = decodeCgroupMount(values, 5);
+            return new LinuxCgroupMembership(mount, new FileIdentity(values[3], values[4]), path);
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Original Linux cgroup membership is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    private static LinuxCgroupMount decodeCgroupMount(long[] values, int expectedLength) throws NativeIOException {
+        if (values == null || values.length != expectedLength
+                || values[0] <= 0 || values[0] > Integer.MAX_VALUE
+                || values[1] <= 0 || values[1] > Integer.MAX_VALUE
+                || values[2] <= 0 || values[2] > 0xffff_ffffL) {
+            throw new NativeIOException("Invalid original Linux cgroup mount observation");
+        }
+        return new LinuxCgroupMount(values[0], values[1], values[2]);
     }
 }

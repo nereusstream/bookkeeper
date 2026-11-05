@@ -414,11 +414,20 @@ fn close_proc_identity_fd<T>(
     fd: libc::c_int,
     outcome: ProcIdentityResult<T>,
 ) -> ProcIdentityResult<T> {
+    close_identity_fd(fd, outcome, "proc identity close failed")
+}
+
+#[cfg(target_os = "linux")]
+fn close_identity_fd<T>(
+    fd: libc::c_int,
+    outcome: ProcIdentityResult<T>,
+    operation: &'static str,
+) -> ProcIdentityResult<T> {
     let closed = unsafe { libc::close(fd) };
     let close_error = if closed == 0 {
         None
     } else {
-        Some(proc_identity_errno("proc identity close failed"))
+        Some(proc_identity_errno(operation))
     };
     match outcome {
         Err(first) => Err(first),
@@ -1637,6 +1646,57 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     }
 }
 
+/// Actual calling-thread membership bound to the original cgroup mount and directory.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_linuxCgroupMembership(
+    mut env: JNIEnv,
+    _class: JClass,
+    _channel: JObject,
+) -> jobjectArray {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(observation) =
+            read_original_file_facts(&mut env, &_channel, OriginalFileQuery::CgroupMembership)
+        else {
+            return ptr::null_mut();
+        };
+        let Some(member) = observation.member else {
+            throw_exception(&mut env, "Original cgroup membership is missing");
+            return ptr::null_mut();
+        };
+        let [mount, parent, namespace] = observation.values;
+        let result = (|| -> jni::errors::Result<jobjectArray> {
+            let numbers = env.new_long_array(5)?;
+            env.set_long_array_region(
+                &numbers,
+                0,
+                &[
+                    mount,
+                    parent,
+                    namespace,
+                    member.device as jlong,
+                    member.inode as jlong,
+                ],
+            )?;
+            let path = env.new_string(member.path)?;
+            let array = env.new_object_array(2, "java/lang/Object", JObject::null())?;
+            env.set_object_array_element(&array, 0, numbers)?;
+            env.set_object_array_element(&array, 1, path)?;
+            Ok(array.into_raw())
+        })();
+        result.unwrap_or(ptr::null_mut())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Linux cgroup membership query is unsupported",
+            libc::ENOTSUP,
+        );
+        ptr::null_mut()
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy)]
 enum OriginalFileQuery {
@@ -1644,6 +1704,35 @@ enum OriginalFileQuery {
     DirectoryFileSystem,
     #[cfg(target_os = "linux")]
     CgroupMount,
+    #[cfg(target_os = "linux")]
+    CgroupMembership,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct OriginalFileObservation {
+    values: [jlong; 3],
+    #[cfg(target_os = "linux")]
+    member: Option<cgroup_mount::Member>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn read_original_file_facts(
+    env: &mut JNIEnv,
+    channel: &JObject,
+    query: OriginalFileQuery,
+) -> Option<OriginalFileObservation> {
+    match with_original_file_stat(env, channel, query) {
+        Ok(result) => result,
+        Err(error) => {
+            if !env.exception_check().unwrap_or(true) {
+                throw_exception(
+                    env,
+                    &format!("Original file-channel identity failed: {error}"),
+                );
+            }
+            None
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1652,24 +1741,13 @@ fn original_file_facts(
     channel: &JObject,
     query: OriginalFileQuery,
 ) -> jlongArray {
-    let values = match with_original_file_stat(env, channel, query) {
-        Ok(Some(value)) => value,
-        Ok(None) => return ptr::null_mut(),
-        Err(error) => {
-            if !env.exception_check().unwrap_or(true) {
-                throw_exception(
-                    env,
-                    &format!("Original file-channel identity failed: {error}"),
-                );
-            }
-            return ptr::null_mut();
-        }
+    let Some(observed) = read_original_file_facts(env, channel, query) else {
+        return ptr::null_mut();
     };
-    let values = match query {
-        OriginalFileQuery::Identity => &values[..2],
-        OriginalFileQuery::DirectoryFileSystem => &values[..],
-        #[cfg(target_os = "linux")]
-        OriginalFileQuery::CgroupMount => &values[..],
+    let values = if matches!(query, OriginalFileQuery::Identity) {
+        &observed.values[..2]
+    } else {
+        &observed.values[..]
     };
     let array = match env.new_long_array(values.len() as jint) {
         Ok(value) => value,
@@ -1686,7 +1764,7 @@ fn with_original_file_stat(
     env: &mut JNIEnv,
     channel: &JObject,
     query: OriginalFileQuery,
-) -> jni::errors::Result<Option<[jlong; 3]>> {
+) -> jni::errors::Result<Option<OriginalFileObservation>> {
     if channel.is_null() {
         throw_exception_with_error_code(env, "Original file channel is null", libc::EINVAL);
         return Ok(None);
@@ -1756,7 +1834,7 @@ fn with_original_file_stat(
         }
         return Ok(None);
     }
-    let observed = (|| -> jni::errors::Result<Option<[jlong; 3]>> {
+    let observed = (|| -> jni::errors::Result<Option<OriginalFileObservation>> {
         if env.exception_check()? {
             return Ok(None);
         }
@@ -1794,9 +1872,13 @@ fn with_original_file_stat(
             return Ok(None);
         }
         let status = unsafe { status.assume_init() };
-        let identity = [status.st_dev as jlong, status.st_ino as jlong, 0];
-        let values = match query {
-            OriginalFileQuery::Identity => identity,
+        let mut observation = OriginalFileObservation {
+            values: [status.st_dev as jlong, status.st_ino as jlong, 0],
+            #[cfg(target_os = "linux")]
+            member: None,
+        };
+        match query {
+            OriginalFileQuery::Identity => {}
             OriginalFileQuery::DirectoryFileSystem => {
                 if status.st_mode & libc::S_IFMT != libc::S_IFDIR {
                     throw_exception_with_error_code(
@@ -1812,17 +1894,23 @@ fn with_original_file_stat(
                     return Ok(None);
                 }
                 let fs = unsafe { fs.assume_init() };
-                [identity[0], identity[1], fs.f_type as jlong]
+                observation.values[2] = fs.f_type as jlong;
             }
             #[cfg(target_os = "linux")]
-            OriginalFileQuery::CgroupMount => match cgroup_mount::observe(fd, &status) {
-                Ok(observed) => observed.map(|value| value as jlong),
-                Err((operation, error)) => {
-                    throw_exception_with_error_code(env, operation, error);
-                    return Ok(None);
+            OriginalFileQuery::CgroupMount | OriginalFileQuery::CgroupMembership => {
+                let include_membership = matches!(query, OriginalFileQuery::CgroupMembership);
+                match cgroup_mount::observe(fd, &status, include_membership) {
+                    Ok(observed) => {
+                        observation.values = observed.mount.map(|value| value as jlong);
+                        observation.member = observed.member;
+                    }
+                    Err((operation, error)) => {
+                        throw_exception_with_error_code(env, operation, error);
+                        return Ok(None);
+                    }
                 }
-            },
-        };
+            }
+        }
         let final_fd = env
             .get_field_unchecked(&descriptor, fd_field, ReturnType::Primitive(Primitive::Int))?
             .i()?;
@@ -1850,7 +1938,7 @@ fn with_original_file_stat(
             );
             return Ok(None);
         }
-        Ok(Some(values))
+        Ok(Some(observation))
     })();
     // MonitorExit is permitted with a pending exception; never strand a descriptor on any failure branch.
     let exited = unsafe { ((**raw).MonitorExit.unwrap())(raw, descriptor.as_raw()) };
