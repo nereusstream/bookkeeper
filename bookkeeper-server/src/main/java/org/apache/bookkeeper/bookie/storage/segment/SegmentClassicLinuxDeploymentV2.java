@@ -328,7 +328,6 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
         }
         ordered(files.stream().map(File::path).toList());
         ordered(units.stream().map(Unit::id).toList());
-        ordered(installLinks.stream().map(InstallLink::path).toList());
         role(files, provider.image(), Role.JDK_RUNTIME);
         role(files, loading.systemctl(), Role.SYSTEMCTL);
         role(files, loading.loader(), Role.LOADER);
@@ -587,6 +586,12 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
                 }
             }
         }
+        requireInstallLinkReferences(units, links);
+    }
+
+    /** Original install link relationships only; the caller separately establishes the full unit contract. */
+    static void requireInstallLinkReferences(List<Unit> units, List<InstallLink> links) {
+        ordered(links.stream().map(InstallLink::path).toList());
         for (InstallLink link : links) {
             reference(link.targetUnit(), units.size());
             Unit target = units.get(link.targetUnit());

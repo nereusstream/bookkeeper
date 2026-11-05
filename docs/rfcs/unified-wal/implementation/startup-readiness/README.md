@@ -1218,6 +1218,16 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的 systemd 安装符号链接观察
+
+2026-11-05在父`d67206d76ce7af97d5626cc59518a209d8d7685f`上，正常schema2启动在unit文件检查之后、独立dropper/childCommand/私钥之前调用`verifyLinuxInstallLinks(deadline)`。先取owner的`originalLinuxDeployment`，再复用D2有序install path及原unit关系检查：targetUnit、sourceUnit、leaf属于目标Names、依赖目录后缀与TARGET/声明关系均在首目标I/O前核验。冻结units最多32、links最多1024，空links合法；数据入口仅units/links/deadline并共用私有体，不授生产来源或资格。
+
+每条原link只把本叶映射到其原target，复用`observeLinuxPath(ALIAS, ..., present=true)`，不授权加载器alias或其他安装链接作为父路径。原native `observeSymbolicLink`的lstat/readlink/lstat、链接owner/单链接、原始UTF8目标字节/身份检查保持；物理parent身份及受保护祖先链在完整叶观察前后复核，最终NOFOLLOW叶身份再核。结果保留原index、kind/path/raw target/sourceUnit/targetUnit与实际path observation。目标中的相对路径和dot段按原字节比较，不因realpath相同接受不同写法；不打开目标、不要求它的realpath对应fragment，也不创建/修复链接、扫描声明外入口或产生票据。成功只说明逐条磁盘链接本次观察通过，不保证跨链接原子快照或声明外没有入口。
+
+新增5项真实临时链接测试覆盖：UNIT_LOOKUP（含Id同名）、WANTS归属/原序、.././目标及悬空目标可观察、空表不触及目标I/O；后条链接改为同一realpath的不同raw target仍拒绝；native叶观察后父目录mode改为0777拒绝；关系与超限表pre-I/O拒绝；typed缺原source前置拒绝。新增5＋原unit5＋walker/alias替换/owner排空与保护5＋Inputs6＋DeploymentV2 13＋Launcher3共37项全过，0失败/错误/跳过，Java Spotless/Checkstyle退出0。四code及1450原输入与test/style快照、原class/日志/XML绑定，9406191e…库未改/重建；证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-install-links-evidence-d67206d7`，旧阶段不移绑。
+
+[systemd 255](https://www.freedesktop.org/software/systemd/man/255/systemd.unit.html)区分load path内alias和外部linked unit。这里不判定manager当前采用哪个unit、lookup优先级或有效依赖；后续实际FragmentPath/有序DropInPaths、NeedDaemonReload、正反依赖及额外激活来源仍需原manager观察与A/文件/B复核。正常typed接线/先后为静态核对，动态走共用数据体；批准Linux/vendor阳性NOT_EXECUTED。不运行systemctl/daemon-reload/helper/backend/diagnostics或显式初始化ProcessImpl，原guard不松；完整Unix资格及parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled及完整目标active保持。
+
 ## 正常 D2 launcher 的 unit 主文件与有序 drop-in 观察
 
 2026-11-05在父`56ccf5c724622240e4c19feedbc088b623b6d679`上，正常schema2启动在helper材料之后、独立dropper/childCommand/私钥之前调用`verifyLinuxUnitFiles(deadline)`。入口先复核owner的`originalLinuxDeployment`，再复用D2解码中的`requireUnitFileReferences`检查整张unit表的fragment/UNIT_FRAGMENT和每个dropIns/UNIT_DROPIN索引；这些检查全部先于目标I/O。随后按原units顺序，逐fragment及其原序drop-in读取对应member的canonical physical路径、long长度和批准SHA。结果保留unit索引、fragment的-1或drop-in位置、member索引、实读路径/摘要/identity/parents；共享member按各引用再次读取，未引用的同role文件不纳入。数据入口仅files/units/deadline并共用同一私有体，不授Installed或资格，不接caller Path、backend或loader aliases。

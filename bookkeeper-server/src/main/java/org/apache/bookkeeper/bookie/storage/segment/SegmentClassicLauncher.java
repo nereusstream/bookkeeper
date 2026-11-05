@@ -291,6 +291,7 @@ public final class SegmentClassicLauncher {
             trust.verifyLinuxCandidateContexts(deadline);
             trust.verifyLinuxJdkHelper(deadline);
             trust.verifyLinuxUnitFiles(deadline);
+            trust.verifyLinuxInstallLinks(deadline);
         }
         trust.verifyLauncherDropper(input, deadline);
         final List<String> childCommand = input.childCommand(material, program);

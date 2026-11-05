@@ -120,6 +120,10 @@ final class SegmentClassicLaunchTrust {
     record LinuxUnitFileObservation(int unit, int dropIn, int member, Path path,
                                     SegmentClassicHandoff.Digest sha256, LinuxFileObservation material) { }
 
+    /** Actual disk link and original relationship only; not systemd lookup priority or an active dependency. */
+    record LinuxInstallLinkObservation(int link, SegmentClassicLinuxDeploymentV2.InstallLink declaration,
+                                       LinuxPathObservation path) { }
+
     /** Original member observations only; not a loader choice, installed provenance or qualification. */
     record LinuxElfMemberObservation(int member, Identity identity, List<Identity> parents,
                                      SegmentClassicHandoff.Digest sha256, SegmentClassicLinuxElf.Image2 elf) {
@@ -2340,6 +2344,73 @@ final class SegmentClassicLaunchTrust {
         Path path = linuxMaterialPath(file.path(), deadline);
         var observed = hashFile(path, file.length(), file.sha256(), false, LinuxContentKind.NONE, true, deadline);
         return new LinuxUnitFileObservation(unit, dropIn, member, path, observed.content().sha256(), observed.legacy());
+    }
+
+    /** Only original D2 install links; disk facts cannot establish effective manager aliases or dependencies. */
+    synchronized List<LinuxInstallLinkObservation> verifyLinuxInstallLinks(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            return observeLinuxInstallLinks(deployment.units(), deployment.installLinks(), deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Data-only declarations share the reader; cannot confer installed provenance or a manager observation. */
+    synchronized List<LinuxInstallLinkObservation> readLinuxInstallLinks(
+            List<SegmentClassicLinuxDeploymentV2.Unit> units,
+            List<SegmentClassicLinuxDeploymentV2.InstallLink> links, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxInstallLinks(units, links, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private List<LinuxInstallLinkObservation> observeLinuxInstallLinks(
+            List<SegmentClassicLinuxDeploymentV2.Unit> declaredUnits,
+            List<SegmentClassicLinuxDeploymentV2.InstallLink> declarations, long deadline) throws IOException {
+        requireTime(deadline);
+        var units = List.copyOf(declaredUnits);
+        var links = List.copyOf(declarations);
+        if (units.isEmpty() || units.size() > 32 || links.size() > 1024) {
+            throw new IOException("Install link tables exceed their original D2 bounds");
+        }
+        try {
+            SegmentClassicLinuxDeploymentV2.requireInstallLinkReferences(units, links);
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Install link relationships differ from their original unit declarations", invalid);
+        }
+        var result = new ArrayList<LinuxInstallLinkObservation>();
+        for (int i = 0; i < links.size(); i++) {
+            var link = links.get(i);
+            Path path = linuxMaterialPath(link.path(), deadline);
+            requireUtf8LoadingText(link.target(), deadline);
+            var leafOnly = Map.of(path, link.target());
+            Path parent = path.getParent();
+            var parentIdentity = checked(parent).parent();
+            var parents = chain(parent);
+            var before = observeLinuxPath(LinuxPathKind.ALIAS, path, leafOnly, true, deadline);
+            if (!parentIdentity.equals(checked(parent).parent()) || !parents.equals(chain(parent))
+                    || !before.identity().equals(SegmentClassicHandoffPaths.loadingIdentity(path))) {
+                throw new IOException("Install link or its protected parent chain changed during observation");
+            }
+            result.add(new LinuxInstallLinkObservation(i, link, before));
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+        return List.copyOf(result);
     }
 
     /** Independent member/subgraph data only; does not establish a complete program, typed source or backend. */

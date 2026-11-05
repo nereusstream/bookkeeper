@@ -2852,6 +2852,151 @@ public class SegmentClassicLaunchTrustTest {
         assertTrue(owner.closeAndDrain().drained());
     }
 
+    private record InstallFixture(List<SegmentClassicLinuxDeploymentV2.Unit> units,
+                                  List<SegmentClassicLinuxDeploymentV2.InstallLink> links) { }
+
+    private InstallFixture installFixture() throws Exception {
+        var unitFiles = unitFixture();
+        Path directory = Files.createDirectory(root.resolve("links"));
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
+        Path wants = Files.createDirectory(directory.resolve("multi-user.target.wants"));
+        Files.setPosixFilePermissions(wants, PosixFilePermissions.fromString("rwx------"));
+        var links = List.of(
+                new SegmentClassicLinuxDeploymentV2.InstallLink(SegmentClassicLinuxDeploymentV2.LinkKind.UNIT_LOOKUP,
+                        directory.resolve("default.target").toString(), "../missing-target", -1, 1),
+                new SegmentClassicLinuxDeploymentV2.InstallLink(SegmentClassicLinuxDeploymentV2.LinkKind.UNIT_LOOKUP,
+                        directory.resolve("launcher.service").toString(), ".././unit-0", -1, 0),
+                new SegmentClassicLinuxDeploymentV2.InstallLink(SegmentClassicLinuxDeploymentV2.LinkKind.WANTS,
+                        wants.resolve("launcher.service").toString(), "../.././unit-0", 1, 0));
+        for (var link : links) {
+            Files.createSymbolicLink(Path.of(link.path()), Path.of(link.target()));
+            assertEquals(link.target(), Files.readSymbolicLink(Path.of(link.path())).toString());
+        }
+        return new InstallFixture(unitFiles.units(), links);
+    }
+
+    @Test
+    public void installLinksKeepLookupIdDependencyAndRawTargetsWithoutOpeningThem() throws Exception {
+        var fixture = installFixture();
+        assertFalse(Files.exists(Path.of(fixture.links().get(0).path())));
+        var owner = owner();
+        owner.initialize();
+        try {
+            var result = owner.readLinuxInstallLinks(fixture.units(), fixture.links(),
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(List.of(0, 1, 2), result.stream().map(r -> r.link()).toList());
+            assertEquals(fixture.links(), result.stream().map(r -> r.declaration()).toList());
+            for (var observed : result) {
+                Path path = Path.of(observed.declaration().path());
+                assertEquals(path, observed.path().entry());
+                assertEquals(path, observed.path().resolved());
+                assertEquals(((Number) Files.getAttribute(path, "unix:ino", java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                        .longValue(), observed.path().identity().inode());
+                assertEquals(0120000, observed.path().identity().mode() & 0170000);
+                assertNull(observed.path().absentAt());
+            }
+            assertThrows(UnsupportedOperationException.class, result::clear);
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Empty install link table reached target I/O");
+            })) {
+                assertTrue(owner.readLinuxInstallLinks(fixture.units(), List.of(),
+                        SegmentClassicLinuxElfTest.deadline()).isEmpty());
+            }
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void installLinksRejectLaterDifferentRawTargetEvenWhenItResolvesToTheSameFile() throws Exception {
+        var fixture = installFixture();
+        var last = fixture.links().get(2);
+        Path path = Path.of(last.path());
+        Path expected = path.toRealPath();
+        Files.delete(path);
+        Files.createSymbolicLink(path, Path.of("../../unit-0"));
+        assertEquals(expected, path.toRealPath());
+        var owner = owner();
+        owner.initialize();
+        try {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxInstallLinks(fixture.units(),
+                    fixture.links(), SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("exact target bytes differ"));
+            assertThrows(IOException.class, owner::parsed);
+            var drained = owner.closeAndDrain();
+            assertTrue(drained.drained());
+            assertSame(failure, drained.launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void installLinksRecheckProtectedParentAfterTheNativeLeafObservation() throws Exception {
+        var fixture = installFixture();
+        Path link = Path.of(fixture.links().get(2).path());
+        Path parent = link.getParent();
+        NativeIO actual = new NativeIOImpl();
+        var changed = new AtomicBoolean();
+        SegmentClassicLaunchTrust owner;
+        try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                (mock, context) -> doAnswer(call -> {
+                    String path = call.getArgument(0);
+                    var result = actual.observeSymbolicLink(path);
+                    if (path.equals(link.toString()) && changed.compareAndSet(false, true)) {
+                        Files.setPosixFilePermissions(parent, PosixFilePermissions.fromString("rwxrwxrwx"));
+                    }
+                    return result;
+                }).when(mock).observeSymbolicLink(any(String.class)))) {
+            owner = owner();
+        }
+        owner.initialize();
+        try {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxInstallLinks(fixture.units(),
+                    fixture.links(), SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(changed.get());
+            assertTrue(failure.getMessage(), failure.getMessage().contains("protected parent chain changed"));
+            assertThrows(IOException.class, owner::parsed);
+        } finally {
+            Files.setPosixFilePermissions(parent, PosixFilePermissions.fromString("rwx------"));
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void installLinksRejectRelationshipsAndExcessiveTablesBeforeAnyTargetIo() throws Exception {
+        var fixture = installFixture();
+        var last = fixture.links().get(2);
+        var wrong = new SegmentClassicLinuxDeploymentV2.InstallLink(last.kind(), last.path(), last.target(), 0, 0);
+        for (var links : List.of(List.of(fixture.links().get(0), fixture.links().get(1), wrong),
+                java.util.Collections.nCopies(1025, last))) {
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Invalid install link declarations reached target I/O");
+            })) {
+                assertThrows(IOException.class, () -> owner.readLinuxInstallLinks(fixture.units(), links,
+                        SegmentClassicLinuxElfTest.deadline()));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void typedInstallLinksWithoutOriginalProviderSourceCannotReachTargetIo() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound typed install link read reached target I/O");
+        })) {
+            assertThrows(IOException.class, () -> owner.verifyLinuxInstallLinks(SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
     @Test
     public void typedJdkHelperWithoutOriginalProviderSourceCannotReachTargetIo() throws Exception {
         var owner = owner();
