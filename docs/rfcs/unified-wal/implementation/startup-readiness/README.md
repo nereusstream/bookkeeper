@@ -1218,9 +1218,17 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的 helper 直接依赖默认目录核验
+
+正常 D2 在原 helper 组入口 `verifyLinuxJdkHelperNeededCandidates` 内串行检查同一条直接 `DT_NEEDED`。cache A/B 完成后只取该次实际 requester，先复核原 helper 路径和身份，再用其原 ordinal、name 及实际 ELF 标志核验默认目录。默认阶段无需重开 requester 或 cache，整组前后仍复核原 helper 与 PT_INTERP。无直接 NEEDED 时，两阶段都不选择或读取目标材料。
+
+原 policy 的目录顺序保留，实际 requester 的 `DF_1_NODEFLIB` 抑制默认目录时不构造四位置或探测目标。其余请求依次检查 v4/v3/v2/base 的实际路径、presence、原候选批准、held fd 与摘要。cache 有匹配行时仍独立检查默认候选，因为本阶段只核验条件材料。单目录完成后，启动组仅保留用于阶段末复核的路径与身份。cache 图与完整候选 ELF 不跨阶段或原规则累积。只有两阶段都通过才记录完成索引，独立 default 数据入口仍保留预检顺序与详细返回。[glibc 2.39 默认目录分支](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)
+
+在父 `91d3800755` 上沿用 acf9afec… native 库。主回归 72 项和独立 requester-tag 回归 5 项全部通过，Java style 通过。实际临时文件覆盖清除和保留 NODEFLIB 的 helper、policy 顺序、相同 requester 读取次数、重复 ordinal 的后项拒绝及最后目录读取期间替换先前候选。真实批准 Linux、阶段可达性与选择、递归依赖和执行期间 native 环境约束仍待验证，原 childCommand 和 diagnostics 继续拒绝。
+
 ## 正常 D2 launcher 的 helper 直接依赖 cache 核验
 
-正常 D2 launcher 在第二次 native 环境采样之后、`childCommand` 之前，调用只接收原 deadline 的 `verifyLinuxJdkHelperNeededCache`。原 owner 先核原 D2 source/provider，再从已完成的私有 `backendObservation` 取得 helper，复核它仍对应同一批准 program、成员与确切执行 context。整组读取前后复核该 helper 及其已绑定 PT_INTERP 的实际路径和身份。
+在 `91d3800755` 上，正常 D2 launcher 在第二次 native 环境采样之后、`childCommand` 之前，调用当时只接收原 deadline 的 `verifyLinuxJdkHelperNeededCache`。该入口随后扩为上节的 cache 与默认目录核验。原 owner 先核原 D2 source/provider，再从已完成的私有 `backendObservation` 取得 helper，复核它仍对应同一批准 program、成员与确切执行 context。整组读取前后复核该 helper 及其已绑定 PT_INTERP 的实际路径和身份。
 
 每条直接 `DT_NEEDED` 按原规则索引处理，重复名称仍按各自的 ordinal 和候选集合独立观察。共享 cache reader 在打开 cache 前比较实际 requester 与已绑定 helper，随后沿原 cache A/B、相关 LP64 行、候选逻辑路径、held fd、文件摘要和首次关闭合同校验。没有直接 NEEDED 时，本次 helper 核验不选 cache 规则或打开 cache。显式缺失、空匹配和 stale 路径沿单条观察的原语义处理，slash/DST 等不支持的名称使整组失败。
 

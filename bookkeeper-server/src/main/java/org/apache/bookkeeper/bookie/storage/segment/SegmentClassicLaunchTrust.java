@@ -182,6 +182,13 @@ final class SegmentClassicLaunchTrust {
 
     private record LinuxDirectoryPlan(int directory, List<String> logicals) { }
 
+    private record LinuxDirectoryPaths(int directory, LinuxPathObservation directoryPath,
+                                       List<LinuxPathObservation> positions) { }
+
+    private record LinuxNeededDefaultPlan(SegmentClassicLinuxDeploymentV2.NeededRule rule,
+            SegmentClassicLinuxDeploymentV2.Context context, SegmentClassicLinuxDeploymentV2.Elf metadata,
+            String name, List<LinuxDirectoryPlan> directories) { }
+
     enum LinuxRequesterTag { NONE, RPATH, RUNPATH }
 
     /** This requester's own tag facts only; stage reachability, inhibition and active positions remain unobserved. */
@@ -2548,14 +2555,14 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    /** Only this owner's actual cached helper can select the direct NEEDED cache requests. */
-    synchronized void verifyLinuxJdkHelperNeededCache(long deadline) throws IOException {
+    /** Only this owner's actual cached helper can select the direct NEEDED candidate observations. */
+    synchronized void verifyLinuxJdkHelperNeededCandidates(long deadline) throws IOException {
         requireReady();
         initializingThread = Thread.currentThread();
         try {
             var deployment = originalLinuxDeployment(deadline);
             if (backendInFlight || backendObservation == null) {
-                throw new IOException("Original cached JDK helper is required for its NEEDED cache observations");
+                throw new IOException("Original cached JDK helper is required for its NEEDED candidate observations");
             }
             var loading = deployment.loading();
             var members = fixedLinuxContextMembers(deployment.files(), loading, deadline);
@@ -2563,10 +2570,10 @@ final class SegmentClassicLaunchTrust {
             var selected = selectLinuxJdkHelper(verifiedProgram.javaHome(), verifiedProgram.value().files(),
                     members, loading, deadline);
             if (!selected.equals(bound.declaration())) {
-                throw new IOException("Original cached JDK helper declaration changed before its NEEDED cache reads");
+                throw new IOException("Original cached JDK helper declaration changed before its NEEDED reads");
             }
             int cacheRule = bound.helper().content().elf().needed().isEmpty() ? -1 : fixedLinuxCacheRule(loading);
-            observeLinuxJdkHelperNeededCache(members, loading, bound.helper(), bound.interpreter(),
+            observeLinuxJdkHelperNeededCandidates(members, loading, bound.helper(), bound.interpreter(),
                     cacheRule, deadline);
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
@@ -2577,11 +2584,11 @@ final class SegmentClassicLaunchTrust {
     }
 
     /** Isolated declaration subtree only. The helper and interpreter are read by this owner. */
-    synchronized List<Integer> readLinuxJdkHelperNeededCache(
+    synchronized List<Integer> readLinuxJdkHelperNeededCandidates(
             List<SegmentClassicLinuxDeploymentV2.File> declared, SegmentClassicLinuxDeploymentV2.Loading loading,
             int helperContext, int cacheRule, long deadline) throws IOException {
         if (production) {
-            throw new IOException("Data-only JDK helper cache observations cannot select a production requester");
+            throw new IOException("Data-only JDK helper candidate observations cannot select a production requester");
         }
         requireReady();
         initializingThread = Thread.currentThread();
@@ -2602,7 +2609,7 @@ final class SegmentClassicLaunchTrust {
             var helper = observeLinuxLoadPath(helperContext, context, member,
                     linuxElfDeclaration(loading, context.file()), loading.interpreter(), aliases, deadline);
             var interpreter = observeLinuxJdkHelperInterpreter(helper, members, loading, aliases, deadline);
-            return observeLinuxJdkHelperNeededCache(members, loading, helper, interpreter, cacheRule, deadline);
+            return observeLinuxJdkHelperNeededCandidates(members, loading, helper, interpreter, cacheRule, deadline);
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
             throw failure;
@@ -2611,7 +2618,7 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    private List<Integer> observeLinuxJdkHelperNeededCache(
+    private List<Integer> observeLinuxJdkHelperNeededCandidates(
             List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
             LinuxLoadPathObservation helper, LinuxLoadPathObservation interpreter, int cacheRule, long deadline)
             throws IOException {
@@ -2621,8 +2628,11 @@ final class SegmentClassicLaunchTrust {
         for (int i = 0; i < loading.needed().size(); i++) {
             requireTime(deadline);
             if (loading.needed().get(i).requester() == helper.context()) {
-                // A single observation can retain two cache images. Keep only its completed original index.
-                observeLinuxNeededCache(members, loading, i, cacheRule, helper, deadline);
+                // Keep only this requester's observation across the stages, not either parsed cache image.
+                var requester = observeLinuxNeededCache(members, loading, i, cacheRule, helper, deadline).requester();
+                var plan = planLinuxNeededDefaults(loading, i, deadline);
+                recheckLinuxJdkHelperMaterial(requester, null, aliases, deadline);
+                observeLinuxDefaultDirectories(members, loading, i, requester, plan, aliases, null, deadline);
                 completedRules.add(i);
             }
         }
@@ -3303,14 +3313,24 @@ final class SegmentClassicLaunchTrust {
     private void recheckLinuxDirectoryPositions(LinuxNeededDirectoryObservation observed,
             SegmentClassicLinuxDeploymentV2.Loading loading, Map<Path, String> aliases, long deadline)
             throws IOException {
+        recheckLinuxDirectoryPaths(directoryPaths(observed), loading, aliases, deadline);
+    }
+
+    private static LinuxDirectoryPaths directoryPaths(LinuxNeededDirectoryObservation observed) {
+        return new LinuxDirectoryPaths(observed.directory(), observed.directoryPath(),
+                observed.positions().stream().map(LinuxNeededDirectoryPosition::path).toList());
+    }
+
+    private void recheckLinuxDirectoryPaths(LinuxDirectoryPaths observed,
+            SegmentClassicLinuxDeploymentV2.Loading loading, Map<Path, String> aliases, long deadline)
+            throws IOException {
         var declaredDirectory = loading.directories().get(observed.directory());
         var directory = new LinuxSearchDirectory(observed.directory(), declaredDirectory.path(),
                 declaredDirectory.present());
         Path directoryEntry = loadingNativePath(directory.logical(), deadline);
         for (var position : observed.positions()) {
-            var terminal = observeLinuxPath(LinuxPathKind.LOOKUP, loadingNativePath(position.logical(), deadline),
-                    aliases, false, deadline);
-            if (!position.path().equals(terminal)) {
+            var terminal = observeLinuxPath(LinuxPathKind.LOOKUP, position.entry(), aliases, false, deadline);
+            if (!position.equals(terminal)) {
                 throw new IOException("Fixed built-in candidate changed across its directory observation");
             }
         }
@@ -3474,6 +3494,22 @@ final class SegmentClassicLaunchTrust {
             List<SegmentClassicLinuxDeploymentV2.File> declared,
             SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, long deadline) throws IOException {
         var members = fixedLinuxContextMembers(declared, loading, deadline);
+        var plan = planLinuxNeededDefaults(loading, ruleIndex, deadline);
+        // Complete the original preflight before even the standalone requester is opened.
+        var aliases = linuxContextAliases(loading, deadline);
+        var requester = observeLinuxLoadPath(plan.rule().requester(), plan.context(),
+                members.get(plan.context().file()), plan.metadata(), loading.interpreter(), aliases, deadline);
+        var directories = new ArrayList<LinuxDefaultDirectoryObservation>();
+        var state = observeLinuxDefaultDirectories(members, loading, ruleIndex, requester, plan, aliases, directories,
+                deadline);
+        var actual = requester.content().elf();
+        return new LinuxNeededDefaultObservation(ruleIndex, plan.rule(), plan.name(), requester, actual.flags1Present(),
+                actual.flags1(), state, directories);
+    }
+
+    private static LinuxNeededDefaultPlan planLinuxNeededDefaults(SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex, long deadline) throws IOException {
+        requireTime(deadline);
         if (loading.policy().hwcaps() != 1 || ruleIndex < 0 || ruleIndex >= loading.needed().size()) {
             throw new IOException("Unsupported default-stage policy or original NEEDED index");
         }
@@ -3498,34 +3534,41 @@ final class SegmentClassicLaunchTrust {
                 plans.add(new LinuxDirectoryPlan(directory, builtinLogicalPaths(loading, directory, name, deadline)));
             }
         }
-        // Pure alias declaration Paths may be prepared here; only the requester's actual chain is probed.
-        var aliases = linuxContextAliases(loading, deadline);
-        var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
-                loading.interpreter(), aliases, deadline);
+        return new LinuxNeededDefaultPlan(rule, context, metadata, name, plans);
+    }
+
+    private LinuxDefaultState observeLinuxDefaultDirectories(
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex, LinuxLoadPathObservation requester, LinuxNeededDefaultPlan plan, Map<Path, String> aliases,
+            List<LinuxDefaultDirectoryObservation> details, long deadline) throws IOException {
         var actual = requester.content().elf();
-        if (!name.equals(actual.needed().get(rule.ordinal()))) {
+        if (requester.context() != plan.rule().requester() || requester.member() != plan.context().file()
+                || !requester.logical().equals(plan.context().logicalLoadName())
+                || actual.flags1() != plan.metadata().flags1()
+                || !plan.name().equals(actual.needed().get(plan.rule().ordinal()))) {
             throw new IOException("Original default-stage NEEDED differs from its requester ELF observation");
         }
         if ((actual.flags1() & DF_1_NODEFLIB) != 0) {
             files.requireHealthy();
             requireTime(deadline);
-            return new LinuxNeededDefaultObservation(ruleIndex, rule, name, requester, actual.flags1Present(),
-                    actual.flags1(), LinuxDefaultState.SUPPRESSED_NODEFLIB, List.of());
+            return LinuxDefaultState.SUPPRESSED_NODEFLIB;
         }
-        var directories = new ArrayList<LinuxDefaultDirectoryObservation>();
-        for (int i = 0; i < plans.size(); i++) {
-            var plan = plans.get(i);
-            var observed = observeLinuxDirectoryPositions(ruleIndex, plan.directory(), requester, plan.logicals(),
-                    members, loading, aliases, deadline);
-            directories.add(new LinuxDefaultDirectoryObservation(i, observed));
+        var paths = new ArrayList<LinuxDirectoryPaths>();
+        for (int i = 0; i < plan.directories().size(); i++) {
+            var directory = plan.directories().get(i);
+            var observed = observeLinuxDirectoryPositions(ruleIndex, directory.directory(), requester,
+                    directory.logicals(), members, loading, aliases, deadline);
+            paths.add(directoryPaths(observed));
+            if (details != null) {
+                details.add(new LinuxDefaultDirectoryObservation(i, observed));
+            }
         }
-        for (var directory : directories) {
-            recheckLinuxDirectoryPositions(directory.observation(), loading, aliases, deadline);
+        for (var directory : paths) {
+            recheckLinuxDirectoryPaths(directory, loading, aliases, deadline);
         }
         files.requireHealthy();
         requireTime(deadline);
-        return new LinuxNeededDefaultObservation(ruleIndex, rule, name, requester, actual.flags1Present(),
-                actual.flags1(), LinuxDefaultState.BUILTIN_POSITIONS_OBSERVED, directories);
+        return LinuxDefaultState.BUILTIN_POSITIONS_OBSERVED;
     }
 
     /** Only an original NEEDED rule and deadline; the fixed cache configuration is selected from this owner. */
