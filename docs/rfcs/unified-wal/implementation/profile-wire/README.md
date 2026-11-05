@@ -2756,3 +2756,13 @@ Spotless/Checkstyle实际exit0；独立RAT实际exit1，仍为父982a18dad9既�
 恢复 lease 排空后，同一 SDK 用独占的新池公开只读打开，逐条核对两份原始 payload，CLOSED metadata 版本保持。两份池的连接、RPC、backing 和 codec workspace 归零，服务端连接份额及 fixture 实际关闭。首轮到达 CLOSED 后因尝试把已使用的池移交 SDK 而被保护条件拒绝。修正测试接线后，新增场景与原 whole-point、registered pool、rolling readonly 共四项全部通过，Java Spotless 和 Checkstyle 通过。沿用原 acf9afec… native 库，生产代码和协议无需改动。原始阶段记录位于 `/Users/liusinan/.codex/artifacts/unified-wal/open-recovery-restart-evidence-964ce25c`。
 
 此证据覆盖同主机、同 JVM、同版本、单 Arena 和一台服务的健康关闭后重开。进程崩溃、掉电、跨版本重启、新 incarnation rejoin、批准 Linux 运行及完整步骤 14/16 验收仍待验证，生产 Gate 保持 OPEN。
+
+## 公开 writer JVM 退出后的 OPEN 账本恢复
+
+以 `c4d87e614e` 为基线。三个真实 ProfileService 通过原 ZooKeeper readiness 与 ephemeral registration 发布端点，使用 mTLS、FileChannel、单 Arena 和 3/3/3 SYNC_ON_ACK。独立 writer JVM 自建 ZK session、SDK、原生 metadata/reservation store 和注册池。临时配置只传递创建参数。子进程通过公开 `createProfileLedger` 完成安装及激活，依次确认 entry 0 和 1，核对 LAC=1、应用累计长度 35，打印绑定 nonce 和 PID 的测试 marker 后立即 `Runtime.halt(23)`。marker 用于核对该进程的退出和确认边界。
+
+父进程等待实际退出，单独等三个服务端的连接份额归还。三个 listener 仍在运行，原注册观察经新 ZK session 重新验证。新 SDK、原生 metadata/reservation store、coordinator 和注册池从仍为 OPEN/READY 的原账本取证，经原 `recover` 完成 durable fence、固定前缀写回和 matching CLOSED。恢复边界与原 metadata birth、lifecycle birth、ledger context 和 ensemble 对应。新鲜标准 metadata 与发布结果的出生、版本及序列化字节一致，`P=1`、`length=35`。恢复池实际排空后，用独立可移交的池调用公开 `openProfileLedgerReadOnly`，核对 16 和 19 字节的两条原 payload，并确认只读期间 CLOSED metadata 版本一致。恢复池和只读池的连接、RPC、backing 及 codec workspace，连同服务端连接份额均归零。
+
+最终新增进程场景、健康服务重开、whole-point recovery、公开 fresh create 和公开只读共五项定向 JUnit 通过，Java Spotless 与 Checkstyle 通过。首次夹具把 SDK wrapper 错当成原生 ZK manager，第二次到达 CLOSED 后用含 byte[] 的对象相等断言比较元数据。修正为独立真实 manager 和逐出生、版本、序列化字节比较，分别保留原测试源码与结果。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/profile-writer-crash-evidence-c4d87e61`。
+
+证据覆盖同主机、同版本、三个服务保持运行时的客户端进程异常退出及新客户端恢复。Bookie 进程崩溃、同身份未关闭 DATA session 重开、掉电、跨版本、批准 Linux 和完整步骤 14/16 验收仍待完成，生产 Gate 保持 OPEN。
