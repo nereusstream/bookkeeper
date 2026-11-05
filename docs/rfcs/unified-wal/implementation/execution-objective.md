@@ -2,9 +2,9 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
-步骤 15 的离线镜像导入在原 DATA 排他锁内先检查 marker、外部 reference、manifest 摘要和预期 scope，来源无效时在可写控制 owner 和 DATA 恢复同步前拒绝。实际恢复仍复核控制 cut、实例清单、文件摘要和 marker。集群恢复接受下界仍待接线。详见 [local-storage](local-storage/README.md#离线镜像来源预检)。
+步骤 15 的离线镜像导入在原 DATA 排他锁内先检查 marker、外部 reference、manifest 摘要和预期 scope，来源无效时在可写控制 owner 和 DATA 恢复同步前拒绝。实际恢复仍复核控制 cut、实例清单、文件摘要和 marker。详见 [local-storage](local-storage/README.md#离线镜像来源预检)。
 
-步骤 15 的源历史绑定覆盖镜像的封存 G1 删除进度。原 CLOSED 准入事务同时检查当前源 head 和原事件证明，并持久化精确镜像 witness。普通 repair 延续既有语义，空范围镜像恢复使用同一 witness。真实 source head 竞争反例及最终 28 项定向测试已归档，Spotless 和 Checkstyle 通过。恢复下界发行、跨 assignment、旧目标终态和历史 GC 仍开放。详见 [profile-wire](profile-wire/README.md#恢复准入绑定已封存镜像与原删除流)。
+步骤 15 已为显式新建的 G1 源 assignment 接入恢复接受下界。源出生事务创建零 revision，推进核验同一源的已提交删除坐标。首次 CLOSED 准入与推进按 floor 版本排序，空范围同样适用。已受理恢复凭同一镜像和原 revision 续接。同 head 版本的竞争反例与最终 35 项定向测试已归档，Spotless 和 Checkstyle 通过。旧 assignment 的升级、跨 assignment、旧目标终态和历史 GC 仍开放。详见 [profile-wire](profile-wire/README.md#g1-恢复接受下界)。
 
 步骤 14→15 的组合验证覆盖实际承载 3/3/3 已确认数据的 Bookie JVM 退出。临时注册自然消失后，原 auditor 产生任务，worker 将 CLOSED 账本修复到另一 BookieId/incarnation，保留原 CLOSED 边界并通过公开 SDK 读回。旧目录的原 owned restart 拒绝。后续逻辑删除包含原三个及新目标的确切义务，旧离线 incarnation 的物理终结回执仍缺失。详见 [profile-wire](profile-wire/README.md#已确认-data-的-bookie-jvm-退出后修复与删除)。
 

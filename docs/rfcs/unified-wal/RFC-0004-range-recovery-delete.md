@@ -893,7 +893,7 @@ all historical targets acknowledged or durably decommissioned
 
 旧目标 incarnation、Manifest、delete events、physical receipts 与 lineage 保留原绑定；新目标恢复、replacement、新盘为空及 WINDOW_ELAPSED 都不解除旧目标的物理义务或授予 GC。解除仍须旧 scope 的真实终态或未来 cluster-accepted wipe/decommission proof。首版依赖当前仍完整可验证的历史；未来删除历史前须先实现集群权威控制的恢复接受下界，使更旧镜像不能绕过已经回收的义务。原地 restore 若以后启用，须另有独立于备份回滚域的外部 authority/epoch；随镜像恢复的本地记录不足以承担它。
 
-当前恢复准入已将封存的源 G1 删除进度与当前原生删除流校验接入 CLOSED repair。同一个 ZooKeeper 事务检查源头版本并记录精确镜像 witness，空范围同样适用。完整历史仍是前提，接受下界的政策发行与跨 assignment 继续待实施。详见 [恢复准入实现](implementation/profile-wire/README.md#恢复准入绑定已封存镜像与原删除流)。
+当前恢复准入将封存的源 G1 删除进度与当前原生删除流接入 CLOSED repair。显式新建的 G1 assignment 可从出生启用恢复接受下界。首次准入与下界推进使用同一 floor 版本竞争，已受理恢复凭精确镜像及原 revision 续接，空范围同样适用。旧 assignment、跨 assignment 和历史回收的接受条件继续开放。详见 [G1 恢复接受下界](implementation/profile-wire/README.md#g1-恢复接受下界)。
 
 恢复专属最小验收复用真实文件/ZK/mTLS/SDK/restart fixture：备份后删除不复活；ledgerId reuse 不混淆 instance；delete 与 admission/writable 两种先后均保留目标和 required-through；缺页/断 suffix/错误 scope 或 generation/recreated birth/旧权限重放 fail closed；copy force、cursor/readiness 与 registration 的 crash/lost-reply 重试幂等且 actual I/O 先排空；旧目标 offline、窗口已到期且新目标已恢复时，旧义务仍保留。未知 authority/timeout/UNKNOWN 不证明无义务，必要数据不足或历史不完整保持隔离/RECOVERING、不发布 writable。既有等价覆盖复用，不按场景数重复扩矩阵。
 

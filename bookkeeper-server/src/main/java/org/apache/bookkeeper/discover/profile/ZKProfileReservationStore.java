@@ -1971,6 +1971,9 @@ public final class ZKProfileReservationStore {
                     if (!Arrays.equals(witnessed, restoreWitness)) {
                         return new RepairResult(CreateStatus.QUARANTINED, null);
                     }
+                    if (code != Code.OK.intValue()) {
+                        verifyRestoreAdmission(metadata, actual, after, source, deadline);
+                    }
                 }
             }
             return new RepairResult(equal ? code == Code.OK.intValue() ? CreateStatus.APPLIED
@@ -2453,9 +2456,13 @@ public final class ZKProfileReservationStore {
 
     private static final int RESTORE_WITNESS_MAGIC = 0x55575253;
     private static final int RESTORE_WITNESS_BYTES = 168 + ProfileControlRequest.DeleteBinding.BYTES;
+    private static final int RESTORE_WITNESS_FLOOR_BYTES = RESTORE_WITNESS_BYTES + 24;
+
+    private record RestoreFloorAdmission(RestoreFloor value, long floorBirth, long revisionBirth) { }
 
     /** The originally checked G1 head and original event/index birth, independent of later appends. */
-    private record RestoreSourceNative(long headBirth, int headVersion, long eventBirth, byte[] streamId) { }
+    private record RestoreSourceNative(long headBirth, int headVersion, long eventBirth, byte[] streamId,
+            RestoreFloorAdmission floor) { }
 
     private static ProfileDeleteRecord.Target restoreTarget(VerifiedSource source) {
         return new ProfileDeleteRecord.Target(source.bookieId().toString(), source.storageIncarnation());
@@ -2467,13 +2474,20 @@ public final class ZKProfileReservationStore {
         var cursor = source.deleteCursor();
         // Absence proven by the original native zero head, sealed zero and sealed positive are distinct.
         int kind = progress == null ? 0 : cursor == null ? 1 : 2;
-        return ByteBuffer.allocate(RESTORE_WITNESS_BYTES).putInt(RESTORE_WITNESS_MAGIC).putInt(1)
+        var floor = authority.floor();
+        var output = ByteBuffer.allocate(floor == null ? RESTORE_WITNESS_BYTES : RESTORE_WITNESS_FLOOR_BYTES)
+                .putInt(RESTORE_WITNESS_MAGIC).putInt(floor == null ? 1 : 2)
                 .putLong(authority.headBirth()).putInt(authority.headVersion()).putLong(authority.eventBirth())
                 .put(authority.streamId()).put(repairAdmissionGuardBytes(repair))
                 .putLong(source.imageId().getMostSignificantBits()).putLong(source.imageId().getLeastSignificantBits())
                 .put(source.manifestDigest()).put(HexFormat.of().parseHex(deliveryTargetKey(restoreTarget(source))))
                 .putLong(source.bookieControlCut()).putInt(kind).putLong(progress == null ? 0 : progress.through())
-                .put(cursor == null ? new byte[ProfileControlRequest.DeleteBinding.BYTES] : cursor.encode()).array();
+                .put(cursor == null ? new byte[ProfileControlRequest.DeleteBinding.BYTES] : cursor.encode());
+        if (floor != null) {
+            output.putInt(floor.value().revision()).putInt(Math.toIntExact(floor.value().through()))
+                    .putLong(floor.floorBirth()).putLong(floor.revisionBirth());
+        }
+        return output.array();
     }
 
     private byte[] readRestoreWitness(RepairSnapshot repair, ProfileZKReadClient.Node admitted, long deadline)
@@ -2488,7 +2502,8 @@ public final class ZKProfileReservationStore {
         if (witness.stat().getCzxid() != admitted.stat().getCzxid()
                 || guard.stat().getCzxid() != admitted.stat().getCzxid()
                 || !Arrays.equals(guard.bytes(), repairAdmissionGuardBytes(repair))
-                || witness.bytes().length != RESTORE_WITNESS_BYTES) {
+                || witness.bytes().length != RESTORE_WITNESS_BYTES
+                    && witness.bytes().length != RESTORE_WITNESS_FLOOR_BYTES) {
             throw new IllegalArgumentException("Restore source lost its original repair admission birth");
         }
         return witness.bytes();
@@ -2499,7 +2514,9 @@ public final class ZKProfileReservationStore {
             throws InterruptedException, TimeoutException {
         byte[] stored = readRestoreWitness(repair, admitted, deadline);
         var input = ByteBuffer.wrap(stored);
-        if (input.getInt() != RESTORE_WITNESS_MAGIC || input.getInt() != 1) {
+        int magic = input.getInt();
+        int schema = input.getInt();
+        if (magic != RESTORE_WITNESS_MAGIC || schema != (stored.length == RESTORE_WITNESS_BYTES ? 1 : 2)) {
             throw new IllegalArgumentException("Unsupported restore source witness");
         }
         long headBirth = input.getLong();
@@ -2507,7 +2524,16 @@ public final class ZKProfileReservationStore {
         long eventBirth = input.getLong();
         byte[] stream = new byte[16];
         input.get(stream);
-        var original = new RestoreSourceNative(headBirth, version, eventBirth, stream);
+        RestoreFloorAdmission floor = null;
+        if (schema == 2) {
+            input.position(RESTORE_WITNESS_BYTES);
+            floor = new RestoreFloorAdmission(new RestoreFloor(input.getInt(), input.getInt()),
+                    input.getLong(), input.getLong());
+            if (floor.revisionBirth() >= admitted.stat().getCzxid()) {
+                throw new IllegalArgumentException("Restore source admission predates its floor revision");
+            }
+        }
+        var original = new RestoreSourceNative(headBirth, version, eventBirth, stream, floor);
         if (!Arrays.equals(stored, restoreWitnessBytes(repair, source, original))) {
             throw new IllegalArgumentException("Restore retry must reuse the admitted image and source");
         }
@@ -2517,11 +2543,8 @@ public final class ZKProfileReservationStore {
     private RestoreSourceNative restoreSourceChecks(ProfileLedgerMetadataStore metadata, VerifiedSource source,
             RestoreSourceNative original, List<Op> checks, long deadline)
             throws InterruptedException, TimeoutException {
-        if (reads.sync(root, deadline) != Code.OK.intValue()) {
-            throw new IllegalStateException("Restore delete stream unavailable");
-        }
         var target = restoreTarget(source);
-        var current = deleteHead(target, deadline);
+        var current = syncedDeleteHead(target, deadline);
         if (current == null || current.head().assignmentGeneration() != 1) {
             throw new IllegalArgumentException("Restore requires an original G1 delete assignment");
         }
@@ -2543,35 +2566,70 @@ public final class ZKProfileReservationStore {
                 || through == 0 && cursor != null || through > 0 && cursor == null) {
             throw new IllegalArgumentException("Mirror delete progress does not prove a current stream prefix");
         }
-        String stream = deliveryPath(target);
-        checks.add(Op.check(stream, version));
-        checks.add(Op.check(stream + "-assignment", 0));
-        checks.add(Op.check(stream + "/birth-" + HexFormat.of().formatHex(head.streamId()), 0));
-        long eventBirth = 0;
-        if (cursor != null) {
-            var committed = readDeleteDelivery(metadata, target, through);
-            if (committed.status() == DeliveryStatus.UNAVAILABLE) {
-                throw new IllegalStateException("Mirror delete cursor authority unavailable");
-            }
-            if (committed.status() != DeliveryStatus.COMMITTED || !cursor.equals(committed.event().deleteBinding())) {
-                throw new IllegalArgumentException("Mirror delete cursor differs from the committed effect");
-            }
-            var event = committed.event();
-            String indexPath = path(event.ledger().ledgerId()) + "/delete-delivery-" + deliveryTargetKey(target);
-            var index = reads.get(indexPath, deadline);
-            requireFound(index);
-            requirePersistent(index, true);
-            eventBirth = index.stat().getCzxid();
-            if (!Arrays.equals(index.bytes(), event.encode()) || eventBirth <= headBirth) {
-                throw new IllegalArgumentException("Mirror delete cursor lost its original native index");
-            }
-            checks.add(Op.check(indexPath, 0));
-            checks.addAll(deleteEventChecks(event, deadline));
+        if (original != null && current.floorEnabled() != (original.floor() != null)) {
+            throw new IllegalArgumentException("Restore source witness does not match its assignment's floor mode");
         }
+        addDeleteHeadChecks(checks, current);
+        RestoreFloorAdmission floor = current.floorEnabled()
+                ? restoreFloorAdmission(current, original == null ? null : original.floor(), through, checks, deadline)
+                : null;
+        long eventBirth = cursor == null ? 0 : committedRestoreDelete(metadata, current, through, cursor, checks,
+                deadline);
         if (original != null && original.eventBirth() != eventBirth) {
             throw new IllegalArgumentException("Mirror delete cursor's original native birth changed");
         }
-        return new RestoreSourceNative(headBirth, version, eventBirth, head.streamId());
+        return new RestoreSourceNative(headBirth, version, eventBirth, head.streamId(), floor);
+    }
+
+    private RestoreFloorAdmission restoreFloorAdmission(DeleteHeadSnapshot head, RestoreFloorAdmission original,
+            long through, List<Op> checks, long deadline) throws InterruptedException, TimeoutException {
+        var current = restoreFloor(head, deadline);
+        long floorBirth = current.node().stat().getCzxid();
+        if (original == null) {
+            if (through < current.value().through()) {
+                throw new IllegalArgumentException("Mirror delete progress is below the current restore floor");
+            }
+            addRestoreFloorChecks(checks, head, current);
+            return new RestoreFloorAdmission(current.value(), floorBirth, current.node().stat().getMzxid());
+        }
+        var floor = original.value();
+        if (floorBirth != original.floorBirth() || current.value().revision() < floor.revision()
+                || current.value().through() < floor.through() || through < floor.through()) {
+            throw new IllegalArgumentException("Restore floor history regressed or differs from the admitted floor");
+        }
+        var revision = restoreFloorRevision(head, floor.revision(), deadline);
+        if (!revision.value().equals(floor) || revision.node().stat().getCzxid() != original.revisionBirth()) {
+            throw new IllegalArgumentException("Restore source lost the original admitted floor revision");
+        }
+        return original;
+    }
+
+    private long committedRestoreDelete(ProfileLedgerMetadataStore metadata, DeleteHeadSnapshot head, long through,
+            ProfileControlRequest.DeleteBinding cursor, List<Op> checks, long deadline)
+            throws InterruptedException, TimeoutException {
+        var target = head.head().target();
+        var committed = readDeleteDelivery(metadata, target, through, null, deadline, checks);
+        if (committed.status() == DeliveryStatus.UNAVAILABLE
+                || cursor == null && committed.status() == DeliveryStatus.PREPARED) {
+            throw new IllegalStateException("Restore delete effect authority unavailable");
+        }
+        if (committed.status() != DeliveryStatus.COMMITTED || !committed.event().belongsTo(head.head())
+                || cursor != null && !cursor.equals(committed.event().deleteBinding())) {
+            throw new IllegalArgumentException("Restore delete progress differs from the committed effect");
+        }
+        var event = committed.event();
+        String indexPath = path(event.ledger().ledgerId()) + "/delete-delivery-" + deliveryTargetKey(target);
+        var index = reads.get(indexPath, deadline);
+        requireFound(index);
+        requirePersistent(index, true);
+        long eventBirth = index.stat().getCzxid();
+        if (!Arrays.equals(index.bytes(), event.encode()) || eventBirth <= head.node().stat().getCzxid()
+                || eventBirth > head.node().stat().getMzxid()) {
+            throw new IllegalArgumentException("Restore delete effect lost its original native index");
+        }
+        checks.add(Op.check(indexPath, 0));
+        checks.addAll(deleteEventChecks(event, deadline));
+        return eventBirth;
     }
 
     private void validateRepairAdmission(RepairSnapshot repair, ProfileZKReadClient.Node node, long deadline)
@@ -3501,7 +3559,9 @@ public final class ZKProfileReservationStore {
         return event.assignmentGeneration() == generation;
     }
 
-    private void verifyDeliveryHead(ProfileZKReadClient.Node node, ProfileDeleteDelivery.Head head,
+    private static final int FLOOR_ASSIGNMENT_MAGIC = 0x55574641; // UWFA
+
+    private boolean verifyDeliveryHead(ProfileZKReadClient.Node node, ProfileDeleteDelivery.Head head,
             String parent, long deadline) throws InterruptedException, TimeoutException {
         requireFound(node);
         requirePersistent(node, false);
@@ -3517,13 +3577,20 @@ public final class ZKProfileReservationStore {
         var assignment = reads.get(parent + "-assignment", deadline);
         requireFound(assignment);
         requirePersistent(assignment, true);
-        var initial = ProfileDeleteDelivery.Head.decode(assignment.bytes());
+        var bytes = assignment.bytes();
+        boolean floorEnabled = bytes.length >= 8 && ByteBuffer.wrap(bytes).getInt() == FLOOR_ASSIGNMENT_MAGIC;
+        if (floorEnabled && ByteBuffer.wrap(bytes).getInt(4) != 1) {
+            throw new IllegalArgumentException("Unsupported floor-enabled delete assignment");
+        }
+        var initial = ProfileDeleteDelivery.Head.decode(floorEnabled ? Arrays.copyOfRange(bytes, 8, bytes.length)
+                : bytes);
         if (assignment.stat().getCzxid() != node.stat().getCzxid() || initial.committedThrough() != 0
                 || initial.assignmentGeneration() != 1 || initial.streamGeneration() != head.streamGeneration()
                 || !Arrays.equals(initial.streamId(), head.streamId()) || !initial.target().equals(head.target())) {
             throw new IllegalArgumentException("Initial delete assignment cannot be replaced with a new stream");
         }
         handoffLineage(head, node.stat().getCzxid(), deadline);
+        return floorEnabled;
     }
 
     public record DeleteHeadResult(ReadStatus status, ProfileDeleteDelivery.Head head) {
@@ -3534,7 +3601,8 @@ public final class ZKProfileReservationStore {
         }
     }
 
-    private record DeleteHeadSnapshot(ProfileDeleteDelivery.Head head, ProfileZKReadClient.Node node) { }
+    private record DeleteHeadSnapshot(ProfileDeleteDelivery.Head head, ProfileZKReadClient.Node node,
+            boolean floorEnabled) { }
 
     private DeleteHeadSnapshot deleteHead(ProfileDeleteRecord.Target target, long deadline)
             throws InterruptedException, TimeoutException {
@@ -3545,15 +3613,24 @@ public final class ZKProfileReservationStore {
         }
         requireFound(node);
         var head = ProfileDeleteDelivery.Head.decode(node.bytes());
-        verifyDeliveryHead(node, head, name, deadline);
+        boolean floorEnabled = verifyDeliveryHead(node, head, name, deadline);
         if (!head.target().equals(target)) {
             throw new IllegalArgumentException("Delete assignment belongs to another storage incarnation");
         }
-        return new DeleteHeadSnapshot(head, node);
+        return new DeleteHeadSnapshot(head, node, floorEnabled);
     }
 
     /** Explicit initial commissioning only. Startup readers never recreate missing assignment authority. */
     public DeleteHeadResult createInitialDeleteAssignment(ProfileDeleteRecord.Target target) {
+        return createInitialDeleteAssignment(target, false);
+    }
+
+    /** Commission a new source scope with a mandatory restore floor, initially zero. */
+    public DeleteHeadResult createInitialDeleteAssignmentWithRestoreFloor(ProfileDeleteRecord.Target target) {
+        return createInitialDeleteAssignment(target, true);
+    }
+
+    private DeleteHeadResult createInitialDeleteAssignment(ProfileDeleteRecord.Target target, boolean floorEnabled) {
         long deadline = System.nanoTime() + timeoutNanos;
         try {
             var parent = reads.get(deliveryRoot(), deadline);
@@ -3574,17 +3651,18 @@ public final class ZKProfileReservationStore {
                     return new DeleteHeadResult(previous.code() == Code.OK.intValue()
                             ? ReadStatus.QUARANTINED : ReadStatus.UNAVAILABLE, null);
                 }
-                UUID id = UUID.randomUUID();
-                byte[] stream = java.nio.ByteBuffer.allocate(16).putLong(id.getMostSignificantBits())
-                        .putLong(id.getLeastSignificantBits()).array();
-                var initial = new ProfileDeleteDelivery.Head(stream, 1, 1, 0, target);
-                multi(List.of(Op.create(name, initial.encode(), acls, CreateMode.PERSISTENT),
-                        Op.create(name + "/birth-" + HexFormat.of().formatHex(stream), stream,
-                                immutableAcls, CreateMode.PERSISTENT),
-                        Op.create(name + "-assignment", initial.encode(), immutableAcls, CreateMode.PERSISTENT)),
-                        deadline);
+                multi(initialDeleteAssignmentOps(target, floorEnabled), deadline);
             }
-            return readDeleteHead(target);
+            if (!floorEnabled) {
+                return readDeleteHead(target);
+            }
+            var current = syncedDeleteHead(target, deadline);
+            if (current == null) {
+                return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
+            }
+            requireRestoreFloorScope(current);
+            restoreFloor(current, deadline);
+            return new DeleteHeadResult(ReadStatus.FOUND, current.head());
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
@@ -3592,6 +3670,223 @@ public final class ZKProfileReservationStore {
             return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
         } catch (IllegalArgumentException invalid) {
             return new DeleteHeadResult(ReadStatus.QUARANTINED, null);
+        }
+    }
+
+    private List<Op> initialDeleteAssignmentOps(ProfileDeleteRecord.Target target, boolean floorEnabled) {
+        String name = deliveryPath(target);
+        UUID id = UUID.randomUUID();
+        byte[] stream = ByteBuffer.allocate(16).putLong(id.getMostSignificantBits())
+                .putLong(id.getLeastSignificantBits()).array();
+        byte[] initial = new ProfileDeleteDelivery.Head(stream, 1, 1, 0, target).encode();
+        byte[] assignment = floorEnabled ? ByteBuffer.allocate(8 + initial.length).putInt(FLOOR_ASSIGNMENT_MAGIC)
+                .putInt(1).put(initial).array() : initial;
+        var ops = new ArrayList<>(List.of(Op.create(name, initial, acls, CreateMode.PERSISTENT),
+                Op.create(name + "/birth-" + HexFormat.of().formatHex(stream), stream,
+                        immutableAcls, CreateMode.PERSISTENT),
+                Op.create(name + "-assignment", assignment, immutableAcls, CreateMode.PERSISTENT)));
+        if (floorEnabled) {
+            String floor = restoreFloorPath(target);
+            byte[] zero = restoreFloorBytes(new RestoreFloor(0, 0), stream);
+            ops.add(Op.create(floor, zero, acls, CreateMode.PERSISTENT));
+            ops.add(Op.create(floor + "/revision-0", zero, immutableAcls, CreateMode.PERSISTENT));
+        }
+        return ops;
+    }
+
+    /** Diagnostic value. Only the store's native rows can supply an admission guard. */
+    public record RestoreFloor(int revision, long through) {
+        public RestoreFloor {
+            if (revision < 0 || through < revision || through > ProfileDeleteDelivery.MAX_EVENTS
+                    || revision == 0 && through != 0) {
+                throw new IllegalArgumentException("Invalid bounded restore floor");
+            }
+        }
+    }
+
+    public record RestoreFloorResult(ReadStatus status, RestoreFloor floor) {
+        public RestoreFloorResult {
+            if ((status == ReadStatus.FOUND) != (floor != null)) {
+                throw new IllegalArgumentException("Only a verified restore floor carries a value");
+            }
+        }
+    }
+
+    private record RestoreFloorSnapshot(RestoreFloor value, ProfileZKReadClient.Node node) { }
+
+    private String restoreFloorPath(ProfileDeleteRecord.Target target) {
+        return deliveryPath(target) + "/restore-floor";
+    }
+
+    private String restoreFloorRevisionPath(ProfileDeleteRecord.Target target, int revision) {
+        return restoreFloorPath(target) + "/revision-" + Integer.toHexString(revision);
+    }
+
+    private static byte[] restoreFloorBytes(RestoreFloor floor, byte[] streamId) {
+        return ByteBuffer.allocate(32).putInt(0x5557464c).putInt(1).put(streamId)
+                .putInt(floor.revision()).putInt(Math.toIntExact(floor.through())).array();
+    }
+
+    private static RestoreFloor decodeRestoreFloor(byte[] bytes, ProfileDeleteDelivery.Head head) {
+        var input = ByteBuffer.wrap(bytes);
+        if (bytes.length != 32 || input.getInt() != 0x5557464c || input.getInt() != 1) {
+            throw new IllegalArgumentException("Unsupported restore floor record");
+        }
+        byte[] streamId = new byte[16];
+        input.get(streamId);
+        var floor = new RestoreFloor(input.getInt(), input.getInt());
+        if (!Arrays.equals(streamId, head.streamId()) || floor.through() > head.committedThrough()) {
+            throw new IllegalArgumentException("Restore floor exceeds or differs from the original stream");
+        }
+        return floor;
+    }
+
+    private static void requireRestoreFloorScope(DeleteHeadSnapshot head) {
+        if (head == null || !head.floorEnabled() || head.head().assignmentGeneration() != 1) {
+            throw new IllegalArgumentException("Restore floor requires a commissioned G1 assignment");
+        }
+    }
+
+    private DeleteHeadSnapshot syncedDeleteHead(ProfileDeleteRecord.Target target, long deadline)
+            throws InterruptedException, TimeoutException {
+        if (reads.sync(root, deadline) != Code.OK.intValue()) {
+            throw new IllegalStateException("Delete stream unavailable");
+        }
+        return deleteHead(target, deadline);
+    }
+
+    private RestoreFloorSnapshot restoreFloorRevision(DeleteHeadSnapshot head, int revision, long deadline)
+            throws InterruptedException, TimeoutException {
+        var node = reads.get(restoreFloorRevisionPath(head.head().target(), revision), deadline);
+        requireFound(node);
+        requirePersistent(node, true);
+        var value = decodeRestoreFloor(node.bytes(), head.head());
+        long streamBirth = head.node().stat().getCzxid();
+        long birth = node.stat().getCzxid();
+        if (value.revision() != revision || (revision == 0 ? birth != streamBirth : birth <= streamBirth)) {
+            throw new IllegalArgumentException("Restore floor revision lost its stream birth");
+        }
+        return new RestoreFloorSnapshot(value, node);
+    }
+
+    private RestoreFloorSnapshot restoreFloor(DeleteHeadSnapshot head, long deadline)
+            throws InterruptedException, TimeoutException {
+        var node = reads.get(restoreFloorPath(head.head().target()), deadline);
+        requireFound(node);
+        requirePersistent(node, false);
+        var floor = decodeRestoreFloor(node.bytes(), head.head());
+        var stat = node.stat();
+        if (stat.getCzxid() != head.node().stat().getCzxid() || stat.getVersion() != floor.revision()
+                || stat.getCversion() != floor.revision() + 1 || stat.getNumChildren() != floor.revision() + 1) {
+            throw new IllegalArgumentException("Restore floor pointer or revision history changed birth");
+        }
+        var zero = restoreFloorRevision(head, 0, deadline);
+        var selected = floor.revision() == 0 ? zero : restoreFloorRevision(head, floor.revision(), deadline);
+        if (selected.node().stat().getCzxid() != stat.getMzxid() || !selected.value().equals(floor)) {
+            throw new IllegalArgumentException("Restore floor lost its original selected revision");
+        }
+        return new RestoreFloorSnapshot(floor, node);
+    }
+
+    /** Read the current native floor. Legacy assignments have no floor. */
+    public RestoreFloorResult readRestoreFloor(ProfileDeleteRecord.Target target) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var head = syncedDeleteHead(target, deadline);
+            if (head == null) {
+                var assignment = reads.get(deliveryPath(target) + "-assignment", deadline);
+                if (assignment.code() == Code.NONODE.intValue()) {
+                    return new RestoreFloorResult(ReadStatus.NOT_FOUND, null);
+                }
+                requireFound(assignment);
+                throw new IllegalArgumentException("Restore floor scope lost its original delete head");
+            }
+            if (!head.floorEnabled()) {
+                return new RestoreFloorResult(ReadStatus.NOT_FOUND, null);
+            }
+            requireRestoreFloorScope(head);
+            return new RestoreFloorResult(ReadStatus.FOUND, restoreFloor(head, deadline).value());
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return new RestoreFloorResult(ReadStatus.UNAVAILABLE, null);
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return new RestoreFloorResult(ReadStatus.UNAVAILABLE, null);
+        } catch (IllegalArgumentException invalid) {
+            return new RestoreFloorResult(ReadStatus.QUARANTINED, null);
+        }
+    }
+
+    /** Explicit bounded cold proposal. Advancing a restore floor grants no authority to remove delete history. */
+    public CreateStatus advanceRestoreFloor(ProfileLedgerMetadataStore metadata, ProfileDeleteRecord.Target target,
+            int expectedRevision, long through) {
+        requireRecoveryClient(metadata);
+        if (expectedRevision < 0 || expectedRevision >= ProfileDeleteDelivery.MAX_EVENTS
+                || through < 1 || through > ProfileDeleteDelivery.MAX_EVENTS) {
+            throw new IllegalArgumentException("Invalid bounded restore floor proposal");
+        }
+        if (through <= expectedRevision) {
+            return CreateStatus.CONFLICT;
+        }
+        var desired = new RestoreFloor(expectedRevision + 1, through);
+        long deadline = System.nanoTime() + timeoutNanos;
+        boolean submitted = false;
+        try {
+            var head = syncedDeleteHead(target, deadline);
+            requireRestoreFloorScope(head);
+            var current = restoreFloor(head, deadline);
+            if (current.value().revision() > expectedRevision) {
+                return restoreFloorRevision(head, desired.revision(), deadline).value().equals(desired)
+                        ? CreateStatus.ALREADY_APPLIED : CreateStatus.CONFLICT;
+            }
+            if (current.value().revision() != expectedRevision || through <= current.value().through()
+                    || through > head.head().committedThrough()) {
+                return CreateStatus.CONFLICT;
+            }
+            var checks = new ArrayList<Op>();
+            addDeleteHeadChecks(checks, head);
+            addRestoreFloorChecks(checks, head, current);
+            committedRestoreDelete(metadata, head, through, null, checks, deadline);
+            byte[] bytes = restoreFloorBytes(desired, head.head().streamId());
+            checks.add(Op.setData(restoreFloorPath(target), bytes, expectedRevision));
+            checks.add(Op.create(restoreFloorRevisionPath(target, desired.revision()), bytes, immutableAcls,
+                    CreateMode.PERSISTENT));
+            submitted = true;
+            int code = multi(checks, deadline);
+            var after = syncedDeleteHead(target, deadline);
+            requireRestoreFloorScope(after);
+            if (after.node().stat().getCzxid() != head.node().stat().getCzxid()) {
+                return CreateStatus.QUARANTINED;
+            }
+            var effective = restoreFloor(after, deadline);
+            if (effective.value().revision() >= desired.revision()) {
+                return restoreFloorRevision(after, desired.revision(), deadline).value().equals(desired)
+                        ? code == Code.OK.intValue() ? CreateStatus.APPLIED : CreateStatus.ALREADY_APPLIED
+                        : CreateStatus.CONFLICT;
+            }
+            return conditionalFailure(code) ? CreateStatus.CONFLICT : CreateStatus.DURABILITY_UNKNOWN;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return submitted ? CreateStatus.DURABILITY_UNKNOWN : CreateStatus.UNAVAILABLE;
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return submitted ? CreateStatus.DURABILITY_UNKNOWN : CreateStatus.UNAVAILABLE;
+        } catch (IllegalArgumentException invalid) {
+            return CreateStatus.QUARANTINED;
+        }
+    }
+
+    private void addDeleteHeadChecks(List<Op> checks, DeleteHeadSnapshot head) {
+        String path = deliveryPath(head.head().target());
+        checks.add(Op.check(path, head.node().stat().getVersion()));
+        checks.add(Op.check(path + "-assignment", 0));
+        checks.add(Op.check(path + "/birth-" + HexFormat.of().formatHex(head.head().streamId()), 0));
+    }
+
+    private void addRestoreFloorChecks(List<Op> checks, DeleteHeadSnapshot head, RestoreFloorSnapshot floor) {
+        var target = head.head().target();
+        checks.add(Op.check(restoreFloorPath(target), floor.value().revision()));
+        checks.add(Op.check(restoreFloorRevisionPath(target, 0), 0));
+        if (floor.value().revision() != 0) {
+            checks.add(Op.check(restoreFloorRevisionPath(target, floor.value().revision()), 0));
         }
     }
 
@@ -4194,7 +4489,10 @@ public final class ZKProfileReservationStore {
     }
 
     public DeleteSnapshotResult readDeleteSnapshot(ProfileDeleteRecord.Target target) {
-        long deadline = System.nanoTime() + timeoutNanos;
+        return readDeleteSnapshot(target, System.nanoTime() + timeoutNanos);
+    }
+
+    private DeleteSnapshotResult readDeleteSnapshot(ProfileDeleteRecord.Target target, long deadline) {
         try {
             if (reads.sync(root, deadline) != Code.OK.intValue()) {
                 return deleteSnapshotFailure(DeleteSnapshotStatus.UNAVAILABLE);
@@ -4465,7 +4763,7 @@ public final class ZKProfileReservationStore {
             }
             return List.of(Op.check(name, 0));
         }
-        var loaded = readDeleteSnapshot(event.target());
+        var loaded = readDeleteSnapshot(event.target(), deadline);
         if (loaded.snapshot() == null) {
             if (loaded.status() == DeleteSnapshotStatus.UNAVAILABLE) {
                 throw new IllegalStateException("Required delete snapshot unavailable");
@@ -4687,7 +4985,7 @@ public final class ZKProfileReservationStore {
             DeleteSnapshotView cached, long deadline) throws InterruptedException, TimeoutException {
         DeleteSnapshotView view = cached;
         if (view == null) {
-            var loaded = readDeleteSnapshot(target);
+            var loaded = readDeleteSnapshot(target, deadline);
             if (loaded.snapshot() == null) {
                 if (loaded.status() == DeleteSnapshotStatus.UNAVAILABLE) {
                     throw new IllegalStateException("Delete snapshot unavailable");
@@ -4883,21 +5181,12 @@ public final class ZKProfileReservationStore {
                             || previousReceipt.code() == Code.OK.intValue() ? DeliveryStatus.QUARANTINED
                                 : DeliveryStatus.UNAVAILABLE, null);
                 }
-                UUID id = UUID.randomUUID();
-                byte[] stream = java.nio.ByteBuffer.allocate(16).putLong(id.getMostSignificantBits())
-                        .putLong(id.getLeastSignificantBits()).array();
-                var initial = new ProfileDeleteDelivery.Head(stream, 1, 1, 0, target);
-                // Czxid is the multi's transaction. The immutable child name fixes the initial stream identity.
-                String guardName = name + "/birth-" + HexFormat.of().formatHex(stream);
-                multi(List.of(Op.create(name, initial.encode(), acls, CreateMode.PERSISTENT),
-                        Op.create(guardName, stream, immutableAcls, CreateMode.PERSISTENT),
-                        Op.create(name + "-assignment", initial.encode(), immutableAcls, CreateMode.PERSISTENT)),
-                        deadline);
+                multi(initialDeleteAssignmentOps(target, false), deadline);
             }
             headNode = reads.get(name, deadline);
             requireFound(headNode);
             var head = ProfileDeleteDelivery.Head.decode(headNode.bytes());
-            verifyDeliveryHead(headNode, head, name, deadline);
+            boolean floorEnabled = verifyDeliveryHead(headNode, head, name, deadline);
             if (!head.target().equals(target)) {
                 return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
             }
@@ -4918,7 +5207,7 @@ public final class ZKProfileReservationStore {
             if (head.committedThrough() == ProfileDeleteDelivery.MAX_EVENTS) {
                 return new DeliveryResult(DeliveryStatus.LIMIT, null);
             }
-            var admission = assignmentAdmission(new DeleteHeadSnapshot(head, headNode), true, deadline);
+            var admission = assignmentAdmission(new DeleteHeadSnapshot(head, headNode, floorEnabled), true, deadline);
             if (admission.value().frozen()) {
                 return new DeliveryResult(DeliveryStatus.UNAVAILABLE, null);
             }
@@ -4962,11 +5251,15 @@ public final class ZKProfileReservationStore {
 
     public DeliveryResult readDeleteDelivery(ProfileLedgerMetadataStore metadata, ProfileDeleteRecord.Target target,
             long sequence, DeleteSnapshotView cached) {
+        return readDeleteDelivery(metadata, target, sequence, cached, System.nanoTime() + timeoutNanos, null);
+    }
+
+    private DeliveryResult readDeleteDelivery(ProfileLedgerMetadataStore metadata, ProfileDeleteRecord.Target target,
+            long sequence, DeleteSnapshotView cached, long deadline, List<Op> committedChecks) {
         requireRecoveryClient(metadata);
         if (sequence < 1 || sequence > ProfileDeleteDelivery.MAX_EVENTS) {
             throw new IllegalArgumentException("Invalid bounded delivery sequence");
         }
-        long deadline = System.nanoTime() + timeoutNanos;
         try {
             if (reads.sync(root, deadline) != Code.OK.intValue()) {
                 return new DeliveryResult(DeliveryStatus.UNAVAILABLE, null);
@@ -5026,7 +5319,14 @@ public final class ZKProfileReservationStore {
                     return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
                 }
             }
-            return reference == null ? new DeliveryResult(DeliveryStatus.PREPARED, event) : resolved;
+            if (reference == null) {
+                return new DeliveryResult(DeliveryStatus.PREPARED, event);
+            }
+            if (committedChecks != null) {
+                committedChecks.addAll(recoveryRootChecks(state.snapshot(), deadline));
+                committedChecks.addAll(metadata.checksForMembership(member.snapshot()));
+            }
+            return resolved;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return new DeliveryResult(DeliveryStatus.UNAVAILABLE, null);

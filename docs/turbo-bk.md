@@ -433,7 +433,7 @@ Segment production candidate 的最低 Gate：
 - RFC-0005选定Bookie级control-log原型的exact durable packing与真实故障证据；same-scope old-binary-visible fence当前BLOCK且`BKPF1`仅candidate；Cookie/superblock/device-manifest exact bytes、minimum reader/writer、migration/reverse/wipe tooling与persistent readiness backend adapter；new BookieId/new scope fallback语义不再OPEN；
 - shared slab的lifetime class、compaction policy/hot promotion、每Arena维护保留预算、准入阈值及长期回收进展证据；
 - RepairIntent child enumeration/retention/orphan cleanup、strong completion record/page/snapshot schema、overlapping-range predecessor encoding、coverage audit commitment 与 compaction policy；
-- Delete Coordinator 的 stream topology、PREPARED/effective assignment encoding、snapshot chunk/schema、cluster-accepted wipe/decommission proof 和 tombstone retention；
+- Delete Coordinator 的 stream topology、PREPARED/effective assignment encoding、snapshot chunk/schema、cluster-accepted wipe/decommission proof 和 tombstone retention。恢复接受下界当前覆盖显式新建的 G1 源 scope，跨 assignment 恢复和历史 GC 仍开放。详见 [G1 恢复接受下界](rfcs/unified-wal/implementation/profile-wire/README.md#g1-恢复接受下界)。
 - streaming range 在一般 E/W/A 下的结果合并与point-oracle伪代码、required-coordinate/normal-tail proof、rich outcome exact enum/wire/admin API/legacy mapping、cancellation、可选 checkpoint 与 recovery-specific semantics；
 - 每个正式 Gate 的基准 commit、硬件和完整 manifest。
 

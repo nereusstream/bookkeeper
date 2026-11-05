@@ -2176,6 +2176,8 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 
 ## 恢复准入绑定已封存镜像与原删除流
 
+新建 G1 assignment 可显式启用 [恢复接受下界](#g1-恢复接受下界)。下文保留来源绑定初次交付的证据。
+
 公开 `SegmentProfileBackup` 在镜像验封及原生控制回放后签发私有构造的 `VerifiedSource`。协调器在同一 source 上使用镜像 UUID、manifest SHA-256、原 BookieId/incarnation、Bookie control cut、有效删除进度和最后一次 durable apply 的原事件绑定。有效 assignment 与原事件 assignment 分开读取。磁盘镜像和外部引用继续使用 v1。
 
 目标 inactive INSTALL 返回 durable receipt 后，恢复准入仍检查当前 CLOSED、ledger instance、lifecycle、membership 和 RepairIntent 的原生出生及版本。源必须有当前可验证的 G1 delete assignment、原 head 和出生记录。正进度须匹配同一 stream 的已提交前缀及原事件内容和 index 出生，验证使用现有 event 或完整选定 snapshot。镜像进度未知时，首次准入只接受当前原生已验证零头。已封存的零进度属于独立类别。已验证的旧前缀可以小于当前头。
@@ -2187,6 +2189,20 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 跨 assignment 的源镜像和恢复续接暂不接受。恢复下界的发行与推进、旧目标终态和历史 GC 保持开放。目标 bootstrap 仍须完成自己的 assignment、snapshot 和无洞 suffix。旧 incarnation 的删除义务继续由原 Manifest、events、receipts 和 lineage 保留。
 
 2026-11-05，基线 `fafd9dfc0b`。实际文件、ZooKeeper 和 mTLS 覆盖源 type 13 持久应用后封存、源出生记录重建拒绝、未知进度对非零头拒绝、原生 verified-zero、同意图换镜像、空范围续接、witness 截断与未知版本、同字节 witness 重建及 admission 回复丢失后的实际排空。移除 source head 的事务版本检查时，真实删除头先推进，旧事务仍完成修复，定向断言失败。恢复检查后，最终三类 28 项定向测试通过，零失败、错误或跳过。Spotless 和 Checkstyle 通过。各阶段 1460 项输入、源码、命令和回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/restore-source-admission-evidence-fafd9dfc`。正式 Linux、掉电、性能和 canary 本轮未执行，生产 Gate 保持 OPEN。
+
+## G1 恢复接受下界
+
+受保护的 ZooKeeper store 提供显式冷入口 `createInitialDeleteAssignmentWithRestoreFloor`。仅新建源 BookieId/incarnation 的 G1 assignment 可启用。原 head、stream birth、initial assignment、零 floor 和 immutable revision 0 在同一事务出生。原 `-assignment` 的 `UWFA` v1 包裹 canonical 初始 Head，表明该 scope 必须验证 floor。普通和隐式 commissioning 延续 legacy 格式。旧 reader 拒绝 `UWFA`，混合版本的整体强制仍待验证。
+
+`/restore-floor` 与其 `/revision-<hex>` 使用 32 字节 big-endian `UWFL` v1。header 后依次为 16 字节 stream ID、u32 revision 和 u32 through。当前指针的 czxid 等于原 head birth，dataVersion 等于 revision，mzxid 等于选中 immutable revision 的 czxid。原 revision 0 与当前所选 revision 必须存在。原生子节点计数与 cversion 必须符合只追加记录的历史。必需的 floor 缺失、重建或损坏时，准入和 floor 操作拒绝继续。
+
+`advanceRestoreFloor` 接收 expected revision 与明确的 through。through 必须严格增长，落在同一源 G1 的已提交 head 内，并核对原逻辑 tombstone、index 及对应的 journal event 或完整 snapshot。发行事务检查 head、assignment birth、逻辑删除及其事件证据、当前 floor version 与原 revision，然后更新指针并创建不可变 revision。发行回复丢失后读回提议的原 revision。查询当前 floor 使用独立冷读，即使早期提议重试返回已应用，当前值仍可能更高。
+
+首次镜像准入在原事务中检查 floor version 和出生证明，要求同一 `VerifiedSource` 的封存 through 至少达到当前 floor。未知镜像进度只可沿原生零头规则通过 floor 0。legacy witness 延续 `UWRS` v1 的 264 字节。启用 floor 的 scope 使用 288 字节 v2，在 v1 字段后追加 u32 revision、u32 through、u64 floor birth 和 u64 revision birth。同一镜像与 RepairIntent 的已受理续接，包括空范围和已发布修复，重验原 revision 与当前未回退的历史。后续 floor 推进只限制首次准入。
+
+floor 适用于显式 commissioning 的 G1 scope。既有 assignment 的升级、跨 assignment、旧目标终态和历史 GC 仍待实施。旧目标义务和已受理 restore 依赖的历史仍由原权限保护，生产 Gate 为 OPEN。
+
+2026-11-05，基线 `5b253528c2`。真实 ZooKeeper、文件、mTLS 验证零下界、推进丢回复后的原 revision、同 head 版本下的 floor 与 admission 竞争、已验封镜像补齐到下界后的实际 copy 和读回、空范围凭原 revision 续接及历史损坏和降级拒绝。移除准入事务的 floor 条件时，源 head 未变，旧镜像在下界推进后仍完成修复，定向断言失败。恢复条件后，最终四类 35 项定向测试通过，零失败、错误或跳过。Spotless 与 Checkstyle 通过。各阶段 1460 项输入、命令及原始回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/restore-floor-evidence-5b253528`。Linux、掉电、正式性能和 canary 本轮未执行。
 
 ## 恢复目标的首次 service bootstrap 组合验证
 

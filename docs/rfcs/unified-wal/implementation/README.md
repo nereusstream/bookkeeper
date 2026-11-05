@@ -417,6 +417,8 @@ DATA durable → hot locator → local result
 
 目标包含初始/写期activation历史及RepairIntent，不只取最终ensemble map。随后实现delete stream、no-hole applied cursor、snapshot/catch-up、离线重返与incarnation校验；startup/readiness接入真实删除追赶结果。
 
+显式新建的 G1 源 assignment 已支持恢复接受下界。首次 CLOSED 恢复准入按原生版本检查下界，已受理恢复继续校验精确镜像及原 revision。既有 assignment 的升级、跨 assignment、终态与历史 GC 仍开放。详见 [G1 恢复接受下界](profile-wire/README.md#g1-恢复接受下界)。
+
 **完成条件：** 离线Bookie不阻塞普通logical success，但清理义务不丢；applied cursor不等compaction；游标缺口、snapshot缺页、身份不符时不注册writable；coordinator崩溃后能继续同一删除。强访问撤销仍关闭，不把普通logical success宣称为全部旧reader立即失效。
 
 **第三里程碑：完整分布式WAL闭环。** 创建→写入→读取→换组→恢复→关闭→删除→离线重返均有对应实现与验证；集群跑通仍须经过步骤16的综合验收才能用于真实业务。

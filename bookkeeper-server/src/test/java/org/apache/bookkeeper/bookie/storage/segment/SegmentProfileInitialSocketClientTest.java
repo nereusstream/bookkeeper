@@ -9840,9 +9840,25 @@ public class SegmentProfileInitialSocketClientTest {
         assertBackupRestoreScenarios(List.of(22, 23));
     }
 
+    @Test
+    public void backupRestoreFloorOrdersNativePublicationAndRequiresTheSealedCut() throws Exception {
+        assertBackupRestoreScenarios(List.of(24));
+    }
+
+    @Test
+    public void emptyBackupRestoreResumesTheAdmittedRevisionAfterFloorAdvance() throws Exception {
+        assertBackupRestoreScenarios(List.of(25));
+    }
+
+    @Test
+    public void backupRestoreCannotDowngradeMissingFloorOrLegacyWitness() throws Exception {
+        assertBackupRestoreScenarios(List.of(26, 27));
+    }
+
     private static final class RestoreAdmissionZk extends ZooKeeper {
         private final AtomicReference<CompletableFuture<Runnable>> beforeAdmission = new AtomicReference<>();
         private final AtomicReference<CompletableFuture<Runnable>> lostAdmissionReply = new AtomicReference<>();
+        private final AtomicInteger loseFloorReply = new AtomicInteger();
         private java.util.function.UnaryOperator<byte[]> corruptWitness;
 
         RestoreAdmissionZk(String connect, ZooKeeperWatcherBase watcher) throws Exception {
@@ -9855,6 +9871,14 @@ public class SegmentProfileInitialSocketClientTest {
                 org.apache.zookeeper.AsyncCallback.MultiCallback callback, Object context) {
             var ops = new ArrayList<org.apache.zookeeper.Op>();
             operations.forEach(ops::add);
+            if (ops.stream().anyMatch(op -> op.getType() == ZooDefs.OpCode.setData
+                    && op.getPath().endsWith("/restore-floor")) && loseFloorReply.compareAndSet(1, 0)) {
+                super.multi(ops, (code, path, ignored, results) -> callback.processResult(
+                        code == org.apache.zookeeper.KeeperException.Code.OK.intValue()
+                                ? org.apache.zookeeper.KeeperException.Code.CONNECTIONLOSS.intValue() : code,
+                        path, context, results), context);
+                return;
+            }
             if (ops.stream().noneMatch(op -> op.getType() == ZooDefs.OpCode.create
                     && op.getPath().equals("/socket-initial/2c/repair-3/admitted"))) {
                 super.multi(ops, callback, context);
@@ -9889,6 +9913,124 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private void assertRestoreFloorAdvance(Fixture fixture, BookKeeper sdk, SegmentProfileBackup backup,
+            IsolatedSegmentConfig sourceConfig, Path directory, Path reference, ProfileLedgerMetadataStore metadata,
+            ZKProfileReservationStore.ReadOnlySnapshot accepted, ZKProfileReservationStore.RepairSnapshot prepared,
+            Map<BookieId, ProfileNormalDataClient> data, ProfileDeleteRecord.Target sourceTarget) throws Exception {
+        var original = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+        String stream = actualDeleteStreamPath(fixture, sourceTarget);
+        String floor = stream + "/restore-floor";
+        String admission = "/socket-initial/2c/repair-3/admitted";
+        String witness = "/socket-initial/2c/repair-3/restore-source";
+        assertEquals(new ZKProfileReservationStore.RestoreFloor(0, 0),
+                fixture.reservations.readRestoreFloor(sourceTarget).floor());
+        long birth = fixture.zk.exists(stream, false).getCzxid();
+        for (String path : List.of(stream + "-assignment", floor, floor + "/revision-0")) {
+            assertEquals(birth, fixture.zk.exists(path, false).getCzxid());
+        }
+        assertThrows(IllegalArgumentException.class, () ->
+                org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery.Head.decode(
+                        fixture.zk.getData(stream + "-assignment", false, null)));
+        assertEquals(ZKProfileReservationStore.CreateStatus.CONFLICT,
+                fixture.reservations.advanceRestoreFloor(metadata, sourceTarget, 0, 2));
+        deleteRestoreNeighbor(fixture, sdk, metadata, sourceTarget, 2);
+        // Preserve the complete native snapshot and index, while forcing the proposed effect through that snapshot.
+        assertEquals(ZKProfileReservationStore.DeleteSnapshotStatus.FOUND,
+                fixture.reservations.publishDeleteSnapshot(metadata, sourceTarget, 8,
+                        Duration.ofSeconds(10), () -> true).status());
+        fixture.zk.delete(stream + "/event-2", 0);
+        var head = fixture.reservations.readDeleteHead(sourceTarget).head();
+        int headVersion = fixture.zk.exists(stream, false).getVersion();
+        var io = files(fixture.nodes.get(3)).dataIo;
+        int writes = io.writes;
+        try (var zk = new RestoreAdmissionZk(fixture.cluster.getZooKeeperConnectString(),
+                new ZooKeeperWatcherBase(10000, false))) {
+            var timeout = Duration.ofSeconds(20);
+            var mutator = new ProfileLedgerMetadataStore(zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+            var reservations = new ZKProfileReservationStore(zk, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    timeout);
+            zk.loseFloorReply.set(1);
+            assertEquals(ZKProfileReservationStore.CreateStatus.ALREADY_APPLIED,
+                    reservations.advanceRestoreFloor(mutator, sourceTarget, 0, 1));
+            assertEquals(new ZKProfileReservationStore.RestoreFloor(1, 1), reservations.readRestoreFloor(sourceTarget)
+                    .floor());
+            var coordinator = new ProfileRecoveryCoordinator(reservations, mutator, fixture.cold);
+            var held = new CompletableFuture<Runnable>();
+            zk.beforeAdmission.set(held);
+            var raced = backup.beginRestoreClosedFragment(directory, reference, coordinator, accepted, prepared,
+                    sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential, data, fixture.clients,
+                    bytes(16, 73));
+            Runnable submit = held.get(10, TimeUnit.SECONDS);
+            try {
+                assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                        fixture.reservations.advanceRestoreFloor(metadata, sourceTarget, 1, 2));
+                assertEquals(headVersion, fixture.zk.exists(stream, false).getVersion());
+                assertEquals(head, fixture.reservations.readDeleteHead(sourceTarget).head());
+            } finally {
+                submit.run();
+            }
+            assertEquals(ProfileRecoveryCoordinator.RepairStatus.DEFERRED,
+                    raced.result().get(15, TimeUnit.SECONDS).status());
+            raced.completion().get(10, TimeUnit.SECONDS);
+            var refused = backup.beginRestoreClosedFragment(directory, reference, coordinator, accepted, prepared,
+                    sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential, data, fixture.clients,
+                    bytes(16, 73));
+            assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED,
+                    refused.result().get(15, TimeUnit.SECONDS).status());
+            refused.completion().get(10, TimeUnit.SECONDS);
+            assertNull(fixture.zk.exists(admission, false));
+            assertNull(fixture.zk.exists(witness, false));
+            assertEquals(writes, io.writes);
+            assertEquals(original.getVersion(), fixture.manager.readLedgerMetadata(44).get().getVersion());
+            assertEquals(ZKProfileReservationStore.CreateStatus.ALREADY_APPLIED,
+                    reservations.advanceRestoreFloor(mutator, sourceTarget, 0, 1));
+            assertEquals(ZKProfileReservationStore.CreateStatus.CONFLICT,
+                    reservations.advanceRestoreFloor(mutator, sourceTarget, 0, 2));
+            assertEquals(new ZKProfileReservationStore.RestoreFloor(2, 2), reservations.readRestoreFloor(sourceTarget)
+                    .floor());
+
+            Path freshImage = directory.resolveSibling("floor-cut-image");
+            Path freshReference = reference.resolveSibling("floor-cut-reference");
+            try (var replay = new IsolatedSegmentStorage(sourceConfig, fixture.identities.get(0),
+                    new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                    new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                            2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                    new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                            new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))))) {
+                replay.restart();
+                assertEquals(1, replay.profileDeleteProgress().sequence());
+                var caught = replay.catchUpProfileDeletes(fixture.reservations, metadata, "ledger-profile", 2,
+                        Duration.ofSeconds(10));
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, caught.status());
+                caught.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(2, replay.profileDeleteProgress().sequence());
+            }
+            backup.capture(freshImage, freshReference);
+            var current = backup.beginRestoreClosedFragment(freshImage, freshReference, coordinator,
+                    accepted, prepared, sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential,
+                    data, fixture.clients, bytes(16, 73));
+            var result = current.result().get(15, TimeUnit.SECONDS);
+            current.completion().get(10, TimeUnit.SECONDS);
+            assertEquals(ProfileRecoveryCoordinator.RepairStatus.REPAIRED_LAST_FRAGMENT, result.status());
+            assertEquals(2, result.copiedEntries());
+            assertReadPayload(data.get(fixture.identities.get(3).bookieId()), fixture.context(), 1, bytes(16, 8));
+            var nativeWitness = java.nio.ByteBuffer.wrap(fixture.zk.getData(witness, false, null));
+            assertEquals(2, nativeWitness.getInt(4));
+            assertEquals(2, nativeWitness.getInt(264));
+            assertEquals(2, nativeWitness.getInt(268));
+            assertEquals(birth, nativeWitness.getLong(272));
+            assertEquals(fixture.zk.exists(floor + "/revision-2", false).getCzxid(), nativeWitness.getLong(280));
+            fixture.zk.delete(witness, 0);
+            var missing = backup.beginRestoreClosedFragment(freshImage, freshReference, coordinator,
+                    accepted, prepared, sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential,
+                    data, fixture.clients, bytes(16, 73));
+            assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED,
+                    missing.result().get(15, TimeUnit.SECONDS).status());
+            missing.completion().get(10, TimeUnit.SECONDS);
+        }
+    }
+
     private void assertRestoreSourceAdmission(int scenario, Fixture fixture, BookKeeper sdk,
             SegmentProfileBackup backup, Path directory, Path reference, ProfileLedgerMetadataStore metadata,
             ZKProfileReservationStore.ReadOnlySnapshot accepted, ZKProfileReservationStore.RepairSnapshot prepared,
@@ -9898,7 +10040,16 @@ public class SegmentProfileInitialSocketClientTest {
         var before = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
         var targetIo = files(fixture.nodes.get(3)).dataIo;
         int writes = targetIo.writes;
-        if (scenario == 19 || scenario == 20) {
+        boolean empty = prepared.intent().empty();
+        if (scenario == 18) {
+            assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.NOT_FOUND,
+                    fixture.reservations.readRestoreFloor(sourceTarget).status());
+            assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.QUARANTINED,
+                    fixture.reservations.createInitialDeleteAssignmentWithRestoreFloor(sourceTarget).status());
+            assertEquals(ZKProfileReservationStore.CreateStatus.QUARANTINED,
+                    fixture.reservations.advanceRestoreFloor(metadata, sourceTarget, 0, 1));
+        }
+        if (scenario == 19 || scenario == 20 || scenario == 26) {
             if (scenario == 19) {
                 String stream = actualDeleteStreamPath(fixture, sourceTarget);
                 String birth = fixture.zk.getChildren(stream, false).stream()
@@ -9908,8 +10059,24 @@ public class SegmentProfileInitialSocketClientTest {
                 // Only the private fixture's native birth is replaced. All image files and reference stay sealed.
                 fixture.zk.delete(path, 0);
                 fixture.zk.create(path, original, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-            } else {
+            } else if (scenario == 20) {
                 deleteRestoreNeighbor(fixture, sdk, metadata, sourceTarget, 1);
+            } else {
+                String floor = actualDeleteStreamPath(fixture, sourceTarget) + "/restore-floor";
+                assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                        fixture.reservations.advanceRestoreFloor(metadata, sourceTarget, 0, 1));
+                byte[] revision = fixture.zk.getData(floor + "/revision-1", false, null);
+                fixture.zk.delete(floor + "/revision-1", 0);
+                assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.QUARANTINED,
+                        fixture.reservations.readRestoreFloor(sourceTarget).status());
+                fixture.zk.create(floor + "/revision-1", revision, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.QUARANTINED,
+                        fixture.reservations.readRestoreFloor(sourceTarget).status());
+                fixture.zk.delete(floor + "/revision-1", 0);
+                fixture.zk.delete(floor + "/revision-0", 0);
+                fixture.zk.delete(floor, 1);
+                assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.QUARANTINED,
+                        fixture.reservations.createInitialDeleteAssignmentWithRestoreFloor(sourceTarget).status());
             }
             var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
             var refused = backup.beginRestoreClosedFragment(directory, reference, coordinator, accepted, prepared,
@@ -9936,10 +10103,12 @@ public class SegmentProfileInitialSocketClientTest {
             var reservations = new ZKProfileReservationStore(zk, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
                     timed);
             var coordinator = new ProfileRecoveryCoordinator(reservations, mutator, fixture.cold);
-            if (scenario >= 22) {
-                zk.corruptWitness = value -> scenario == 22
-                        ? java.nio.ByteBuffer.wrap(value.clone()).putInt(4, 2).array()
-                        : Arrays.copyOf(value, value.length - 1);
+            if (scenario == 22 || scenario == 23 || scenario == 27) {
+                zk.corruptWitness = value -> switch (scenario) {
+                    case 22 -> java.nio.ByteBuffer.wrap(value.clone()).putInt(4, 3).array();
+                    case 27 -> java.nio.ByteBuffer.wrap(Arrays.copyOf(value, 264)).putInt(4, 1).array();
+                    default -> Arrays.copyOf(value, value.length - 1);
+                };
                 for (int attempt = 0; attempt < 2; attempt++) {
                     var refused = backup.beginRestoreClosedFragment(directory, reference, coordinator,
                             accepted, prepared, sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential,
@@ -9991,10 +10160,10 @@ public class SegmentProfileInitialSocketClientTest {
                 nativeBirth = stat.getCzxid();
                 assertEquals(nativeBirth, fixture.zk.exists(admission, false).getCzxid());
                 assertEquals(0, stat.getVersion());
-                assertEquals(264, sealedWitness.length);
+                assertEquals(scenario == 25 ? 288 : 264, sealedWitness.length);
                 var fields = java.nio.ByteBuffer.wrap(sealedWitness);
                 assertEquals(0x55575253, fields.getInt(0));
-                assertEquals(1, fields.getInt(4));
+                assertEquals(scenario == 25 ? 2 : 1, fields.getInt(4));
                 assertEquals(scenario == 18 ? 2 : 0, fields.getInt(16));
                 assertArrayEquals(Arrays.copyOfRange(Files.readAllBytes(reference), 8, 56),
                         Arrays.copyOfRange(sealedWitness, 68, 116));
@@ -10005,17 +10174,28 @@ public class SegmentProfileInitialSocketClientTest {
                     assertArrayEquals(event.deleteApply("ledger-profile").deleteBinding().orElseThrow().encode(),
                             Arrays.copyOfRange(sealedWitness, 168, 264));
                 }
+                if (scenario == 25) {
+                    String floor = actualDeleteStreamPath(fixture, sourceTarget) + "/restore-floor";
+                    long floorBirth = fixture.zk.exists(floor, false).getCzxid();
+                    assertEquals(0, fields.getLong(264));
+                    assertEquals(floorBirth, fields.getLong(272));
+                    assertEquals(floorBirth, fields.getLong(280));
+                }
             } finally {
                 failReply.run();
             }
             first.completion().get(10, TimeUnit.SECONDS);
-            if (scenario == 21) {
+            if (empty) {
                 deleteRestoreNeighbor(fixture, sdk, metadata, sourceTarget, 1);
+            }
+            if (scenario == 25) {
+                assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                        fixture.reservations.advanceRestoreFloor(metadata, sourceTarget, 0, 1));
             }
             var refused = backup.beginRestoreClosedFragment(alternative, alternativeReference, coordinator,
                     accepted, prepared, sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential,
                     data, fixture.clients, bytes(16, 73));
-            if (scenario == 21) {
+            if (empty) {
                 var failure = assertThrows(ExecutionException.class,
                         () -> refused.result().get(15, TimeUnit.SECONDS));
                 assertTrue(failure.getCause() instanceof IllegalArgumentException);
@@ -10034,13 +10214,13 @@ public class SegmentProfileInitialSocketClientTest {
             var result = same.result().get(15, TimeUnit.SECONDS);
             same.completion().get(10, TimeUnit.SECONDS);
             assertEquals(ProfileRecoveryCoordinator.RepairStatus.REPAIRED_LAST_FRAGMENT, result.status());
-            assertEquals(scenario == 21 ? 0 : 2, result.copiedEntries());
+            assertEquals(empty ? 0 : 2, result.copiedEntries());
             var target = fixture.identities.get(3).bookieId();
             var repaired = fixture.manager.readLedgerMetadata(44).get().getValue();
             assertEquals(target, repaired.getAllEnsembles().get(0L).get(2));
             assertEquals(LedgerMetadata.State.CLOSED, repaired.getState());
             assertEquals(nativeBirth, fixture.zk.exists(witness, false).getCzxid());
-            if (scenario == 21) {
+            if (empty) {
                 assertEquals(writes, targetIo.writes);
             } else {
                 assertReadPayload(data.get(target), fixture.context(), 1, bytes(16, 8));
@@ -10303,7 +10483,7 @@ public class SegmentProfileInitialSocketClientTest {
                 fixture.connectAll(Duration.ofSeconds(5));
                 fixture.initialize().get(5, TimeUnit.SECONDS);
                 var data = new HashMap<BookieId, ProfileNormalDataClient>();
-                boolean empty = scenario == 21;
+                boolean empty = scenario == 21 || scenario == 25;
                 for (int node = 0; node < 3; node++) {
                     var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
                     data.put(fixture.identities.get(node).bookieId(), peer);
@@ -10320,9 +10500,12 @@ public class SegmentProfileInitialSocketClientTest {
                 var sourceIdentity = fixture.identities.get(0);
                 var sourceTarget = new ProfileDeleteRecord.Target(sourceIdentity.bookieId().toString(),
                         sourceIdentity.incarnation().value());
+                var assignment = scenario >= 24
+                        ? fixture.reservations.createInitialDeleteAssignmentWithRestoreFloor(sourceTarget)
+                        : fixture.reservations.createInitialDeleteAssignment(sourceTarget);
                 assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.FOUND,
-                        fixture.reservations.createInitialDeleteAssignment(sourceTarget).status());
-                if (scenario == 18 || scenario == 19) {
+                        assignment.status());
+                if (scenario == 18 || scenario == 19 || scenario == 24 || scenario == 26) {
                     prepareSnapshotLedger(fixture, sdk, metadata, 45, false, data);
                     var delivery = fixture.reservations.readDeleteDelivery(metadata, sourceTarget, 1);
                     assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED, delivery.status());
@@ -10331,7 +10514,7 @@ public class SegmentProfileInitialSocketClientTest {
                             .get(5, TimeUnit.SECONDS).outcome());
                     assertEquals(1, fixture.nodes.get(0).profileDeleteProgress().sequence());
                 }
-                if (scenario == 18 || scenario == 20 || scenario == 21) {
+                if (scenario == 18 || scenario == 20 || scenario == 21 || scenario == 24 || scenario == 25) {
                     var neighbor = openHandoffTestLedger(fixture, sdk, metadata, 46, data);
                     try {
                         neighbor.closeAsync().get(30, TimeUnit.SECONDS);
@@ -10408,6 +10591,11 @@ public class SegmentProfileInitialSocketClientTest {
                 fixture.connect(3, 4, Duration.ofSeconds(5));
                 var peer = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
                 data.put(target.bookieId(), peer);
+                if (scenario == 24) {
+                    assertRestoreFloorAdvance(fixture, sdk, backup, sourceConfig, directory, reference, metadata,
+                            accepted, prepared, data, sourceTarget);
+                    continue;
+                }
                 if (scenario >= 18) {
                     assertRestoreSourceAdmission(scenario, fixture, sdk, backup, directory, reference, metadata,
                             accepted, prepared, data, sourceTarget);

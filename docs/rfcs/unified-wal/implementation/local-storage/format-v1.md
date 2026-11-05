@@ -6,7 +6,7 @@
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
-离线备份的 v1 manifest 以原 Bookie control cut、文件长度和 SHA-256 封存现有控制历史。恢复入口验封后由该历史读取 effective progress 和最后实际 applied cursor。镜像保留原格式，恢复来源 witness 由集群在原准入事务中保存。详见 [恢复准入](../profile-wire/README.md#恢复准入绑定已封存镜像与原删除流)。
+离线备份的 v1 manifest 以原 Bookie control cut、文件长度和 SHA-256 封存现有控制历史。恢复入口验封后由该历史读取 effective progress 和最后实际 applied cursor。镜像保留原格式，恢复来源 witness 和 G1 floor 由 ZooKeeper 保存。详见 [G1 恢复接受下界](../profile-wire/README.md#g1-恢复接受下界)。
 
 ## 目录和文件身份
 
