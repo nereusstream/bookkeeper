@@ -54,6 +54,8 @@ class NativeIOJni {
 
     static native long[] currentProcessCredentials() throws NativeIOException;
 
+    static native String[] currentKernelIdentity() throws NativeIOException;
+
     static native NativeIO.JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException;
 
     static native long[] unixPeerCredentials(java.nio.channels.SocketChannel channel) throws NativeIOException;

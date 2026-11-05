@@ -1218,6 +1218,20 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## D2 运行内核标识与受控 JNI
+
+2026-11-05在父`1dbbf7943ab14195d0d35bfed7291512bfa61f09`上，原NativeIO/Impl/Jni/Rust新增无参currentKernelIdentity，返回sysname、machine、release、version四个不可变字符串。原受控库只调用一次libc::uname，失败立即保存errno；按各实际libc字段数组的长度找首NUL，拒绝缺失/空串/坏UTF8/未终止字段，保留完整空格、标点及Unicode，不输出nodename/domainname。default明确unsupported，Impl拒绝未知结果并在旧JNI缺symbol时保留LinkageError cause，没有JVM属性、外部命令或procfs生产fallback，也不新增持久格式。
+
+正常launcher仅D2在verifyLinuxProvider之后、dropper/childCommand/私钥/ZK之前调用原owner.verifyLinuxKernel(deadline)。原source/provider/原期限及紧邻native调用的期限检查先于从final nativeIo取数；只按sysname=`Linux`、machine=`x86_64`及原D2.Platform的kernelRelease/kernelVersion逐字相等，再检查原healthy/deadline。没有trim、大小写/amd64转换、版本推断、caller kernel结果参数、缓存或第二套资格状态；原同步/first failure/close纪律保持。小型值比较函数只供同一入口及数据fixture使用，给定Linux DTO不补认真实来源，旧描述符跳过此检查。
+
+最终新宿主库353840字节，SHA-256 `804093b036652cf71b7b5662f79f9073a3b0086e373086e86f8a9c6e296882ba`；本机真实uname为Darwin/arm64，与独立`/usr/bin/uname`四个单项输出逐字相等，只移除命令自身最后LF，不trim版本。新native3及含原Credentials2/FileIdentity4的相关9项全通过；server新kernel3加Inputs6/DeploymentV2 11/Provider3/Launcher3共26项全通过，均0失败/错误/跳过，共35项当前JUnit，首3和checked-JNI重复3不再累计。`-Xcheck:jni`同3通过/无native warning；独立VM加载精确旧sealed70bb，原credential调用在新symbol拒绝前后均可用，新查询因缺symbol保留UnsatisfiedLinkError cause，旧库未改。没有重跑Trust整类、旧ELF/solver/完整native矩阵。
+
+评审前未执行的static native stubbing已移除，Linux默认打包JNI的实际对照不再因缺override而跳过；未为mock注入生产JNI。首宿主构建在旧credentials格式被formatter展开的原源码上退出0，库与快照单列保留，不移绑恢复后的源；恢复父格式后的final host build退出0，新库绑定最终Rust原源。Linux x86_64 cargo check退出0，只编译/未链接运行，真实Linux/获批D2 source阳性NOT_EXECUTED。原Cargo lib test因测试可执行链接收到动态库`-install_name`参数退出101、零用例；未改共享build.rs，逐字节抽取生产kernel_field及原test module，用独立rustc test binary完成2项字段边界测试，只算字段逻辑。Java Spotless/Checkstyle退出0；实际cargo fmt check退出1，仅保留与父相同的4项credentials既有格式差异，新函数没有新增差异。
+
+证据`/Users/liusinan/.codex/artifacts/unified-wal/native-kernel-identity-evidence-1dbbf794`保留原构建/失败/source/class/log/XML与旧库probe；三Maven阶段各1449输入按原snapshot/父Git blob核验无错配，8个改动源与各test/Java style一致，新库另按最终4项Rust构建输入绑定。原字段测试依赖rlib与测试binary保留，Cargo失败不改写为通过。双lsof/identity/SHA核验后，仅清理本次3个Cargo target的691文件路径/168759068逻辑字节（实际物理回收未测），以及3个raw scope的6目录、18文件路径/1072487逻辑字节；原库/新库、源码、class、日志、输入及归档硬链接保留，raw regular-file数据块回收0，共享target/用户文件未清理。
+
+该条件只证明当前调用进程的uname返回与D2原批准文字相等。[uname接口](https://man7.org/linux/man-pages/man2/uname.2.html)及[Linux v6.6 newuname](https://raw.githubusercontent.com/torvalds/linux/v6.6/kernel/sys.c)只作静态语义依据；后者复制调用者UTS视图，personality可影响release/machine，不据此证明宿主PID/user/UTS namespace、硬件、build身份、cgroup2/ext4、systemd或canary。实际Linux资格/cgroup producer、JDK/helper/父环境及完整启动仍OPEN，原childCommand/diagnostics拒绝及parent/child/Main/G1/full-bytes/full16/生产Gate不变；无models/性能结论，完整目标active，默认OFF/SYSTEM/PARK与advanced disabled保持。
+
 ## Launcher 的 D2 dropper 与第一条解释器材料关联
 
 2026-11-05在父`a14d1025595a91e7a306a5bcdeb86cd69f405d4b`上，现有SegmentClassicLauncher.startup在原verifyLinuxProvider之后、loadPrivateKey之前调用的verifyLauncherDropper，其D2分支改接已有owned ELF2。分支同时检查owner原descriptor和caller的schema，任一为D2都必须先匹配同一原input引用，再通过originalLinuxDeployment/provider/source/原deadline及recipe；原owner绑定D2后，另一个legacy或同值重解码descriptor不能降级。公共dropper path/length/SHA继续由原Inputs构造绑定固定isolation.dropper，不建立第二份权威。旧v1及旧deployment schema一保留原Linux/Mach短头合同和流程。

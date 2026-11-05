@@ -153,6 +153,27 @@ public class NativeIOImpl implements NativeIO {
     }
 
     @Override
+    public KernelIdentity currentKernelIdentity() throws NativeIOException {
+        try {
+            String[] actual = NativeIOJni.currentKernelIdentity();
+            if (actual == null || actual.length != 4) {
+                throw new NativeIOException("Unknown current kernel identity query outcome");
+            }
+            try {
+                return new KernelIdentity(actual[0], actual[1], actual[2], actual[3]);
+            } catch (IllegalArgumentException invalid) {
+                var failure = new NativeIOException("Invalid native current kernel identity");
+                failure.initCause(invalid);
+                throw failure;
+            }
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Current kernel identity is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
     public JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException {
         try {
             var type = Class.forName("java.lang.ProcessImpl", false, null);

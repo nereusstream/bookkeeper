@@ -4415,6 +4415,58 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void kernelIdentityRequiresEachExactOriginalFieldWithoutNormalization() throws Exception {
+        var expected = SegmentClassicLinuxProviderTest.schemaTwoInput().linuxDeployment().versionTwo().platform();
+        var exact = new NativeIO.KernelIdentity("Linux", "x86_64", expected.kernelRelease(), expected.kernelVersion());
+        SegmentClassicLaunchTrust.requireLinuxKernelIdentity(expected, exact);
+        var mismatches = List.of(
+                new NativeIO.KernelIdentity("linux", exact.machine(), exact.release(), exact.version()),
+                new NativeIO.KernelIdentity(exact.sysname(), "amd64", exact.release(), exact.version()),
+                new NativeIO.KernelIdentity(exact.sysname(), exact.machine(), exact.release() + " ", exact.version()),
+                new NativeIO.KernelIdentity(exact.sysname(), exact.machine(), exact.release(), exact.version() + " "));
+        for (var actual : mismatches) {
+            assertThrows(IOException.class,
+                    () -> SegmentClassicLaunchTrust.requireLinuxKernelIdentity(expected, actual));
+        }
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireLinuxKernelIdentity(expected, null));
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireLinuxKernelIdentity(null, exact));
+    }
+
+    @Test
+    public void kernelRealProcessViewDoesNotBecomeApprovedLinuxByMatchingOnlyVersionText() throws Exception {
+        var actual = new NativeIOImpl().currentKernelIdentity();
+        var old = SegmentClassicLinuxProviderTest.schemaTwoInput().linuxDeployment().versionTwo().platform();
+        var matchingText = new SegmentClassicLinuxDeploymentV2.Platform(old.profile(), actual.release(),
+                actual.version(), old.systemdVersion(), old.systemctlVersion(), old.loaderVersion(), old.showFormat(),
+                old.elfFormat());
+        if (actual.sysname().equals("Linux") && actual.machine().equals("x86_64")) {
+            SegmentClassicLaunchTrust.requireLinuxKernelIdentity(matchingText, actual);
+        } else {
+            assertThrows(IOException.class,
+                    () -> SegmentClassicLaunchTrust.requireLinuxKernelIdentity(matchingText, actual));
+        }
+    }
+
+    @Test
+    public void kernelOriginalSourceAndDeadlineRejectBeforeTheNativeQuery() throws Exception {
+        for (int mode = 0; mode < 2; mode++) {
+            long deadline = mode == 0 ? SegmentClassicLinuxElfTest.deadline() : System.nanoTime();
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> {
+                        throw new AssertionError("Unbound or expired D2 reached native uname");
+                    }).when(mock).currentKernelIdentity())) {
+                var owner = owner();
+                owner.initialize();
+                var failure = assertThrows(IOException.class, () -> owner.verifyLinuxKernel(deadline));
+                assertTrue(failure.getMessage(), failure.getMessage().contains(mode == 0
+                        ? "original provider/source binding" : "deadline elapsed"));
+                assertThrows(IOException.class, owner::parsed);
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
     public void callerConstructedD2InputCannotReachDropperIoWithoutTheOriginalProviderBinding() throws Exception {
         var owner = owner();
         owner.initialize();

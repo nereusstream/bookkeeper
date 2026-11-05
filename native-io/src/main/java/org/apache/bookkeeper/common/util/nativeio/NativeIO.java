@@ -20,6 +20,7 @@
 package org.apache.bookkeeper.common.util.nativeio;
 
 import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.TreeSet;
 
@@ -30,6 +31,19 @@ public interface NativeIO {
 
     /** Actual descriptor facts only; every raw dev/ino bit pattern, including zero, is valid data. */
     record FileIdentity(long device, long inode) { }
+
+    /** This process's uname view only; not host namespace, hardware or deployment qualification. */
+    record KernelIdentity(String sysname, String machine, String release, String version) {
+        public KernelIdentity {
+            for (String value : new String[]{sysname, machine, release, version}) {
+                if (value == null || value.isEmpty() || value.length() > 4096 || value.indexOf(0) >= 0
+                        || !StandardCharsets.UTF_8.newEncoder().canEncode(value)
+                        || value.getBytes(StandardCharsets.UTF_8).length > 4096) {
+                    throw new IllegalArgumentException("Invalid bounded UTF8 uname field");
+                }
+            }
+        }
+    }
 
     /** Cached JDK data only, not backend approval. The copied helper bytes retain their one final NUL byte. */
     record JdkProcessLaunchObservation(String mechanism, int ordinal, byte[] helperPath) {
@@ -187,6 +201,11 @@ public interface NativeIO {
     /** Direct getuid/geteuid/getgid/getegid/getgroups observations; no external PID or credential input. */
     default ProcessCredentials currentProcessCredentials() throws NativeIOException {
         throw new NativeIOException("Current process credential query is unsupported");
+    }
+
+    /** One libc uname call, no property, procfs, command or deployment-qualification fallback. */
+    default KernelIdentity currentKernelIdentity() throws NativeIOException {
+        throw new NativeIOException("Current kernel identity query is unsupported");
     }
 
     /**

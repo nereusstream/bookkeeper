@@ -26,7 +26,7 @@
 
 use jni::objects::{JByteArray, JClass, JObject, JString, JThrowable};
 use jni::signature::{Primitive, ReturnType};
-use jni::sys::{jint, jlong, jlongArray};
+use jni::sys::{jint, jlong, jlongArray, jobjectArray};
 use jni::JNIEnv;
 use std::ffi::{c_void, CString};
 use std::ptr;
@@ -261,6 +261,105 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     {
         throw_exception(&mut env, "Current process credential query is unsupported");
         ptr::null_mut()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn kernel_field(field: &[libc::c_char]) -> Result<String, libc::c_int> {
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(libc::EINVAL)?;
+    if end == 0 {
+        return Err(libc::EINVAL);
+    }
+    let bytes: Vec<u8> = field[..end].iter().map(|byte| *byte as u8).collect();
+    String::from_utf8(bytes).map_err(|_| libc::EINVAL)
+}
+
+/// One libc uname call in this process's view, without hostname or domain-name output or qualification.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentKernelIdentity(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jobjectArray {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let mut value: libc::utsname = unsafe { std::mem::zeroed() };
+        if unsafe { libc::uname(&mut value) } != 0 {
+            let error = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            throw_exception_with_error_code(&mut env, "Current kernel uname failed", error);
+            return ptr::null_mut();
+        }
+        let fields: [&[libc::c_char]; 4] = [
+            &value.sysname,
+            &value.machine,
+            &value.release,
+            &value.version,
+        ];
+        let mut texts = Vec::with_capacity(fields.len());
+        for field in fields {
+            match kernel_field(field) {
+                Ok(text) => texts.push(text),
+                Err(error) => {
+                    throw_exception_with_error_code(
+                        &mut env,
+                        "Invalid bounded UTF8 uname field",
+                        error,
+                    );
+                    return ptr::null_mut();
+                }
+            }
+        }
+        let array = match env.new_object_array(4, "java/lang/String", JObject::null()) {
+            Ok(array) => array,
+            Err(_) => return ptr::null_mut(),
+        };
+        for (index, text) in texts.iter().enumerate() {
+            let value = match env.new_string(text) {
+                Ok(value) => value,
+                Err(_) => return ptr::null_mut(),
+            };
+            if env
+                .set_object_array_element(&array, index as jint, value)
+                .is_err()
+            {
+                return ptr::null_mut();
+            }
+        }
+        array.into_raw()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Current kernel identity query unsupported",
+            libc::ENOSYS,
+        );
+        ptr::null_mut()
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod kernel_field_tests {
+    use super::kernel_field;
+
+    #[test]
+    fn preserves_first_nul_bounded_full_utf8_text() {
+        let text = "#1 SMP  雪; release:build ";
+        let mut field: Vec<libc::c_char> = text.bytes().map(|b| b as libc::c_char).collect();
+        field.extend([0, b'x' as libc::c_char]);
+        assert_eq!(kernel_field(&field).unwrap(), text);
+    }
+
+    #[test]
+    fn rejects_empty_unterminated_and_invalid_utf8_fields() {
+        for bytes in [vec![], vec![0], vec![b'x'], vec![0xff, 0]] {
+            let field: Vec<libc::c_char> = bytes.into_iter().map(|b| b as libc::c_char).collect();
+            assert_eq!(kernel_field(&field), Err(libc::EINVAL));
+        }
     }
 }
 
