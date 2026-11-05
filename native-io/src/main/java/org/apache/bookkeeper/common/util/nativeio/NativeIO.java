@@ -208,6 +208,11 @@ public interface NativeIO {
         throw new NativeIOException("Current kernel identity query is unsupported");
     }
 
+    /** One statfs of the current Linux mount view's literal /sys/fs/cgroup/; no episode or membership proof. */
+    default long currentCgroupRootFileSystemType() throws NativeIOException {
+        throw new NativeIOException("Current cgroup root filesystem type query is unsupported");
+    }
+
     /**
      * Read only the fixed bootstrap ProcessImpl's cached mechanism and helper bytes. May initialize that class and
      * wait for class initialization; callers must not hold a trust monitor or infer termination from a timeout.

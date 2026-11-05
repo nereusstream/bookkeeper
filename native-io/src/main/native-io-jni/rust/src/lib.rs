@@ -264,6 +264,36 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     }
 }
 
+/// The type at this literal directory in the caller's current mount view, not cgroup identity or membership.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentCgroupRootFileSystemType(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jlong {
+    #[cfg(target_os = "linux")]
+    {
+        let path = b"/sys/fs/cgroup/\0";
+        let mut value: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statfs(path.as_ptr().cast::<libc::c_char>(), &mut value) } != 0 {
+            let error = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            throw_exception_with_error_code(&mut env, "Current cgroup root statfs failed", error);
+            return 0;
+        }
+        value.f_type as jlong
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Current cgroup root filesystem type query unsupported",
+            libc::ENOSYS,
+        );
+        0
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn kernel_field(field: &[libc::c_char]) -> Result<String, libc::c_int> {
     let end = field

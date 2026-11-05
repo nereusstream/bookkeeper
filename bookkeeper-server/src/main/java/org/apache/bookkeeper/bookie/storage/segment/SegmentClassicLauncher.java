@@ -281,7 +281,7 @@ public final class SegmentClassicLauncher {
         program.requireCurrentLauncher(recipeId);
         if (input.linuxDeployment() != null && input.linuxDeployment().schema() == 2) {
             trust.verifyLinuxProvider(deadline);
-            trust.verifyLinuxKernel(deadline);
+            trust.verifyLinuxKernelAndCgroupRoot(deadline);
         }
         trust.verifyLauncherDropper(input, deadline);
         final List<String> childCommand = input.childCommand(material, program);

@@ -1218,6 +1218,18 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## D2 当前可见 cgroup 标准路径的文件系统类型
+
+2026-11-05在父`9500b3f79edcf5064a545d99305cfc2c343b7eb5`上，原NativeIO/Impl/Jni/Rust新增无参currentCgroupRootFileSystemType。Linux只对字面`/sys/fs/cgroup/`调用一次libc::statfs，保留尾slash目录语义，失败立即保存并传播errno，完整f_type转jlong；非Linux/default明确unsupported，旧JNI缺symbol保留LinkageError cause。没有任意路径参数、通用statfs DTO、fd打开/关闭、外部命令、proc/mountinfo fallback或cache，也不改原ACL/readlink及CPU拓扑的best-effort读取。
+
+原owner核验更名为verifyLinuxKernelAndCgroupRoot并返回void：同owner原D2 source/provider/deadline→一次uname及原四字段精确比较→期限检查→一次固定路径statfs→完整long精确等于`CGROUP2_SUPER_MAGIC=0x63677270`→healthy/deadline。没有返回可转移资格、状态字段或重复uname；原launcher仅D2在provider后/dropper与私钥之前调用，旧描述符跳过。v1、tmpfs、sysfs、未知/零/负值和低32位相同但高位不同者均拒绝，不探测unified/systemd子挂载升级hybrid。[systemd v255对应路径检查](https://raw.githubusercontent.com/systemd/systemd/v255/src/basic/cgroup-util.c)及[Linux UAPI magic](https://raw.githubusercontent.com/torvalds/linux/v6.8/include/uapi/linux/magic.h)仅作静态依据，本实现不复用其缓存或完整布局分类。
+
+新宿主库353984字节，SHA-256 `9406191eb9312ddae13f52be174cf2a24344b1da109c15ab65eda4f06f3e3fc2`。新native2及含原uname3的相关5、server kernel/cgroup4＋Inputs6/DeploymentV2 11/Provider3/Launcher3共27，合计32项当前JUnit全通过，0失败/错误/跳过；首2和checked-JNI重复2不再累计。宿主实际执行的是macOS native unsupported（errno78），不是Linux statfs或cgroup2阳性。Linux默认JAR路径会运行独立C同路径statfs参考，分别比对完整type或errno，只有实际magic命中才记录该条件阳性；本机Linux参考/实跑NOT_EXECUTED。`-Xcheck:jni`同2通过/无native warning；旧精确804093b0库的独立VM中，原uname在新symbol缺失拒绝前后均可用，cause为UnsatisfiedLinkError，旧库未改。
+
+host build与Linux x86_64 cargo check均退出0，后者仅编译/未链接执行；Java Spotless/Checkstyle退出0，cargo fmt1仅保留与父相同的4项旧credentials格式差异。未重跑无关Rust lib test/字段unit、旧ELF/solver或完整native矩阵，没有创建/写入cgroup或改变系统服务/配置。证据`/Users/liusinan/.codex/artifacts/unified-wal/native-cgroup-root-evidence-9500b3f7`保留源/class/日志/XML、构建输入和旧库probe；三Maven阶段各1450输入按原snapshot/父Git blob核验无错配，8个改动源与各test/Java style一致，新库另绑定4项原Rust构建输入。双lsof/identity/SHA核验后仅清2个自有Cargo target的447文件路径/91410580逻辑字节（物理回收未测）和3个raw scope的6目录/17文件路径/1062404逻辑字节；源码、库、class和归档硬链接保留、raw数据块回收0，共享target/用户文件未清理。
+
+该检查只表示固定目录路径当次解析到的文件系统类型，不能辨认cgroup2被bind的子树、cgroup namespace根、宿主其他v1 mount、controllers、父membership/写者、独立episode对象或populated=0。实际Linux/原D2 source阳性仍NOT_EXECUTED；episode对象持有/身份/权限/连续性、cgroup.procs及排空后续另验，不将Java常量或macOS拒绝当作运行证明。原childCommand/diagnostics及各整体Gate仍OPEN，完整16步active，无models/性能结论，默认OFF/SYSTEM/PARK与advanced disabled保持。
+
 ## D2 运行内核标识与受控 JNI
 
 2026-11-05在父`1dbbf7943ab14195d0d35bfed7291512bfa61f09`上，原NativeIO/Impl/Jni/Rust新增无参currentKernelIdentity，返回sysname、machine、release、version四个不可变字符串。原受控库只调用一次libc::uname，失败立即保存errno；按各实际libc字段数组的长度找首NUL，拒绝缺失/空串/坏UTF8/未终止字段，保留完整空格、标点及Unicode，不输出nodename/domainname。default明确unsupported，Impl拒绝未知结果并在旧JNI缺symbol时保留LinkageError cause，没有JVM属性、外部命令或procfs生产fallback，也不新增持久格式。

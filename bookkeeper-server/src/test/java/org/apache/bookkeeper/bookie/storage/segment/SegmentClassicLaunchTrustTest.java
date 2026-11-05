@@ -4448,21 +4448,34 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
-    public void kernelOriginalSourceAndDeadlineRejectBeforeTheNativeQuery() throws Exception {
+    public void kernelAndCgroupOriginalSourceAndDeadlineRejectBeforeNativeQueries() throws Exception {
         for (int mode = 0; mode < 2; mode++) {
             long deadline = mode == 0 ? SegmentClassicLinuxElfTest.deadline() : System.nanoTime();
             try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
-                    (mock, context) -> doAnswer(call -> {
-                        throw new AssertionError("Unbound or expired D2 reached native uname");
-                    }).when(mock).currentKernelIdentity())) {
+                    (mock, context) -> {
+                        doAnswer(call -> {
+                            throw new AssertionError("Unbound or expired D2 reached native uname");
+                        }).when(mock).currentKernelIdentity();
+                        doAnswer(call -> {
+                            throw new AssertionError("Unbound or expired D2 reached native cgroup statfs");
+                        }).when(mock).currentCgroupRootFileSystemType();
+                    })) {
                 var owner = owner();
                 owner.initialize();
-                var failure = assertThrows(IOException.class, () -> owner.verifyLinuxKernel(deadline));
+                var failure = assertThrows(IOException.class, () -> owner.verifyLinuxKernelAndCgroupRoot(deadline));
                 assertTrue(failure.getMessage(), failure.getMessage().contains(mode == 0
                         ? "original provider/source binding" : "deadline elapsed"));
                 assertThrows(IOException.class, owner::parsed);
                 assertTrue(owner.closeAndDrain().drained());
             }
+        }
+    }
+
+    @Test
+    public void cgroupRootFileSystemTypeRequiresTheCompleteCgroup2Value() throws Exception {
+        SegmentClassicLaunchTrust.requireLinuxCgroupRootType(0x63677270L);
+        for (long type : new long[]{0x27e0ebL, 0x01021994L, 0x62656572L, 0, -1, 0x1_63677270L}) {
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireLinuxCgroupRootType(type));
         }
     }
 

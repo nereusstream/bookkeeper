@@ -174,6 +174,18 @@ public class NativeIOImpl implements NativeIO {
     }
 
     @Override
+    public long currentCgroupRootFileSystemType() throws NativeIOException {
+        try {
+            return NativeIOJni.currentCgroupRootFileSystemType();
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException(
+                    "Current cgroup root filesystem type is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
     public JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException {
         try {
             var type = Class.forName("java.lang.ProcessImpl", false, null);

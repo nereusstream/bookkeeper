@@ -851,8 +851,8 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    /** Current process uname equality only; no host namespace, filesystem, systemd or cgroup qualification. */
-    synchronized NativeIO.KernelIdentity verifyLinuxKernel(long deadline) throws IOException {
+    /** Current uname and visible fixed-path type only; no host namespace or episode cgroup qualification. */
+    synchronized void verifyLinuxKernelAndCgroupRoot(long deadline) throws IOException {
         requireReady();
         initializingThread = Thread.currentThread();
         try {
@@ -860,14 +860,21 @@ final class SegmentClassicLaunchTrust {
             requireTime(deadline);
             var actual = nativeIo.currentKernelIdentity();
             requireLinuxKernelIdentity(deployment.platform(), actual);
+            requireTime(deadline);
+            requireLinuxCgroupRootType(nativeIo.currentCgroupRootFileSystemType());
             files.requireHealthy();
             requireTime(deadline);
-            return actual;
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
             throw failure;
         } finally {
             initializingThread = null;
+        }
+    }
+
+    static void requireLinuxCgroupRootType(long actual) throws IOException {
+        if (actual != 0x63677270L) { // Linux UAPI CGROUP2_SUPER_MAGIC, complete f_type value.
+            throw new IOException("Current /sys/fs/cgroup/ filesystem type differs from required cgroup2");
         }
     }
 
