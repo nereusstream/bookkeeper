@@ -71,6 +71,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
             "UW-RECOVERY-GRANT-V1".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] RECOVERY_CLOSE_DOMAIN =
             "UW-RECOVERY-CLOSE-V1".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] CLASSIC_BOOTSTRAP_CLAIM_DOMAIN =
+            "BookKeeper/ClassicBootstrap/CLAIM_CLASSIC/v1".getBytes(StandardCharsets.US_ASCII);
 
     enum Status {
         APPLIED_DURABLE, ALREADY_DURABLE, CONDITION_FAILED, INCOMPATIBLE
@@ -106,6 +108,22 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 throw new IllegalArgumentException("Route binding requires a nonzero enable operation");
             }
         }
+
+        RouteChange bootstrapClaim(long ledgerId) {
+            if (ledgerId < 0) {
+                throw new IllegalArgumentException("Classic bootstrap requires a nonnegative ledger ID");
+            }
+            ByteBuffer input = ByteBuffer.allocate(CLASSIC_BOOTSTRAP_CLAIM_DOMAIN.length + 1
+                    + 3 * Long.BYTES + ManifestIdentity.LENGTH);
+            input.put(CLASSIC_BOOTSTRAP_CLAIM_DOMAIN).put((byte) 0)
+                    .putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits())
+                    .put(manifest.value()).putLong(ledgerId);
+            UUID operation = operationId(sha256(input.array()));
+            if (operation.equals(new UUID(0, 0))) {
+                throw new IllegalArgumentException("Derived Classic bootstrap claim identity is zero");
+            }
+            return new RouteChange(RouteAction.CLAIM_CLASSIC, ledgerId, this, operation);
+        }
     }
 
     sealed interface Change permits ProfileChange, RouteChange { }
@@ -127,6 +145,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
         }
     }
+
+    /** Original applied receipt, or an unsubmitted command when the result is empty. */
+    record BootstrapClaim(RouteChange command, Optional<Result> applied) { }
 
     record ExplicitLac(long lac, byte[] body) {
         ExplicitLac {
@@ -1171,6 +1192,42 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 operation.sequence(), bootstrapComplete.value()));
     }
 
+    /** A local control observation only. The bootstrap owner still has to prove its scope and submit new claims. */
+    synchronized BootstrapClaim prepareBootstrapClaim(long ledgerId) throws IOException {
+        if (ledgerId < 0) {
+            throw new IllegalArgumentException("Classic bootstrap requires a nonnegative ledger ID");
+        }
+        requireWritable();
+        if (routeBinding == null || ownedFiles != null && !ownedFiles.healthy()
+                || !quiescentForRotation() || durableThrough != appliedThrough) {
+            throw new IOException("Classic bootstrap requires quiescent, applied common Bookie control");
+        }
+        if (ledgers.containsKey(ledgerId) || tombstones.containsKey(ledgerId)) {
+            throw new IOException("Classic bootstrap claim conflicts with a Profile route or tombstone: " + ledgerId);
+        }
+        RouteChange existing = classicRoutes.get(ledgerId);
+        if (existing != null) {
+            AppliedOperation prior = operations.get(existing.operationId());
+            if (existing.action() != RouteAction.CLAIM_CLASSIC || existing.value() != ledgerId
+                    || !routeBinding.equals(existing.binding()) || prior == null
+                    || !existing.equals(prior.command().route) || prior.outcome() != Status.APPLIED_DURABLE
+                    || prior.sequence() < 0 || prior.sequence() > appliedThrough) {
+                throw new IOException("Classic bootstrap claim has no matching original applied result: " + ledgerId);
+            }
+            return new BootstrapClaim(existing, Optional.of(routeResult(existing, prior.outcome(), prior.sequence())));
+        }
+        if (bootstrapComplete != null) {
+            throw new IOException("Classic bootstrap is already sealed");
+        }
+        RouteChange candidate = routeBinding.bootstrapClaim(ledgerId);
+        UUID operation = candidate.operationId();
+        if (operations.containsKey(operation) || fenceOperations.containsKey(operation)
+                || reservedOperation(operation)) {
+            throw new IOException("Classic bootstrap claim operation is already occupied: " + ledgerId);
+        }
+        return new BootstrapClaim(candidate, Optional.empty());
+    }
+
     synchronized void requireCommonBinding(UUID bindingId, ManifestIdentity manifest) throws IOException {
         requireWritable();
         if (routeBinding == null || !routeBinding.id().equals(bindingId) || !routeBinding.manifest().equals(manifest)) {
@@ -1414,11 +1471,13 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 Status status = apply(command, sequence);
                 ByteBuffer record = encode(command, sequence);
                 appliedOffset += record.remaining();
+                if (command.route != null) {
+                    results.add(routeResult(command.route, status, sequence));
+                    continue;
+                }
                 LedgerState state = command.scope == null ? null : ledgers.get(command.scope.ledgerId());
                 results.add(new Result(status, command.operationId(), sequence,
-                        command.route != null
-                                ? status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE ? 1 : 0
-                                : command.deletion != null
+                        command.deletion != null
                                 && (status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE)
                                 ? command.deletion.sequence() : state == null ? 0 : state.localGeneration,
                         state == null ? 0 : state.localInstallGeneration));
@@ -1429,6 +1488,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         pending = null;
         return List.copyOf(results);
+    }
+
+    private static Result routeResult(RouteChange route, Status status, long sequence) {
+        long generation = status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE ? 1 : 0;
+        return new Result(status, route.operationId(), sequence, generation, 0);
     }
 
     List<Result> submitBatch(List<ProtectedProfileStateStore.Transition> transitions) throws IOException {
@@ -3709,8 +3773,12 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         input.put(intentId).putLong(intentGeneration).putLong(grantGeneration)
                 .putLong(scope.exactRange().firstEntryId()).putLong(scope.exactRange().lastEntryId());
+        return sha256(input.array());
+    }
+
+    private static byte[] sha256(byte[] bytes) {
         try {
-            return MessageDigest.getInstance("SHA-256").digest(input.array());
+            return MessageDigest.getInstance("SHA-256").digest(bytes);
         } catch (NoSuchAlgorithmException impossible) {
             throw new IllegalStateException("SHA-256 is unavailable", impossible);
         }

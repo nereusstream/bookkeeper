@@ -2319,3 +2319,13 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 原文件和 lastMark 在真实多 Journal 用例中保持原路径和字节。另测缺失标记文件、后 Journal 坏 mark 或完整 payload、visitor 与首次 native close 双失败，以及跨 Journal 排空。新增五项通过，最终历史 Journal 13、历史 index 14、普通 Classic Journal 16、历史子图 3 共 46 项通过，Java Spotless 与 Checkstyle 通过。沿用原 acf9afec… native 库，归档位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-journal-inventory-evidence-f5ccf982`。
 
 ledger ID 按记录流式交付，每个 Journal 仍沿用随实际文件数增长的排序清单。整个 bootstrap 的内存上界、外层根排他、持久 CLASSIC claim、受控重放与 flush、BOOTSTRAP_COMPLETE、PREPARED 到 ENABLED、运行期 route 和批准 Linux 运行仍待验收。
+
+## 离线 bootstrap 的 Classic claim 身份与结果续接
+
+在父 `f563eb2e91` 上，Bookie 控制日志新增包内 `prepareBootstrapClaim`。查询由实际 `classicRoutes` 和 `operations` 共同确认相同 binding、ledger、原命令、首次应用序号和成功结果。旧的显式 UUID 随原结果保留。只有健康、无未决写入或应用、尚未封口且没有冲突的 ledger 才能得到待提交命令。已有 seal 时仍可查询原结果。新的命令由既有 Driver 写入并按序应用，准备入口只返回本地控制数据。
+
+新 operation UUID 使用 SHA-256。输入依序是 ASCII `BookKeeper/ClassicBootstrap/CLAIM_CLASSIC/v1`、单字节 `00`、原 binding UUID 的两个 big-endian 64-bit 值、原 manifest 的 32 字节，以及非负 ledger ID 的 big-endian 64-bit 值。取前 16 字节按原 UUID 的两个 long 解释，全零或原操作索引已占用时拒绝。既有 ROUTE body 保持 64 字节，frame 保持 208 字节。独立 Python 向量的 UUID 为 `29829e31-4e58-030e-9dc2-f9fa525c7c81`。
+
+四项新增测试和最终 21 项回归通过，Java Spotless 与 Checkstyle 通过。真实 owned control 和 Driver 验证了重复查询的零写入、零 force，首次结果通过 checkpoint、rotation 和重开后仍可取回。真实写盘后暂停 force 或等待 apply 时拒绝查询，注入 force 失败后只从健康重开的实际重演结果续接。测试还覆盖了已占用的派生 ID、进行中的 rotation 和首次 native close 失败。沿用原 acf9afec… native 库，归档位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-claim-evidence-f563eb2e`。
+
+本项证据覆盖原本地控制日志。完整旧写者隔离、外层根保护、有界 index 和 Journal 导入、受控重放与严格 flush、BOOTSTRAP_COMPLETE、PREPARED 到 ENABLED、运行期 route 及批准 Linux 运行仍待验收。

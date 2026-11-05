@@ -20,6 +20,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -33,18 +34,21 @@ import java.nio.file.Files;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
+import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.net.BookieId;
 import org.junit.Before;
@@ -143,6 +147,160 @@ public class SegmentOwnedBookieControlLogTest {
     }
 
     @Test
+    public void bootstrapClaimIdentityUsesTheFixedBindingManifestAndLedgerBytes() {
+        var digest = HexFormat.of().parseHex("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
+        var manifest = new ManifestIdentity(digest);
+        var enableId = UUID.fromString("01234567-89ab-cdef-fedc-ba9876543210");
+        var scope = new SegmentBookieControlLog.RouteBinding(enableId, manifest);
+        long ledger = 0x1020304050607080L;
+        var claim = scope.bootstrapClaim(ledger);
+        // Independently computed with Python hashlib/struct using the specified big-endian input.
+        assertEquals(UUID.fromString("29829e31-4e58-030e-9dc2-f9fa525c7c81"), claim.operationId());
+        assertEquals(SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC, claim.action());
+        assertEquals(ledger, claim.value());
+        assertEquals(scope, claim.binding());
+        assertEquals(claim, new SegmentBookieControlLog.RouteBinding(enableId, new ManifestIdentity(digest))
+                .bootstrapClaim(ledger));
+        assertNotEquals(claim.operationId(), scope.bootstrapClaim(ledger + 1).operationId());
+        assertNotEquals(claim.operationId(), new SegmentBookieControlLog.RouteBinding(
+                new UUID(enableId.getMostSignificantBits(), enableId.getLeastSignificantBits() + 1), manifest)
+                .bootstrapClaim(ledger).operationId());
+        digest[0] ^= 1;
+        assertNotEquals(claim.operationId(), new SegmentBookieControlLog.RouteBinding(
+                enableId, new ManifestIdentity(digest)).bootstrapClaim(ledger).operationId());
+        assertThrows(IllegalArgumentException.class, () -> scope.bootstrapClaim(-1));
+    }
+
+    @Test
+    public void bootstrapClaimReusesTheFirstReceiptAndLegacyIdentityThroughRotationAndReopen() throws Exception {
+        var io = new SegmentFileIo();
+        var owner = owned(io);
+        owner.initialize();
+        var log = owner.log();
+        var candidate = log.prepareBootstrapClaim(47);
+        assertTrue(candidate.applied().isEmpty());
+        assertEquals(binding.bootstrapClaim(47), candidate.command());
+        var legacy = claim();
+        SegmentBookieControlLog.Result original;
+        SegmentBookieControlLog.Result old;
+        try {
+            try (var driver = new Driver(log)) {
+                original = driver.submit(candidate.command()).get(0);
+                old = driver.submit(legacy).get(0);
+            }
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, original.status());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, old.status());
+            assertEquals(SegmentBookieControlLog.RouteState.UNAVAILABLE, log.routeState(47));
+            var file = config.directory().resolve("bookie-control");
+            var before = Files.readAllBytes(file);
+            int writes = io.writes;
+            int forces = io.forces;
+            assertEquals(candidate.command(), log.prepareBootstrapClaim(47).command());
+            assertEquals(original, log.prepareBootstrapClaim(47).applied().orElseThrow());
+            assertEquals(legacy, log.prepareBootstrapClaim(44).command());
+            assertEquals(old, log.prepareBootstrapClaim(44).applied().orElseThrow());
+            assertEquals(writes, io.writes);
+            assertEquals(forces, io.forces);
+            assertArrayEquals(before, Files.readAllBytes(file));
+            log.checkpoint();
+            log.rotate();
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        var reopened = owned();
+        try {
+            reopened.initialize();
+            var restored = reopened.log();
+            assertEquals(original, restored.prepareBootstrapClaim(47).applied().orElseThrow());
+            assertEquals(legacy, restored.prepareBootstrapClaim(44).command());
+            assertEquals(old, restored.prepareBootstrapClaim(44).applied().orElseThrow());
+            try (var driver = new Driver(restored)) {
+                var seal = new SegmentBookieControlLog.RouteChange(
+                        SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE,
+                        restored.appliedThrough(), binding, new UUID(0, 45));
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, driver.submit(seal).get(0).status());
+            }
+            assertEquals(original, restored.prepareBootstrapClaim(47).applied().orElseThrow());
+            assertThrows(IOException.class, () -> restored.prepareBootstrapClaim(48));
+        } finally {
+            assertTrue(reopened.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void bootstrapClaimRejectsPendingApplyAndAnOccupiedDerivedIdentity() throws Exception {
+        var owner = owned();
+        owner.initialize();
+        try {
+            var log = owner.log();
+            var candidate = log.prepareBootstrapClaim(47).command();
+            var occupant = new SegmentBookieControlLog.RouteChange(SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC,
+                    48, binding, candidate.operationId());
+            var durable = log.appendChangesDurably(List.of(occupant));
+            assertThrows(IOException.class, () -> log.prepareBootstrapClaim(48));
+            assertThrows(IOException.class, () -> log.prepareBootstrapClaim(47));
+            var original = log.applyDurable(durable).get(0);
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, original.status());
+            var failure = assertThrows(IOException.class, () -> log.prepareBootstrapClaim(47));
+            assertTrue(failure.getMessage().contains("operation is already occupied"));
+            assertEquals(occupant, log.prepareBootstrapClaim(48).command());
+            assertEquals(original, log.prepareBootstrapClaim(48).applied().orElseThrow());
+            assertEquals(original.sequence(), log.appliedThrough());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void bootstrapClaimRequiresOwnedRecoveryAfterAnUncertainForce() throws Exception {
+        var forcing = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var io = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false, () -> {
+            forcing.countDown();
+            try {
+                assertTrue(release.await(5, TimeUnit.SECONDS));
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(failure);
+            }
+        });
+        var owner = owned(io);
+        owner.initialize();
+        var log = owner.log();
+        var claim = log.prepareBootstrapClaim(47).command();
+        try (var driver = new Driver(log)) {
+            var pending = driver.begin(claim);
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                assertThrows(IOException.class, () -> log.prepareBootstrapClaim(47));
+                assertThrows(IOException.class, () -> log.prepareBootstrapClaim(48));
+                assertFalse(pending.isDone());
+            } finally {
+                release.countDown();
+            }
+            assertTrue(assertThrows(ExecutionException.class,
+                    () -> pending.get(5, TimeUnit.SECONDS)).getCause() instanceof IOException);
+            assertEquals(1, io.forces);
+            assertThrows(IOException.class, () -> log.prepareBootstrapClaim(47));
+            assertThrows(IOException.class, () -> log.prepareBootstrapClaim(48));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        var reopened = owned();
+        try {
+            reopened.initialize();
+            var restored = reopened.log().prepareBootstrapClaim(47);
+            assertEquals(claim, restored.command());
+            var result = restored.applied().orElseThrow();
+            assertEquals(claim.operationId(), result.operationId());
+            assertEquals(0, result.sequence());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, result.status());
+        } finally {
+            assertTrue(reopened.closeAndDrain().drained());
+        }
+    }
+
+    @Test
     public void missingExistingGuardNeverCreatesAReplacementAndTheOriginalFailureSurvivesDrain() throws Exception {
         Path path = config.directory().resolve("bookie-control.lock");
         Files.delete(path);
@@ -175,12 +333,14 @@ public class SegmentOwnedBookieControlLogTest {
     public void failedMainCloseRetainsItsNativeHandleAndTheIndependentGuardAcrossRetries() throws Exception {
         var owner = owned();
         owner.initialize();
-        var fault = replaceNative(channel(owner.log(), "originalChannel"));
+        var log = owner.log();
+        var fault = replaceNative(channel(log, "originalChannel"));
         fault.closeFailure = new IOException("main native close failed");
         try {
             var first = owner.closeAndDrain();
             assertFalse(first.drained());
             assertSame(fault.closeFailure, first.files().closeFailure());
+            assertSame(fault.closeFailure, assertThrows(IOException.class, () -> log.prepareBootstrapClaim(44)));
             assertFalse(first.guard().lock().started());
             assertTrue(fault.actual.isOpen());
             assertFalse(owner.closeAndDrain().drained());
@@ -257,6 +417,10 @@ public class SegmentOwnedBookieControlLogTest {
         var first = log.rotate();
         var fault = replaceNative(channel(log, "channel"));
         fault.closeFailure = new IOException("previous rotation native close failed");
+        fault.beforeClose = () -> {
+            var failure = assertThrows(IOException.class, () -> log.prepareBootstrapClaim(44));
+            assertTrue(failure.getMessage().contains("quiescent"));
+        };
         try {
             assertSame(fault.closeFailure, assertThrows(IOException.class, log::rotate));
             assertTrue(Files.exists(SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE,
