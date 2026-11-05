@@ -22,13 +22,17 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.PublicKey;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Objects;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
@@ -74,6 +78,8 @@ final class SegmentClassicHandoffMaterials {
     record Result(boolean drained, Throwable initializationFailure, SegmentOwnedFiles.Result files,
                   SegmentDataFileLock.DrainResult guard) { }
 
+    private record ClassicGuard(Path current, Identity rootIdentity, Identity currentIdentity, Object fileKey) { }
+
     private final References references;
     private final Expected expected;
     private final SegmentArenaManifest manifest;
@@ -88,6 +94,7 @@ final class SegmentClassicHandoffMaterials {
     private Thread closingThread;
     private Throwable initializationFailure;
     private Parsed parsed;
+    private List<ClassicGuard> classicGuards;
 
     /** Heap-only preparation. Materials, metadata, directories and locks open after the caller retains this owner. */
     SegmentClassicHandoffMaterials(References references, Expected expected, SegmentArenaManifest manifest) {
@@ -101,9 +108,6 @@ final class SegmentClassicHandoffMaterials {
         var excluded = new ArrayList<Path>();
         excluded.add(guardPath);
         excluded.add(manifest.controlDirectory().resolve("bookie-control.lock"));
-        for (var root : manifest.classicRoots()) {
-            excluded.add(root.directory().resolve("current").resolve(SegmentClassicRootBindings.LOCK_NAME));
-        }
         for (var arena : manifest.arenas()) {
             excluded.add(arena.directory().resolve("isolated.lock"));
             excluded.add(arena.directory().resolve("arena-control.lock"));
@@ -161,6 +165,7 @@ final class SegmentClassicHandoffMaterials {
             requireExpected(proof.operation());
             rawKey = read(references.aesKey(), 32, 32);
             SegmentClassicHandoff.requireMaterials(proof, policy, rawKey, manifest);
+            checkClassicGuards(allMaterialPaths());
             files.requireHealthy();
             parsed = new Parsed(proof, policy, new SecretKeySpec(rawKey, "AES"));
         } catch (IOException | RuntimeException | Error failure) {
@@ -192,6 +197,7 @@ final class SegmentClassicHandoffMaterials {
         try {
             Identity before = paths.privateFile(path, minimum, maximum);
             var beforeParents = paths.parents(path);
+            checkClassicGuards(List.of(path));
             try (FileChannel channel = SegmentOwnedFiles.open(files, path, StandardOpenOption.READ,
                     LinkOption.NOFOLLOW_LINKS)) {
                 long length = channel.size();
@@ -218,6 +224,98 @@ final class SegmentClassicHandoffMaterials {
         }
     }
 
+    private List<Path> allMaterialPaths() {
+        return List.of(references.proof(), references.policy(), intentPath, references.aesKey());
+    }
+
+    private void checkClassicGuards(List<Path> materialPaths) throws IOException {
+        var observed = new ArrayList<ClassicGuard>(manifest.classicRoots().size());
+        boolean missing = false;
+        for (int index = 0; index < manifest.classicRoots().size(); index++) {
+            Path root = manifest.classicRoots().get(index).directory();
+            Path current = root.resolve("current");
+            Identity rootIdentity = directoryIdentity(root);
+            Identity currentIdentity = directoryIdentity(current);
+            Path lock = current.resolve(SegmentClassicRootBindings.LOCK_NAME);
+            Object fileKey = guardKey(lock);
+            var observation = new ClassicGuard(current, rootIdentity, currentIdentity, fileKey);
+            if (classicGuards != null) {
+                var previous = classicGuards.get(index);
+                if (!previous.rootIdentity().equals(rootIdentity) || !previous.currentIdentity().equals(currentIdentity)
+                        || previous.fileKey() != null && !previous.fileKey().equals(fileKey)) {
+                    throw new IOException("Observed Classic guard or its parent changed: " + lock);
+                }
+            }
+            if (fileKey != null) {
+                for (Path material : materialPaths) {
+                    if (Files.isSameFile(material, lock)) {
+                        throw new IOException("Handoff material aliases a Classic guard: " + material);
+                    }
+                }
+            }
+            missing |= fileKey == null;
+            observed.add(observation);
+        }
+        if (missing) {
+            if (expected.nativeScope().binding().phase() != BookieRouteBinding.Phase.PREPARED) {
+                throw new IOException("A missing Classic guard requires native PREPARED");
+            }
+            Path control = manifest.controlDirectory();
+            requireAbsentMarker(control, directoryIdentity(control));
+            for (var member : observed) {
+                requireAbsentMarker(member.current(), member.currentIdentity());
+            }
+        }
+        for (var member : observed) {
+            Path lock = member.current().resolve(SegmentClassicRootBindings.LOCK_NAME);
+            if (!Objects.equals(member.fileKey(), guardKey(lock))
+                    || !member.currentIdentity().equals(directoryIdentity(member.current()))
+                    || !member.rootIdentity().equals(directoryIdentity(member.current().getParent()))) {
+                throw new IOException("Classic guard or its parent changed during lookup: " + lock);
+            }
+        }
+        classicGuards = List.copyOf(observed);
+    }
+
+    private static Object guardKey(Path lock) throws IOException {
+        var attributes = leaf(lock);
+        if (attributes == null) {
+            return null;
+        }
+        Object fileKey = attributes.fileKey();
+        if (!attributes.isRegularFile() || fileKey == null) {
+            throw new IOException("Existing Classic guard must be an identifiable regular file: " + lock);
+        }
+        return fileKey;
+    }
+
+    private static Identity directoryIdentity(Path directory) throws IOException {
+        Identity identity = SegmentClassicHandoffPaths.fileIdentity(directory);
+        if (!identity.directory()) {
+            throw new IOException(
+                    "Classic guard or marker parent must be an existing canonical directory: " + directory);
+        }
+        return identity.parent();
+    }
+
+    private static void requireAbsentMarker(Path directory, Identity original) throws IOException {
+        Path marker = directory.resolve(SegmentClassicRootBindings.FILE_NAME);
+        if (leaf(marker) != null || !original.equals(directoryIdentity(directory))) {
+            throw new IOException("Missing Classic guard requires an unchanged, unmarked root: " + marker);
+        }
+    }
+
+    private static BasicFileAttributes leaf(Path path) throws IOException {
+        try {
+            return Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        } catch (NoSuchFileException absent) {
+            if (!path.toString().equals(absent.getFile()) || absent.getOtherFile() != null) {
+                throw absent;
+            }
+            return null;
+        }
+    }
+
     private static Path path(Path path) {
         Objects.requireNonNull(path, "path");
         if (!path.isAbsolute() || !path.normalize().equals(path) || path.getParent() == null) {
@@ -231,6 +329,12 @@ final class SegmentClassicHandoffMaterials {
             throw new IOException("Handoff material data is not available", initializationFailure);
         }
         return parsed;
+    }
+
+    /** The same preparation owner calls this after its second cold read, before publishing input association. */
+    synchronized void recheckClassicGuards() throws IOException {
+        parsed();
+        checkClassicGuards(allMaterialPaths());
     }
 
     /** Outer native/Unix checks and all actual users must terminate before releasing this child. */

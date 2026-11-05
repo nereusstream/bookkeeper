@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+首次 PREPARED 的材料读取现可接受尚未创建的 Classic `route-claim.lock`，前提是 control 与全部 Classic 绑定 marker 均明确缺失，且所有原根和 `current` 目录已验证。每次材料 open 前复核 Classic 锁和别名，已观察到的锁消失或换 inode 即拒绝。准备阶段在第二轮 ZK 冷读后再次复核。最终 62 项回归和 Java 样式通过。实际建锁仍由后续通过实时 Unix 采用检查的原根 owner 执行。详见 [startup-readiness](startup-readiness/README.md#首次-prepared-的-classic-锁存在性)。
+
 共同 route 离线 bootstrap 新增包内准备阶段。它从原 ZK manager 借用实际冷读 owner，以真实 PREPARED 与 commissioned requirements 验证签名材料，持同一 supervisor guard 重读 ZK 并逐一复核签名的物理根。关闭请求阻止发布迟到的成功，原 ZK 回调与材料首次关闭结果先于 guard 释放。最终 48 项定向回归和 Java 样式通过。完整实时 Unix 采用、根与控制 owner 装配及受保护写入仍待接线。详见 [startup-readiness](startup-readiness/README.md#classic-bootstrap-在-supervisor-guard-下的来源绑定)。
 
 共同 route 离线导入已有包内有界 claim 消费器。它从已初始化的原 Bookie control owner 借用同一 Driver，以原 `maxPendingEntries` 分批提交两类已验证清单的 ledger ID，在实际 Ticket 终态后复核原 claim 回执。真实 index 与多份 Journal 验证晚项坏记录、持久前缀、健康重开重扫及 force 在途期间的停止。最终 57 项定向回归和 Java 样式通过。完整受保护 bootstrap owner、受控重放与 flush、封口、ENABLED 和批准 Linux 验收仍待完成。详见 [local-storage](local-storage/README.md#离线-bootstrap-的有界-classic-claim-导入)。

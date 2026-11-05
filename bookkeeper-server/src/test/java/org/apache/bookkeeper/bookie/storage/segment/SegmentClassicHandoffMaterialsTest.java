@@ -33,9 +33,13 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -317,6 +321,221 @@ public class SegmentClassicHandoffMaterialsTest {
     }
 
     @Test(timeout = 30000)
+    public void preparationReadsAnUnmarkedPreparedScopeWithNoClassicGuards() throws Exception {
+        var nativeSources = realSources();
+        var classicGuards = manifest.classicRoots().stream()
+                .map(root -> root.directory().resolve("current").resolve(SegmentClassicRootBindings.LOCK_NAME))
+                .toList();
+        for (Path path : classicGuards) {
+            Files.delete(path);
+        }
+        var preparation = prepare(nativeSources, Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            assertTrue(preparation.inputsBound());
+            probe("HELD");
+            for (Path path : classicGuards) {
+                assertTrue(Files.notExists(path, LinkOption.NOFOLLOW_LINKS));
+                assertTrue(Files.notExists(path.resolveSibling(SegmentClassicRootBindings.FILE_NAME)));
+            }
+            assertTrue(Files.notExists(manifest.controlDirectory().resolve(SegmentClassicRootBindings.FILE_NAME)));
+            assertTrue(Files.notExists(manifest.controlDirectory().resolve("bookie-control")));
+            assertEquals(nativeScope, nativeSources.manager().readBookieRouteBinding(manifest.bookieId())
+                    .observation().orElseThrow());
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test
+    public void missingClassicGuardWithAnyBindingMarkerOrMissingCurrentIsRejected() throws Exception {
+        var firstCurrent = manifest.classicRoots().get(0).directory().resolve("current");
+        var otherCurrent = manifest.classicRoots().get(1).directory().resolve("current");
+        Path missing = firstCurrent.resolve(SegmentClassicRootBindings.LOCK_NAME);
+        Files.delete(missing);
+        for (Path parent : List.of(manifest.controlDirectory(), otherCurrent)) {
+            Path marker = parent.resolve(SegmentClassicRootBindings.FILE_NAME);
+            Files.createSymbolicLink(marker, parent.resolve("unreadable-marker-target"));
+            rejected();
+            assertTrue(Files.notExists(missing, LinkOption.NOFOLLOW_LINKS));
+            assertTrue(Files.isSymbolicLink(marker));
+            Files.delete(marker);
+        }
+        Path marker = otherCurrent.resolve(SegmentClassicRootBindings.FILE_NAME);
+        try (var opens = whileOpeningKey(() -> privateFile(marker, new byte[]{1}))) {
+            rejected();
+        }
+        assertArrayEquals(new byte[]{1}, Files.readAllBytes(marker));
+        Files.delete(marker);
+        Files.delete(firstCurrent);
+        rejected();
+        assertTrue(Files.notExists(firstCurrent, LinkOption.NOFOLLOW_LINKS));
+        Files.createSymbolicLink(firstCurrent, directory(firstCurrent.resolveSibling("aliased-current")));
+        rejected();
+        assertTrue(Files.isSymbolicLink(firstCurrent));
+    }
+
+    @Test
+    public void existingClassicGuardMustBeRegularAndMustNotAliasMaterial() throws Exception {
+        Path classic = manifest.classicRoots().get(0).directory().resolve("current")
+                .resolve(SegmentClassicRootBindings.LOCK_NAME);
+        Path saved = classic.resolveSibling("saved-guard");
+        Files.move(classic, saved);
+        for (Path target : List.of(saved, saved.resolveSibling("absent"))) {
+            Files.createSymbolicLink(classic, target);
+            rejected();
+            assertTrue(Files.isSymbolicLink(classic));
+            Files.delete(classic);
+        }
+        Path proof = references.proof();
+        Files.move(proof, classic);
+        try (var lock = SegmentDataFileLock.existingControlOwner(classic)) {
+            lock.initialize();
+            try (var opens = mockStatic(FileChannel.class, invocation -> {
+                if (invocation.getMethod().getName().equals("open")
+                        && (classic.equals(invocation.getArgument(0)) || proof.equals(invocation.getArgument(0)))) {
+                    throw new AssertionError("Material must not open a Classic guard inode");
+                }
+                return invocation.callRealMethod();
+            })) {
+                Files.createLink(proof, classic);
+                rejected();
+                Files.delete(proof);
+                references = new SegmentClassicHandoffMaterials.References(
+                        references.directory(), classic, references.policy(), references.aesKey());
+                rejected();
+            }
+            probe(classic, "HELD");
+        }
+        probe(classic, "AVAILABLE");
+    }
+
+    @Test
+    public void requiredGuardsAndInconclusiveClassicLookupsDoNotQualifyAsMissingLeaves() throws Exception {
+        var arena = manifest.arenas().get(0).directory();
+        for (Path lock : List.of(manifest.controlDirectory().resolve("bookie-control.lock"),
+                arena.resolve("isolated.lock"), arena.resolve("arena-control.lock"))) {
+            Path saved = lock.resolveSibling("saved-guard");
+            Files.move(lock, saved);
+            try {
+                rejected();
+                assertTrue(Files.notExists(lock, LinkOption.NOFOLLOW_LINKS));
+            } finally {
+                Files.move(saved, lock);
+            }
+        }
+        Path classic = manifest.classicRoots().get(0).directory().resolve("current")
+                .resolve(SegmentClassicRootBindings.LOCK_NAME);
+        Files.delete(classic);
+        for (IOException unavailable : List.of(new AccessDeniedException(classic.toString()),
+                new NoSuchFileException(classic.getParent().toString()))) {
+            var materialOwner = owner();
+            try (var reads = mockStatic(Files.class, invocation -> {
+                if (invocation.getMethod().getName().equals("readAttributes")
+                        && classic.equals(invocation.getArgument(0))
+                        && invocation.getArgument(1) == BasicFileAttributes.class) {
+                    throw unavailable;
+                }
+                return invocation.callRealMethod();
+            })) {
+                assertSame(unavailable, assertThrows(IOException.class, materialOwner::initialize));
+            } finally {
+                assertTrue(materialOwner.closeAndDrain().drained());
+            }
+            assertTrue(Files.notExists(classic, LinkOption.NOFOLLOW_LINKS));
+        }
+    }
+
+    @Test
+    public void aGuardAppearingBetweenMaterialReadsParticipatesInTheNextAliasCheck() throws Exception {
+        Path classic = manifest.classicRoots().get(0).directory().resolve("current")
+                .resolve(SegmentClassicRootBindings.LOCK_NAME);
+        Files.delete(classic);
+        Path originalKey = references.aesKey();
+        Path proof = references.proof();
+        references = new SegmentClassicHandoffMaterials.References(
+                references.directory(), proof, references.policy(), classic);
+        var materialOwner = owner();
+        try (var opens = mockStatic(FileChannel.class, invocation -> {
+            String name = invocation.getMethod().getName();
+            var parameters = invocation.getMethod().getParameterTypes();
+            Object path = invocation.getArgument(0);
+            if (isMaterialOpen(proof, name, parameters, path)) {
+                Files.move(originalKey, classic);
+            }
+            if (isKeyOpen(name, parameters, path)) {
+                throw new AssertionError("Newly observed Classic guard must not open as key material");
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, materialOwner::initialize);
+            assertTrue(failure.getMessage().contains("aliases a Classic guard"));
+            assertThrows(IOException.class, materialOwner::parsed);
+            assertArrayEquals(filled(32, 10), Files.readAllBytes(classic));
+        } finally {
+            assertTrue(materialOwner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void aPreviouslyObservedGuardCannotDisappearOrBeReplacedBeforeMaterialPublication() throws Exception {
+        Path classic = manifest.classicRoots().get(0).directory().resolve("current")
+                .resolve(SegmentClassicRootBindings.LOCK_NAME);
+        Path saved = classic.resolveSibling("original-guard");
+        for (boolean replace : List.of(false, true)) {
+            var materialOwner = owner();
+            try (var opens = whileOpeningKey(() -> {
+                Files.move(classic, saved);
+                if (replace) {
+                    privateFile(classic, new byte[0]);
+                }
+            })) {
+                var failure = assertThrows(IOException.class, materialOwner::initialize);
+                assertTrue(failure.getMessage().contains("Observed Classic guard or its parent changed"));
+                assertThrows(IOException.class, materialOwner::parsed);
+            } finally {
+                assertTrue(materialOwner.closeAndDrain().drained());
+            }
+            Files.deleteIfExists(classic);
+            Files.move(saved, classic);
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void preparationRechecksClassicGuardsAfterTheSecondNativeRead() throws Exception {
+        var preparation = prepare(realSources(), Duration.ofSeconds(5));
+        Path classic = manifest.classicRoots().get(0).directory().resolve("current")
+                .resolve(SegmentClassicRootBindings.LOCK_NAME);
+        var task = new FutureTask<Void>(() -> {
+            try (var opens = whileOpeningKey(() -> client.holdNextRead.set(true))) {
+                preparation.initialize();
+            }
+            return null;
+        });
+        var reader = new Thread(task, "bootstrap-classic-guard-recheck");
+        reader.start();
+        try {
+            assertTrue(client.replyHeld.await(5, TimeUnit.SECONDS));
+            Files.delete(classic);
+            client.lateReply.getAndSet(null).run();
+            var failure = assertThrows(ExecutionException.class, () -> task.get(5, TimeUnit.SECONDS)).getCause();
+            assertTrue(failure.getMessage().contains("Observed Classic guard or its parent changed"));
+            assertFalse(preparation.inputsBound());
+            probe("HELD");
+        } finally {
+            Runnable reply = client.lateReply.getAndSet(null);
+            if (reply != null) {
+                reply.run();
+            }
+            reader.join(5000);
+            assertFalse(reader.isAlive());
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
     public void preparationRejectsRegistrationAndRecreatedRequirementsDuringTheMaterialRead() throws Exception {
         var nativeSources = realSources();
         String registration = "/ledgers/available/readonly/" + manifest.bookieId();
@@ -562,6 +781,9 @@ public class SegmentClassicHandoffMaterialsTest {
         assertTrue(owner.closeAndDrain().drained());
         assertArrayEquals(proof, Files.readAllBytes(references.proof()));
         assertArrayEquals(key, Files.readAllBytes(references.aesKey()));
+        Files.delete(manifest.classicRoots().get(0).directory().resolve("current")
+                .resolve(SegmentClassicRootBindings.LOCK_NAME));
+        rejected();
     }
 
     @Test
@@ -779,8 +1001,12 @@ public class SegmentClassicHandoffMaterialsTest {
     }
 
     private boolean isKeyOpen(String name, Class<?>[] parameters, Object path) {
+        return isMaterialOpen(references.aesKey(), name, parameters, path);
+    }
+
+    private static boolean isMaterialOpen(Path material, String name, Class<?>[] parameters, Object path) {
         return name.equals("open") && parameters.length == 2 && parameters[1] == OpenOption[].class
-                && references.aesKey().equals(path);
+                && material.equals(path);
     }
 
     private static SegmentDataFileLock guard(SegmentClassicHandoffMaterials owner) throws Exception {
@@ -790,11 +1016,15 @@ public class SegmentClassicHandoffMaterialsTest {
     }
 
     private void probe(String expected) throws Exception {
+        probe(guardPath, expected);
+    }
+
+    private static void probe(Path path, String expected) throws Exception {
         var process = new ProcessBuilder(
                 Path.of(System.getProperty("java.home"), "bin", "java").toString(),
                 "-cp", System.getProperty("java.class.path"),
                 SegmentOwnedBookieControlLogTest.GuardProbe.class.getName(),
-                guardPath.toString()).redirectErrorStream(true).start();
+                path.toString()).redirectErrorStream(true).start();
         try {
             assertTrue(process.waitFor(10, TimeUnit.SECONDS));
             String output = new String(

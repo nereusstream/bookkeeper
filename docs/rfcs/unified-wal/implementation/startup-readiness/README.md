@@ -690,11 +690,19 @@ supervisor文件名按clusterId、原cluster birth和Bookie固定，绑定UUID�
 
 持同一 guard 重新读取 B，比较原 native 版本和出生、requirements 的原始来源和 commissioned 值、完整 required devices，并在两轮分别检查两类 registration 缺失。B 前后按原 manifest 的角色和序号读取 Classic、control 与全部 Arena 根目录，比较规范路径下实际 device、inode、UID、GID 和 mode 与签名成员。这个结果只记录输入关联，后续仍需实时验证旧 UID/进程/fd、ACL、重启策略与根排他。
 
-关闭请求可在初始化 I/O 期间关闭后续准入，迟到结果沿原阶段失败收束。实际初始化返回和借用 ZK 回调全部归还后，才排空材料并释放 supervisor。材料首次关闭失败保留原资源和原因，借用的 client、manager 与 store 由原 owner 持有。准备阶段使用材料原有的 guard 别名检查，依赖共同 guard 文件已存在。读取期间未取得 Classic、Arena 或 control 锁。
+关闭请求可在初始化 I/O 期间关闭后续准入，迟到结果沿原阶段失败收束。实际初始化返回和借用 ZK 回调全部归还后，才排空材料并释放 supervisor。材料首次关闭失败保留原资源和原因，借用的 client、manager 与 store 由原 owner 持有。该次实现沿用当时材料读取对所有 guard 文件的存在性要求，首次 PREPARED 的规则见下一节。
 
 使用真实 ZooKeeper、测试签名与现存文件验证六项组合场景。实际重现的只读注册及同字节重建的 requirements 出生均被第二轮拒绝，同路径替换 Arena 目录被 inode 检查拒绝。正向保持原 PREPARED、Journal 与 index 字节，未创建 marker 或打开 control。独立进程观测了实际读关闭、迟到回调与首次文件关闭失败期间的 guard。首轮测试编译因误用包内 ZK 路径方法失败，改用原 manager 的完整原生观察后六项通过。最终材料 14、交接 codec 8、ZK 冷读 9、owned 文件 7、文件锁 10 共 48 项通过，Java Spotless 与 Checkstyle 通过。沿用原 acf9afec… native 库，证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-preparation-evidence-9c619d57`。
 
 真实旧服务退役、实时 Unix 采用、完整 bootstrap owner、受保护导入、replay/flush、封口和批准 Linux 运行继续待验收。隔离测试的签名与退役数据来自 fixture。
+
+## 首次 PREPARED 的 Classic 锁存在性
+
+在父 `02ae3330bf` 上，持原 supervisor guard 的材料 owner 允许初次 PREPARED 的 Classic `route-claim.lock` 尚未创建。先核验 manifest 所列原根与 `current` 是实际的规范目录，叶子用 NOFOLLOW 查询。只接受明确指向该叶子的缺失异常，并复核原目录身份。control 和所有 Classic 的 binding marker 均须明确缺失。marker 存在、权限或 I/O 失败、父目录缺失、符号链接和不明确的状态均不能取得缺失豁免。
+
+每次材料 native open 前，新出现或原已存在的 Classic 锁都必须参与同文件排除。以 manifest 顺序保留每个已观察锁的 file key 和原目录身份。已观察的锁消失、替换或变更类型则拒绝。发布解析结果前以及准备阶段第二轮 ZK 冷读后再次复核。supervisor、Bookie control 和 Arena guard 沿原严格文件保护。此处只观察锁的存在性和别名，实际建锁仍由原根 owner 在实时 Unix 采用成功后执行。
+
+父源码上，真实 PREPARED 和签名文件的组合测试在原 `Files.isSameFile` 处复现 `NoSuchFileException`。修正后，同一用例通过，原 Classic 锁和 marker 仍缺失，原 native 观察未变。另验证了必需 guard 缺失、marker 出现、父目录或叶子别名、查询不确定、同文件与硬链接别名，以及锁出现、消失和替换。实际持有的 Classic 锁经独立进程探测保持排他。七项定向通过，最终材料 21、共同根 13、Arena 11、owned 文件 7、文件锁 10 共 62 项通过，Java Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-initial-guard-evidence-02ae3330`。
 
 ## 固定交接的原子不覆盖改名
 

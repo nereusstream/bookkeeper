@@ -94,6 +94,7 @@ final class SegmentClassicBootstrapPreparation {
                 throw new IOException("Classic bootstrap sources changed under the supervisor guard");
             }
             requireMembers(proof);
+            materials.recheckClassicGuards();
             synchronized (this) {
                 requireOpen();
                 bound = first;
