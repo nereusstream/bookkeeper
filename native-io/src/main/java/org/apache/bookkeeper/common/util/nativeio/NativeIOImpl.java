@@ -209,6 +209,27 @@ public class NativeIOImpl implements NativeIO {
     }
 
     @Override
+    public LinuxProcessBirth currentLinuxProcessBirth() throws NativeIOException {
+        try {
+            long[] actual = NativeIOJni.currentLinuxProcessBirth();
+            if (actual == null || actual.length != 3) {
+                throw new NativeIOException("Unknown current Linux process birth query outcome");
+            }
+            try {
+                return new LinuxProcessBirth(actual[0], actual[1], actual[2]);
+            } catch (IllegalArgumentException invalid) {
+                var failure = new NativeIOException("Invalid native current Linux process birth");
+                failure.initCause(invalid);
+                throw failure;
+            }
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Current Linux process birth is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
     public JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException {
         try {
             var type = Class.forName("java.lang.ProcessImpl", false, null);

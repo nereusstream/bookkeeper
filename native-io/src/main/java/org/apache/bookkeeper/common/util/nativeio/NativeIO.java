@@ -33,6 +33,15 @@ public interface NativeIO {
     /** Actual descriptor facts only; every raw dev/ino bit pattern, including zero, is valid data. */
     record FileIdentity(long device, long inode) { }
 
+    /** Visible proc/time view only. Both tick fields preserve raw unsigned u64 bits, including zero. */
+    record LinuxProcessBirth(long pid, long startTicks, long pid1StartTicks) {
+        public LinuxProcessBirth {
+            if (pid <= 0 || pid > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("Invalid current Linux process PID");
+            }
+        }
+    }
+
     /** This process's uname view only; not host namespace, hardware or deployment qualification. */
     record KernelIdentity(String sysname, String machine, String release, String version) {
         public KernelIdentity {
@@ -217,6 +226,11 @@ public interface NativeIO {
     /** Cold read through a held verified procfs root and fixed openat2 path; no host namespace qualification. */
     default UUID currentLinuxBootId() throws NativeIOException {
         throw new NativeIOException("Current Linux boot ID query is unsupported");
+    }
+
+    /** Cold self/stat and 1/stat from one held verified procfs root; no caller PID or host identity inference. */
+    default LinuxProcessBirth currentLinuxProcessBirth() throws NativeIOException {
+        throw new NativeIOException("Current Linux process birth query is unsupported");
     }
 
     /**

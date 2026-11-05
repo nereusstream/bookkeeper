@@ -439,6 +439,7 @@ final class SegmentClassicLaunchTrust {
     private SegmentClassicLaunchProgram.Decoded verifiedProgram;
     private LinuxFileObservation verifiedRuntimeImage;
     private UUID linuxBootId;
+    private NativeIO.LinuxProcessBirth linuxProcessBirth;
     private boolean configurationAttempted;
     private Throwable configurationFailure;
     private boolean launcherDescriptorAttempted;
@@ -925,6 +926,52 @@ final class SegmentClassicLaunchTrust {
         }
         requireTime(deadline);
         linuxBootId = actual;
+        return actual;
+    }
+
+    /** Original source before each cold read; neither PID1 nor current birth implies a systemd qualification. */
+    synchronized void verifyLinuxProcessBirth(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            originalLinuxDeployment(deadline);
+            observeLinuxProcessBirth(deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Fixture comparison only; cannot seed the first observation of any production owner. */
+    synchronized NativeIO.LinuxProcessBirth readLinuxProcessBirth(long deadline) throws IOException {
+        if (production) {
+            throw new IOException("Data-only process birth reads cannot seed a production owner");
+        }
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxProcessBirth(deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private NativeIO.LinuxProcessBirth observeLinuxProcessBirth(long deadline) throws IOException {
+        requireTime(deadline);
+        var actual = nativeIo.currentLinuxProcessBirth();
+        requireTime(deadline);
+        files.requireHealthy();
+        if (actual == null || linuxProcessBirth != null && !linuxProcessBirth.equals(actual)) {
+            throw new IOException("Current/PID1 process birth is missing or changed during original startup");
+        }
+        requireTime(deadline);
+        linuxProcessBirth = actual;
         return actual;
     }
 

@@ -318,10 +318,10 @@ fn parse_boot_id(bytes: &[u8]) -> Result<String, libc::c_int> {
 }
 
 #[cfg(target_os = "linux")]
-type BootIdResult = Result<String, (&'static str, libc::c_int)>;
+type ProcIdentityResult<T> = Result<T, (&'static str, libc::c_int)>;
 
 #[cfg(target_os = "linux")]
-fn boot_id_errno(operation: &'static str) -> (&'static str, libc::c_int) {
+fn proc_identity_errno(operation: &'static str) -> (&'static str, libc::c_int) {
     (
         operation,
         std::io::Error::last_os_error()
@@ -332,12 +332,15 @@ fn boot_id_errno(operation: &'static str) -> (&'static str, libc::c_int) {
 
 // Each opened fd has exactly one explicit close, even on read/validation failure. Never retry close.
 #[cfg(target_os = "linux")]
-fn close_boot_id_fd(fd: libc::c_int, outcome: BootIdResult) -> BootIdResult {
+fn close_proc_identity_fd<T>(
+    fd: libc::c_int,
+    outcome: ProcIdentityResult<T>,
+) -> ProcIdentityResult<T> {
     let closed = unsafe { libc::close(fd) };
     let close_error = if closed == 0 {
         None
     } else {
-        Some(boot_id_errno("boot ID close failed"))
+        Some(proc_identity_errno("proc identity close failed"))
     };
     match outcome {
         Err(first) => Err(first),
@@ -349,34 +352,34 @@ fn close_boot_id_fd(fd: libc::c_int, outcome: BootIdResult) -> BootIdResult {
 }
 
 #[cfg(target_os = "linux")]
-fn boot_id_proc_stat(fd: libc::c_int) -> Result<libc::stat, (&'static str, libc::c_int)> {
+fn proc_identity_stat(fd: libc::c_int) -> Result<libc::stat, (&'static str, libc::c_int)> {
     let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstatfs(fd, &mut fs) } != 0 {
-        return Err(boot_id_errno("boot ID held-fd fstatfs failed"));
+        return Err(proc_identity_errno("proc identity held-fd fstatfs failed"));
     }
     if fs.f_type != 0x9fa0 {
         // Linux UAPI PROC_SUPER_MAGIC, full f_type.
-        return Err(("boot ID source is not procfs", libc::EINVAL));
+        return Err(("proc identity source is not procfs", libc::EINVAL));
     }
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-        return Err(boot_id_errno("boot ID held-fd fstat failed"));
+        return Err(proc_identity_errno("proc identity held-fd fstat failed"));
     }
     Ok(stat)
 }
 
 #[cfg(target_os = "linux")]
-fn boot_id_proc_root(fd: libc::c_int) -> Result<libc::stat, (&'static str, libc::c_int)> {
-    let stat = boot_id_proc_stat(fd)?;
+fn proc_identity_root(fd: libc::c_int) -> Result<libc::stat, (&'static str, libc::c_int)> {
+    let stat = proc_identity_stat(fd)?;
     if stat.st_mode & libc::S_IFMT != libc::S_IFDIR || stat.st_ino != 1 {
         // PROCFS_ROOT_INO
-        return Err(("boot ID source is not the procfs root", libc::EINVAL));
+        return Err(("proc identity source is not the procfs root", libc::EINVAL));
     }
     Ok(stat)
 }
 
 #[cfg(target_os = "linux")]
-fn linux_boot_id() -> BootIdResult {
+fn linux_boot_id() -> ProcIdentityResult<String> {
     let root = unsafe {
         libc::open(
             b"/proc\0".as_ptr().cast(),
@@ -384,10 +387,10 @@ fn linux_boot_id() -> BootIdResult {
         )
     };
     if root < 0 {
-        return Err(boot_id_errno("boot ID fixed proc root open failed"));
+        return Err(proc_identity_errno("boot ID fixed proc root open failed"));
     }
     let outcome = (|| {
-        let root_stat = boot_id_proc_root(root)?;
+        let root_stat = proc_identity_root(root)?;
         // Linux UAPI open_how: exactly three u64 fields, zero mode. No open/realpath fallback.
         let how = [
             (libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) as u64,
@@ -406,11 +409,11 @@ fn linux_boot_id() -> BootIdResult {
             )
         };
         if leaf < 0 {
-            return Err(boot_id_errno("boot ID fixed openat2 failed"));
+            return Err(proc_identity_errno("boot ID fixed openat2 failed"));
         }
         let leaf = leaf as libc::c_int;
         let outcome = (|| {
-            let before = boot_id_proc_stat(leaf)?;
+            let before = proc_identity_stat(leaf)?;
             if before.st_mode & libc::S_IFMT != libc::S_IFREG || before.st_dev != root_stat.st_dev {
                 return Err(("boot ID leaf differs from its held procfs", libc::EINVAL));
             }
@@ -422,7 +425,7 @@ fn linux_boot_id() -> BootIdResult {
                     libc::read(leaf, bytes[used..].as_mut_ptr().cast(), bytes.len() - used)
                 };
                 if count < 0 {
-                    return Err(boot_id_errno("boot ID bounded read failed"));
+                    return Err(proc_identity_errno("boot ID bounded read failed"));
                 }
                 if count == 0 {
                     break;
@@ -434,8 +437,8 @@ fn linux_boot_id() -> BootIdResult {
             }
             let value = parse_boot_id(&bytes[..used])
                 .map_err(|error| ("Invalid kernel boot ID line", error))?;
-            let after = boot_id_proc_stat(leaf)?;
-            let root_after = boot_id_proc_root(root)?;
+            let after = proc_identity_stat(leaf)?;
+            let root_after = proc_identity_root(root)?;
             if before.st_dev != after.st_dev
                 || before.st_ino != after.st_ino
                 || before.st_mode != after.st_mode
@@ -446,9 +449,204 @@ fn linux_boot_id() -> BootIdResult {
             }
             Ok(value)
         })();
-        close_boot_id_fd(leaf, outcome)
+        close_proc_identity_fd(leaf, outcome)
     })();
-    close_boot_id_fd(root, outcome)
+    close_proc_identity_fd(root, outcome)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn proc_stat_unsigned(token: &[u8]) -> Result<u64, libc::c_int> {
+    if token.is_empty() || !token.iter().all(u8::is_ascii_digit) {
+        return Err(libc::EINVAL);
+    }
+    std::str::from_utf8(token)
+        .map_err(|_| libc::EINVAL)?
+        .parse()
+        .map_err(|_| libc::EINVAL)
+}
+
+// The complete bounded file is read first. Only the prefix through field 22 is interpreted.
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_start_ticks(bytes: &[u8], expected_pid: libc::pid_t) -> Result<u64, libc::c_int> {
+    if bytes.is_empty() || bytes.len() > 4096 || bytes.last() != Some(&b'\n') || expected_pid <= 0 {
+        return Err(libc::EINVAL);
+    }
+    let pid_end = bytes.iter().position(|b| *b == b' ').ok_or(libc::EINVAL)?;
+    if bytes.get(pid_end + 1) != Some(&b'(')
+        || proc_stat_unsigned(&bytes[..pid_end])? != expected_pid as u64
+    {
+        return Err(libc::EINVAL);
+    }
+    // comm is raw kernel text and can itself contain spaces, ')' and newlines, even non-UTF8 bytes.
+    let comm_end = bytes.iter().rposition(|b| *b == b')').ok_or(libc::EINVAL)?;
+    if comm_end < pid_end + 2 || bytes.get(comm_end + 1) != Some(&b' ') {
+        return Err(libc::EINVAL);
+    }
+    let mut fields = bytes[comm_end + 2..]
+        .split(u8::is_ascii_whitespace)
+        .filter(|f| !f.is_empty());
+    let state = fields.next().ok_or(libc::EINVAL)?;
+    if state.len() != 1 || !state[0].is_ascii_alphabetic() {
+        return Err(libc::EINVAL);
+    }
+    for number in 4..=22 {
+        let token = fields.next().ok_or(libc::EINVAL)?;
+        if (4..=8).contains(&number) || (16..=20).contains(&number) {
+            let digits = token.strip_prefix(b"-").unwrap_or(token);
+            proc_stat_unsigned(digits)?;
+            std::str::from_utf8(token)
+                .map_err(|_| libc::EINVAL)?
+                .parse::<i64>()
+                .map_err(|_| libc::EINVAL)?;
+        } else {
+            let value = proc_stat_unsigned(token)?;
+            if number == 22 {
+                return Ok(value);
+            }
+        }
+    }
+    Err(libc::EINVAL)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_birth() -> ProcIdentityResult<[u64; 3]> {
+    let pid = unsafe { libc::getpid() };
+    if pid <= 0 {
+        return Err(("Invalid direct current PID", libc::EINVAL));
+    }
+    let root = unsafe {
+        libc::open(
+            b"/proc\0".as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root < 0 {
+        return Err(proc_identity_errno(
+            "process birth fixed proc root open failed",
+        ));
+    }
+    let outcome = (|| {
+        let root_stat = proc_identity_root(root)?;
+        let mut starts = [0_u64; 2];
+        // self is the kernel's ordinary proc symlink, interpreted in this proc superblock's PID view.
+        // Only that fixed path omits NO_SYMLINKS. Both paths keep NO_XDEV/BENEATH/NO_MAGICLINKS.
+        for (index, (path, resolve, expected)) in [
+            (b"self/stat\0".as_slice(), 0x08 | 0x01 | 0x02, pid),
+            (b"1/stat\0".as_slice(), 0x08 | 0x01 | 0x02 | 0x04, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let how = [
+                (libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) as u64,
+                0,
+                resolve,
+            ];
+            let leaf = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    root,
+                    path.as_ptr().cast::<libc::c_char>(),
+                    how.as_ptr(),
+                    std::mem::size_of_val(&how),
+                )
+            };
+            if leaf < 0 {
+                return Err(proc_identity_errno("process birth fixed openat2 failed"));
+            }
+            let leaf = leaf as libc::c_int;
+            let outcome = (|| {
+                let before = proc_identity_stat(leaf)?;
+                if before.st_mode & libc::S_IFMT != libc::S_IFREG
+                    || before.st_dev != root_stat.st_dev
+                {
+                    return Err((
+                        "process birth leaf differs from its held procfs",
+                        libc::EINVAL,
+                    ));
+                }
+                let mut bytes = [0_u8; 4097];
+                let mut used = 0;
+                loop {
+                    let count = unsafe {
+                        libc::read(leaf, bytes[used..].as_mut_ptr().cast(), bytes.len() - used)
+                    };
+                    if count < 0 {
+                        return Err(proc_identity_errno("process birth bounded read failed"));
+                    }
+                    if count == 0 {
+                        break;
+                    }
+                    used += count as usize;
+                    if used > 4096 {
+                        return Err((
+                            "process birth stat exceeds its fixed bound",
+                            libc::EOVERFLOW,
+                        ));
+                    }
+                }
+                let ticks = parse_proc_start_ticks(&bytes[..used], expected).map_err(|error| {
+                    ("Invalid process birth stat or mismatched PID view", error)
+                })?;
+                let after = proc_identity_stat(leaf)?;
+                if before.st_dev != after.st_dev
+                    || before.st_ino != after.st_ino
+                    || before.st_mode != after.st_mode
+                {
+                    return Err(("process birth held leaf changed during read", libc::EAGAIN));
+                }
+                Ok(ticks)
+            })();
+            starts[index] = close_proc_identity_fd(leaf, outcome)?;
+        }
+        let after = proc_identity_root(root)?;
+        if root_stat.st_dev != after.st_dev || root_stat.st_ino != after.st_ino {
+            return Err((
+                "process birth held proc root changed during read",
+                libc::EAGAIN,
+            ));
+        }
+        Ok([pid as u64, starts[0], starts[1]])
+    })();
+    close_proc_identity_fd(root, outcome)
+}
+
+/// Cold process identities from one verified proc root, with raw unsigned ticks, never wall-clock instants.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxProcessBirth(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jlongArray {
+    #[cfg(target_os = "linux")]
+    {
+        match linux_process_birth() {
+            Ok(values) => {
+                let array = match env.new_long_array(3) {
+                    Ok(array) => array,
+                    Err(_) => return ptr::null_mut(),
+                };
+                // Rust u64 -> Java long is deliberately a bit-preserving conversion.
+                let bits = values.map(|value| value as jlong);
+                if env.set_long_array_region(&array, 0, &bits).is_err() {
+                    return ptr::null_mut();
+                }
+                array.into_raw()
+            }
+            Err((operation, error)) => {
+                throw_exception_with_error_code(&mut env, operation, error);
+                ptr::null_mut()
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Current Linux process birth query unsupported",
+            libc::ENOSYS,
+        );
+        ptr::null_mut()
+    }
 }
 
 /// Fixed Linux procfs boot identity only. No caller pathname/fd, cached value or namespace qualification.
@@ -514,21 +712,85 @@ mod boot_id_tests {
     fn held_ordinary_directory_and_real_proc_subdirectory_are_not_proc_roots() {
         use std::os::fd::AsRawFd;
         let ordinary = std::fs::File::open(std::env::temp_dir()).unwrap();
-        assert!(super::boot_id_proc_root(ordinary.as_raw_fd()).is_err());
+        assert!(super::proc_identity_root(ordinary.as_raw_fd()).is_err());
         let subdirectory = std::fs::File::open("/proc/sys").unwrap();
-        assert!(super::boot_id_proc_stat(subdirectory.as_raw_fd()).is_ok());
-        assert!(super::boot_id_proc_root(subdirectory.as_raw_fd()).is_err());
+        assert!(super::proc_identity_stat(subdirectory.as_raw_fd()).is_ok());
+        assert!(super::proc_identity_root(subdirectory.as_raw_fd()).is_err());
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn close_failure_cannot_replace_an_earlier_read_failure_or_publish_success() {
         let first = ("earlier read failure", libc::EIO);
-        assert_eq!(super::close_boot_id_fd(-1, Err(first)), Err(first));
         assert_eq!(
-            super::close_boot_id_fd(-1, Ok("unpublished".to_string())),
-            Err(("boot ID close failed", libc::EBADF))
+            super::close_proc_identity_fd::<String>(-1, Err(first)),
+            Err(first)
         );
+        assert_eq!(
+            super::close_proc_identity_fd(-1, Ok("unpublished".to_string())),
+            Err(("proc identity close failed", libc::EBADF))
+        );
+    }
+}
+
+#[cfg(test)]
+mod process_birth_tests {
+    use super::parse_proc_start_ticks;
+
+    fn stat(pid: i32, comm: &[u8], start: &str) -> Vec<u8> {
+        let mut bytes = format!("{pid} (").into_bytes();
+        bytes.extend_from_slice(comm);
+        bytes.extend_from_slice(b") S");
+        for field in 4..=52 {
+            bytes.push(b' ');
+            bytes.extend_from_slice(if field == 22 { start.as_bytes() } else { b"0" });
+        }
+        bytes.push(b'\n');
+        bytes
+    }
+
+    #[test]
+    fn raw_comm_with_spaces_parentheses_newlines_and_non_utf8_does_not_shift_birth() {
+        for comm in [
+            b"plain".as_slice(),
+            b"with space ) tail))\n",
+            b"\xff ) (\n) name",
+            b"",
+        ] {
+            assert_eq!(
+                parse_proc_start_ticks(&stat(42, comm, "1234"), 42).unwrap(),
+                1234
+            );
+        }
+    }
+
+    #[test]
+    fn start_ticks_preserve_zero_high_bit_and_complete_u64_without_hz_conversion() {
+        for value in [0_u64, 1, 1_u64 << 63, u64::MAX] {
+            assert_eq!(
+                parse_proc_start_ticks(&stat(1, b"init", &value.to_string()), 1).unwrap(),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn stat_rejects_pid_view_mismatch_missing_fields_bad_numbers_and_overflow() {
+        assert!(parse_proc_start_ticks(&stat(43, b"x", "123"), 42).is_err());
+        assert!(parse_proc_start_ticks(&stat(0, b"x", "0"), 0).is_err());
+        for start in ["18446744073709551616", "-1", "+1", "NaN"] {
+            assert!(parse_proc_start_ticks(&stat(42, b"x", start), 42).is_err());
+        }
+        let short = format!("42 (x) S{}\n", " 0".repeat(18));
+        assert!(parse_proc_start_ticks(short.as_bytes(), 42).is_err());
+        let bad = String::from_utf8(stat(42, b"x", "123"))
+            .unwrap()
+            .replace(") S 0", ") S 9223372036854775808");
+        assert!(parse_proc_start_ticks(bad.as_bytes(), 42).is_err());
+        let mut no_newline = stat(42, b"x", "123");
+        no_newline.pop();
+        assert!(parse_proc_start_ticks(&no_newline, 42).is_err());
+        assert!(parse_proc_start_ticks(&stat(42, &vec![b'x'; 4096], "123"), 42).is_err());
     }
 }
 

@@ -4979,6 +4979,119 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void processBirthEveryReadIsColdAndEachChangedIdentityFieldPoisonsOwner() throws Exception {
+        var first = new NativeIO.LinuxProcessBirth(42, Long.MIN_VALUE, 0);
+        for (var changed : List.of(new NativeIO.LinuxProcessBirth(43, Long.MIN_VALUE, 0),
+                new NativeIO.LinuxProcessBirth(42, Long.MIN_VALUE + 1, 0),
+                new NativeIO.LinuxProcessBirth(42, Long.MIN_VALUE, 1))) {
+            var reads = new AtomicInteger();
+            SegmentClassicLaunchTrust owner;
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> reads.incrementAndGet() <= 2 ? first : changed)
+                            .when(mock).currentLinuxProcessBirth())) {
+                owner = owner();
+            }
+            owner.initialize();
+            try {
+                assertEquals(first, owner.readLinuxProcessBirth(SegmentClassicLinuxElfTest.deadline()));
+                assertEquals(first, owner.readLinuxProcessBirth(SegmentClassicLinuxElfTest.deadline()));
+                assertEquals(2, reads.get());
+                var failure = assertThrows(IOException.class,
+                        () -> owner.readLinuxProcessBirth(SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("changed during original startup"));
+                assertEquals(3, reads.get());
+                assertThrows(IOException.class, owner::parsed);
+                var drained = owner.closeAndDrain();
+                assertTrue(drained.drained());
+                assertSame(failure, drained.launcherFailure());
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void processBirthNativeFailureRemainsOriginalThroughDrain() throws Exception {
+        var failure = new NativeIOException("process birth held source injected rejection", 22);
+        SegmentClassicLaunchTrust owner;
+        try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                (mock, context) -> doAnswer(call -> {
+                    throw failure;
+                }).when(mock).currentLinuxProcessBirth())) {
+            owner = owner();
+        }
+        owner.initialize();
+        assertSame(failure, assertThrows(NativeIOException.class,
+                () -> owner.readLinuxProcessBirth(SegmentClassicLinuxElfTest.deadline())));
+        var drained = owner.closeAndDrain();
+        assertTrue(drained.drained());
+        assertSame(failure, drained.launcherFailure());
+    }
+
+    @Test
+    public void processBirthDeadlineIsCheckedBeforeAndAfterReadReturn() throws Exception {
+        for (int mode = 0; mode < 2; mode++) {
+            var reads = new AtomicInteger();
+            SegmentClassicLaunchTrust owner;
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> {
+                        reads.incrementAndGet();
+                        Thread.sleep(1100);
+                        return new NativeIO.LinuxProcessBirth(42, 123, 0);
+                    }).when(mock).currentLinuxProcessBirth())) {
+                owner = owner();
+            }
+            owner.initialize();
+            long deadline = System.nanoTime() + (mode == 0 ? 0 : TimeUnit.SECONDS.toNanos(1));
+            try {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxProcessBirth(deadline));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("deadline elapsed"));
+                assertEquals(mode, reads.get());
+                assertThrows(IOException.class, owner::parsed);
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void processBirthMissingNativeValueCannotBecomeFirstObservation() throws Exception {
+        SegmentClassicLaunchTrust owner;
+        try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                (mock, context) -> doAnswer(call -> null).when(mock).currentLinuxProcessBirth())) {
+            owner = owner();
+        }
+        owner.initialize();
+        try {
+            assertThrows(IOException.class, () -> owner.readLinuxProcessBirth(SegmentClassicLinuxElfTest.deadline()));
+            assertThrows(IOException.class, owner::parsed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void processBirthOriginalSourceAndDeadlineRejectBeforeNativeQueries() throws Exception {
+        for (int mode = 0; mode < 2; mode++) {
+            long deadline = mode == 0 ? SegmentClassicLinuxElfTest.deadline() : System.nanoTime();
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> {
+                        throw new AssertionError("Unbound or expired D2 reached native process birth");
+                    }).when(mock).currentLinuxProcessBirth())) {
+                var owner = owner();
+                owner.initialize();
+                try {
+                    var failure = assertThrows(IOException.class, () -> owner.verifyLinuxProcessBirth(deadline));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains(mode == 0
+                            ? "original provider/source binding" : "deadline elapsed"));
+                } finally {
+                    assertTrue(owner.closeAndDrain().drained());
+                }
+            }
+        }
+    }
+
+    @Test
     public void kernelAndCgroupOriginalSourceAndDeadlineRejectBeforeNativeQueries() throws Exception {
         for (int mode = 0; mode < 2; mode++) {
             long deadline = mode == 0 ? SegmentClassicLinuxElfTest.deadline() : System.nanoTime();

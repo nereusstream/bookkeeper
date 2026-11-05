@@ -1218,6 +1218,20 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 与可见 PID1 的原始出生 ticks
+
+2026-11-05在父`94bad1e5fbedf9fd8719d66936ed392ecb70fd84`上，正常D2在第一次boot核验后冷读进程出生标记，unit/link检查后第二次boot核验之后再独立读取，均先于dropper/childCommand/私钥。typed入口先`originalLinuxDeployment`；实际native返回后依原绝对期限、资源健康、值与首record对应检查，全部通过才记录本owner首次值。每次均真正冷读，不把在途native认作已被timeout取消。data-only入口只接deadline且最先拒绝production owner，不能预置正式首次值，不造进程许可或改child的Process/Instant/HELLO。
+
+无参`NativeIO.currentLinuxProcessBirth()`返回当前PID及其startTicks、可见PID1的startTicks。两ticks保留unsigned u64原bits的Java long，0合法，不转Instant或假定HZ。一次调用从同一held proc根经openat2读固定self/stat和1/stat；前者resolve0xb保留BENEATH/NO_XDEV/NO_MAGICLINKS，仅允许必要普通self symlink，后者0xf仍禁所有symlink。leaf NOFOLLOW/NONBLOCK、regular/同procdev，4097-byte缓冲探测4096上限并完整读EOF，前后held fd/root复核。只将原boot的根/stat/errno/首close私有体局部共用，不建通用proc框架；每个已开leaf/root各close一次，后错不盖首错，全部释放有结论后才构造JNI long[3]。Boot仍用严格0xf，共享wrong-root诊断及对应测试分类改为proc identity。
+
+[内核self实现](https://github.com/torvalds/linux/blob/v6.8/fs/proc/self.c#L10-L24)按proc superblock的PID namespace计算当前tgid并返回普通相对symlink；self stat PID另须与本次直接getpid相等，PID1 stat须为1，视图不对应拒绝，不接caller PID/path/fd/backend。parser从有界原始字节的最后右括号后核comm尾和前22字段数字语法/范围并取field22，不整行split或取首右括号，comm的空格、多括号、换行及非UTF8不会移位。[stat字段](https://man7.org/linux/man-pages/man5/proc_pid_stat.5.html)的starttime是原始ticks；[内核输出](https://github.com/torvalds/linux/blob/v6.8/fs/proc/array.c#L554-L580)还应用time namespace boottime偏移，故这是当前可见proc/time视图标记。
+
+宿主构建退出0，新库354224 bytes/SHA `e3d116498fff91a1a1b8e41f0c9f224823ed7649add244e8c35b2221235d41b4`。Linux x86_64 cargo check --tests退出0但未链接/执行。精确生产parser及原测试片段在宿主独立编译，仅errno/pid_t类型常量声明，无来源/backend模拟：原boot2＋新proc3共5项通过，含特殊comm、合法0/高位/完整u64、PID视图不符、缺字段、坏数字及溢出。Java native Birth4＋Boot3＋Credentials2＋Kernel3＋Cgroup2共14项为12通过/2 Linux阳性跳过；Darwin实际ENOSYS78、raw值形状/default拒绝和原ABI回归有效。server Trust24（birth5、boot5、kernel/cgroup4、unit/link10）＋Launcher5＋Inputs6＋DeploymentV2 13共48项全过。最终62个唯一JUnit用例为60通过/2跳过，同4项CheckedJNI复验不增加唯一数；精确旧189库在独立VM拒绝新birth符号，旧credential ABI前后有效。
+
+owner mock仅证相同值仍两次调用、三字段独立错配/源失败/缺值/期限前后及原失败/drain。Linux测试仅首读建立来源前分类环境限制，不跳过未证明的openat2 EINVAL；JVM PID、独立self/PID1 stat对照及第二读均在catch外，异常须失败。真实Linux syscall、复用的根/子目录/close测试及source阳性仍NOT_EXECUTED。九code与1452原输入、class/日志/XML/style快照绑定，Java Spotless/Checkstyle退出0，Rustfmt退出1且差异逐行同父；证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/native-process-birth-evidence-94bad1e5`。old-library probe原描述误留boot符号名，原命令/输出实为birth probe，原输入保留并另有scope-correction纠正，未重绑旧ABI证据。
+
+正常接线及production-data guard静态核对；data mocks、portable、Darwin拒绝、交叉编译与真实Linux来源分开。PID1标记不证明它是宿主systemd或初始namespace，manager MainPID/ExecMainPID/InvocationID及cgroup归属仍须真实返回值另外关联。未改宿主/proc、挂载、namespace或Installed，不新增systemctl/ProcessImpl/helper执行；D1/noLinux不上新ABI，原childCommand/diagnostics拒绝、完整Unix及parent/child/Main/G1/full-bytes/full16/生产Gate OPEN、默认OFF/SYSTEM/PARK、advanced disabled及完整目标active保持。
+
 ## 正常 D2 launcher 的可信 procfs boot ID 冷读
 
 2026-11-05在父`4c4c2102fe9bd4a7bf6c97d8767893fb78c65d9f`上，正常D2在原source/provider、kernel/cgroup检查之后第一次`verifyLinuxBootId(deadline)`，原unit/link检查结束后、独立dropper/childCommand/私钥之前第二次调用。每次均实际重新打开、验证并读取；owner私有首UUID只作本轮比较，不替代第二读或产生boot许可。typed入口先`originalLinuxDeployment`；包内data-only入口只接deadline且最先拒绝production owner，不能提前建立正式首次值。共享体在native返回后核原绝对期限、资源健康、非零值和一致性，全部通过才记首值；失败按原owner失败/drain合同处理，超期不等于已取消在途syscall。

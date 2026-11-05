@@ -58,7 +58,7 @@ public class NativeIOBootIdTest {
             String message = restricted.getMessage();
             boolean openRestriction = (message.contains("fixed openat2") || message.contains("fixed proc root open"))
                     && Set.of(1, 2, 11, 13, 18, 38, 40, 95).contains(restricted.getErrno());
-            boolean wrongRoot = restricted.getErrno() == 22 && message.contains("boot ID source is not");
+            boolean wrongRoot = restricted.getErrno() == 22 && message.contains("proc identity source is not");
             assertTrue(message, openRestriction || wrongRoot);
             System.out.println("LINUX_BOOT_ID_SOURCE_POSITIVE_NOT_EXECUTED " + message);
             assumeNoException("Restricted procfs/openat2 source; no Linux positive", restricted);
