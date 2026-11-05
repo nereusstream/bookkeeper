@@ -300,6 +300,7 @@ public final class SegmentClassicLauncher {
             trust.verifyLinuxBootId(deadline);
             trust.verifyLinuxProcessBirth(deadline);
             trust.verifyLinuxInitialNamespaces(deadline);
+            trust.recheckLinuxCgroupRoot(deadline);
             trust.verifyLinuxSystemdPeer(deadline);
         }
         trust.verifyLauncherDropper(input, deadline);

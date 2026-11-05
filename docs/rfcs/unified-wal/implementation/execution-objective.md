@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+正常 D2 launcher 由原 trust owner 持有固定 `/sys/fs/cgroup` 目录，并在后续启动检查中复核同一 fd。各 sysfs 父目录使用自己的短期 fd 检查类型和身份，`/` 沿用通用 ACL 检查。26 项定向回归、Java 样式、旧库缺符号检查与 Linux x86_64 交叉检查通过。批准 Linux 实读、episode cgroup 与实际排空仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-持有并复核-cgroup-目录)。
+
 受控 Linux Classic child 在三个原凭据检查点核对 fsuid/fsgid。原六个 ID 和补充组匹配后，新 JNI 通过实际持有的 procfs 根读取固定 `thread-self/status`，把 `Uid:` 和 `Gid:` 的第四项与原 recipe 核对。最终 19 项 Java 回归、四项原 Rust 解析测试及 Linux 交叉检查通过，两个 Linux 实读用例在 Darwin 跳过。完整 dropper 与 Unix 隔离仍待验收。详见 [startup-readiness](startup-readiness/README.md#受控-linux-classic-child-的-filesystem-id-检查)。
 
 受控 Classic child 的三个原凭据检查点现使用同一次 Linux 调用线程读取核对 real、effective 和 saved UID/GID，以及精确补充组。实际入口在 metadata 构建前、START 消费前和网络激活前核验批准 recipe。Darwin JNI、旧库缺符号、child 和 launcher 回归以及 Linux x86_64 交叉检查已验证；批准 Linux 实读与完整隔离仍待验收。详见 [startup-readiness](startup-readiness/README.md#受控-linux-classic-child-的-saved-uidgid-检查)。

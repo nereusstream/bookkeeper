@@ -78,6 +78,8 @@ final class SegmentClassicLaunchTrust {
     private static final List<String> BUILTIN_HWCAP_SUFFIXES = List.of("glibc-hwcaps/x86-64-v4/",
             "glibc-hwcaps/x86-64-v3/", "glibc-hwcaps/x86-64-v2/", "");
     private static final long DF_1_NODEFLIB = 0x800L;
+    private static final String CGROUP_ROOT = "/sys/fs/cgroup";
+    private static final long SYSFS_TYPE = 0x62656572L;
     private static final String SYSTEMD_PRIVATE_SOCKET = "/run/systemd/private";
 
     record Recipe(String recipeId, String deployment, String keyName, SegmentClassicHandoff.Digest signerKeyId,
@@ -438,6 +440,9 @@ final class SegmentClassicLaunchTrust {
         Throwable failure;
     }
 
+    private record HeldCgroupRoot(Path path, FileChannel channel, NativeIO.DirectoryFileSystem facts,
+                                  List<Identity> identities) { }
+
     private final Path root;
     private final String recipeId;
     private final long ownerUid;
@@ -455,6 +460,7 @@ final class SegmentClassicLaunchTrust {
     private Throwable programFailure;
     private SegmentClassicLaunchProgram.Decoded verifiedProgram;
     private LinuxFileObservation verifiedRuntimeImage;
+    private HeldCgroupRoot linuxCgroupRoot;
     private UUID linuxBootId;
     private NativeIO.LinuxProcessBirth linuxProcessBirth;
     private boolean configurationAttempted;
@@ -879,7 +885,7 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    /** Current uname and visible fixed-path type only; no host namespace or episode cgroup qualification. */
+    /** Current uname and the actual directory in the launcher mount view. */
     synchronized void verifyLinuxKernelAndCgroupRoot(long deadline) throws IOException {
         requireReady();
         initializingThread = Thread.currentThread();
@@ -888,16 +894,146 @@ final class SegmentClassicLaunchTrust {
             requireTime(deadline);
             var actual = nativeIo.currentKernelIdentity();
             requireLinuxKernelIdentity(deployment.platform(), actual);
-            requireTime(deadline);
-            requireLinuxCgroupRootType(nativeIo.currentCgroupRootFileSystemType());
-            files.requireHealthy();
-            requireTime(deadline);
+            observeCgroupRoot(linuxPhysicalPath(CGROUP_ROOT, deadline), deadline);
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
             throw failure;
         } finally {
             initializingThread = null;
         }
+    }
+
+    /** Reobserve the same held root across the later startup checks. */
+    synchronized void recheckLinuxCgroupRoot(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            originalLinuxDeployment(deadline);
+            if (linuxCgroupRoot == null) {
+                throw new IOException("Original D2 cgroup directory is not held");
+            }
+            observeCgroupRoot(linuxPhysicalPath(CGROUP_ROOT, deadline), deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** The test owner uses a real local directory and reports its native filesystem facts. */
+    synchronized NativeIO.DirectoryFileSystem readCgroupDirectory(Path directory, long deadline) throws IOException {
+        if (production) {
+            throw new IOException("Data-only directory reads cannot seed a production owner");
+        }
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeCgroupRoot(directory, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private NativeIO.DirectoryFileSystem observeCgroupRoot(Path directory, long deadline) throws IOException {
+        requireTime(deadline);
+        var held = linuxCgroupRoot;
+        if (held != null && !held.path().equals(directory)) {
+            throw new IOException("Original cgroup directory path differs");
+        }
+        var before = cgroupPathIdentities(directory, deadline);
+        if (held != null && !held.identities().equals(before)) {
+            throw new IOException("Fixed path no longer identifies the original cgroup directory");
+        }
+        if (production) {
+            Path sysFs = directory.getParent();
+            verifyCgroupSysfsDirectory(sysFs.getParent(), before.get(2), deadline);
+            verifyCgroupSysfsDirectory(sysFs, before.get(1), deadline);
+        }
+        requireTime(deadline);
+        FileChannel channel = held == null
+                ? SegmentOwnedFiles.open(files, directory, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
+                : held.channel();
+        requireTime(deadline);
+        var facts = files.directoryFileSystem(channel, nativeIo);
+        if (!matchesDirectoryIdentity(facts, before.get(0)) || held != null && !held.facts().equals(facts)) {
+            throw new IOException("Original cgroup directory fd differs from its path or previous observation");
+        }
+        if (production) {
+            requireLinuxCgroupRootType(facts.type());
+        }
+        if (!before.equals(cgroupPathIdentities(directory, deadline))) {
+            throw new IOException("Original cgroup directory path changed during its fd query");
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+        if (held == null) {
+            linuxCgroupRoot = new HeldCgroupRoot(directory, channel, facts, before);
+        }
+        return facts;
+    }
+
+    private List<Identity> cgroupPathIdentities(Path directory, long deadline) throws IOException {
+        requireTime(deadline);
+        // Compare leaf to root, excluding directory size, link count and timestamps.
+        if (!production) {
+            var identities = new ArrayList<Identity>();
+            Identity leaf = checked(directory);
+            if (!leaf.directory() || (leaf.mode() & 022) != 0) {
+                throw new IOException("Local observation requires a protected directory");
+            }
+            identities.add(leaf.parent());
+            identities.addAll(chain(directory));
+            return List.copyOf(identities);
+        }
+        Path sysFs = directory.getParent();
+        Path filesystemRoot = directory.getRoot();
+        var rootIdentity = protectedCgroupDirectory(filesystemRoot, deadline);
+        if (nativeIo.hasExtendedAcl(filesystemRoot.toString())
+                || !rootIdentity.equals(protectedCgroupDirectory(filesystemRoot, deadline))) {
+            throw new IOException("Additional ACL or changed identity on the fixed cgroup path's filesystem root");
+        }
+        var sys = protectedCgroupDirectory(sysFs.getParent(), deadline);
+        var fs = protectedCgroupDirectory(sysFs, deadline);
+        var leaf = protectedCgroupDirectory(directory, deadline);
+        return List.of(leaf, fs, sys, rootIdentity);
+    }
+
+    private static Identity protectedCgroupDirectory(Path path, long deadline) throws IOException {
+        requireTime(deadline);
+        var observed = SegmentClassicHandoffPaths.fileIdentity(path);
+        if (!observed.directory() || observed.uid() != 0 || (observed.mode() & 022) != 0) {
+            throw new IOException("Fixed cgroup path requires a protected root-owned directory: " + path);
+        }
+        requireTime(deadline);
+        return observed.parent();
+    }
+
+    private void verifyCgroupSysfsDirectory(Path path, Identity expected, long deadline) throws IOException {
+        requireTime(deadline);
+        try (FileChannel channel = SegmentOwnedFiles.open(files, path,
+                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            requireTime(deadline);
+            requireCgroupSysfsIdentity(path, expected, files.directoryFileSystem(channel, nativeIo));
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+    }
+
+    // Only the fixed kernfs parents may use this rule. Each must prove its own filesystem type.
+    static void requireCgroupSysfsIdentity(Path path, Identity expected, NativeIO.DirectoryFileSystem facts)
+            throws IOException {
+        if (facts.type() != SYSFS_TYPE || !matchesDirectoryIdentity(facts, expected)) {
+            throw new IOException("Fixed cgroup path parent is not the expected sysfs directory: " + path);
+        }
+    }
+
+    private static boolean matchesDirectoryIdentity(NativeIO.DirectoryFileSystem facts, Identity path) {
+        return facts.identity().device() == path.device() && facts.identity().inode() == path.inode();
     }
 
     /** Independently cold-read on every call; private first value is only this owner's startup comparison. */

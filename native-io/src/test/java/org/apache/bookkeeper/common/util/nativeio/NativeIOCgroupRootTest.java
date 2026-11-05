@@ -25,8 +25,12 @@ import static org.junit.Assume.assumeTrue;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mock;
 
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.lang3.SystemUtils;
 import org.junit.Rule;
@@ -88,6 +92,61 @@ public class NativeIOCgroupRootTest {
         var unsupported = mock(NativeIO.class, CALLS_REAL_METHODS);
         var failure = assertThrows(NativeIOException.class, unsupported::currentCgroupRootFileSystemType);
         assertTrue(failure.getMessage().contains("unsupported"));
+        assertThrows(NativeIOException.class, () -> unsupported.directoryFileSystem(null));
+    }
+
+    @Test
+    public void heldDirectoryMatchesIndependentFstatAndFstatfs() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_LINUX || NativeIOLibraryPath.configuredLibraryPath() != null);
+        Path root = temporary.getRoot().toPath().toRealPath();
+        Path directory = Files.createDirectory(root.resolve("original-directory"));
+        Path source = root.resolve("held-fstatfs.c");
+        Path binary = root.resolve("held-fstatfs");
+        Files.writeString(source, """
+                #include <fcntl.h>
+                #include <inttypes.h>
+                #include <stdio.h>
+                #include <sys/stat.h>
+                #ifdef __APPLE__
+                #include <sys/mount.h>
+                #else
+                #include <sys/vfs.h>
+                #endif
+                #include <unistd.h>
+                int main(int argc, char **argv) {
+                    if (argc != 2) return 1;
+                    int fd = open(argv[1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+                    struct stat st;
+                    struct statfs fs;
+                    if (fd < 0 || fstat(fd, &st) != 0 || fstatfs(fd, &fs) != 0 || close(fd) != 0) return 2;
+                    printf("%" PRId64 " %" PRIu64 " %" PRId64 "\\n",
+                           (int64_t)st.st_dev, (uint64_t)st.st_ino, (int64_t)fs.f_type);
+                    return 0;
+                }
+                """);
+        command("cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", source.toString(), "-o", binary.toString());
+        assertDirectoryFacts(binary, directory);
+        Path cgroupRoot = Path.of("/sys/fs/cgroup");
+        if (SystemUtils.IS_OS_LINUX && Files.isDirectory(cgroupRoot, LinkOption.NOFOLLOW_LINKS)) {
+            assertDirectoryFacts(binary, cgroupRoot);
+        }
+    }
+
+    private static void assertDirectoryFacts(Path binary, Path directory) throws Exception {
+        String[] reference = command(binary.toString(), directory.toString()).split(" ");
+        assertEquals(3, reference.length);
+        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            var io = new NativeIOImpl();
+            var facts = io.directoryFileSystem(channel);
+            assertEquals(Long.parseLong(reference[0]), facts.identity().device());
+            assertEquals(Long.parseUnsignedLong(reference[1]), facts.identity().inode());
+            assertEquals(Long.parseLong(reference[2]), facts.type());
+            assertEquals(io.fileIdentity(channel), facts.identity());
+            assertTrue(channel.isOpen());
+            channel.close();
+            assertThrows(NativeIOException.class, () -> io.directoryFileSystem(channel));
+            System.out.println("HELD_DIRECTORY_FSTATFS path=" + directory + " type=" + Long.toHexString(facts.type()));
+        }
     }
 
     private static String command(String... arguments) throws Exception {
@@ -123,6 +182,20 @@ public class NativeIOCgroupRootTest {
             assertTrue(failure.getCause() instanceof UnsatisfiedLinkError);
             assertTrue(!io.currentKernelIdentity().sysname().isEmpty());
             System.out.println("OLD_JNI_CGROUP_ROOT_UNSUPPORTED");
+        }
+    }
+
+    /** Exact previous library retains original file identity and lacks the new directory symbol. */
+    public static final class OldDirectoryLibraryProbe {
+        public static void main(String[] args) throws Exception {
+            var io = new NativeIOImpl();
+            try (FileChannel channel = FileChannel.open(Path.of(args[0]), StandardOpenOption.READ)) {
+                var original = io.fileIdentity(channel);
+                var failure = assertThrows(NativeIOException.class, () -> io.directoryFileSystem(channel));
+                assertTrue(failure.getCause() instanceof UnsatisfiedLinkError);
+                assertEquals(original, io.fileIdentity(channel));
+            }
+            System.out.println("OLD_JNI_DIRECTORY_FILESYSTEM_UNSUPPORTED");
         }
     }
 }

@@ -54,6 +54,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
+import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
@@ -5899,16 +5900,138 @@ public class SegmentClassicLaunchTrustTest {
                             throw new AssertionError("Unbound or expired D2 reached native uname");
                         }).when(mock).currentKernelIdentity();
                         doAnswer(call -> {
-                            throw new AssertionError("Unbound or expired D2 reached native cgroup statfs");
-                        }).when(mock).currentCgroupRootFileSystemType();
+                            throw new AssertionError("Unbound or expired D2 reached the original directory query");
+                        }).when(mock).directoryFileSystem(any(FileChannel.class));
                     })) {
                 var owner = owner();
                 owner.initialize();
-                var failure = assertThrows(IOException.class, () -> owner.verifyLinuxKernelAndCgroupRoot(deadline));
-                assertTrue(failure.getMessage(), failure.getMessage().contains(mode == 0
-                        ? "original provider/source binding" : "deadline elapsed"));
+                try (var factory = mockStatic(FileChannel.class, call -> {
+                    throw new AssertionError("Unbound or expired D2 opened a target directory");
+                })) {
+                    var failure = assertThrows(IOException.class, () -> owner.verifyLinuxKernelAndCgroupRoot(deadline));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains(mode == 0
+                            ? "original provider/source binding" : "deadline elapsed"));
+                }
                 assertThrows(IOException.class, owner::parsed);
                 assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void actualLocalDirectoryDoesNotSatisfyFixedSysfsParentCheck() throws Exception {
+        try (FileChannel channel = FileChannel.open(root, StandardOpenOption.READ)) {
+            var facts = new NativeIOImpl().directoryFileSystem(channel);
+            var identity = SegmentClassicHandoffPaths.fileIdentity(root);
+            assertEquals(identity.device(), facts.identity().device());
+            assertEquals(identity.inode(), facts.identity().inode());
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireCgroupSysfsIdentity(
+                    Path.of("/sys"), identity, facts));
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireCgroupSysfsIdentity(
+                    Path.of("/sys/fs"), identity, facts));
+        }
+    }
+
+    @Test
+    public void originalDirectoryObservationRejectsAliasRegularFileAndWritableDirectoryBeforeOpen() throws Exception {
+        Path directory = Files.createDirectory(root.resolve("cgroup-directory"));
+        Path alias = Files.createSymbolicLink(root.resolve("alias"), directory);
+        Path regular = Files.createFile(root.resolve("regular"));
+        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwxrwx---"));
+        for (Path refused : List.of(alias, regular, directory)) {
+            var owner = owner();
+            owner.initialize();
+            try (var factory = mockStatic(FileChannel.class, call -> {
+                throw new AssertionError("Invalid directory path reached open");
+            })) {
+                var failure = assertThrows(IOException.class,
+                        () -> owner.readCgroupDirectory(refused, SegmentClassicLinuxElfTest.deadline()));
+                assertSame(failure, assertThrows(IOException.class, owner::parsed).getCause());
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void originalCgroupDirectoryStaysHeldAcrossChildChangesAndRejectsPathReplacement() throws Exception {
+        Path path = Files.createDirectory(root.resolve("cgroup-directory"));
+        var original = new AtomicReference<FileChannel>();
+        var observations = new AtomicInteger();
+        try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                (mock, context) -> doAnswer(call -> {
+                    FileChannel channel = call.getArgument(0);
+                    if (!original.compareAndSet(null, channel)) {
+                        assertSame(original.get(), channel);
+                    }
+                    observations.incrementAndGet();
+                    return call.callRealMethod();
+                }).when(mock).directoryFileSystem(any(FileChannel.class)))) {
+            var owner = owner();
+            owner.initialize();
+            try {
+                var first = owner.readCgroupDirectory(path, SegmentClassicLinuxElfTest.deadline());
+                assertTrue(original.get().isOpen());
+                Files.createDirectory(path.resolve("child"));
+                assertEquals(first, owner.readCgroupDirectory(path, SegmentClassicLinuxElfTest.deadline()));
+                assertEquals(2, observations.get());
+                Files.move(path, path.resolveSibling("original-directory"));
+                Files.createDirectory(path);
+                var failure = assertThrows(IOException.class,
+                        () -> owner.readCgroupDirectory(path, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("original cgroup directory"));
+                assertTrue(original.get().isOpen());
+                assertSame(failure, assertThrows(IOException.class, owner::parsed).getCause());
+                assertSame(failure, owner.closeAndDrain().launcherFailure());
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+            assertFalse(original.get().isOpen());
+        }
+    }
+
+    @Test
+    public void failedCgroupDirectoryObservationKeepsItsFirstCloseFailure() throws Exception {
+        Path path = Files.createDirectory(root.resolve("cgroup-directory"));
+        var original = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        var close = new IOException("Original directory first close failed");
+        NativeIO actualIo = new NativeIOImpl();
+        try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                (mock, context) -> doAnswer(call -> {
+                    SegmentDataFileLockTest.FaultChannel wrapper = call.getArgument(0);
+                    var actual = actualIo.directoryFileSystem(wrapper.actual);
+                    Files.move(path, path.resolveSibling("original-directory"));
+                    Files.createDirectory(path);
+                    return actual;
+                }).when(mock).directoryFileSystem(any(FileChannel.class)))) {
+            var owner = owner();
+            owner.initialize();
+            try (var factory = mockStatic(FileChannel.class, invocation -> {
+                Object result = invocation.callRealMethod();
+                if (invocation.getMethod().getParameterTypes()[1] == OpenOption[].class
+                        && path.equals(invocation.getArgument(0))) {
+                    var wrapper = new SegmentDataFileLockTest.FaultChannel((FileChannel) result);
+                    wrapper.closeFailure = close;
+                    assertTrue(original.compareAndSet(null, wrapper));
+                    return wrapper;
+                }
+                return result;
+            })) {
+                var failure = assertThrows(IOException.class,
+                        () -> owner.readCgroupDirectory(path, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("changed during its fd query"));
+                assertTrue(original.get().actual.isOpen());
+                for (int attempt = 0; attempt < 2; attempt++) {
+                    var drained = owner.closeAndDrain();
+                    assertFalse(drained.drained());
+                    assertSame(failure, drained.launcherFailure());
+                    assertSame(close, drained.files().closeFailure());
+                    assertEquals(1, original.get().closes.get());
+                }
+            } finally {
+                if (original.get() != null) {
+                    original.get().actual.close();
+                }
             }
         }
     }

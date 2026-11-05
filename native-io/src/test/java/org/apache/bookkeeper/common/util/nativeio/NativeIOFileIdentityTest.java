@@ -92,6 +92,9 @@ public class NativeIOFileIdentityTest {
              FileChannel wrapper = new Wrapper(original)) {
             var expected = io.fileIdentity(original);
             assertThrows(NativeIOException.class, () -> io.fileIdentity(wrapper));
+            assertThrows(NativeIOException.class, () -> io.directoryFileSystem(wrapper));
+            var notDirectory = assertThrows(NativeIOException.class, () -> io.directoryFileSystem(original));
+            assertTrue(notDirectory.getMessage().contains("not a directory"));
             assertTrue(wrapper.isOpen());
             assertEquals(expected, io.fileIdentity(original));
             original.close();

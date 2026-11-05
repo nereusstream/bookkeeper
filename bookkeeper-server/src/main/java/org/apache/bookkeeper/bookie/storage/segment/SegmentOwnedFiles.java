@@ -119,10 +119,20 @@ final class SegmentOwnedFiles {
 
     /** Only this owner's exact original wrapper can query its private resource; no raw channel is exposed. */
     NativeIO.FileIdentity fileIdentity(FileChannel channel, NativeIO nativeIo) throws IOException {
-        if (nativeIo == null || !(channel instanceof SegmentOwnedFiles.Channel owned) || !owned.ownedBy(this)) {
-            throw new IOException("Original file identity requires this owner's channel wrapper");
-        }
+        Channel owned = originalWrapper(channel, nativeIo);
         return owned.entry.fileIdentity(owned, nativeIo);
+    }
+
+    NativeIO.DirectoryFileSystem directoryFileSystem(FileChannel channel, NativeIO nativeIo) throws IOException {
+        Channel owned = originalWrapper(channel, nativeIo);
+        return owned.entry.directoryFileSystem(owned, nativeIo);
+    }
+
+    private Channel originalWrapper(FileChannel channel, NativeIO nativeIo) throws IOException {
+        if (nativeIo == null || !(channel instanceof SegmentOwnedFiles.Channel owned) || !owned.ownedBy(this)) {
+            throw new IOException("Original file query requires this owner's channel wrapper");
+        }
+        return owned;
     }
 
     private Entry begin(Path path) throws IOException {
@@ -279,13 +289,17 @@ final class SegmentOwnedFiles {
             }
         }
 
-        synchronized NativeIO.FileIdentity fileIdentity(Channel caller, NativeIO nativeIo) throws IOException {
+        private FileChannel beginIdentityQuery(Channel caller) throws IOException {
             if (queryingThread != null) {
                 throw new IllegalStateException("Control file identity query cannot reenter itself");
             }
             requireIdentityQuery(caller, null);
-            FileChannel original = resource;
             queryingThread = Thread.currentThread();
+            return resource;
+        }
+
+        synchronized NativeIO.FileIdentity fileIdentity(Channel caller, NativeIO nativeIo) throws IOException {
+            FileChannel original = beginIdentityQuery(caller);
             try {
                 var identity = nativeIo.fileIdentity(original);
                 if (identity == null) {
@@ -293,6 +307,21 @@ final class SegmentOwnedFiles {
                 }
                 requireIdentityQuery(caller, original);
                 return identity;
+            } finally {
+                queryingThread = null;
+            }
+        }
+
+        synchronized NativeIO.DirectoryFileSystem directoryFileSystem(Channel caller, NativeIO nativeIo)
+                throws IOException {
+            FileChannel original = beginIdentityQuery(caller);
+            try {
+                var observation = nativeIo.directoryFileSystem(original);
+                if (observation == null || observation.identity() == null) {
+                    throw new IOException("Unknown original directory filesystem outcome");
+                }
+                requireIdentityQuery(caller, original);
+                return observation;
             } finally {
                 queryingThread = null;
             }

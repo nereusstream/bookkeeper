@@ -1552,27 +1552,7 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
 ) -> jlongArray {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        let values = match original_file_identity(&mut env, &channel) {
-            Ok(Some(value)) => value,
-            Ok(None) => return ptr::null_mut(),
-            Err(error) => {
-                if !env.exception_check().unwrap_or(true) {
-                    throw_exception(
-                        &mut env,
-                        &format!("Original file-channel identity failed: {error}"),
-                    );
-                }
-                return ptr::null_mut();
-            }
-        };
-        let array = match env.new_long_array(2) {
-            Ok(value) => value,
-            Err(_) => return ptr::null_mut(),
-        };
-        if env.set_long_array_region(&array, 0, &values).is_err() {
-            return ptr::null_mut();
-        }
-        array.into_raw()
+        original_file_facts(&mut env, &channel, OriginalFileQuery::Identity)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -1585,11 +1565,74 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     }
 }
 
+/// File identity and filesystem type from the same held directory descriptor.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_directoryFileSystem(
+    mut env: JNIEnv,
+    _class: JClass,
+    channel: JObject,
+) -> jlongArray {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        original_file_facts(&mut env, &channel, OriginalFileQuery::DirectoryFileSystem)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Directory filesystem query is unsupported",
+            libc::ENOTSUP,
+        );
+        ptr::null_mut()
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn original_file_identity(
+#[derive(Clone, Copy)]
+enum OriginalFileQuery {
+    Identity,
+    DirectoryFileSystem,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn original_file_facts(
     env: &mut JNIEnv,
     channel: &JObject,
-) -> jni::errors::Result<Option<[jlong; 2]>> {
+    query: OriginalFileQuery,
+) -> jlongArray {
+    let values = match with_original_file_stat(env, channel, query) {
+        Ok(Some(value)) => value,
+        Ok(None) => return ptr::null_mut(),
+        Err(error) => {
+            if !env.exception_check().unwrap_or(true) {
+                throw_exception(
+                    env,
+                    &format!("Original file-channel identity failed: {error}"),
+                );
+            }
+            return ptr::null_mut();
+        }
+    };
+    let values = match query {
+        OriginalFileQuery::Identity => &values[..2],
+        OriginalFileQuery::DirectoryFileSystem => &values[..],
+    };
+    let array = match env.new_long_array(values.len() as jint) {
+        Ok(value) => value,
+        Err(_) => return ptr::null_mut(),
+    };
+    if env.set_long_array_region(&array, 0, values).is_err() {
+        return ptr::null_mut();
+    }
+    array.into_raw()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn with_original_file_stat(
+    env: &mut JNIEnv,
+    channel: &JObject,
+    query: OriginalFileQuery,
+) -> jni::errors::Result<Option<[jlong; 3]>> {
     if channel.is_null() {
         throw_exception_with_error_code(env, "Original file channel is null", libc::EINVAL);
         return Ok(None);
@@ -1659,7 +1702,7 @@ fn original_file_identity(
         }
         return Ok(None);
     }
-    let observed = (|| -> jni::errors::Result<Option<[jlong; 2]>> {
+    let observed = (|| -> jni::errors::Result<Option<[jlong; 3]>> {
         if env.exception_check()? {
             return Ok(None);
         }
@@ -1697,6 +1740,26 @@ fn original_file_identity(
             return Ok(None);
         }
         let status = unsafe { status.assume_init() };
+        let filesystem_type = match query {
+            OriginalFileQuery::Identity => 0,
+            OriginalFileQuery::DirectoryFileSystem => {
+                if status.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                    throw_exception_with_error_code(
+                        env,
+                        "Original file is not a directory",
+                        libc::ENOTDIR,
+                    );
+                    return Ok(None);
+                }
+                let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
+                if unsafe { libc::fstatfs(fd, fs.as_mut_ptr()) } != 0 {
+                    throw_exception_with_errno(env, "Original directory fstatfs failed");
+                    return Ok(None);
+                }
+                let fs = unsafe { fs.assume_init() };
+                fs.f_type as jlong
+            }
+        };
         let final_fd = env
             .get_field_unchecked(&descriptor, fd_field, ReturnType::Primitive(Primitive::Int))?
             .i()?;
@@ -1724,7 +1787,11 @@ fn original_file_identity(
             );
             return Ok(None);
         }
-        Ok(Some([status.st_dev as jlong, status.st_ino as jlong]))
+        Ok(Some([
+            status.st_dev as jlong,
+            status.st_ino as jlong,
+            filesystem_type,
+        ]))
     })();
     // MonitorExit is permitted with a pending exception; never strand a descriptor on any failure branch.
     let exited = unsafe { ((**raw).MonitorExit.unwrap())(raw, descriptor.as_raw()) };

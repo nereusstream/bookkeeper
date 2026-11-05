@@ -386,4 +386,19 @@ public class NativeIOImpl implements NativeIO {
             throw failure;
         }
     }
+
+    @Override
+    public DirectoryFileSystem directoryFileSystem(java.nio.channels.FileChannel channel) throws NativeIOException {
+        try {
+            long[] observed = NativeIOJni.directoryFileSystem(channel);
+            if (observed == null || observed.length != 3) {
+                throw new NativeIOException("Unknown original directory filesystem outcome");
+            }
+            return new DirectoryFileSystem(new FileIdentity(observed[0], observed[1]), observed[2]);
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Original directory filesystem is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
 }

@@ -1450,7 +1450,21 @@ D2 present cache在原`observeLoaderConfiguration`路径上复用私有Entry及s
 
 证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-preload-evidence-c48530e7`，保留原源码/class/日志/XML及静态rtld.c原字节（88632 bytes，SHA-256 `03681f7c7cea6f542a6416e3478a8c6bfe6c3a7969d1bb081dbba4f18395ed49`）。正常D2消费点与先后顺序按实际直线代码静态确认；临时树动态测试不是原批准D2 typed阳性，实际Linux/vendor启动仍NOT_EXECUTED。检查仅表示此时系统preload路径的受保护缺失，不证明已运行父JVM的历史、helper的LD_PRELOAD/--preload、未来exec时不变或完整加载闭包。boot身份的可信procfs来源仍待设计，不能把普通路径UUID读数补成authority；原childCommand/diagnostics拒绝和整体parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled及持续目标active保持。
 
+## 正常 D2 launcher 持有并复核 cgroup 目录
+
+正常 D2 在原 provider、source 和期限校验后，沿用精确的 uname 比较，再取得固定 `/sys/fs/cgroup`。JNI 在原 bootstrap FileChannelImpl 的 FileDescriptor monitor 内，对同一 fd 调用 `fstat` 和 `fstatfs`，要求实际目录并报告 dev、ino 和完整 `f_type`。原 `fileIdentity` 仍只调用 `fstat`。旧路径级 ABI 保留，D2 从持有的 fd 取得类型。 [Linux statfs 手册](https://man7.org/linux/man-pages/man2/statfs.2.html)
+
+路径组件要求 canonical、目录、UID 0 且 group/other 不可写。各组件比较稳定的 dev、ino、UID、GID、mode 和目录类型。根目录 `/` 沿用原 ACL 查询。`/sys` 与 `/sys/fs` 各以原 owner 登记的短期只读 NOFOLLOW fd 绑定路径身份和完整 SYSFS_MAGIC，并结算实际首次关闭。`/sys/fs/cgroup` 的原 fd 必须对应路径身份且完整类型为 CGROUP2_SUPER_MAGIC。sysfs 和 cgroup2 的 POSIX ACL 规则只用于这三个固定组件，依据批准内核基线的 kernfs 实现。 [kernfs 目录操作](https://raw.githubusercontent.com/torvalds/linux/v6.17/fs/kernfs/dir.c) [kernfs xattr handlers](https://raw.githubusercontent.com/torvalds/linux/v6.17/fs/kernfs/inode.c)
+
+两轮观察均比较 fd 查询前后的路径链。第二轮在后续 boot、process、namespace 核验之后、systemd peer 之前，重读原 fd。正常子项变化可改变目录大小、链接数和时间戳。若固定路径被替换或保护字段改变，原 trust 记录失败，原句柄仍由该 owner 的实际 drain 结算，首次关闭失败保留。
+
+26 项定向 JUnit 全部通过，其中 7 项 native、19 项 server。macOS 的真实目录用独立 C 程序对照 dev、ino 和 f_type。服务端覆盖同一 fd 复核、路径替换、坏路径拒绝、在途读取与实际关闭的排他、首次关闭失败。Checked JNI、旧库缺新符号拒绝和 Java 样式通过。Linux x86_64 交叉检查只编译，批准 Linux 固定 cgroup2 路径实读为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-d2-cgroup-root-owner-evidence-3ecbc046`。
+
+目录观测限于 launcher 当前 mount view。实际 mount/cgroup namespace、bind 子树、systemd ControlGroup、episode membership 和 `populated=0` 仍待独立核验。D2 handoff 和生产 Gate 继续等待批准 Linux 端到端证据。
+
 ## D2 当前可见 cgroup 标准路径的文件系统类型
+
+以下记录原路径级 ABI 的历史验收。正常 D2 的当前调用点见上节。
 
 2026-11-05在父`9500b3f79edcf5064a545d99305cfc2c343b7eb5`上，原NativeIO/Impl/Jni/Rust新增无参currentCgroupRootFileSystemType。Linux只对字面`/sys/fs/cgroup/`调用一次libc::statfs，保留尾slash目录语义，失败立即保存并传播errno，完整f_type转jlong；非Linux/default明确unsupported，旧JNI缺symbol保留LinkageError cause。没有任意路径参数、通用statfs DTO、fd打开/关闭、外部命令、proc/mountinfo fallback或cache，也不改原ACL/readlink及CPU拓扑的best-effort读取。
 

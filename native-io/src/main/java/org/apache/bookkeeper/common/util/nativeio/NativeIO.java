@@ -313,4 +313,12 @@ public interface NativeIO {
     default FileIdentity fileIdentity(java.nio.channels.FileChannel channel) throws NativeIOException {
         throw new NativeIOException("Original file-channel identity query is unsupported");
     }
+
+    /** The identity and native filesystem type of the same open directory. */
+    record DirectoryFileSystem(FileIdentity identity, long type) { }
+
+    /** Queries the original bootstrap descriptor with fstat and fstatfs without changing its lifetime or position. */
+    default DirectoryFileSystem directoryFileSystem(java.nio.channels.FileChannel channel) throws NativeIOException {
+        throw new NativeIOException("Original directory filesystem query is unsupported");
+    }
 }

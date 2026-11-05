@@ -35,6 +35,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -138,6 +139,62 @@ public class SegmentOwnedFilesTest {
             assertFalse(reader.isAlive());
             assertFalse(closer.isAlive());
             assertTrue(files.drain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void actualDirectoryQueryHoldsOriginalFdUntilDrainAndRejectsForeignWrappers() throws Exception {
+        Path path = temporary.newFolder().toPath();
+        var files = new SegmentOwnedFiles();
+        var other = new SegmentOwnedFiles();
+        FileChannel channel = SegmentOwnedFiles.open(files, path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
+        NativeIO io = spy(new NativeIOImpl());
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var raw = new AtomicReference<FileChannel>();
+        var observed = new AtomicReference<NativeIO.DirectoryFileSystem>();
+        doAnswer(call -> {
+            raw.set(call.getArgument(0));
+            assertThrows(IllegalStateException.class, files::drain);
+            assertThrows(IllegalStateException.class, () -> files.directoryFileSystem(channel, io));
+            entered.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            var actual = (NativeIO.DirectoryFileSystem) call.callRealMethod();
+            observed.set(actual);
+            return actual;
+        }).when(io).directoryFileSystem(any(FileChannel.class));
+        var query = new FutureTask<>(() -> files.directoryFileSystem(channel, io));
+        var drain = new FutureTask<>(files::drain);
+        Thread reader = new Thread(query);
+        Thread closer = new Thread(drain);
+        try (FileChannel foreign = SegmentOwnedFiles.open(other, path, StandardOpenOption.READ);
+             FileChannel direct = FileChannel.open(path, StandardOpenOption.READ)) {
+            NativeIO forbidden = mock(NativeIO.class, call -> {
+                throw new AssertionError("Invalid directory wrapper reached the native operator");
+            });
+            assertThrows(IOException.class, () -> files.directoryFileSystem(foreign, forbidden));
+            assertThrows(IOException.class, () -> files.directoryFileSystem(direct, forbidden));
+            reader.start();
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            closer.start();
+            await().atMost(5, TimeUnit.SECONDS).until(() -> closer.getState() == Thread.State.BLOCKED);
+            assertFalse(drain.isDone());
+            assertTrue(raw.get().isOpen());
+            release.countDown();
+            var failed = assertThrows(ExecutionException.class, () -> query.get(5, TimeUnit.SECONDS));
+            assertTrue(failed.getCause() instanceof IOException);
+            assertTrue(drain.get(5, TimeUnit.SECONDS).drained());
+            assertNotNull(observed.get());
+            long inode = ((Number) Files.getAttribute(path, "unix:ino")).longValue();
+            assertEquals(inode, observed.get().identity().inode());
+            assertFalse(raw.get().isOpen());
+            assertThrows(IOException.class, () -> files.directoryFileSystem(channel, forbidden));
+        } finally {
+            release.countDown();
+            reader.join(5000);
+            closer.join(5000);
+            assertTrue(files.drain().drained());
+            assertTrue(other.drain().drained());
         }
     }
 
