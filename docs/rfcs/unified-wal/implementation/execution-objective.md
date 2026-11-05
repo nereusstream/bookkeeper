@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+正常 D2 launcher 在独立 dropper 核验后调用一次原 `verifyLinuxJdkProcess`，把真实缓存的后端和 helper 路径绑定到批准材料。调用前后检查原期限和关闭请求。此处允许专用 LauncherMain 触发 ProcessImpl 首次初始化。独立 JVM native 4 项和 server 42 项通过，Java 样式通过。批准 Linux 上的 owner 全路径、helper 继承的 native 环境与传递加载、systemctl 实际连接和 manager 响应仍待验证。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的实际-jdk-后端与-helper-关联)。
+
 正常 D2 启动在末轮初始 PID/user namespace 检查后连接固定的 `/run/systemd/private`，要求实际连接的 `SO_PEERCRED` 为 PID 1、UID 0。原 owner 核验端点和父链，按首次关闭结果结算 channel 和 selector，再允许启动进入原 dropper 检查。最终回归 62 项通过，1 项 Linux 用例跳过，Java 样式通过。正式 Linux 端点、实际 manager 查询与完整 D2 验收待验证。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-systemd-private-socket-对端核验)。
 
 正常 D2 初始 PID/user namespace 增量：2026-11-05 在父 0a700621 上新增固定无参的调用线程 procfs 读取，两次紧跟原 process-birth 检查。native 持有固定链接自身的 fd，直接 `SYS_readlinkat` 空路径读取并解析两个原始非零 u32；owner 每次都要求精确初始 inode，不缓存、不从外部预置。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的初始-pid-与-user-namespace)。最终库 4e0a6d2e…、Maven 68 项（65 通过、3 项 Linux 实读跳过）、Checked JNI、旧库拒绝及 Java style 各自绑定最终输入；Linux `cargo check --tests` 通过，未链接或执行。此增量不证明宿主 PID1、systemd 或 Unix 隔离资格，原拒绝、默认值及整体 Gate OPEN 保持，16 步目标继续。

@@ -280,7 +280,8 @@ public final class SegmentClassicLauncher {
         }
         requireRoot();
         program.requireCurrentLauncher(recipeId);
-        if (input.linuxDeployment() != null && input.linuxDeployment().schema() == 2) {
+        boolean linuxD2 = input.linuxDeployment() != null && input.linuxDeployment().schema() == 2;
+        if (linuxD2) {
             var deployment = input.linuxDeployment().versionTwo();
             trust.verifyLinuxProvider(deadline);
             trust.verifyLinuxKernelAndCgroupRoot(deadline);
@@ -302,6 +303,11 @@ public final class SegmentClassicLauncher {
             trust.verifyLinuxSystemdPeer(deadline);
         }
         trust.verifyLauncherDropper(input, deadline);
+        if (linuxD2) {
+            checkStarting();
+            trust.verifyLinuxJdkProcess(deadline);
+            checkStarting();
+        }
         final List<String> childCommand = input.childCommand(material, program);
         loadPrivateKey();
         checkStarting();

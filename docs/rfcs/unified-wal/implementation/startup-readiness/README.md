@@ -1218,6 +1218,16 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的实际 JDK 后端与 helper 关联
+
+原 launcher worker 在专用 Main、原程序、D2 文件和身份、systemd 固定端点及 dropper 检查通过后，调用一次现有的 `verifyLinuxJdkProcess(deadline)`。同一个 schema2 判断控制该调用和先前的 D2 检查，调用前后各走一次原 `checkStarting()`。核验失败、过期或已请求关闭时，启动在 `childCommand`、私钥读取与 ZooKeeper 建连之前停止。
+
+这个阶段明确允许专用 LauncherMain 触发 `ProcessImpl` 首次初始化。上游 OpenJDK 21u 的实现会缓存父 PATH 并设置本进程的 SIGCHLD 处置。原 trust owner 复用锁内来源绑定、锁外实际 JNI 调用和返回后的同来源与实际 helper 文件复核，完成后只保存 owner 私有观察。初始化仍由原 worker 实际执行，外部等待超时只报告资源尚未终结。[OpenJDK 21u 的 ProcessImpl 原生初始化](https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.10-ga/src/java.base/unix/native/libjava/ProcessImpl_md.c)
+
+在父 `271379e769` 上沿用原 4e0a6d2e… native 库。server 42 项全部通过，覆盖原 owner 缺可信来源拒绝、helper 字节与实际文件关联及 launcher 回归。native 4 项全部通过，包含独立 JVM 的 `-Xcheck:jni` 缓存读取、初始化后的属性变化及初始化失败。Java style 通过。正常 D2 调用位置和顺序由源码核验，批准 Linux 上的 owner 全路径及初始化与关闭并发尚未实跑。
+
+后续执行还需要确认 helper 继承的实际 native 环境与传递加载链，并绑定 systemctl 自身的连接与 manager 响应。原 childCommand 和 diagnostics 的拒绝继续生效，生产 Gate 保持 OPEN。
+
 ## 正常 D2 launcher 的 systemd private socket 对端核验
 
 schema2 launcher 先核验原生父凭据，在末轮 boot ID、process birth 与初始 PID/user namespace 检查后，调用只接收原 deadline 的 `verifyLinuxSystemdPeer`。原 trust owner 先核验 D2 source/provider，再用已绑定的 provider 构造固定 `/run/systemd/private`。父目录和祖先沿用原物理路径、owner、ACL 与保护检查。对 leaf 用 `NOFOLLOW_LINKS` 取得原始 Unix 身份，要求 UID 0、socket 类型及精确 mode 0700。systemd v255 的系统 manager 在 PID 1 时以 umask 0077 绑定该固定路径。[systemd v255 listener 源码](https://github.com/systemd/systemd/blob/v255/src/core/dbus.c#L850-L898)
