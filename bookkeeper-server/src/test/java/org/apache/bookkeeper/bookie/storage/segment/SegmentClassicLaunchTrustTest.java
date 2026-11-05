@@ -3566,6 +3566,79 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void loadingConfigurationAbsenceRejectsEmptyFilesDirectoriesLinksAndDeniedLookupWithoutContentOpen()
+            throws Exception {
+        for (int kind = 0; kind < 5; kind++) {
+            Path preload = root.resolve("preload-" + kind);
+            if (kind == 0) {
+                write(preload, new byte[0]);
+            } else if (kind == 1) {
+                Files.createDirectory(preload);
+            } else if (kind == 2) {
+                Files.createSymbolicLink(preload, Path.of("missing"));
+            } else if (kind == 3) {
+                Files.createSymbolicLink(preload, key.getFileName());
+            }
+            var input = loading(key, List.of(), List.of(),
+                    List.of(new SegmentClassicLinuxDeployment.Requirement(preload, -1)));
+            var owner = owner();
+            owner.initialize();
+            boolean denied = kind == 4;
+            try (var channels = mockStatic(FileChannel.class, invocation -> {
+                throw new AssertionError("Absent configuration check must not open content");
+            }); var targets = mockStatic(Files.class, invocation -> {
+                if (denied && invocation.getMethod().getName().equals("readAttributes")
+                        && preload.equals(invocation.getArgument(0))) {
+                    throw new java.nio.file.AccessDeniedException(preload.toString());
+                }
+                return invocation.callRealMethod();
+            })) {
+                var failure = assertThrows(IOException.class,
+                        () -> owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline()));
+                assertThrows(IOException.class, owner::parsed);
+                var drain = owner.closeAndDrain();
+                assertSame(failure, drain.launcherFailure());
+                assertTrue(drain.drained());
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void loadingConfigurationAbsentThenPresentCannotReturnTheFirstMissingObservation() throws Exception {
+        Path preload = root.resolve("preload-race");
+        var input = loading(key, List.of(), List.of(),
+                List.of(new SegmentClassicLinuxDeployment.Requirement(preload, -1)));
+        var owner = owner();
+        owner.initialize();
+        var changed = new AtomicInteger();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            try {
+                return invocation.callRealMethod();
+            } catch (java.nio.file.NoSuchFileException absent) {
+                if (invocation.getMethod().getName().equals("readAttributes")
+                        && preload.equals(invocation.getArgument(0)) && changed.compareAndSet(0, 1)) {
+                    write(preload, new byte[0]);
+                }
+                throw absent;
+            }
+        })) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.verifyLinuxLoadingPaths(input, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage().contains("presence, kind or protection rule"));
+            assertEquals(1, changed.get());
+            assertEquals(0, Files.size(preload));
+            assertThrows(IOException.class, owner::parsed);
+            var drain = owner.closeAndDrain();
+            assertSame(failure, drain.launcherFailure());
+            assertTrue(drain.drained());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
     public void replacementOfOriginalAliasAfterNativeObservationCannotReturnMatchingPathFacts() throws Exception {
         Path file = root.resolve("interpreter");
         write(file, new byte[]{7});

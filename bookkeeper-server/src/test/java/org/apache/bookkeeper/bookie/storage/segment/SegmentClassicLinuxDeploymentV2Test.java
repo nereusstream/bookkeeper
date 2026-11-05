@@ -111,6 +111,25 @@ public class SegmentClassicLinuxDeploymentV2Test {
     }
 
     @Test
+    public void fixedPreloadAbsenceSelectionKeepsItsOriginalIndexWhenOtherRulesPrecedeIt() throws Exception {
+        var d = original();
+        var l = d.loading();
+        var selected = l.configuration().get(d.preloadAbsentConfigurationIndex());
+        assertEquals("/etc/ld.so.preload", selected.path());
+        assertEquals(ConfigurationKind.PRELOAD_ABSENT, selected.kind());
+        assertEquals(1, selected.format());
+        assertEquals(-1, selected.file());
+        assertEquals(l.configuration().indexOf(selected), d.preloadAbsentConfigurationIndex());
+        var configuration = new ArrayList<>(l.configuration());
+        configuration.add(0, new Configuration("/etc/aaa.no-material", -1, ConfigurationKind.MODULE_RUNTIME, 1));
+        var shifted = withLoading(d, new Loading(l.systemctl(), l.loader(), l.interpreter(), l.aliases(),
+                l.directories(), configuration, l.policy(), l.elf(), l.contexts(), l.needed(), l.modules()));
+        assertTrue(shifted.preloadAbsentConfigurationIndex() > d.preloadAbsentConfigurationIndex());
+        assertEquals(configuration.indexOf(selected), shifted.preloadAbsentConfigurationIndex());
+        assertEquals(selected, shifted.loading().configuration().get(shifted.preloadAbsentConfigurationIndex()));
+    }
+
+    @Test
     public void legacyTypedAccessorsAndLegacyRoleCannotSilentlyConsumeNewSchema() throws Exception {
         var d = SegmentClassicLinuxDeployment.decode(vector());
         assertThrows(IllegalStateException.class, d::platform);

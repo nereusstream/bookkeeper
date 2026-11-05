@@ -429,6 +429,18 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
         requireContextReferences(files, loading);
     }
 
+    /** Original fixed preload rule index; no caller path, I/O or startup qualification. */
+    int preloadAbsentConfigurationIndex() throws IOException {
+        for (int i = 0; i < loading.configuration().size(); i++) {
+            var rule = loading.configuration().get(i);
+            if (rule.path().equals("/etc/ld.so.preload") && rule.kind() == ConfigurationKind.PRELOAD_ABSENT
+                    && rule.format() == 1 && rule.file() == -1) {
+                return i;
+            }
+        }
+        throw new IOException("Missing original fixed preload absence rule");
+    }
+
     /** Exact raw declarations, in policy search order; no physical normalization or runtime selection. */
     static List<Integer> defaultDirectoryIndices(Loading loading) {
         var indices = new ArrayList<Integer>();

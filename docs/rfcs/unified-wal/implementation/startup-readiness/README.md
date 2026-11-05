@@ -1218,6 +1218,16 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的固定系统 preload 缺失检查
+
+2026-11-05在父`c48530e7db5db39e4d234608c85e31de034e3e7e`上，正常launcher在原D2 provider、uname/cgroup检查之后，dropper、childCommand与私钥读取之前，调用原`verifyLinuxLoaderConfiguration(index, deadline)`。index由同一原D2不可变有界configuration表中的`preloadAbsentConfigurationIndex()`选出，只匹配原字面`/etc/ld.so.preload`、PRELOAD_ABSENT、format 1、file -1；不硬编码表位置，也不接受caller Path、环境或可调根。原构造器的固定规则、唯一性与presence保证保持，未改schema或codec。[glibc 2.39的系统preload读取](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/rtld.c)是静态依据，不作为运行资格。
+
+生产trust主体未改：原source/provider/deadline门先于目标I/O，复用CONFIGURATION路径walker的两次完整观察与相等比较，保持healthy、原期限、首失败留存及实际排空。只有受保护父链上的可靠缺失才可返回；空文件、目录、末端正常或dangling symlink、权限拒绝和不安全absence父链不能成为“无preload”。不打开/解析现存preload内容，不修改真实`/etc`，没有新JNI、缓存、permit或资格字段。
+
+首轮3项新增测试全部通过，最终Trust相关7＋DeploymentV2 12＋Inputs6＋Launcher3共28项全部通过，0失败/错误/跳过；首3已包含在28中。D2有效向量前插合法MODULE_RUNTIME规则后仍按原index选中同一固定行。Trust新增两项走原legacy表入口与D2共用的实际CONFIGURATION walker：真实空文件/目录/两种链接拒绝、注入AccessDenied不吞错且无内容open；首次实际NoSuchFile后创建空文件，第二遍拒绝，失败保留至drain。既有受保护缺失、不安全父链和typed缺source拒绝覆盖复用。Java Spotless/Checkstyle退出0，两Maven测试阶段各1450输入按原snapshot/父Git blob核验，四个改动code与test/style保持原绑定。沿用原9406191e…受控库，没有重建或重跑native/ELF矩阵。
+
+证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-preload-evidence-c48530e7`，保留原源码/class/日志/XML及静态rtld.c原字节（88632 bytes，SHA-256 `03681f7c7cea6f542a6416e3478a8c6bfe6c3a7969d1bb081dbba4f18395ed49`）。正常D2消费点与先后顺序按实际直线代码静态确认；临时树动态测试不是原批准D2 typed阳性，实际Linux/vendor启动仍NOT_EXECUTED。检查仅表示此时系统preload路径的受保护缺失，不证明已运行父JVM的历史、helper的LD_PRELOAD/--preload、未来exec时不变或完整加载闭包。boot身份的可信procfs来源仍待设计，不能把普通路径UUID读数补成authority；原childCommand/diagnostics拒绝和整体parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled及持续目标active保持。
+
 ## D2 当前可见 cgroup 标准路径的文件系统类型
 
 2026-11-05在父`9500b3f79edcf5064a545d99305cfc2c343b7eb5`上，原NativeIO/Impl/Jni/Rust新增无参currentCgroupRootFileSystemType。Linux只对字面`/sys/fs/cgroup/`调用一次libc::statfs，保留尾slash目录语义，失败立即保存并传播errno，完整f_type转jlong；非Linux/default明确unsupported，旧JNI缺symbol保留LinkageError cause。没有任意路径参数、通用statfs DTO、fd打开/关闭、外部命令、proc/mountinfo fallback或cache，也不改原ACL/readlink及CPU拓扑的best-effort读取。

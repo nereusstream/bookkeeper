@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+正常D2系统preload增量：2026-11-05父c48530e7db上，原不可变configuration表按exact `/etc/ld.so.preload`、PRELOAD_ABSENT/format1/file -1选出原index；正常launcher在provider→kernel/cgroup后、dropper/childCommand/私钥前调用原typed verifyLinuxLoaderConfiguration。source/provider/deadline及两次CONFIGURATION观察保持原主体，无新walker/JNI/seam/资格状态，不触摸真实/etc。新增3项及最终Trust相关7＋DeploymentV2 12＋Inputs6＋Launcher3共28项全过，style0；两阶段1450输入、四code与原test/style无错配，沿用9406191e库。动态证据为临时树共用walker拒绝空文件/目录/终端链接/AccessDenied和真实absent→present窗口、首失败/drain，原D2消费顺序为静态核对；批准Linux/vendor阳性NOT_EXECUTED。详见[startup-readiness](startup-readiness/README.md#正常-d2-launcher-的固定系统-preload-缺失检查)。当前缺失不证明父JVM历史、helper环境/--preload或未来exec，boot身份的可信procfs来源仍待设计；原childCommand/diagnostics拒绝及全部整体Gate OPEN，默认OFF/SYSTEM/PARK、advanced disabled与完整16步目标active保持。
+
 SDK 入口决策：用户2026-10-25已选择显式 Profile create/open，先接 CLOSED 只读 open 与实际排空；不再为同一入口选择重复提问。normal writer create 必须有本次原子 fresh origin，不能从已有 READY/OPEN 重建 P=-1 writer。
 
 Main 首版部署决策：用户2026-10-27已选择先限已有旧服务的受控部署；要求已有 commissioned requirements、真实旧服务 episode 及明确外部信任输入。现有 properties 中的 DRAINED/FORMAT_READY 或 mTLS 成功不自行构成 old-service/Unix access/key/policy authority；具体 issuer 与受保护输入装载仍须实现并真实验证，不伪造从未存在的旧 scope。该选择冻结首版范围，不代表 Main 已交付。 规划会话2026-10-30已裁定固定受控launcher持有真实旧进程/控制通道/registration episode，实际关闭与进程终结后发行DRAINED，由固定受保护文件loader沿原owned-resource生命周期接入Main；commissioned requirements、输入信任根、AES key和exact-scope policy均来自外部部署，不从properties或测试nonce生成。旧Classic scope须有真实commissioning绑定，root集合按实际引擎/设备表达；实现与真实Main进程验收仍OPEN。
