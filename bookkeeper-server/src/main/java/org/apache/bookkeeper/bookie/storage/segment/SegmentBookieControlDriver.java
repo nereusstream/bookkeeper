@@ -29,6 +29,8 @@ import org.apache.bookkeeper.discover.profile.ProfileDeleteHandoff;
 
 /** Bookie control commands use reserved control I/O and return ordered results to the owner. */
 final class SegmentBookieControlDriver {
+    private static final Runnable NOOP_TERMINAL = () -> { };
+
     @FunctionalInterface
     interface BatchCompletion {
         void complete(List<SegmentBookieControlLog.Result> results, Throwable failure);
@@ -91,21 +93,31 @@ final class SegmentBookieControlDriver {
 
     boolean submitBatch(List<ProtectedProfileStateStore.Transition> commands, BatchCompletion completion) {
         List<ProtectedProfileStateStore.Transition> batch = List.copyOf(commands);
-        return submitDurableBatch(() -> log.appendDurably(batch), completion);
+        return submitDurableBatch(() -> log.appendDurably(batch), completion, NOOP_TERMINAL);
     }
 
     boolean submitChanges(List<? extends SegmentBookieControlLog.Change> commands, BatchCompletion completion) {
+        return submitChanges(commands, completion, NOOP_TERMINAL);
+    }
+
+    /**
+     * An accepted batch reports its result before returning its ticket. The terminal observer is a nonblocking
+     * owner notification after that return, on success and failure. Rejection invokes neither callback.
+     */
+    boolean submitChanges(List<? extends SegmentBookieControlLog.Change> commands, BatchCompletion completion,
+                          Runnable terminal) {
+        Objects.requireNonNull(terminal, "terminal");
         log.requireBatchSize(commands.size());
         List<SegmentBookieControlLog.Change> batch = List.copyOf(commands);
-        return submitDurableBatch(() -> log.appendChangesDurably(batch), completion);
+        return submitDurableBatch(() -> log.appendChangesDurably(batch), completion, terminal);
     }
 
     boolean submitRecoveryGrant(SegmentBookieControlLog.RecoveryGrant grant, BatchCompletion completion) {
         Objects.requireNonNull(grant, "grant");
-        return submitDurableBatch(() -> log.appendRecoveryGrantDurably(grant), completion);
+        return submitDurableBatch(() -> log.appendRecoveryGrantDurably(grant), completion, NOOP_TERMINAL);
     }
 
-    private boolean submitDurableBatch(DurableAppend append, BatchCompletion completion) {
+    private boolean submitDurableBatch(DurableAppend append, BatchCompletion completion, Runnable terminal) {
         Objects.requireNonNull(completion, "completion");
         if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
             return false;
@@ -141,6 +153,11 @@ final class SegmentBookieControlDriver {
                 public void failed(Throwable cause) {
                     owner.requireOwner();
                     deliver(completion, null, cause);
+                }
+
+                @Override
+                public void terminal() {
+                    terminal.run();
                 }
             });
         } catch (RuntimeException | Error failure) {

@@ -2329,3 +2329,13 @@ ledger ID 按记录流式交付，每个 Journal 仍沿用随实际文件数增�
 四项新增测试和最终 21 项回归通过，Java Spotless 与 Checkstyle 通过。真实 owned control 和 Driver 验证了重复查询的零写入、零 force，首次结果通过 checkpoint、rotation 和重开后仍可取回。真实写盘后暂停 force 或等待 apply 时拒绝查询，注入 force 失败后只从健康重开的实际重演结果续接。测试还覆盖了已占用的派生 ID、进行中的 rotation 和首次 native close 失败。沿用原 acf9afec… native 库，归档位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-claim-evidence-f563eb2e`。
 
 本项证据覆盖原本地控制日志。完整旧写者隔离、外层根保护、有界 index 和 Journal 导入、受控重放与严格 flush、BOOTSTRAP_COMPLETE、PREPARED 到 ENABLED、运行期 route 及批准 Linux 运行仍待验收。
+
+## 离线 bootstrap 的 Bookie 控制批次实际终态
+
+在父 `0027767e0d` 上，包内 `submitChanges` 增加可选终态观察。已接纳批次沿原控制 I/O 和 owner 处理。结果回调返回或抛错后，Driver 清除该批 busy，原 owner 归还 Ticket 完成额度，再通过 `Command.terminal()` 执行一次短通知。调用者在 owner 之外等待该批终态，并根据独立的结果回调判断持久状态。校验或接纳拒绝时，数据责任仍由调用者持有，两个回调均无调用。旧提交入口使用固定空终态观察。
+
+真实 owned Bookie 控制文件和单槽 owner 验证了两批顺序 claim。持有第一批结果回调时唯一槽位仍被占用，第二批拒绝接纳。释放回调后，终态观察到槽位归还，下一批获得连续序号。重复查询保留原 UUID 和结果，写入及 force 计数保持。另验证了实际 force 挂起和失败、结果回调抛错时的额度归还、拒绝接纳，以及 force 失败后的健康重开。测试的顺序提交改等显式终态。
+
+定向三项通过，最终 Owned 15、Bookie control 9、Profile INSTALL 3 共 27 项通过，Java Spotless 与 Checkstyle 通过。归档的 Command class 有四个捕获引用，包含新终态观察，沿用原每闭包八个捕获的估算上界。沿用原 acf9afec… native 库，证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-batch-terminal-evidence-0027767e`。
+
+终态仅覆盖本批操作的 owner 责任。整个 scope、控制文件、根锁和执行器的关闭仍由外层负责。旧写者隔离、受保护导入、受控重放与严格 flush、BOOTSTRAP_COMPLETE、PREPARED 到 ENABLED、运行期 route 和批准 Linux 运行仍待验收。

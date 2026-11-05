@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+Bookie 控制 Driver 的批次提交已有实际终态通知。原 owner 在结果回调返回或抛错、Driver busy 清理以及该 Ticket 的完成额度归还后通知外部调用者。单槽真实顺序 claim、force 失败、回调异常和拒绝接纳已验证，最终 27 项回归和 Java 样式通过。受保护导入仍待接入。详见 [local-storage](local-storage/README.md#离线-bootstrap-的-bookie-控制批次实际终态)。
+
 共同 route 离线导入已有稳定的 bootstrap claim 身份和原持久结果查询。重复 ledger 保留原 UUID、序号和结果，已封口仅可查询既有 claim。未决 apply、force 不确定、active rotation、身份冲突和首次关闭失败均拒绝。最终 21 项定向回归和 Java 样式通过。两类只读清单到 Driver 的有界导入、受控重放与封口仍待接入。详见 [local-storage](local-storage/README.md#离线-bootstrap-的-classic-claim-身份与结果续接)。
 
 共同 route 离线导入已补齐 Journal suffix 的只读 ledger 流。每个 Journal 沿用自身最大有效 lastMark、实际 required 文件和 V6 重放的 payload 校验，逐条交付完整记录的 ledger ID。五项新增用例、最终 46 项定向回归和 Java 样式通过。每个 Journal 的文件清单仍随文件数增长，持久 claim、封口和共同运行入口仍待接线。详见 [local-storage](local-storage/README.md#离线-bootstrap-的-journal-suffix-只读清单)。

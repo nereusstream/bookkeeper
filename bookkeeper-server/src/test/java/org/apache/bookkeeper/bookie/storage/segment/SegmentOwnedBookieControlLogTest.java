@@ -269,17 +269,26 @@ public class SegmentOwnedBookieControlLogTest {
         var log = owner.log();
         var claim = log.prepareBootstrapClaim(47).command();
         try (var driver = new Driver(log)) {
-            var pending = driver.begin(claim);
+            var terminal = new CompletableFuture<Void>();
+            var terminalCalls = new AtomicInteger();
+            var pending = driver.begin(claim, () -> {
+                terminalCalls.incrementAndGet();
+                terminal.complete(null);
+            });
             try {
                 assertTrue(forcing.await(5, TimeUnit.SECONDS));
                 assertThrows(IOException.class, () -> log.prepareBootstrapClaim(47));
                 assertThrows(IOException.class, () -> log.prepareBootstrapClaim(48));
                 assertFalse(pending.isDone());
+                assertFalse(terminal.isDone());
             } finally {
                 release.countDown();
             }
             assertTrue(assertThrows(ExecutionException.class,
                     () -> pending.get(5, TimeUnit.SECONDS)).getCause() instanceof IOException);
+            terminal.get(5, TimeUnit.SECONDS);
+            assertEquals(0, driver.loop.controlPending());
+            assertEquals(1, terminalCalls.get());
             assertEquals(1, io.forces);
             assertThrows(IOException.class, () -> log.prepareBootstrapClaim(47));
             assertThrows(IOException.class, () -> log.prepareBootstrapClaim(48));
@@ -297,6 +306,106 @@ public class SegmentOwnedBookieControlLogTest {
             assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, result.status());
         } finally {
             assertTrue(reopened.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void batchTerminalReturnsTheOnlyControlSlotBeforeTheNextClaimBatch() throws Exception {
+        var io = new SegmentFileIo();
+        var owner = owned(io);
+        owner.initialize();
+        var log = owner.log();
+        try (var driver = new Driver(log, 1)) {
+            var first = log.prepareBootstrapClaim(47).command();
+            var second = log.prepareBootstrapClaim(48).command();
+            var firstResult = new CompletableFuture<List<SegmentBookieControlLog.Result>>();
+            var terminal = new CompletableFuture<Integer>();
+            var terminalCalls = new AtomicInteger();
+            var releaseResult = new CountDownLatch(1);
+            var rejectedCalls = new AtomicInteger();
+            assertTrue(driver.driver.submitChanges(List.of(first), (results, failure) -> {
+                assertNull(failure);
+                firstResult.complete(results);
+                try {
+                    assertTrue(releaseResult.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(interrupted);
+                }
+            }, () -> {
+                assertTrue(driver.driver.isOwnerThread());
+                terminalCalls.incrementAndGet();
+                terminal.complete(driver.loop.controlPending());
+            }));
+            SegmentBookieControlLog.Result original;
+            try {
+                original = firstResult.get(5, TimeUnit.SECONDS).get(0);
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, original.status());
+                assertEquals(first.operationId(), original.operationId());
+                assertEquals(0, original.sequence());
+                assertEquals(1, driver.loop.controlPending());
+                assertFalse(terminal.isDone());
+                assertFalse(driver.driver.submitChanges(List.of(second),
+                        (ignored, failure) -> rejectedCalls.incrementAndGet(), rejectedCalls::incrementAndGet));
+            } finally {
+                releaseResult.countDown();
+            }
+            assertEquals(0, terminal.get(5, TimeUnit.SECONDS).intValue());
+            var applied = driver.submit(second).get(0);
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, applied.status());
+            assertEquals(second.operationId(), applied.operationId());
+            assertEquals(1, applied.sequence());
+            int writes = io.writes;
+            int forces = io.forces;
+            assertEquals(original, log.prepareBootstrapClaim(47).applied().orElseThrow());
+            assertEquals(applied, log.prepareBootstrapClaim(48).applied().orElseThrow());
+            assertEquals(writes, io.writes);
+            assertEquals(forces, io.forces);
+            assertEquals(1, terminalCalls.get());
+            assertEquals(0, rejectedCalls.get());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void batchTerminalStillReturnsTheControlSlotWhenTheResultCallbackThrows() throws Exception {
+        var owner = owned();
+        owner.initialize();
+        var log = owner.log();
+        var failure = new IllegalStateException("result callback failure");
+        try (var driver = new Driver(log, 1)) {
+            driver.expectedLoopFailure = failure;
+            var claim = log.prepareBootstrapClaim(47).command();
+            var result = new CompletableFuture<SegmentBookieControlLog.Result>();
+            var terminal = new CompletableFuture<Integer>();
+            var resultCalls = new AtomicInteger();
+            var terminalCalls = new AtomicInteger();
+            var rejectedCalls = new AtomicInteger();
+            assertTrue(driver.driver.submitChanges(List.of(claim), (results, cause) -> {
+                assertNull(cause);
+                resultCalls.incrementAndGet();
+                result.complete(results.get(0));
+                throw failure;
+            }, () -> {
+                terminalCalls.incrementAndGet();
+                terminal.complete(driver.loop.controlPending());
+            }));
+            assertEquals(0, terminal.get(5, TimeUnit.SECONDS).intValue());
+            var applied = result.get(5, TimeUnit.SECONDS);
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, applied.status());
+            assertEquals(applied, log.prepareBootstrapClaim(47).applied().orElseThrow());
+            assertSame(failure, driver.loop.failure());
+            assertTrue(driver.driver.reserveMaintenance());
+            driver.driver.releaseMaintenance();
+            var next = log.prepareBootstrapClaim(48).command();
+            assertFalse(driver.driver.submitChanges(List.of(next),
+                    (ignored, cause) -> rejectedCalls.incrementAndGet(), rejectedCalls::incrementAndGet));
+            assertEquals(1, resultCalls.get());
+            assertEquals(1, terminalCalls.get());
+            assertEquals(0, rejectedCalls.get());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
         }
     }
 
@@ -601,7 +710,7 @@ public class SegmentOwnedBookieControlLogTest {
     }
 
     private static final class Driver implements AutoCloseable {
-        private final SegmentOwnerLoop loop = new SegmentOwnerLoop(1, 1, 0, 4, 4);
+        private final SegmentOwnerLoop loop;
         private final List<Thread> threads = new CopyOnWriteArrayList<>();
         private final SegmentIoExecutor io = new SegmentIoExecutor(1, 4, 1, 4, action -> {
             Thread thread = new Thread(action, "owned-control-test-io");
@@ -609,13 +718,24 @@ public class SegmentOwnedBookieControlLogTest {
             return thread;
         }, null);
         private final SegmentBookieControlDriver driver;
+        private Throwable expectedLoopFailure;
 
         Driver(SegmentBookieControlLog log) {
+            this(log, 4);
+        }
+
+        Driver(SegmentBookieControlLog log, int controlCapacity) {
+            loop = new SegmentOwnerLoop(1, 1, 0, 4, controlCapacity);
             driver = new SegmentBookieControlDriver(loop, io, log);
             loop.start();
         }
 
         CompletableFuture<List<SegmentBookieControlLog.Result>> begin(SegmentBookieControlLog.Change change) {
+            return begin(change, () -> { });
+        }
+
+        CompletableFuture<List<SegmentBookieControlLog.Result>> begin(SegmentBookieControlLog.Change change,
+                Runnable terminal) {
             var future = new CompletableFuture<List<SegmentBookieControlLog.Result>>();
             assertTrue(driver.submitChanges(List.of(change), (result, failure) -> {
                 if (failure != null) {
@@ -623,14 +743,15 @@ public class SegmentOwnedBookieControlLogTest {
                 } else {
                     future.complete(result);
                 }
-            }));
+            }, terminal));
             return future;
         }
 
         List<SegmentBookieControlLog.Result> submit(SegmentBookieControlLog.Change change) throws Exception {
-            var result = begin(change).get(5, TimeUnit.SECONDS);
-            await().atMost(5, TimeUnit.SECONDS).until(() -> loop.controlPending() == 0);
-            return result;
+            var terminal = new CompletableFuture<Void>();
+            var result = begin(change, () -> terminal.complete(null));
+            terminal.get(5, TimeUnit.SECONDS);
+            return result.get(5, TimeUnit.SECONDS);
         }
 
         @Override
@@ -643,7 +764,7 @@ public class SegmentOwnedBookieControlLogTest {
                 assertFalse(thread.isAlive());
             }
             assertTrue(loop.awaitTermination(Duration.ofSeconds(5)));
-            assertNull(loop.failure());
+            assertSame(expectedLoopFailure, loop.failure());
         }
     }
 }
