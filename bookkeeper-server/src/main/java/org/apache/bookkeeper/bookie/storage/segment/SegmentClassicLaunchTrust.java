@@ -2548,6 +2548,90 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Only this owner's actual cached helper can select the direct NEEDED cache requests. */
+    synchronized void verifyLinuxJdkHelperNeededCache(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            if (backendInFlight || backendObservation == null) {
+                throw new IOException("Original cached JDK helper is required for its NEEDED cache observations");
+            }
+            var loading = deployment.loading();
+            var members = fixedLinuxContextMembers(deployment.files(), loading, deadline);
+            var bound = backendObservation.helper();
+            var selected = selectLinuxJdkHelper(verifiedProgram.javaHome(), verifiedProgram.value().files(),
+                    members, loading, deadline);
+            if (!selected.equals(bound.declaration())) {
+                throw new IOException("Original cached JDK helper declaration changed before its NEEDED cache reads");
+            }
+            int cacheRule = bound.helper().content().elf().needed().isEmpty() ? -1 : fixedLinuxCacheRule(loading);
+            observeLinuxJdkHelperNeededCache(members, loading, bound.helper(), bound.interpreter(),
+                    cacheRule, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Isolated declaration subtree only. The helper and interpreter are read by this owner. */
+    synchronized List<Integer> readLinuxJdkHelperNeededCache(
+            List<SegmentClassicLinuxDeploymentV2.File> declared, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int helperContext, int cacheRule, long deadline) throws IOException {
+        if (production) {
+            throw new IOException("Data-only JDK helper cache observations cannot select a production requester");
+        }
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            var members = fixedLinuxContextMembers(declared, loading, deadline);
+            if (helperContext < 0 || helperContext >= loading.contexts().size()) {
+                throw new IOException("JDK helper cache context is outside its declaration table");
+            }
+            var context = loading.contexts().get(helperContext);
+            var member = members.get(context.file());
+            if (member.role() != SegmentClassicLinuxDeployment.Role.START_CHAIN
+                    || !member.path().endsWith("/lib/jspawnhelper")
+                    || !member.path().equals(context.logicalLoadName())) {
+                throw new IOException("JDK helper cache fixture requires an exact helper execution context");
+            }
+            var aliases = linuxContextAliases(loading, deadline);
+            var helper = observeLinuxLoadPath(helperContext, context, member,
+                    linuxElfDeclaration(loading, context.file()), loading.interpreter(), aliases, deadline);
+            var interpreter = observeLinuxJdkHelperInterpreter(helper, members, loading, aliases, deadline);
+            return observeLinuxJdkHelperNeededCache(members, loading, helper, interpreter, cacheRule, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private List<Integer> observeLinuxJdkHelperNeededCache(
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            LinuxLoadPathObservation helper, LinuxLoadPathObservation interpreter, int cacheRule, long deadline)
+            throws IOException {
+        var aliases = linuxContextAliases(loading, deadline);
+        recheckLinuxJdkHelperMaterial(helper, interpreter, aliases, deadline);
+        var completedRules = new ArrayList<Integer>();
+        for (int i = 0; i < loading.needed().size(); i++) {
+            requireTime(deadline);
+            if (loading.needed().get(i).requester() == helper.context()) {
+                // A single observation can retain two cache images. Keep only its completed original index.
+                observeLinuxNeededCache(members, loading, i, cacheRule, helper, deadline);
+                completedRules.add(i);
+            }
+        }
+        recheckLinuxJdkHelperMaterial(helper, interpreter, aliases, deadline);
+        files.requireHealthy();
+        requireTime(deadline);
+        return List.copyOf(completedRules);
+    }
+
     /** Original unit files only; successful disk observations do not establish manager effective configuration. */
     synchronized List<LinuxUnitFileObservation> verifyLinuxUnitFiles(long deadline) throws IOException {
         requireReady();
@@ -2714,16 +2798,30 @@ final class SegmentClassicLaunchTrust {
         var context = loading.contexts().get(selected.context());
         var helper = observeLinuxLoadPath(selected.context(), context, members.get(selected.member()),
                 linuxElfDeclaration(loading, selected.member()), loading.interpreter(), aliases, deadline);
-        LinuxLoadPathObservation interpreter = null;
+        var interpreter = observeLinuxJdkHelperInterpreter(helper, members, loading, aliases, deadline);
+        recheckLinuxJdkHelperMaterial(helper, interpreter, aliases, deadline);
+        files.requireHealthy();
+        requireTime(deadline);
+        return new LinuxJdkHelperObservation(selected, helper, interpreter);
+    }
+
+    private LinuxLoadPathObservation observeLinuxJdkHelperInterpreter(LinuxLoadPathObservation helper,
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            Map<Path, String> aliases, long deadline) throws IOException {
         String actual = helper.content().elf().interpreter();
-        if (actual != null) {
-            if (!actual.equals(loading.interpreter())) {
-                throw new IOException("JDK helper PT_INTERP differs from the exact original interpreter name");
-            }
-            var fixed = new SegmentClassicLinuxDeploymentV2.Context(loading.loader(), loading.interpreter());
-            interpreter = observeLinuxLoadPath(-1, fixed, members.get(loading.loader()),
-                    linuxElfDeclaration(loading, loading.loader()), loading.interpreter(), aliases, deadline);
+        if (actual == null) {
+            return null;
         }
+        if (!actual.equals(loading.interpreter())) {
+            throw new IOException("JDK helper PT_INTERP differs from the exact original interpreter name");
+        }
+        var fixed = new SegmentClassicLinuxDeploymentV2.Context(loading.loader(), loading.interpreter());
+        return observeLinuxLoadPath(-1, fixed, members.get(loading.loader()),
+                linuxElfDeclaration(loading, loading.loader()), loading.interpreter(), aliases, deadline);
+    }
+
+    private void recheckLinuxJdkHelperMaterial(LinuxLoadPathObservation helper, LinuxLoadPathObservation interpreter,
+            Map<Path, String> aliases, long deadline) throws IOException {
         for (var observed : interpreter == null ? List.of(helper) : List.of(helper, interpreter)) {
             var kind = observed.context() == -1 ? LinuxPathKind.INTERPRETER : LinuxPathKind.LOOKUP;
             var after = observeLinuxPath(kind, loadingNativePath(observed.logical(), deadline), aliases, true,
@@ -2732,10 +2830,6 @@ final class SegmentClassicLaunchTrust {
                 throw new IOException("JDK helper or interpreter changed during their material association");
             }
         }
-        var result = new LinuxJdkHelperObservation(selected, helper, interpreter);
-        files.requireHealthy();
-        requireTime(deadline);
-        return result;
     }
 
     /** Bounded pure matching only; the caller must separately validate the original context subgraph and source. */
@@ -3441,7 +3535,8 @@ final class SegmentClassicLaunchTrust {
         try {
             var deployment = originalLinuxDeployment(deadline);
             int cacheRule = fixedLinuxCacheRule(deployment.loading());
-            return observeLinuxNeededCache(deployment.files(), deployment.loading(), ruleIndex, cacheRule, deadline);
+            var members = fixedLinuxContextMembers(deployment.files(), deployment.loading(), deadline);
+            return observeLinuxNeededCache(members, deployment.loading(), ruleIndex, cacheRule, null, deadline);
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
             throw failure;
@@ -3458,7 +3553,8 @@ final class SegmentClassicLaunchTrust {
         initializingThread = Thread.currentThread();
         try {
             requireBoundDeadline(deadline);
-            return observeLinuxNeededCache(members, loading, ruleIndex, cacheRule, deadline);
+            return observeLinuxNeededCache(fixedLinuxContextMembers(members, loading, deadline), loading, ruleIndex,
+                    cacheRule, null, deadline);
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
             throw failure;
@@ -3484,10 +3580,10 @@ final class SegmentClassicLaunchTrust {
         return selected;
     }
 
-    private LinuxNeededCacheObservation observeLinuxNeededCache(List<SegmentClassicLinuxDeploymentV2.File> declared,
-            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, int cacheRule, long deadline)
-            throws IOException {
-        var members = fixedLinuxContextMembers(declared, loading, deadline);
+    private LinuxNeededCacheObservation observeLinuxNeededCache(List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, int cacheRule,
+            LinuxLoadPathObservation boundRequester, long deadline) throws IOException {
+        requireTime(deadline);
         if (ruleIndex < 0 || ruleIndex >= loading.needed().size()) {
             throw new IOException("Cache NEEDED index is outside the original rule table");
         }
@@ -3507,6 +3603,9 @@ final class SegmentClassicLaunchTrust {
         var aliases = linuxContextAliases(loading, deadline);
         var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
                 loading.interpreter(), aliases, deadline);
+        if (boundRequester != null && !boundRequester.equals(requester)) {
+            throw new IOException("JDK helper requester changed before its original NEEDED cache lookup");
+        }
         if (!name.equals(requester.content().elf().needed().get(rule.ordinal()))) {
             throw new IOException("Original cache NEEDED differs from its requester ELF observation");
         }

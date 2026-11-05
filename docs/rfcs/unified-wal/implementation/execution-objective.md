@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+正常 D2 在第二次 native 环境采样之后，以原 owner 已绑定的 JDK helper 为请求者，按原规则索引逐条核验直接 `DT_NEEDED` 的 cache 相关行与批准候选。整组前后复核 helper 和解释器身份，每条校验后只保留完成的原索引。最终 58 项回归和 Java 样式通过。批准 Linux 运行、递归依赖、完整搜索及执行期间环境约束仍待验证。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-直接依赖-cache-核验)。
+
 正常 D2 在 JDK backend 观察前后分别采样当前 libc `environ`，两次都只接受 `EMPTY_SAMPLED`。Linux native 通过 self `SYS_process_vm_readv` 精确复制表指针和首槽位，再复读表指针。最终回归 59 项通过，4 项 Linux 实读跳过，Java 样式和 Linux 交叉编译通过。批准 Linux 运行及执行期间环境稳定性仍待验证。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的当前-native-环境采样)。
 
 正常 D2 launcher 在独立 dropper 核验后调用一次原 `verifyLinuxJdkProcess`，把真实缓存的后端和 helper 路径绑定到批准材料。调用前后检查原期限和关闭请求。此处允许专用 LauncherMain 触发 ProcessImpl 首次初始化。独立 JVM native 4 项和 server 42 项通过，Java 样式通过。批准 Linux 上的 owner 全路径、helper 继承的 native 环境与传递加载、systemctl 实际连接和 manager 响应仍待验证。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的实际-jdk-后端与-helper-关联)。

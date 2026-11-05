@@ -1218,6 +1218,16 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的 helper 直接依赖 cache 核验
+
+正常 D2 launcher 在第二次 native 环境采样之后、`childCommand` 之前，调用只接收原 deadline 的 `verifyLinuxJdkHelperNeededCache`。原 owner 先核原 D2 source/provider，再从已完成的私有 `backendObservation` 取得 helper，复核它仍对应同一批准 program、成员与确切执行 context。整组读取前后复核该 helper 及其已绑定 PT_INTERP 的实际路径和身份。
+
+每条直接 `DT_NEEDED` 按原规则索引处理，重复名称仍按各自的 ordinal 和候选集合独立观察。共享 cache reader 在打开 cache 前比较实际 requester 与已绑定 helper，随后沿原 cache A/B、相关 LP64 行、候选逻辑路径、held fd、文件摘要和首次关闭合同校验。没有直接 NEEDED 时，本次 helper 核验不选 cache 规则或打开 cache。显式缺失、空匹配和 stale 路径沿单条观察的原语义处理，slash/DST 等不支持的名称使整组失败。
+
+每条完成后仅保留原规则索引，完整 cache 图和行随该次调用退出。测试数据入口只在非 production owner 可用，由其独立读取实际声明根和解释器。相关行属于该条批准候选集合是条件材料事实，实际 loader 何时查 cache、哪条记录获选、依赖如何递归加载仍须独立核验。[glibc 依赖加载实现](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-deps.c)
+
+在父 `dc6c1e1ace` 上沿用 acf9afec… native 库。首轮 57 项中有 1 项失败和 1 项错误，原因是两个测试夹具沿用了 slash/DST 名称。修正实际 ELF 字节与批准摘要，补独立拒绝用例后 58 项和样式通过。复核发现整组保留完整图会累积内存，改为逐条完成后只留索引，最终独立 58 项与 Java style 再次通过。真实临时 ELF/cache 覆盖非零根、重复 ordinal 各自批准、零直接请求、后项未批准拒绝和同字节解释器替换。批准 Linux 路径与实际加载未执行，父 native 环境写入约束和递归依赖仍待完成，原 childCommand 与 diagnostics 拒绝继续生效。
+
 ## 正常 D2 launcher 的当前 native 环境采样
 
 原 D2 launcher 在 backend 观察前后的两个 `checkStarting()` 之后分别调用 `verifyLinuxNativeEnvironment(deadline)`。每次先核原 D2 source/provider 与期限，再冷读当前 native 环境。返回后检查原期限和资源健康，只有 `EMPTY_SAMPLED` 通过。非空、短读、变化或无法取得样本沿原 owner 的 sticky failure 阻止后续启动。D1 和无 Linux 部署不调用新 ABI。
