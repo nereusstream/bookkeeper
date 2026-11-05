@@ -11464,6 +11464,57 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void offlineBackupRejectsUnmarkedDirectoryBeforeCreatingControlLocks() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+            // The unmarked directory has real DATA and control identity pages but no control owners.
+        }
+        Path arenaLock = config.directory().resolve("arena-control.lock");
+        Path bookieLock = config.directory().resolve("bookie-control.lock");
+        assertFalse(Files.exists(arenaLock));
+        assertFalse(Files.exists(bookieLock));
+        var before = inspectionImage(config.directory());
+        var reference = new SegmentBackupImage.Reference(new UUID(0, 1), "01".repeat(32));
+        var failure = assertThrows(IOException.class, () -> SegmentBackupImage.open(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", config.directory(), reference));
+        assertFalse(Files.exists(arenaLock));
+        assertFalse(Files.exists(bookieLock));
+        assertInspectionImage(before, config.directory());
+        assertTrue(failure.getMessage(), failure.getMessage().contains("Backup input marker"));
+    }
+
+    @Test
+    public void offlineBackupChecksReferenceAndScopeBeforeCreatingControlLocks() throws Exception {
+        IsolatedSegmentConfig config = config();
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity())) {
+            // Capture a valid sealed image so both rejections occur with a matching on-disk marker.
+        }
+        Path output = temporary.getRoot().toPath().resolve("backup");
+        var reference = SegmentBackupImage.capture(config, identity(), key((byte) 3), VALIDATOR,
+                1024 * 1024, 16, "cluster/profile", "device-1", output);
+        Files.delete(output.resolve("arena-control.lock"));
+        Files.delete(output.resolve("bookie-control.lock"));
+        var before = inspectionImage(output);
+        var wrongImage = new SegmentBackupImage.Reference(new UUID(0, 1), reference.digest());
+        var failure = assertThrows(IOException.class, () -> SegmentBackupImage.open(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", output, wrongImage));
+        assertTrue(failure.getMessage(), failure.getMessage().contains("Backup marker does not bind"));
+        assertInspectionImage(before, output);
+        var wrongDigest = new SegmentBackupImage.Reference(reference.imageId(), "00".repeat(32));
+        failure = assertThrows(IOException.class, () -> SegmentBackupImage.open(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "cluster/profile", "device-1", output, wrongDigest));
+        assertTrue(failure.getMessage(), failure.getMessage().contains("external image reference"));
+        assertInspectionImage(before, output);
+        failure = assertThrows(IOException.class, () -> SegmentBackupImage.open(config, identity(), key((byte) 3),
+                VALIDATOR, 1024 * 1024, 16, "another-cluster/profile", "device-1", output, reference));
+        assertTrue(failure.getMessage(), failure.getMessage().contains("scope or image identity"));
+        assertInspectionImage(before, output);
+        try (var lock = SegmentDataFileLock.open(output)) {
+            assertTrue(lock.lock().isValid());
+        }
+    }
+
+    @Test
     public void offlineBackupInputCannotRestartAsTheOriginalService() throws Exception {
         IsolatedSegmentConfig config = config();
         Path output = temporary.getRoot().toPath().resolve("backup");

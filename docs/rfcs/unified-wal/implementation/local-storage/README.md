@@ -1554,6 +1554,15 @@ service rotation仍顺序处理两个owner，模型保守相加各自一份snaps
 本次只接公开运维操作和输入生命周期，不增加 prepareRepair/authority producer、CLI 或默认路由，不改变当前元数据/复制/bootstrap 算法、协议和镜像 native 格式。reference force 失败的真实故障注入、本轮完整恢复运维接受下界、同 incarnation unclosed-session crash 接受、全量字节账本/B11、默认 SDK/Main、兼容、正式性能及其余16步仍未闭合。TLA 转移未改，不重跑或移绑旧模型 PASS；目标 active、生产 Gate OPEN，默认 OFF/SYSTEM/PARK 与 disabled 能力保持，Linux NUMA、真实掉电、正式性能/canary 本轮 NOT_EXECUTED。
 
 
+### 离线镜像来源预检
+
+以 `ee71b39825` 为基线。导入先取得候选目录已有的 DATA 排他锁，再用只读文件句柄校验 marker 和 manifest 的类型、长度、EOF、外部引用 SHA-256、镜像 UUID、cluster/device scope 及预期身份页。两个只读句柄都在打开 Arena、Bookie 控制 owner 和 DATA 恢复同步之前关闭。原恢复校验继续消费同一份至多 1 MiB 的已验证 manifest，核对真实控制 cut、实例清单、完整文件集合、长度和摘要，并再次读取 marker。原离线 capture 的源目录仍走普通源检查，捕获后的镜像验证走该预检。
+
+真实未标记目录具有原生 DATA 和控制文件。旧入口虽然拒绝，仍先创建控制锁文件。修复后的来源错误先返回，既有目录项和字节一致。另用实际捕获的镜像验证 marker 与引用 UUID 错绑、摘要错误及 cluster scope 错误，拒绝后可再次取得原 DATA 锁。该预检覆盖来源错误，已通过预检的目录仍进入原控制回放及深层验证。集群恢复接受下界、目标终态 authority 和历史 GC 仍待实现。
+
+旧源码反例为一项断言失败。初版五项离线测试通过。最终两类八项定向测试通过，零失败、错误或跳过，覆盖真实捕获与点读、公开导入与实际 completion、无洞 suffix 和跨 JVM 同 intent 续接。Spotless 与 Checkstyle 通过。各阶段 1460 项输入、原始命令、源码和回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/backup-admission-evidence-ee71b398`。
+
+
 [显式 SDK CLOSED 只读入口与依赖关闭顺序](../profile-wire/README.md#显式-sdk-closed-只读入口与依赖关闭顺序)：2026-10-25父cc7b8cdd82上，BookKeeper显式enable/open复用原registered pool与CLOSED coordinator，单个open/handle持有lease到实际read/output终结；SDK close先排空Profile再关闭原metadata/executors，中断可继续，self-drain提前拒绝。三项真实服务定向与相关两类23项全部通过、输入匹配，style通过；新增有限模型1正向/3指定反例符合预期，旧Spec/11cfg保持原绑定；独立RAT仍443父路径无新增，原证据由上述canonical节拥有。默认builder拒绝保持，writer create/默认routing/Main可信issuer/full-bytes及其余16步继续OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
 
 

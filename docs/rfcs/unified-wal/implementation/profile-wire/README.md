@@ -2151,6 +2151,8 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 
 [离线 backup image 与不可服务输入](../local-storage/README.md#离线-backup-image-与不可服务输入)：2026-10-22父4b1ba0889d上复用原DATA/双control锁和完整恢复扫描，建立有界manifest/外部SHA reference、全native文件复制/force/重读及借用scratch的instance点读；marked input在服务replay前拒绝，旧权限不作新授权。新启动拒绝RED，最终两类六项0 failure/error/skip、style通过；1171输入各stage冻结，独立RAT443父HEAD既有无新增。仅完成离线输入层，repair来源/新目标导入/membership/bootstrap及恢复专属组合仍OPEN，未称restore完成；旧目标义务保留，全16步目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK和disabled不变。
 
+镜像导入已在打开可写控制 owner 前验证外部 reference 和 expected scope。集群当前 CLOSED/RepairIntent 仍负责目标 admission 与权限。[离线镜像来源预检](../local-storage/README.md#离线镜像来源预检)
+
 ## 离线镜像接入当前 CLOSED repair-copy
 
 2026-10-23，父源码 `b7c9e32bc6670fb168c47f56336bf6047271ab47`，按已冻结的 [首版接受语义](#backuprestore-的首版接受语义)，`SegmentBackupImage.Image` 接入原 `ProfileRecoveryCoordinator`，作为当前 CLOSED fragment 的附加数据源。要求不同 BookieId、不同 incarnation 的目标；当前 native metadata/context/birth 与 retained install 必须精确包含源身份及 ledgerInstanceId/descriptor，镜像旧权限不成为新 authority。当前 CLOSED 边界已是 terminal，不要求离线旧源再生产 fence RPC；目标仍走原 inactive install → RepairIntent admission → recovery-only grant → copy → native membership CAS → recovery close，不开放 normal writer，也不改变原 CLOSED P/length/cut。

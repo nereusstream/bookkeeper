@@ -162,7 +162,8 @@ final class SegmentBackupImage {
                 || Files.exists(config.directory().resolve(MARKER), LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Backup output must be a new independent input directory");
         }
-        try (Image source = inspect(config, identity, key, validator, controlBytes, maximumEntries, null)) {
+        try (Image source = inspect(config, identity, key, validator, controlBytes, maximumEntries,
+                clusterScope, deviceScope, null)) {
             Files.createDirectory(output);
             UUID imageId = UUID.randomUUID();
             // Mark even an incomplete copy before any native files can appear in it.
@@ -211,29 +212,25 @@ final class SegmentBackupImage {
         var config = new IsolatedSegmentConfig(directory, 1, sourceConfig.logicalShards(), sourceConfig.dataFiles(),
                 sourceConfig.bytesPerFile(), 4096, sourceConfig.maxPayloadBytes(), sourceConfig.maxPendingEntries(),
                 "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
-        return inspect(config, identity, key, validator, controlBytes, maximumEntries,
-                image -> verify(image, clusterScope, deviceScope, reference, controlBytes));
-    }
-
-    @FunctionalInterface
-    private interface Verification {
-        void check(Image image) throws IOException;
+        return inspect(config, identity, key, validator, controlBytes, maximumEntries, clusterScope, deviceScope,
+                java.util.Objects.requireNonNull(reference, "reference"));
     }
 
     private static Image inspect(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
             ProfileDescriptorValidator validator, long controlBytes, int maximumEntries,
-            Verification verification) throws IOException {
+            String cluster, String device, Reference reference) throws IOException {
         SegmentDataFileLock lock = SegmentDataFileLock.open(config.directory());
         SegmentArenaControlLog arena = null;
         SegmentBookieControlLog bookie = null;
-        try {
+        try (var manifest = reference == null ? null : verifiedManifest(config, identity, cluster, device, reference)) {
             arena = SegmentArenaControlLog.open(config, identity, controlBytes);
             bookie = SegmentBookieControlLog.open(config, identity, controlBytes, key, validator);
             var inventory = SegmentDataRecovery.recoverLocallyReadableInventoryWhileLocked(config, identity,
                     arena, bookie, new SegmentFileIo(), maximumEntries, config.logicalShards(), lock.lock());
             var image = new Image(config, identity, lock, arena, bookie, inventory);
-            if (verification != null) {
-                verification.check(image);
+            if (manifest != null) {
+                verifyNative(image, manifest, controlBytes);
+                verifyMarker(config.directory(), reference);
             }
             return image;
         } catch (IOException | RuntimeException | Error failure) {
@@ -324,77 +321,98 @@ final class SegmentBackupImage {
         return bytes.toByteArray();
     }
 
-    private static void verify(Image image, String cluster, String device, Reference reference, long controlBytes)
-            throws IOException {
-        Path manifest = image.config.directory().resolve(MANIFEST);
-        long size = Files.size(manifest);
-        if (size < 4096 || size > MAX_MANIFEST) {
-            throw new IOException("Backup manifest length is invalid");
+    private static DataInputStream verifiedManifest(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            String cluster, String device, Reference reference) throws IOException {
+        verifyMarker(config.directory(), reference);
+        Path manifest = config.directory().resolve(MANIFEST);
+        if (!Files.isRegularFile(manifest, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Backup manifest must be a regular file without symlinks");
         }
-        ByteBuffer content = ByteBuffer.allocate((int) size);
+        ByteBuffer content;
         try (var file = FileChannel.open(manifest, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            long size = file.size();
+            if (size < 4096 || size > MAX_MANIFEST) {
+                throw new IOException("Backup manifest length is invalid");
+            }
+            content = ByteBuffer.allocate((int) size);
             SegmentFileIo.readFully(file, content, 0);
+            if (file.read(ByteBuffer.allocate(1), size) != -1) {
+                throw new IOException("Backup manifest length changed while reading");
+            }
         }
         if (!reference.digest().equals(HexFormat.of().formatHex(sha256().digest(content.array())))) {
             throw new IOException("Backup manifest differs from its external image reference");
         }
-        try (var in = new DataInputStream(new ByteArrayInputStream(content.array()))) {
-            if (in.readLong() != MAGIC || in.readInt() != 1
-                    || !new UUID(in.readLong(), in.readLong()).equals(reference.imageId())
-                    || !in.readUTF().equals(cluster) || !in.readUTF().equals(device)
-                    || !Arrays.equals(in.readNBytes(4096), image.identity.encode(image.config, -1).array())
-                    || in.readLong() != image.arena.appliedThrough()
-                    || in.readLong() != image.bookie.appliedThrough()) {
-                throw new IOException("Backup scope, native control cut or image identity differs");
-            }
-            List<ProfileLedgerContext> contexts = image.contexts();
-            if (in.readInt() != contexts.size()) {
-                throw new IOException("Backup ledger-instance inventory is incomplete");
-            }
-            for (var context : contexts) {
-                if (!Arrays.equals(in.readNBytes(ProfileLedgerContext.ENCODED_LENGTH), context.encode())) {
-                    throw new IOException("Backup ledger-instance identity differs");
-                }
-            }
-            List<String> names = fileNames(image.config, controlBytes);
-            if (in.readInt() != names.size()) {
-                throw new IOException("Backup native file range is incomplete");
-            }
-            ByteBuffer scratch = ByteBuffer.allocate(COPY_BYTES);
-            for (String name : names) {
-                if (!in.readUTF().equals(name)) {
-                    throw new IOException("Backup file name or range differs");
-                }
-                long length = in.readLong();
-                byte[] digest = in.readNBytes(32);
-                try (var file = FileChannel.open(image.config.directory().resolve(name),
-                        StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
-                    if (length != file.size()) {
-                        throw new IOException("Backup file length differs");
-                    }
-                    MessageDigest hash = sha256();
-                    for (long offset = 0; offset < length;) {
-                        scratch.clear().limit((int) Math.min(scratch.capacity(), length - offset));
-                        SegmentFileIo.readFully(file, scratch, offset);
-                        hash.update(scratch);
-                        offset += scratch.limit();
-                    }
-                    if (!Arrays.equals(digest, hash.digest())) {
-                        throw new IOException("Backup file digest differs");
-                    }
-                }
-            }
-            if (in.read() != -1) {
-                throw new IOException("Backup manifest has an unsupported suffix");
+        var in = new DataInputStream(new ByteArrayInputStream(content.array()));
+        if (in.readLong() != MAGIC || in.readInt() != 1
+                || !new UUID(in.readLong(), in.readLong()).equals(reference.imageId())
+                || !in.readUTF().equals(cluster) || !in.readUTF().equals(device)
+                || !Arrays.equals(in.readNBytes(4096), identity.encode(config, -1).array())) {
+            throw new IOException("Backup scope or image identity differs");
+        }
+        return in;
+    }
+
+    private static void verifyNative(Image image, DataInputStream in, long controlBytes) throws IOException {
+        if (in.readLong() != image.arena.appliedThrough() || in.readLong() != image.bookie.appliedThrough()) {
+            throw new IOException("Backup native control cut differs");
+        }
+        List<ProfileLedgerContext> contexts = image.contexts();
+        if (in.readInt() != contexts.size()) {
+            throw new IOException("Backup ledger-instance inventory is incomplete");
+        }
+        for (var context : contexts) {
+            if (!Arrays.equals(in.readNBytes(ProfileLedgerContext.ENCODED_LENGTH), context.encode())) {
+                throw new IOException("Backup ledger-instance identity differs");
             }
         }
+        List<String> names = fileNames(image.config, controlBytes);
+        if (in.readInt() != names.size()) {
+            throw new IOException("Backup native file range is incomplete");
+        }
+        ByteBuffer scratch = ByteBuffer.allocate(COPY_BYTES);
+        for (String name : names) {
+            if (!in.readUTF().equals(name)) {
+                throw new IOException("Backup file name or range differs");
+            }
+            long length = in.readLong();
+            byte[] digest = in.readNBytes(32);
+            try (var file = FileChannel.open(image.config.directory().resolve(name),
+                    StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+                if (length != file.size()) {
+                    throw new IOException("Backup file length differs");
+                }
+                MessageDigest hash = sha256();
+                for (long offset = 0; offset < length;) {
+                    scratch.clear().limit((int) Math.min(scratch.capacity(), length - offset));
+                    SegmentFileIo.readFully(file, scratch, offset);
+                    hash.update(scratch);
+                    offset += scratch.limit();
+                }
+                if (!Arrays.equals(digest, hash.digest())) {
+                    throw new IOException("Backup file digest differs");
+                }
+            }
+        }
+        if (in.read() != -1) {
+            throw new IOException("Backup manifest has an unsupported suffix");
+        }
+    }
+
+    private static void verifyMarker(Path directory, Reference reference) throws IOException {
+        Path path = directory.resolve(MARKER);
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            throw new IOException("Backup input marker must be a regular file without symlinks");
+        }
         ByteBuffer marker = ByteBuffer.allocate(24);
-        try (var file = FileChannel.open(image.config.directory().resolve(MARKER),
-                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+        try (var file = FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
             if (file.size() != 24) {
                 throw new IOException("Backup input marker length differs");
             }
             SegmentFileIo.readFully(file, marker, 0);
+            if (file.read(ByteBuffer.allocate(1), marker.limit()) != -1) {
+                throw new IOException("Backup input marker length changed while reading");
+            }
         }
         if (marker.getLong() != MAGIC
                 || !new UUID(marker.getLong(), marker.getLong()).equals(reference.imageId())) {

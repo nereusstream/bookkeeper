@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+步骤 15 的离线镜像导入在原 DATA 排他锁内先检查 marker、外部 reference、manifest 摘要和预期 scope，来源无效时在可写控制 owner 和 DATA 恢复同步前拒绝。实际恢复仍复核控制 cut、实例清单、文件摘要和 marker。集群恢复接受下界仍待接线。详见 [local-storage](local-storage/README.md#离线镜像来源预检)。
+
 步骤 14→15 的组合验证覆盖实际承载 3/3/3 已确认数据的 Bookie JVM 退出。临时注册自然消失后，原 auditor 产生任务，worker 将 CLOSED 账本修复到另一 BookieId/incarnation，保留原 CLOSED 边界并通过公开 SDK 读回。旧目录的原 owned restart 拒绝。后续逻辑删除包含原三个及新目标的确切义务，旧离线 incarnation 的物理终结回执仍缺失。详见 [profile-wire](profile-wire/README.md#已确认-data-的-bookie-jvm-退出后修复与删除)。
 
 步骤 7→12 的服务组合验证覆盖持原目录并完成真实注册、从未发 DATA grant 的 Bookie 子 JVM 异常退出。旧临时注册自然消失后，原 owned service 以同一身份、目录和端点重开，持久应用 action 4 后发布新 episode。旧观察在端点复用时仍拒绝，公开 SDK 经新注册池以 3/3/3 确认首次写入，正常关闭并逐条读回。详见 [profile-wire](profile-wire/README.md#未授权-data-的-bookie-jvm-退出后重新注册)。
