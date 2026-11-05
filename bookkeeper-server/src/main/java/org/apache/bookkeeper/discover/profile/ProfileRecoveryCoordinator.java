@@ -2628,9 +2628,7 @@ public final class ProfileRecoveryCoordinator {
                             && ref.intentBirth().equals(prepared.birth())
                             && ref.intentStoreVersion() == prepared.storeVersion());
                 if (published) {
-                    return CompletableFuture.supplyAsync(() -> reservations.resolveRepairClose(metadata, prepared,
-                            closeId, backup), cold).thenCompose(result -> closeRepair(result, prepared,
-                                    control, 0, backup, stopped));
+                    return resumePublishedRepair(prepared, control, closeId, backup, stopped);
                 }
                 boolean sameContent;
                 try {
@@ -2735,9 +2733,7 @@ public final class ProfileRecoveryCoordinator {
                 return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, 0, null));
             }
             if (ready.published()) {
-                return CompletableFuture.supplyAsync(
-                        () -> reservations.resolveRepairClose(metadata, prepared, closeId, backup), cold)
-                            .thenCompose(published -> closeRepair(published, prepared, control, 0, backup, stopped));
+                return resumePublishedRepair(prepared, control, closeId, backup, stopped);
             }
             if (ready.current().metadata().birthZxid() != frozen.metadata().birthZxid()
                     || !ready.current().metadata().metadata().getVersion().equals(
@@ -2855,16 +2851,43 @@ public final class ProfileRecoveryCoordinator {
             ProfileRepairIntent intent, ProfileInitialControlClient control, long copied) {
         if (published.status() != ZKProfileReservationStore.CreateStatus.APPLIED
                 && published.status() != ZKProfileReservationStore.CreateStatus.ALREADY_APPLIED) {
-            return CompletableFuture.completedFuture(new RepairResult(published.status()
-                    == ZKProfileReservationStore.CreateStatus.CONFLICT ? RepairStatus.CONFLICT
-                    : published.status() == ZKProfileReservationStore.CreateStatus.QUARANTINED
-                        ? RepairStatus.QUARANTINED : RepairStatus.DEFERRED, copied, published));
+            return CompletableFuture.completedFuture(new RepairResult(repairCommitFailure(published.status()),
+                    copied, published));
         }
         var request = repairCloseRequest(published, intent);
         var reply = published.terminal() != null ? control.terminalClose(request) : control.recoveryClose(request);
         return reply.handle((closed, failure) -> new RepairResult(failure == null
                         && closed.durable() ? RepairStatus.REPAIRED_HISTORICAL_FRAGMENT : RepairStatus.DEFERRED,
                         copied, published));
+    }
+
+    private CompletableFuture<RepairResult> resumePublishedRepair(ZKProfileReservationStore.RepairSnapshot repair,
+            ProfileInitialControlClient control, byte[] closeId, VerifiedSource backup, AtomicBoolean stopped) {
+        return CompletableFuture.supplyAsync(() -> {
+            if (backup != null) {
+                if (stopped.get()) {
+                    return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, 0, null));
+                }
+                var settled = reservations.readSettledRestore(metadata, repair, closeId, backup);
+                if (settled.isPresent()) {
+                    var publication = settled.get();
+                    var status = stopped.get() ? RepairStatus.DEFERRED
+                            : publication.status() == ZKProfileReservationStore.CreateStatus.ALREADY_APPLIED
+                                ? RepairStatus.REPAIRED_HISTORICAL_FRAGMENT : repairCommitFailure(publication.status());
+                    return CompletableFuture.completedFuture(new RepairResult(status, 0, publication));
+                }
+            }
+            var publication = reservations.resolveRepairClose(metadata, repair, closeId, backup);
+            return closeRepair(publication, repair, control, 0, backup, stopped);
+        }, cold).thenCompose(result -> result);
+    }
+
+    private static RepairStatus repairCommitFailure(ZKProfileReservationStore.CreateStatus status) {
+        return switch (status) {
+            case CONFLICT -> RepairStatus.CONFLICT;
+            case QUARANTINED -> RepairStatus.QUARANTINED;
+            default -> RepairStatus.DEFERRED;
+        };
     }
 
     private static ProfileControlRequest repairCloseRequest(ZKProfileReservationStore.RepairCommitResult published,

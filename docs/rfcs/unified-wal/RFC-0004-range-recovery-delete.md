@@ -897,6 +897,8 @@ all historical targets acknowledged or durably decommissioned
 
 当前镜像恢复在精确目标 CLOSE 的实际终态后，按当前原生条件提交不可变完成回执。该回执区分已经结算的恢复，并保留原源历史、删除义务和后续回收的独立前提。详见 [镜像恢复的目标完成回执](implementation/profile-wire/README.md#镜像恢复的目标完成回执)。
 
+已经结算的精确重试先核对原生完成回执与当前 CLOSED、源 assignment 和原 floor revision。源删除事件证明由已结算的原 witness 绑定，重试无需再发目标 CLOSE。未结算恢复继续核对完整事件证明。详见 [已结算镜像恢复的精确重试](implementation/profile-wire/README.md#已结算镜像恢复的精确重试)。
+
 恢复专属最小验收复用真实文件/ZK/mTLS/SDK/restart fixture：备份后删除不复活；ledgerId reuse 不混淆 instance；delete 与 admission/writable 两种先后均保留目标和 required-through；缺页/断 suffix/错误 scope 或 generation/recreated birth/旧权限重放 fail closed；copy force、cursor/readiness 与 registration 的 crash/lost-reply 重试幂等且 actual I/O 先排空；旧目标 offline、窗口已到期且新目标已恢复时，旧义务仍保留。未知 authority/timeout/UNKNOWN 不证明无义务，必要数据不足或历史不完整保持隔离/RECOVERING、不发布 writable。既有等价覆盖复用，不按场景数重复扩矩阵。
 
 ## 16. 安全不变量

@@ -2214,9 +2214,21 @@ floor 适用于显式 commissioning 的 G1 scope。既有 assignment 的升级�
 
 目标 CLOSE 实际排空后，原 cold store 核对当前 CLOSED 和 delete、原 intent/admission/镜像 witness、原 floor revision 与 committed 出生。完成事务检查这些原生条件，并写入不可变 `/restore-completed` 和同出生的摘要子节点 `/birth`。`UWRE` v1 的 268 字节按 big-endian 编码，绑定 ledger/instance、intent 出生、metadata/admission/commit 出生、intent/源 witness/commit/目标身份摘要、close ID/authority generation、DATA 或 EMPTY kind 和 close payload 摘要。
 
-成功在实际目标 CLOSE 和原生回执读回之后返回。回执提交后丢回复可凭原镜像、intent 和 CLOSE ID 解析相同出生。取消保留已提交 CONTROL 与 ZooKeeper callback 的实际排空及镜像锁。普通 repair 延续原完成路径。回执只证明该次恢复已结算。显式续接仍重验原源事件与 floor revision，源历史和旧目标义务继续由原权限保留。历史 GC、跨 assignment、外部退役及生产 Gate 仍开放。
+成功在实际目标 CLOSE 和原生回执读回之后返回。回执提交后丢回复可凭原镜像、intent 和 CLOSE ID 解析相同出生。取消保留已提交 CONTROL 与 ZooKeeper callback 的实际排空及镜像锁。普通 repair 延续原完成路径。回执只证明该次恢复已结算。现行续接见 [已结算镜像恢复的精确重试](#已结算镜像恢复的精确重试)。源历史和旧目标义务继续由原权限保留。
 
 2026-11-05，基线 `2f5481d6eb`。真实 mTLS 测试在目标 CLOSE 持久成功响应已到时挂起原输出完成。回执尚未提交，原 completion 尚未结束，镜像锁继续持有。移除实际排空等待后，ZooKeeper 在原输出挂起期间提前提交回执，定向断言失败。恢复等待后，回执提交的回复挂过 store deadline，原操作继续持锁到实际 callback，随后返回 DEFERRED。重试读取同一原生回执且 copy 0。另验证不可删除的出生锚、同字节 committed 重建、必需 proof 缺失、旧原生发布及 metadata 前进后的拒绝，以及空范围完成。最终三类 32 项定向测试通过，零失败、错误或跳过。Spotless 和 Checkstyle 通过。各阶段 1460 项输入、原始命令和回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/restore-completion-evidence-2f5481d6`。Linux、掉电、正式性能和 canary 本轮未执行。
+
+## 已结算镜像恢复的精确重试
+
+同一公开镜像恢复入口在已发布的 DATA 或 EMPTY 分支，先同步读取原生 `/restore-completed`。只有明确的 `NONODE` 才进入原 CLOSE 续接。未知读取结果、损坏或不匹配的记录及出生证明均返回非成功。
+
+既有回执仍需核对实际持锁的同一封存镜像、原 source witness 与 admission 出生、当前源 G1 assignment 和 head 出生、未回退的当前 head 以及原 floor revision。回执绑定的原 witness 承担已经结算的源事件证明，因此重试可确认原结果，即使对应源 event、snapshot effect、index 或关联 tombstone 已不可读。首次准入、未结算的 CLOSE 和首次完成回执写入继续读取完整源事件证明。
+
+只读核对保留当前 CLOSED、ledger/instance、metadata/lifecycle birth 和当前成员位置的要求，并再次读取实际 membership 与 lifecycle。原 `/committed` 的内容与出生、要求的受保护 guard、精确 CLOSE ID/authority/payload、EMPTY 选择及边界、`UWRE` 和 `/birth` 均须一致。已有回执成功返回 copy 0，不发目标 INSTALL、DATA 或 CLOSE，不改写 metadata 或回执。调用入口继续验证 supplied peer 身份，服务启动与注册沿用自身当前权威。
+
+未结算的恢复仍依赖完整源历史。新生 scope 的活跃依赖覆盖、旧目标终态、跨 assignment 和历史回收继续各自验收，生产 Gate 为 OPEN。
+
+2026-11-05，基线 `9729b5a7d4`。在真实文件、ZooKeeper 与 mTLS fixture 中先结算非零源进度的恢复，再仅在隔离测试中移除源事件及索引。旧实现将精确 DATA 重试判为 QUARANTINED，触发定向反例。最终 DATA 与 EMPTY 重试均确认同一原生回执和 copy 0，目标控制计数与 DATA 写入计数保持稳定。另验证 floor 从 1 推进到 2、原 revision 缺失、同条件未结算请求、换镜像或 CLOSE ID、坏回执、同字节 committed 重建，以及 DELETE 先赢。初轮五项通过，最终三类 34 项定向测试通过，零失败、错误或跳过。Spotless 和 Checkstyle 通过。各阶段 1460 项输入、原命令和回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/settled-restore-replay-evidence-9729b5a7`。Linux、掉电、正式性能和 canary 本轮未执行。
 
 ## 恢复目标的首次 service bootstrap 组合验证
 
