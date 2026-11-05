@@ -2905,7 +2905,7 @@ public final class ZKProfileReservationStore {
         var checks = new ArrayList<Op>();
         long latest = 0;
         for (var target : manifest.targets()) {
-            var verified = readPhysicalDeleteReceipt(metadata, manifest, target);
+            var verified = readPhysicalDeleteReceipt(metadata, manifest, target, deadline);
             if (verified.status() == PhysicalReceiptStatus.ABSENT) {
                 return null;
             }
@@ -2942,22 +2942,22 @@ public final class ZKProfileReservationStore {
     /** No caller clock or reported offline state can create this all-historical-target terminal cut. */
     public RetentionBarrierResult readDeleteRetentionBarrier(ProfileLedgerMetadataStore metadata,
             ProfileDeleteRecord.Manifest manifest) {
-        return retentionBarrier(metadata, manifest, false, () -> true);
+        return retentionBarrier(metadata, manifest, false, () -> true, System.nanoTime() + timeoutNanos);
     }
 
     RetentionBarrierResult publishDeleteRetentionBarrier(ProfileLedgerMetadataStore metadata,
             ProfileDeleteRecord.Manifest manifest, BooleanSupplier live) {
-        return retentionBarrier(metadata, manifest, true, live);
+        return retentionBarrier(metadata, manifest, true, live, System.nanoTime() + timeoutNanos);
     }
 
     private RetentionBarrierResult retentionBarrier(ProfileLedgerMetadataStore metadata,
-            ProfileDeleteRecord.Manifest manifest, boolean create, BooleanSupplier live) {
+            ProfileDeleteRecord.Manifest manifest, boolean create, BooleanSupplier live, long deadline) {
         requireRecoveryClient(metadata);
         Objects.requireNonNull(manifest, "manifest");
-        long deadline = System.nanoTime() + timeoutNanos;
         boolean submitted = false;
         try {
-            var logical = readLogicalDeletion(metadata, manifest.ledger().ledgerId(), manifest.seal().requestId());
+            var logical = readLogicalDeletion(metadata, manifest.ledger().ledgerId(), manifest.seal().requestId(),
+                    deadline);
             if (logical.manifest() == null) {
                 return retentionBarrierFailure(logical.status() == DeleteStatus.UNAVAILABLE
                         ? RetentionBarrierStatus.UNAVAILABLE : RetentionBarrierStatus.QUARANTINED);
@@ -3034,7 +3034,7 @@ public final class ZKProfileReservationStore {
             }
             submitted = true;
             multi(operations, deadline);
-            var after = retentionBarrier(metadata, manifest, false, live);
+            var after = retentionBarrier(metadata, manifest, false, live, deadline);
             return after.status() == RetentionBarrierStatus.ABSENT
                     || after.status() == RetentionBarrierStatus.UNAVAILABLE
                     ? retentionBarrierFailure(RetentionBarrierStatus.DURABILITY_UNKNOWN) : after;
@@ -5044,9 +5044,13 @@ public final class ZKProfileReservationStore {
 
     /** Read-only exact logical deletion and all historical obligations; creates no delivery or GC authority. */
     public DeleteResult readLogicalDeletion(ProfileLedgerMetadataStore metadata, long ledger, byte[] requestId) {
+        return readLogicalDeletion(metadata, ledger, requestId, System.nanoTime() + timeoutNanos);
+    }
+
+    private DeleteResult readLogicalDeletion(ProfileLedgerMetadataStore metadata, long ledger, byte[] requestId,
+            long deadline) {
         requireRecoveryClient(metadata);
         byte[] request = ProfileLifecycleHead.fixed(requestId, 16, true);
-        long deadline = System.nanoTime() + timeoutNanos;
         try {
             var rootRead = read(ledger, deadline);
             var member = metadata.readMembership(ledger, deadline);
@@ -5090,8 +5094,12 @@ public final class ZKProfileReservationStore {
     /** Read the immutable per-ledger target index, then the actual committed stream event. No append or gap skip. */
     public DeliveryResult readLedgerDeleteDelivery(ProfileLedgerMetadataStore metadata, long ledger,
             ProfileDeleteRecord.Target target) {
+        return readLedgerDeleteDelivery(metadata, ledger, target, System.nanoTime() + timeoutNanos);
+    }
+
+    private DeliveryResult readLedgerDeleteDelivery(ProfileLedgerMetadataStore metadata, long ledger,
+            ProfileDeleteRecord.Target target, long deadline) {
         requireRecoveryClient(metadata);
-        long deadline = System.nanoTime() + timeoutNanos;
         try {
             var recorded = reads.get(path(ledger) + "/delete-delivery-" + deliveryTargetKey(target), deadline);
             if (recorded.code() != Code.OK.intValue()) {
@@ -5103,7 +5111,7 @@ public final class ZKProfileReservationStore {
             if (event.ledger().ledgerId() != ledger || !event.target().equals(target)) {
                 return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
             }
-            var actual = readDeleteDelivery(metadata, target, event.sequence());
+            var actual = readDeleteDelivery(metadata, target, event.sequence(), null, deadline, null);
             return actual.event() != null && !Arrays.equals(actual.event().encode(), event.encode())
                     ? new DeliveryResult(DeliveryStatus.QUARANTINED, null) : actual;
         } catch (InterruptedException interrupted) {
@@ -5354,10 +5362,15 @@ public final class ZKProfileReservationStore {
     /** Native metadata receipt only; no offline status or cursor can manufacture a terminal result. */
     public PhysicalReceiptResult readPhysicalDeleteReceipt(ProfileLedgerMetadataStore metadata,
             ProfileDeleteRecord.Manifest manifest, ProfileDeleteRecord.Target target) {
+        return readPhysicalDeleteReceipt(metadata, manifest, target, System.nanoTime() + timeoutNanos);
+    }
+
+    private PhysicalReceiptResult readPhysicalDeleteReceipt(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Manifest manifest, ProfileDeleteRecord.Target target, long deadline) {
         requireRecoveryClient(metadata);
-        long deadline = System.nanoTime() + timeoutNanos;
         try {
-            var logical = readLogicalDeletion(metadata, manifest.ledger().ledgerId(), manifest.seal().requestId());
+            var logical = readLogicalDeletion(metadata, manifest.ledger().ledgerId(), manifest.seal().requestId(),
+                    deadline);
             if (logical.manifest() == null) {
                 return physicalReceiptFailure(logical.status() == DeleteStatus.UNAVAILABLE
                         ? PhysicalReceiptStatus.UNAVAILABLE : PhysicalReceiptStatus.QUARANTINED);
@@ -5383,7 +5396,7 @@ public final class ZKProfileReservationStore {
             if (!receipt.event().target().equals(target) || !receipt.matches(manifest, domain)) {
                 return physicalReceiptFailure(PhysicalReceiptStatus.QUARANTINED);
             }
-            var committed = readLedgerDeleteDelivery(metadata, manifest.ledger().ledgerId(), target);
+            var committed = readLedgerDeleteDelivery(metadata, manifest.ledger().ledgerId(), target, deadline);
             if (committed.status() != DeliveryStatus.COMMITTED) {
                 return physicalReceiptFailure(committed.status() == DeliveryStatus.UNAVAILABLE
                         ? PhysicalReceiptStatus.UNAVAILABLE : PhysicalReceiptStatus.QUARANTINED);
