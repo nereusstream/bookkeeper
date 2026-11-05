@@ -2580,6 +2580,138 @@ public class SegmentClassicLaunchTrustTest {
                 List.of(earlier, later), metadata));
     }
 
+    private CandidateFixture jdkHelperOwnTagFixture(boolean runpath, boolean rejectLaterOrdinal) throws Exception {
+        var original = jdkHelperDefaultFixture(true, false);
+        var l = original.loading();
+        Path earlier = root.resolve("tag-z");
+        Path later = root.resolve("tag-a");
+        String raw = earlier + ":" + later + ":" + earlier + '/';
+        var rpath = new DynamicPath(true, runpath ? "$ORIGIN/$LIB" : raw);
+        var runpathTag = new DynamicPath(runpath, runpath ? raw : "");
+        var members = new java.util.ArrayList<>(original.files());
+        var metadata = new java.util.ArrayList<>(l.elf());
+        var helper = members.get(1);
+        var old = metadata.get(1);
+        var strings = new ByteArrayOutputStream();
+        strings.write(0);
+        var entries = new java.util.ArrayList<long[]>();
+        for (String name : old.needed()) {
+            entries.add(tagText(strings, 1, name));
+        }
+        entries.add(tagText(strings, 14, "/not/a/whitelisted SONAME/雪.so"));
+        entries.add(tagText(strings, 15, rpath.value()));
+        if (runpath) {
+            entries.add(tagText(strings, 29, runpathTag.value()));
+        }
+        entries.add(new long[]{30, old.flags()});
+        entries.add(new long[]{0x6ffffffbL, old.flags1()});
+        byte[] image = SegmentClassicLinuxElfTest.dynamicImage(entries, strings.toByteArray());
+        byte[] interpreter = (l.interpreter() + (char) 0).getBytes(StandardCharsets.UTF_8);
+        assertTrue(interpreter.length < 256);
+        var buffer = ByteBuffer.wrap(image).order(ByteOrder.LITTLE_ENDIAN);
+        buffer.putLong(96, interpreter.length).putLong(104, interpreter.length);
+        buffer.position(256).put(interpreter);
+        Path source = Path.of(helper.path());
+        write(source, image);
+        Files.setPosixFilePermissions(source, PosixFilePermissions.fromString("rwxr-xr-x"));
+        members.set(1, new SegmentClassicLinuxDeploymentV2.File(helper.path(), helper.role(), image.length,
+                SegmentClassicHandoff.digest(image)));
+        metadata.set(1, new SegmentClassicLinuxDeploymentV2.Elf(1, old.needed(), rpath, runpathTag,
+                old.flags(), old.flags1()));
+
+        var contexts = new java.util.ArrayList<>(l.contexts());
+        var needed = new java.util.ArrayList<>(l.needed());
+        var dirs = new java.util.ArrayList<>(l.directories());
+        for (Path path : List.of(earlier, later)) {
+            Files.createDirectory(path);
+            var member = loadPathFile(path.getFileName() + "/libz.so.1", SegmentClassicLinuxDeployment.Role.LIBRARY);
+            var declaration = l.elf().get(0);
+            int file = members.size();
+            int context = contexts.size();
+            members.add(member);
+            dirs.add(new SegmentClassicLinuxDeploymentV2.Directory(path.toString(), true));
+            contexts.add(new SegmentClassicLinuxDeploymentV2.Context(file, member.path()));
+            metadata.add(new SegmentClassicLinuxDeploymentV2.Elf(file, declaration.needed(), declaration.rpath(),
+                    declaration.runpath(), declaration.flags(), declaration.flags1()));
+            for (int ordinal = 0; ordinal < declaration.needed().size(); ordinal++) {
+                needed.add(new SegmentClassicLinuxDeploymentV2.NeededRule(context, ordinal, List.of(0)));
+            }
+        }
+        dirs.sort(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Directory::path));
+        needed.set(12, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, 6, 7)));
+        needed.set(13, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1,
+                rejectLaterOrdinal ? List.of(0, 6) : List.of(0, 6, 7)));
+        return new CandidateFixture(members, new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(),
+                l.interpreter(), l.aliases(), dirs, l.configuration(), l.policy(), metadata, contexts, needed,
+                l.modules()));
+    }
+
+    @Test
+    public void jdkHelperOwnRpathUsesTagOrderAfterCacheDespiteNodeflibWithoutRereadingRequester() throws Exception {
+        var f = jdkHelperOwnTagFixture(false, false);
+        var owner = owner();
+        owner.initialize();
+        Path helper = Path.of(f.files().get(1).path());
+        Path cache = Path.of(f.loading().configuration().get(0).path());
+        Path earlier = Path.of(f.files().get(5).path());
+        Path later = Path.of(f.files().get(6).path());
+        var helperOpens = new AtomicInteger();
+        var stages = new java.util.ArrayList<Path>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                Path path = invocation.getArgument(0);
+                if (helper.equals(path)) {
+                    helperOpens.incrementAndGet();
+                } else if (cache.equals(path) || earlier.equals(path) || later.equals(path)) {
+                    stages.add(path);
+                }
+            }
+            return invocation.callRealMethod();
+        })) {
+            assertEquals(List.of(12, 13, 14, 15), owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(),
+                    3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertEquals(5, helperOpens.get());
+            assertEquals(List.of(cache, cache, earlier, later, cache, cache, earlier, later,
+                    cache, cache, cache, cache), stages);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperOwnRunpathMasksRpathButRejectsTheLaterUnapprovedTagCandidate() throws Exception {
+        var f = jdkHelperOwnTagFixture(true, true);
+        var owner = owner();
+        owner.initialize();
+        Path cache = Path.of(f.loading().configuration().get(0).path());
+        Path later = Path.of(f.files().get(6).path());
+        var cacheOpens = new AtomicInteger();
+        var opened = new java.util.ArrayList<FileChannel>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object result = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                Path path = invocation.getArgument(0);
+                if (cache.equals(path)) {
+                    cacheOpens.incrementAndGet();
+                } else if (later.equals(path)) {
+                    opened.add((FileChannel) result);
+                }
+            }
+            return result;
+        })) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(), 3, 0,
+                            SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("exact approved logical context"));
+            assertEquals(4, cacheOpens.get());
+            assertEquals(1, opened.size());
+            assertFalse(opened.get(0).isOpen());
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
     @Test
     public void jdkHelperDefaultsUsePolicyOrderAndTheCacheRequesterWithoutReopeningIt() throws Exception {
         var f = jdkHelperDefaultFixture(false, false);

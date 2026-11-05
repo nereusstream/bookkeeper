@@ -1218,9 +1218,17 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的 helper 自身 RPATH/RUNPATH 候选核验
+
+正常 D2 仍只调用一次 `verifyLinuxJdkHelperNeededCandidates`。每条直接 `DT_NEEDED` 先完成 cache A/B，再以同一份实际 requester 核验自身 tag 和默认目录。tag 核验前后复核 requester 的原逻辑路径和身份，实际 context、member、ordinal、name 和两 tag 的 presence/value 与原声明逐项对应。组前后继续复核 helper 和 PT_INTERP，三阶段均通过才记录该条原规则索引。零直接请求时整组不选择或读取这些阶段的目标。
+
+RUNPATH 只要存在便优先，包括空值。仅在 RUNPATH 缺失时考虑自身 RPATH，NODEFLIB 只抑制默认目录，不抑制 tag。tag 沿原顺序和同来源首次去重检查 v4/v3/v2/base，所选 tag 需要未观察的 DST、相对路径、CWD 或无对应原目录时拒绝。独立 tag 入口继续在读取 requester 前完成全部预检，并保留详细返回。启动组的 tag 与默认目录共用逐目录读取及阶段末复核，仅持有路径和身份直到末轮。cache 图和完整候选 ELF 不跨阶段累积。[glibc 2.39 的 RPATH/RUNPATH 与默认目录分支](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)
+
+在父 `33725ccaed` 上沿用 acf9afec… native 库。首轮 79 项回归通过，样式报两处超长签名。换行后以最终源码独立执行，79 项与 Java style 全通过。真实临时 ELF/cache/候选验证了 RPATH 原序和去重、NODEFLIB 下 tag 仍访问、同一 requester 的读取次数，以及 RUNPATH 压下未知 DST 后重复请求的未批准候选拒绝。这里记录的是材料核验顺序，实际阶段可达性和选择仍待验证。批准 Linux 运行、递归依赖和执行期间 native 环境约束继续开放，原 childCommand 与 diagnostics 继续拒绝。
+
 ## 正常 D2 launcher 的 helper 直接依赖默认目录核验
 
-正常 D2 在原 helper 组入口 `verifyLinuxJdkHelperNeededCandidates` 内串行检查同一条直接 `DT_NEEDED`。cache A/B 完成后只取该次实际 requester，先复核原 helper 路径和身份，再用其原 ordinal、name 及实际 ELF 标志核验默认目录。默认阶段无需重开 requester 或 cache，整组前后仍复核原 helper 与 PT_INTERP。无直接 NEEDED 时，两阶段都不选择或读取目标材料。
+在 `33725ccaed` 上，正常 D2 在原 helper 组入口 `verifyLinuxJdkHelperNeededCandidates` 内串行检查同一条直接 `DT_NEEDED` 的 cache 和默认目录。该入口随后按上节接入自身 tag。cache A/B 完成后只取该次实际 requester，先复核原 helper 路径和身份，再用其原 ordinal、name 及实际 ELF 标志核验默认目录。默认阶段无需重开 requester 或 cache，整组前后仍复核原 helper 与 PT_INTERP。无直接 NEEDED 时，两阶段都不选择或读取目标材料。
 
 原 policy 的目录顺序保留，实际 requester 的 `DF_1_NODEFLIB` 抑制默认目录时不构造四位置或探测目标。其余请求依次检查 v4/v3/v2/base 的实际路径、presence、原候选批准、held fd 与摘要。cache 有匹配行时仍独立检查默认候选，因为本阶段只核验条件材料。单目录完成后，启动组仅保留用于阶段末复核的路径与身份。cache 图与完整候选 ELF 不跨阶段或原规则累积。只有两阶段都通过才记录完成索引，独立 default 数据入口仍保留预检顺序与详细返回。[glibc 2.39 默认目录分支](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c)
 

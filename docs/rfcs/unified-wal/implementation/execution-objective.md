@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+正常 D2 的 helper 组已接入请求者自身 RPATH/RUNPATH 候选核验。每条 cache A/B 后取得的实际 requester 同时用于 tag 与默认目录，两阶段均逐目录读取并仅保留路径身份作末轮复核。三个阶段通过才记录原规则索引。最终 79 项回归与 Java 样式通过。真实加载选择、递归依赖及执行期间 native 环境约束仍待验证。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-自身-rpathrunpath-候选核验)。
+
 正常 D2 的 helper 直接 NEEDED 检查已把同一规则的 cache A/B 和默认目录四位置核验串在一起。默认阶段复用本条实际 requester，按其 NODEFLIB 位及原 policy 处理，末轮仅持有路径与身份事实。两阶段均通过才记录原规则索引。77 项回归和 Java 样式通过。实际加载选择、递归依赖与执行期间 native 环境约束仍待验证。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-直接依赖默认目录核验)。
 
 正常 D2 在第二次 native 环境采样之后，以原 owner 已绑定的 JDK helper 为请求者，按原规则索引逐条核验直接 `DT_NEEDED` 的 cache 相关行与批准候选。整组前后复核 helper 和解释器身份，每条校验后只保留完成的原索引。最终 58 项回归和 Java 样式通过。批准 Linux 运行、递归依赖、完整搜索及执行期间环境约束仍待验证。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-直接依赖-cache-核验)。

@@ -191,6 +191,11 @@ final class SegmentClassicLaunchTrust {
 
     enum LinuxRequesterTag { NONE, RPATH, RUNPATH }
 
+    private record LinuxNeededRequesterTagPlan(SegmentClassicLinuxDeploymentV2.NeededRule rule,
+            SegmentClassicLinuxDeploymentV2.Context context, SegmentClassicLinuxDeploymentV2.Elf metadata,
+            String name, LinuxRequesterTag tag, SegmentClassicLinuxDeploymentV2.DynamicPath declaration,
+            List<LinuxDirectoryPlan> directories) { }
+
     /** This requester's own tag facts only; stage reachability, inhibition and active positions remain unobserved. */
     record LinuxNeededRequesterTagObservation(int rule, SegmentClassicLinuxDeploymentV2.NeededRule declaration,
             String name, LinuxRequesterTag tag, SegmentClassicLinuxDeploymentV2.DynamicPath tagDeclaration,
@@ -2630,6 +2635,9 @@ final class SegmentClassicLaunchTrust {
             if (loading.needed().get(i).requester() == helper.context()) {
                 // Keep only this requester's observation across the stages, not either parsed cache image.
                 var requester = observeLinuxNeededCache(members, loading, i, cacheRule, helper, deadline).requester();
+                var tag = planLinuxNeededRequesterTag(loading, i, deadline);
+                recheckLinuxJdkHelperMaterial(requester, null, aliases, deadline);
+                observeLinuxRequesterTagDirectories(members, loading, i, requester, tag, aliases, null, deadline);
                 var plan = planLinuxNeededDefaults(loading, i, deadline);
                 recheckLinuxJdkHelperMaterial(requester, null, aliases, deadline);
                 observeLinuxDefaultDirectories(members, loading, i, requester, plan, aliases, null, deadline);
@@ -3377,6 +3385,21 @@ final class SegmentClassicLaunchTrust {
             List<SegmentClassicLinuxDeploymentV2.File> declared, SegmentClassicLinuxDeploymentV2.Loading loading,
             int ruleIndex, long deadline) throws IOException {
         var members = fixedLinuxContextMembers(declared, loading, deadline);
+        var plan = planLinuxNeededRequesterTag(loading, ruleIndex, deadline);
+        // Complete all tag/mapping/joined-path preflight before even the requester is opened.
+        var aliases = linuxContextAliases(loading, deadline);
+        var requester = observeLinuxLoadPath(plan.rule().requester(), plan.context(),
+                members.get(plan.context().file()), plan.metadata(), loading.interpreter(), aliases, deadline);
+        var directories = new ArrayList<LinuxNeededDirectoryObservation>();
+        observeLinuxRequesterTagDirectories(members, loading, ruleIndex, requester, plan, aliases, directories,
+                deadline);
+        return new LinuxNeededRequesterTagObservation(ruleIndex, plan.rule(), plan.name(), plan.tag(),
+                plan.declaration(), requester, directories);
+    }
+
+    private static LinuxNeededRequesterTagPlan planLinuxNeededRequesterTag(
+            SegmentClassicLinuxDeploymentV2.Loading loading, int ruleIndex, long deadline) throws IOException {
+        requireTime(deadline);
         if (loading.policy().hwcaps() != 1 || ruleIndex < 0 || ruleIndex >= loading.needed().size()) {
             throw new IOException("Unsupported requester-tag policy or original NEEDED index");
         }
@@ -3409,21 +3432,24 @@ final class SegmentClassicLaunchTrust {
                 plans.add(new LinuxDirectoryPlan(index, builtinLogicalPaths(loading, index, name, deadline)));
             }
         }
-        // Complete all tag/mapping/joined-path preflight before even the requester is opened.
-        var aliases = linuxContextAliases(loading, deadline);
-        var requester = observeLinuxLoadPath(rule.requester(), context, members.get(context.file()), metadata,
-                loading.interpreter(), aliases, deadline);
-        if (!name.equals(requester.content().elf().needed().get(rule.ordinal()))) {
+        return new LinuxNeededRequesterTagPlan(rule, context, metadata, name, tag, declaration, plans);
+    }
+
+    private void observeLinuxRequesterTagDirectories(
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex, LinuxLoadPathObservation requester, LinuxNeededRequesterTagPlan plan,
+            Map<Path, String> aliases, List<LinuxNeededDirectoryObservation> details, long deadline)
+            throws IOException {
+        var actual = requester.content().elf();
+        if (requester.context() != plan.rule().requester() || requester.member() != plan.context().file()
+                || !requester.logical().equals(plan.context().logicalLoadName())
+                || !actual.rpath().equals(plan.metadata().rpath())
+                || !actual.runpath().equals(plan.metadata().runpath())
+                || !plan.name().equals(actual.needed().get(plan.rule().ordinal()))) {
             throw new IOException("Original tag NEEDED differs from its requester ELF observation");
         }
-        var directories = new ArrayList<LinuxNeededDirectoryObservation>();
-        for (var plan : plans) {
-            directories.add(observeLinuxDirectoryPositions(ruleIndex, plan.directory(), requester, plan.logicals(),
-                    members, loading, aliases, deadline));
-        }
-        for (var directory : directories) {
-            recheckLinuxDirectoryPositions(directory, loading, aliases, deadline);
-        }
+        observeLinuxPlannedDirectories(members, loading, ruleIndex, requester, plan.directories(), aliases,
+                details, deadline);
         var terminal = observeLinuxPath(LinuxPathKind.LOOKUP, loadingNativePath(requester.logical(), deadline),
                 aliases, true, deadline);
         if (!requester.path().equals(terminal) || !requester.content().identity().equals(terminal.identity())) {
@@ -3431,7 +3457,6 @@ final class SegmentClassicLaunchTrust {
         }
         files.requireHealthy();
         requireTime(deadline);
-        return new LinuxNeededRequesterTagObservation(ruleIndex, rule, name, tag, declaration, requester, directories);
     }
 
     private static int requesterTagDirectory(SegmentClassicLinuxDeploymentV2.Loading loading, String dirname,
@@ -3499,9 +3524,13 @@ final class SegmentClassicLaunchTrust {
         var aliases = linuxContextAliases(loading, deadline);
         var requester = observeLinuxLoadPath(plan.rule().requester(), plan.context(),
                 members.get(plan.context().file()), plan.metadata(), loading.interpreter(), aliases, deadline);
-        var directories = new ArrayList<LinuxDefaultDirectoryObservation>();
-        var state = observeLinuxDefaultDirectories(members, loading, ruleIndex, requester, plan, aliases, directories,
+        var observations = new ArrayList<LinuxNeededDirectoryObservation>();
+        var state = observeLinuxDefaultDirectories(members, loading, ruleIndex, requester, plan, aliases, observations,
                 deadline);
+        var directories = new ArrayList<LinuxDefaultDirectoryObservation>();
+        for (var observed : observations) {
+            directories.add(new LinuxDefaultDirectoryObservation(directories.size(), observed));
+        }
         var actual = requester.content().elf();
         return new LinuxNeededDefaultObservation(ruleIndex, plan.rule(), plan.name(), requester, actual.flags1Present(),
                 actual.flags1(), state, directories);
@@ -3540,7 +3569,7 @@ final class SegmentClassicLaunchTrust {
     private LinuxDefaultState observeLinuxDefaultDirectories(
             List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
             int ruleIndex, LinuxLoadPathObservation requester, LinuxNeededDefaultPlan plan, Map<Path, String> aliases,
-            List<LinuxDefaultDirectoryObservation> details, long deadline) throws IOException {
+            List<LinuxNeededDirectoryObservation> details, long deadline) throws IOException {
         var actual = requester.content().elf();
         if (requester.context() != plan.rule().requester() || requester.member() != plan.context().file()
                 || !requester.logical().equals(plan.context().logicalLoadName())
@@ -3553,22 +3582,30 @@ final class SegmentClassicLaunchTrust {
             requireTime(deadline);
             return LinuxDefaultState.SUPPRESSED_NODEFLIB;
         }
+        observeLinuxPlannedDirectories(members, loading, ruleIndex, requester, plan.directories(), aliases,
+                details, deadline);
+        files.requireHealthy();
+        requireTime(deadline);
+        return LinuxDefaultState.BUILTIN_POSITIONS_OBSERVED;
+    }
+
+    private void observeLinuxPlannedDirectories(
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex, LinuxLoadPathObservation requester, List<LinuxDirectoryPlan> plans,
+            Map<Path, String> aliases, List<LinuxNeededDirectoryObservation> details, long deadline)
+            throws IOException {
         var paths = new ArrayList<LinuxDirectoryPaths>();
-        for (int i = 0; i < plan.directories().size(); i++) {
-            var directory = plan.directories().get(i);
+        for (var directory : plans) {
             var observed = observeLinuxDirectoryPositions(ruleIndex, directory.directory(), requester,
                     directory.logicals(), members, loading, aliases, deadline);
             paths.add(directoryPaths(observed));
             if (details != null) {
-                details.add(new LinuxDefaultDirectoryObservation(i, observed));
+                details.add(observed);
             }
         }
         for (var directory : paths) {
             recheckLinuxDirectoryPaths(directory, loading, aliases, deadline);
         }
-        files.requireHealthy();
-        requireTime(deadline);
-        return LinuxDefaultState.BUILTIN_POSITIONS_OBSERVED;
     }
 
     /** Only an original NEEDED rule and deadline; the fixed cache configuration is selected from this owner. */
