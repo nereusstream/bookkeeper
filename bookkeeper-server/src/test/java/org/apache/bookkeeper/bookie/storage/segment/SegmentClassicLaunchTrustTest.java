@@ -2551,6 +2551,179 @@ public class SegmentClassicLaunchTrustTest {
                 List.of(directory), loading.elf()));
     }
 
+    private CandidateFixture jdkHelperTransitiveFixture(boolean approveIndirect) throws Exception {
+        var direct = jdkHelperCacheFixture(false, false);
+        var loading = direct.loading();
+        var members = new java.util.ArrayList<>(direct.files());
+        var metadata = new java.util.ArrayList<>(loading.elf());
+        var contexts = new java.util.ArrayList<>(loading.contexts());
+        var rules = new java.util.ArrayList<>(loading.needed());
+        var absent = new DynamicPath(false, "");
+        Path branch = Files.createDirectory(root.resolve("unselected")).resolve("libz.so.1");
+        Path defaults = Files.createDirectory(root.resolve("indirect-default"));
+        Path leaf = defaults.resolve("libindirect.so.1");
+        int branchContext = contexts.size();
+        int leafContext = branchContext + 1;
+        for (Path path : List.of(branch, leaf)) {
+            boolean first = path.equals(branch);
+            // The leaf points back to the branch as a declared alternative, so the graph contains a cycle.
+            String name = first ? leaf.getFileName().toString() : branch.getFileName().toString();
+            int member = members.size();
+            var elf = new SegmentClassicLinuxDeploymentV2.Elf(member, List.of(name), absent, absent,
+                    0, first ? 0 : 0x800L);
+            byte[] bytes = launcherDropperImage(elf, null);
+            write(path, bytes);
+            members.add(new SegmentClassicLinuxDeploymentV2.File(path.toString(),
+                    SegmentClassicLinuxDeployment.Role.LIBRARY, bytes.length, SegmentClassicHandoff.digest(bytes)));
+            metadata.add(elf);
+            contexts.add(new SegmentClassicLinuxDeploymentV2.Context(member, path.toString()));
+            rules.add(new SegmentClassicLinuxDeploymentV2.NeededRule(contexts.size() - 1, 0,
+                    first ? (approveIndirect ? List.of(leafContext) : List.of(0)) : List.of(0, branchContext)));
+        }
+        rules.set(4, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, branchContext)));
+        var declarations = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
+                loading.policy(), metadata, contexts, rules, loading.modules());
+        return new CandidateFixture(members, defaultLoading(declarations,
+                List.of(new SegmentClassicLinuxDeploymentV2.Directory(defaults.toString(), true)),
+                List.of(defaults.toString()), metadata));
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesRejectAnUnapprovedIndirectDefault() throws Exception {
+        var fixture = jdkHelperTransitiveFixture(false);
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(4, 5, 6, 7), owner.readLinuxJdkHelperNeededCandidates(fixture.files(),
+                    fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
+                    fixture.files(), fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("exact approved logical context"));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesFinishSharedAndCyclicRulesWithoutRevisitingThem() throws Exception {
+        var fixture = jdkHelperTransitiveFixture(true);
+        var owner = owner();
+        owner.initialize();
+        Path cache = Path.of(fixture.loading().configuration().get(0).path());
+        var cacheReads = new java.util.ArrayList<FileChannel>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && cache.equals(invocation.getArgument(0))) {
+                cacheReads.add((FileChannel) actual);
+            }
+            return actual;
+        })) {
+            assertEquals(List.of(4, 5, 6, 7, 8, 9), owner.readLinuxJdkHelperReachableCandidates(fixture.files(),
+                    fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertEquals(12, cacheReads.size()); // A/B from each of the six original ordinals.
+            assertTrue(cacheReads.stream().noneMatch(FileChannel::isOpen));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesDoNotBorrowApprovalFromTheSameFileInAnotherContext() throws Exception {
+        var fixture = jdkHelperTransitiveFixture(true);
+        var loading = fixture.loading();
+        Path alias = Files.createSymbolicLink(root.resolve("z-branch-view"), Path.of("unselected/libz.so.1"));
+        var aliases = new java.util.ArrayList<>(loading.aliases());
+        aliases.add(new SegmentClassicLinuxDeploymentV2.Alias(alias.toString(), "unselected/libz.so.1"));
+        var contexts = new java.util.ArrayList<>(loading.contexts());
+        contexts.add(5, new SegmentClassicLinuxDeploymentV2.Context(contexts.get(4).file(), alias.toString()));
+        var rules = new java.util.ArrayList<>(loading.needed());
+        rules.set(4, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, 4, 5)));
+        rules.set(8, new SegmentClassicLinuxDeploymentV2.NeededRule(4, 0, List.of(6)));
+        rules.set(9, new SegmentClassicLinuxDeploymentV2.NeededRule(6, 0, List.of(0, 4)));
+        rules.add(9, new SegmentClassicLinuxDeploymentV2.NeededRule(5, 0, List.of(0)));
+        var aliased = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), aliases, loading.directories(), loading.configuration(), loading.policy(),
+                loading.elf(), contexts, rules, loading.modules());
+        var owner = owner();
+        owner.initialize();
+        try {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
+                    fixture.files(), aliased, 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("exact approved logical context"));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesReadADeclaredButUnselectedZeroNeededLeaf() throws Exception {
+        var fixture = jdkHelperCacheFixture(false, false);
+        var loading = fixture.loading();
+        var members = new java.util.ArrayList<>(fixture.files());
+        var metadata = new java.util.ArrayList<>(loading.elf());
+        var contexts = new java.util.ArrayList<>(loading.contexts());
+        var rules = new java.util.ArrayList<>(loading.needed());
+        var absent = new DynamicPath(false, "");
+        Path leaf = root.resolve("declared-only-libz.so.1");
+        var declaration = new SegmentClassicLinuxDeploymentV2.Elf(members.size(), List.of(), absent, absent, 0, 0);
+        byte[] approved = launcherDropperImage(declaration, null);
+        members.add(new SegmentClassicLinuxDeploymentV2.File(leaf.toString(),
+                SegmentClassicLinuxDeployment.Role.LIBRARY, approved.length, SegmentClassicHandoff.digest(approved)));
+        metadata.add(declaration);
+        rules.set(4, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, contexts.size())));
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(declaration.file(), leaf.toString()));
+        // Keep valid ELF shape and length while changing the approved material's digest.
+        approved[approved.length - 1] ^= 1;
+        write(leaf, approved);
+        var extended = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
+                loading.policy(), metadata, contexts, rules, loading.modules());
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(4, 5, 6, 7), owner.readLinuxJdkHelperNeededCandidates(members, extended, 3, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
+                    members, extended, 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("SHA-256"));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesRejectSameBytesAtAReplacedEarlierRequester() throws Exception {
+        var fixture = jdkHelperTransitiveFixture(true);
+        var owner = owner();
+        owner.initialize();
+        Path branch = Path.of(fixture.loading().contexts().get(4).logicalLoadName());
+        Path leaf = Path.of(fixture.loading().contexts().get(5).logicalLoadName());
+        Path old = root.resolve("old-branch");
+        var replaced = new AtomicBoolean();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && leaf.equals(invocation.getArgument(0))
+                    && replaced.compareAndSet(false, true)) {
+                Files.move(branch, old);
+                Files.copy(old, branch, StandardCopyOption.COPY_ATTRIBUTES);
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
+                    fixture.files(), fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(replaced.get());
+            assertArrayEquals(Files.readAllBytes(old), Files.readAllBytes(branch));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("Reachable NEEDED context changed"));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
     private CandidateFixture jdkHelperDefaultFixture(boolean nodeflib, boolean rejectLaterOrdinal) throws Exception {
         var cached = jdkHelperCacheFixture(false, false);
         var l = cached.loading();

@@ -2706,7 +2706,7 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
-    /** Only this owner's actual cached helper can select the direct NEEDED candidate observations. */
+    /** Only this owner's actual cached helper can select the reachable NEEDED candidate observations. */
     synchronized void verifyLinuxJdkHelperNeededCandidates(long deadline) throws IOException {
         requireReady();
         initializingThread = Thread.currentThread();
@@ -2724,7 +2724,7 @@ final class SegmentClassicLaunchTrust {
                 throw new IOException("Original cached JDK helper declaration changed before its NEEDED reads");
             }
             int cacheRule = bound.helper().content().elf().needed().isEmpty() ? -1 : fixedLinuxCacheRule(loading);
-            observeLinuxJdkHelperNeededCandidates(members, loading, bound.helper(), bound.interpreter(),
+            observeLinuxJdkHelperReachableCandidates(members, loading, bound.helper(), bound.interpreter(),
                     cacheRule, deadline);
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
@@ -2738,6 +2738,19 @@ final class SegmentClassicLaunchTrust {
     synchronized List<Integer> readLinuxJdkHelperNeededCandidates(
             List<SegmentClassicLinuxDeploymentV2.File> declared, SegmentClassicLinuxDeploymentV2.Loading loading,
             int helperContext, int cacheRule, long deadline) throws IOException {
+        return readLinuxJdkHelperCandidates(declared, loading, helperContext, cacheRule, false, deadline);
+    }
+
+    /** Isolated graph fixture. Production always derives the graph root from its observed backend. */
+    synchronized List<Integer> readLinuxJdkHelperReachableCandidates(
+            List<SegmentClassicLinuxDeploymentV2.File> declared, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int helperContext, int cacheRule, long deadline) throws IOException {
+        return readLinuxJdkHelperCandidates(declared, loading, helperContext, cacheRule, true, deadline);
+    }
+
+    private List<Integer> readLinuxJdkHelperCandidates(
+            List<SegmentClassicLinuxDeploymentV2.File> declared, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int helperContext, int cacheRule, boolean reachable, long deadline) throws IOException {
         if (production) {
             throw new IOException("Data-only JDK helper candidate observations cannot select a production requester");
         }
@@ -2760,7 +2773,10 @@ final class SegmentClassicLaunchTrust {
             var helper = observeLinuxLoadPath(helperContext, context, member,
                     linuxElfDeclaration(loading, context.file()), loading.interpreter(), aliases, deadline);
             var interpreter = observeLinuxJdkHelperInterpreter(helper, members, loading, aliases, deadline);
-            return observeLinuxJdkHelperNeededCandidates(members, loading, helper, interpreter, cacheRule, deadline);
+            return reachable
+                    ? observeLinuxJdkHelperReachableCandidates(members, loading, helper, interpreter,
+                            cacheRule, deadline)
+                    : observeLinuxJdkHelperNeededCandidates(members, loading, helper, interpreter, cacheRule, deadline);
         } catch (IOException | RuntimeException | Error failure) {
             launcherFailure = failure;
             throw failure;
@@ -2774,22 +2790,12 @@ final class SegmentClassicLaunchTrust {
             LinuxLoadPathObservation helper, LinuxLoadPathObservation interpreter, int cacheRule, long deadline)
             throws IOException {
         var aliases = linuxContextAliases(loading, deadline);
-        recheckLinuxJdkHelperMaterial(helper, interpreter, aliases, deadline);
-        if (interpreter != null && !isLinuxSelfContainedLoader(interpreter.content().elf())) {
-            throw new IOException("Unsupported JDK helper PT_INTERP requires an approved self-contained ET_DYN loader");
-        }
+        requireLinuxJdkHelperSearchRoot(helper, interpreter, aliases, deadline);
         var completedRules = new ArrayList<Integer>();
         for (int i = 0; i < loading.needed().size(); i++) {
             requireTime(deadline);
             if (loading.needed().get(i).requester() == helper.context()) {
-                // Keep only this requester's observation across the stages, not either parsed cache image.
-                var requester = observeLinuxNeededCache(members, loading, i, cacheRule, helper, deadline).requester();
-                var tag = planLinuxNeededRequesterTag(loading, i, deadline);
-                recheckLinuxJdkHelperMaterial(requester, null, aliases, deadline);
-                observeLinuxRequesterTagDirectories(members, loading, i, requester, tag, aliases, null, deadline);
-                var plan = planLinuxNeededDefaults(loading, i, deadline);
-                recheckLinuxJdkHelperMaterial(requester, null, aliases, deadline);
-                observeLinuxDefaultDirectories(members, loading, i, requester, plan, aliases, null, deadline);
+                observeLinuxNeededCandidateStages(members, loading, helper, i, cacheRule, aliases, deadline);
                 completedRules.add(i);
             }
         }
@@ -2797,6 +2803,101 @@ final class SegmentClassicLaunchTrust {
         files.requireHealthy();
         requireTime(deadline);
         return List.copyOf(completedRules);
+    }
+
+    private List<Integer> observeLinuxJdkHelperReachableCandidates(
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            LinuxLoadPathObservation helper, LinuxLoadPathObservation interpreter, int cacheRule, long deadline)
+            throws IOException {
+        var aliases = linuxContextAliases(loading, deadline);
+        requireLinuxJdkHelperSearchRoot(helper, interpreter, aliases, deadline);
+        int[] ruleStarts = new int[loading.contexts().size() + 1];
+        int next = 0;
+        for (int context = 0; context < loading.contexts().size(); context++) {
+            requireTime(deadline);
+            ruleStarts[context] = next;
+            while (next < loading.needed().size() && loading.needed().get(next).requester() == context) {
+                next++;
+            }
+        }
+        ruleStarts[loading.contexts().size()] = next;
+        boolean[] reached = reachableLinuxNeededContexts(loading, ruleStarts, helper.context(), deadline);
+        var completedRules = new ArrayList<Integer>();
+        var retainedPaths = new ArrayList<LinuxPathObservation>();
+        // Original context order makes the observations reproducible and carries no loader ordering semantics.
+        for (int index = 0; index < reached.length; index++) {
+            requireTime(deadline);
+            if (!reached[index]) {
+                continue;
+            }
+            var requester = helper;
+            if (index != helper.context()) {
+                var context = loading.contexts().get(index);
+                requester = observeLinuxLoadPath(index, context, members.get(context.file()),
+                        linuxElfDeclaration(loading, context.file()), loading.interpreter(), aliases, deadline);
+                retainedPaths.add(requester.path());
+            }
+            for (int rule = ruleStarts[index]; rule < ruleStarts[index + 1]; rule++) {
+                observeLinuxNeededCandidateStages(members, loading, requester, rule, cacheRule, aliases, deadline);
+                completedRules.add(rule);
+            }
+        }
+        for (var path : retainedPaths) {
+            var after = observeLinuxPath(LinuxPathKind.LOOKUP, path.entry(), aliases, true, deadline);
+            if (!path.equals(after)) {
+                throw new IOException("Reachable NEEDED context changed across the JDK helper observations");
+            }
+        }
+        recheckLinuxJdkHelperMaterial(helper, interpreter, aliases, deadline);
+        files.requireHealthy();
+        requireTime(deadline);
+        return List.copyOf(completedRules);
+    }
+
+    /** Each index is enqueued once. Rules and candidates remain in their original bounded tables. */
+    private static boolean[] reachableLinuxNeededContexts(SegmentClassicLinuxDeploymentV2.Loading loading,
+            int[] ruleStarts, int root, long deadline) throws IOException {
+        boolean[] reached = new boolean[loading.contexts().size()];
+        var pending = new ArrayDeque<Integer>();
+        reached[root] = true;
+        pending.add(root);
+        while (!pending.isEmpty()) {
+            requireTime(deadline);
+            int requester = pending.removeFirst();
+            for (int rule = ruleStarts[requester]; rule < ruleStarts[requester + 1]; rule++) {
+                requireTime(deadline);
+                for (int candidate : loading.needed().get(rule).candidates()) {
+                    requireTime(deadline);
+                    if (!reached[candidate]) {
+                        reached[candidate] = true;
+                        pending.add(candidate);
+                    }
+                }
+            }
+        }
+        return reached;
+    }
+
+    private void requireLinuxJdkHelperSearchRoot(LinuxLoadPathObservation helper,
+            LinuxLoadPathObservation interpreter, Map<Path, String> aliases, long deadline) throws IOException {
+        recheckLinuxJdkHelperMaterial(helper, interpreter, aliases, deadline);
+        if (interpreter != null && !isLinuxSelfContainedLoader(interpreter.content().elf())) {
+            throw new IOException("Unsupported JDK helper PT_INTERP requires an approved self-contained ET_DYN loader");
+        }
+    }
+
+    private void observeLinuxNeededCandidateStages(List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, LinuxLoadPathObservation boundRequester,
+            int ruleIndex, int cacheRule, Map<Path, String> aliases, long deadline) throws IOException {
+        // Keep only this requester's observation across the stages, not either parsed cache image.
+        var requester = observeLinuxNeededCache(members, loading, ruleIndex, cacheRule, boundRequester, deadline)
+                .requester();
+        var tag = planLinuxNeededRequesterTag(loading, ruleIndex, deadline);
+        recheckLinuxJdkHelperMaterial(requester, null, aliases, deadline);
+        observeLinuxRequesterTagDirectories(members, loading, ruleIndex, requester, tag, aliases, null, deadline);
+        var plan = planLinuxNeededDefaults(loading, ruleIndex, deadline);
+        recheckLinuxJdkHelperMaterial(requester, null, aliases, deadline);
+        observeLinuxDefaultDirectories(members, loading, ruleIndex, requester, plan, aliases, null, deadline);
     }
 
     /** Original unit files only; successful disk observations do not establish manager effective configuration. */

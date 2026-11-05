@@ -1450,6 +1450,16 @@ D2 present cache在原`observeLoaderConfiguration`路径上复用私有Entry及s
 
 证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-preload-evidence-c48530e7`，保留原源码/class/日志/XML及静态rtld.c原字节（88632 bytes，SHA-256 `03681f7c7cea6f542a6416e3478a8c6bfe6c3a7969d1bb081dbba4f18395ed49`）。正常D2消费点与先后顺序按实际直线代码静态确认；临时树动态测试不是原批准D2 typed阳性，实际Linux/vendor启动仍NOT_EXECUTED。检查仅表示此时系统preload路径的受保护缺失，不证明已运行父JVM的历史、helper的LD_PRELOAD/--preload、未来exec时不变或完整加载闭包。boot身份的可信procfs来源仍待设计，不能把普通路径UUID读数补成authority；原childCommand/diagnostics拒绝和整体parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled及持续目标active保持。
 
+## 正常 D2 launcher 的 helper 可达依赖候选检查
+
+正常 D2 在原 JDK backend 与 native 环境采样之后，以原 owner 已绑定的 cached `jspawnhelper` 为根。复核其原 program/deployment 声明、路径与 PT_INTERP。解释器继续要求现有 self-contained ET_DYN 条件。沿每条原 `NeededRule.candidates` 的 context 索引求可达范围，包括未选中的候选。每个 context 只入队一次，同文件的不同逻辑路径及同名依赖的不同 ordinal 各自检查。队列与规则范围沿用原表界限。
+
+按原 context 与 ordinal 顺序实际读取可达 ELF，包括零 NEEDED 叶子。每条规则用该请求者的实际 ELF 复用 cache A/B、自身 RPATH 或 RUNPATH、默认目录三段检查，并核对本规则的批准候选。保留原 NODEFLIB、路径与 fd 身份、SHA-256、权限和实际首次关闭要求。组末复核原 helper、解释器及其余已观察 context 的路径身份。独立的 ModuleRequest/dlopen 表不参与这次静态依赖遍历。
+
+55 项定向 JUnit 和 Java 样式通过。新增临时 ELF、目录和 cache 用例覆盖未选中分支的间接未批准库、共享和环、同文件的独立逻辑 context、零 NEEDED 叶子及同字节换 inode。沿用已封存的宿主 JNI。批准 vendor/Linux 执行及实际加载选择为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-d2-helper-dependencies-evidence-6abcc85c`。
+
+检查顺序用于文件取证。祖先 RPATH、实际 namespace 和加载者链、已加载对象的名称与文件身份复用、hwcap/ISA/token 来源、实际候选选择及执行期间 parent libc environ 仍待验证。loader diagnostics、systemd 查询、child 启动和 handoff 继续受原执行条件约束。 [glibc 路径与已加载对象](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c) [glibc 依赖装载](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-deps.c)
+
 ## 正常 D2 launcher 的调用线程 cgroup 成员关系
 
 两轮原 cgroup 启动检查均在已有 source、provider、deadline、目录类型及保护链核验后，从同一个 held root 取得组合观察。原 JNI mount 查询仍独立可用。组合 JNI 只扫描一次 mountinfo，并在同一个验证过的 procfs 根下两次冷开固定 `thread-self/cgroup`，沿用初始 cgroup namespace 和 mount namespace 前后核验。
