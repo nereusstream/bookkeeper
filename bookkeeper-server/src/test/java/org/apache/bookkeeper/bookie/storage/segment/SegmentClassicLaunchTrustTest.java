@@ -2693,6 +2693,165 @@ public class SegmentClassicLaunchTrustTest {
         }
     }
 
+    private record UnitFixture(List<SegmentClassicLinuxDeploymentV2.File> members,
+                               List<SegmentClassicLinuxDeploymentV2.Unit> units) { }
+
+    private UnitFixture unitFixture() throws Exception {
+        var members = new java.util.ArrayList<SegmentClassicLinuxDeploymentV2.File>();
+        for (int i = 0; i < 4; i++) {
+            Path path = root.resolve("unit-" + i);
+            byte[] bytes = ("[Unit]\nDescription=fixture-" + i + "\n").getBytes(StandardCharsets.UTF_8);
+            write(path, bytes);
+            members.add(new SegmentClassicLinuxDeploymentV2.File(path.toString(), i % 2 == 0
+                    ? SegmentClassicLinuxDeployment.Role.UNIT_FRAGMENT
+                    : SegmentClassicLinuxDeployment.Role.UNIT_DROPIN, bytes.length,
+                    SegmentClassicHandoff.digest(bytes)));
+        }
+        var first = members.get(1);
+        members.add(new SegmentClassicLinuxDeploymentV2.File(root.resolve("unreferenced-missing-drop-in").toString(),
+                first.role(), first.length(), first.sha256()));
+        var original = SegmentClassicLinuxDeployment.decode(
+                SegmentClassicLinuxDeploymentTest.vector("classic-linux-deployment-v2")).versionTwo().units();
+        return new UnitFixture(List.copyOf(members), List.of(unitFiles(original.get(0), 0, List.of(1, 3)),
+                unitFiles(original.get(1), 2, List.of(1))));
+    }
+
+    private static SegmentClassicLinuxDeploymentV2.Unit unitFiles(SegmentClassicLinuxDeploymentV2.Unit unit,
+            int fragment, List<Integer> dropIns) {
+        return new SegmentClassicLinuxDeploymentV2.Unit(unit.kind(), unit.id(), unit.names(), unit.fileState(),
+                fragment, dropIns, unit.commonRule(), unit.relations(), unit.service());
+    }
+
+    @Test
+    public void unitFilesKeepEachServiceAndTargetReferenceInOriginalOrder() throws Exception {
+        var fixture = unitFixture();
+        var owner = owner();
+        owner.initialize();
+        try {
+            var result = owner.readLinuxUnitFiles(fixture.members(), fixture.units(),
+                    SegmentClassicLinuxElfTest.deadline());
+            assertEquals(List.of(0, 1, 3, 2, 1), result.stream().map(r -> r.member()).toList());
+            assertEquals(List.of(0, 0, 0, 1, 1), result.stream().map(r -> r.unit()).toList());
+            assertEquals(List.of(-1, 0, 1, -1, 0), result.stream().map(r -> r.dropIn()).toList());
+            for (var observed : result) {
+                var file = fixture.members().get(observed.member());
+                assertEquals(Path.of(file.path()), observed.path());
+                assertEquals(file.length(), observed.material().identity().size());
+                assertEquals(((Number) Files.getAttribute(observed.path(), "unix:ino")).longValue(),
+                        observed.material().identity().inode());
+                assertArrayEquals(file.sha256().value(), observed.sha256().value());
+                assertNull(observed.material().elf());
+                assertNull(observed.material().cache());
+                assertNull(observed.material().configuration());
+            }
+            assertThrows(UnsupportedOperationException.class, result::clear);
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void unitFilesRejectLaterEqualLengthDropInDamageAndActuallyClose() throws Exception {
+        var fixture = unitFixture();
+        var damaged = fixture.members().get(3);
+        byte[] bytes = Files.readAllBytes(Path.of(damaged.path()));
+        bytes[bytes.length - 2] ^= 1;
+        write(Path.of(damaged.path()), bytes);
+        var owner = faultOwner();
+        owner.initialize();
+        var opened = new java.util.ArrayList<SegmentDataFileLockTest.FaultChannel>();
+        var paths = new java.util.ArrayList<Path>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                paths.add(invocation.getArgument(0));
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                opened.add(fault);
+                return fault;
+            }
+            return actual;
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxUnitFiles(fixture.members(),
+                    fixture.units(), SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("SHA-256"));
+            assertEquals(List.of(0, 1, 3).stream().map(i -> Path.of(fixture.members().get(i).path())).toList(), paths);
+            for (var channel : opened) {
+                assertEquals(1, channel.closes.get());
+                assertFalse(channel.actual.isOpen());
+            }
+            assertThrows(IOException.class, owner::parsed);
+            var drained = owner.closeAndDrain();
+            assertTrue(drained.drained());
+            assertSame(failure, drained.launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        var fragment = fixture.members().get(0);
+        assertArrayEquals(fragment.sha256().value(), SegmentClassicHandoff.digest(
+                Files.readAllBytes(Path.of(fragment.path()))).value());
+        assertEquals(damaged.length(), Files.size(Path.of(damaged.path())));
+    }
+
+    @Test
+    public void unitFilesRejectSameByteDifferentFdForLaterDropIn() throws Exception {
+        var fixture = unitFixture();
+        Path path = Path.of(fixture.members().get(3).path());
+        Path other = Files.copy(path, root.resolve("different-unit-inode"));
+        assertFalse(Files.isSameFile(path, other));
+        var owner = owner();
+        owner.initialize();
+        var redirected = new AtomicBoolean();
+        try (FileChannel wrong = FileChannel.open(other, StandardOpenOption.READ);
+             var channels = mockStatic(FileChannel.class, call -> {
+                 if (call.getMethod().getName().equals("open") && call.getMethod().getParameterCount() == 3
+                         && path.equals(call.getArgument(0)) && redirected.compareAndSet(false, true)) {
+                     return wrong;
+                 }
+                 return call.callRealMethod();
+             })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxUnitFiles(fixture.members(),
+                    fixture.units(), SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(redirected.get());
+            assertTrue(failure.getMessage(), failure.getMessage().contains("Original file fd identity differs"));
+            assertFalse(wrong.isOpen());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertArrayEquals(Files.readAllBytes(path), Files.readAllBytes(other));
+    }
+
+    @Test
+    public void unitFilesRejectLaterInvalidRoleOrIndexBeforeAnyTargetIo() throws Exception {
+        var fixture = unitFixture();
+        for (int invalid : List.of(2, fixture.members().size())) {
+            var units = List.of(fixture.units().get(0), unitFiles(fixture.units().get(1), 2, List.of(invalid)));
+            var owner = owner();
+            owner.initialize();
+            try (var targets = mockStatic(Files.class, invocation -> {
+                throw new AssertionError("Invalid unit file reference reached target I/O");
+            })) {
+                assertThrows(IOException.class, () -> owner.readLinuxUnitFiles(fixture.members(), units,
+                        SegmentClassicLinuxElfTest.deadline()));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void typedUnitFilesWithoutOriginalProviderSourceCannotReachTargetIo() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound typed unit file read reached target I/O");
+        })) {
+            assertThrows(IOException.class, () -> owner.verifyLinuxUnitFiles(SegmentClassicLinuxElfTest.deadline()));
+        }
+        assertThrows(IOException.class, owner::parsed);
+        assertTrue(owner.closeAndDrain().drained());
+    }
+
     @Test
     public void typedJdkHelperWithoutOriginalProviderSourceCannotReachTargetIo() throws Exception {
         var owner = owner();

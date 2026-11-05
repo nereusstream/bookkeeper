@@ -1218,6 +1218,16 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的 unit 主文件与有序 drop-in 观察
+
+2026-11-05在父`56ccf5c724622240e4c19feedbc088b623b6d679`上，正常schema2启动在helper材料之后、独立dropper/childCommand/私钥之前调用`verifyLinuxUnitFiles(deadline)`。入口先复核owner的`originalLinuxDeployment`，再复用D2解码中的`requireUnitFileReferences`检查整张unit表的fragment/UNIT_FRAGMENT和每个dropIns/UNIT_DROPIN索引；这些检查全部先于目标I/O。随后按原units顺序，逐fragment及其原序drop-in读取对应member的canonical physical路径、long长度和批准SHA。结果保留unit索引、fragment的-1或drop-in位置、member索引、实读路径/摘要/identity/parents；共享member按各引用再次读取，未引用的同role文件不纳入。数据入口仅files/units/deadline并共用同一私有体，不授Installed或资格，不接caller Path、backend或loader aliases。
+
+文件读取复用`hashFile(NONE, bindIdentity=true)`，不新建解析器：checked/chain、owner/mode/ACL/单链接、只读NOFOLLOW、完整流SHA和持有channel前后实际fd dev/ino绑定、首close、原失败/drain和期限保持。NONE的fd错误使用file诊断。每项只是本次读取的磁盘事实，不是跨unit原子快照或manager配置证明。[systemd 255](https://www.freedesktop.org/software/systemd/man/255/org.freedesktop.systemd1.html)的FragmentPath、DropInPaths及NeedDaemonReload属于manager属性；后续仍须取得实际返回值，对照原引用并按冻结的A/文件/B顺序重新核验，不用这次冷读代替。
+
+新增5项真实临时文件测试覆盖：service和target的全部原引用及共享drop-in顺序、未引用缺失文件不读；主文件正确而后置drop-in等长损坏时整次拒绝，已打开三channel各首close/实际关闭、保留原失败并drain；后置drop-in重定向到同字节异inode的真实raw fd时拒绝并关闭；后置错误role/index在首目标I/O前拒绝；typed入口缺原source时pre-I/O拒绝。新增5＋原Trust helper8＋Inputs6＋DeploymentV2 13＋Launcher3共35项全过，0失败/错误/跳过，Java Spotless/Checkstyle退出0。四code、1450输入、原class/日志/XML及精确9406191e…库保存在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-unit-files-evidence-56ccf5c7`；JNI未改/重建，旧PASS未移绑。
+
+正常D2接线及顺序为静态核对，动态测试走同一私有读取体的数据入口；批准Linux/vendor/source阳性NOT_EXECUTED。不读写宿主unit作fixture，不运行systemctl/daemon-reload/helper/diagnostics/backend或显式初始化ProcessImpl；原childCommand/diagnostics拒绝保持。manager有效配置、helper传递加载、完整Unix资格及parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled及完整目标active保持。
+
 ## 正常 D2 launcher 的固定 JDK helper 文件观察
 
 2026-11-05在父`e615f7d893ef54b4dedb570dbabba2914fec5f57`上，正常schema2块在候选全集之后、独立dropper之前，一次调用原`verifyLinuxJdkHelper(deadline)`。只消费原owner的raw javaHome、verifiedProgram和D2表，固定`lib/jspawnhelper`须同时对应program JDK成员、D2 START_CHAIN成员及exact执行context，三索引/长度/SHA/角色先核，再复用原owned ELF2/实际fd、PT_INTERP字面匹配及helper/interpreter末端复核。原观察器未改，不从向量或宿主JDK补材料，也不推断backend实际会执行helper。

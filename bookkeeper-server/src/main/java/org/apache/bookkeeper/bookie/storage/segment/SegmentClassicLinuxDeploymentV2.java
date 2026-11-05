@@ -551,6 +551,7 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
     }
 
     private static void requireUnits(List<File> files, List<Unit> units, int launcher, List<InstallLink> links) {
+        requireUnitFileReferences(files, units);
         reference(launcher, units.size());
         if (units.get(launcher).kind() != Kind.SERVICE
                 || units.stream().filter(u -> u.kind() == Kind.SERVICE).count() != 1) {
@@ -564,10 +565,6 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
                 if (names.put(name, i) != null) {
                     throw new IllegalArgumentException("Unit aliases must be globally unique");
                 }
-            }
-            role(files, unit.fragment(), Role.UNIT_FRAGMENT);
-            for (int dropIn : unit.dropIns()) {
-                role(files, dropIn, Role.UNIT_DROPIN);
             }
             if (unit.service() != null) {
                 for (Execution execution : unit.service().execution()) {
@@ -615,6 +612,16 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
                                 .noneMatch(target.names()::contains)) {
                     throw new IllegalArgumentException("Install dependency lacks its exact source/manager relation");
                 }
+            }
+        }
+    }
+
+    /** Original unit file references only; shared by full decoding and data-only material reads. */
+    static void requireUnitFileReferences(List<File> files, List<Unit> units) {
+        for (Unit unit : units) {
+            role(files, unit.fragment(), Role.UNIT_FRAGMENT);
+            for (int dropIn : unit.dropIns()) {
+                role(files, dropIn, Role.UNIT_DROPIN);
             }
         }
     }

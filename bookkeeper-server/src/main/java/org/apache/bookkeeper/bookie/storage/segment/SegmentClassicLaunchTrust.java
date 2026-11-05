@@ -116,6 +116,10 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** One original unit reference; dropIn is -1 for its fragment, otherwise the original drop-in position. */
+    record LinuxUnitFileObservation(int unit, int dropIn, int member, Path path,
+                                    SegmentClassicHandoff.Digest sha256, LinuxFileObservation material) { }
+
     /** Original member observations only; not a loader choice, installed provenance or qualification. */
     record LinuxElfMemberObservation(int member, Identity identity, List<Identity> parents,
                                      SegmentClassicHandoff.Digest sha256, SegmentClassicLinuxElf.Image2 elf) {
@@ -2271,6 +2275,73 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Original unit files only; successful disk observations do not establish manager effective configuration. */
+    synchronized List<LinuxUnitFileObservation> verifyLinuxUnitFiles(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            var deployment = originalLinuxDeployment(deadline);
+            return observeLinuxUnitFiles(deployment.files(), deployment.units(), deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Data-only unit references; cannot confer installed provenance or query the systemd manager. */
+    synchronized List<LinuxUnitFileObservation> readLinuxUnitFiles(
+            List<SegmentClassicLinuxDeploymentV2.File> declarations,
+            List<SegmentClassicLinuxDeploymentV2.Unit> units, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxUnitFiles(declarations, units, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private List<LinuxUnitFileObservation> observeLinuxUnitFiles(
+            List<SegmentClassicLinuxDeploymentV2.File> declarations,
+            List<SegmentClassicLinuxDeploymentV2.Unit> declaredUnits, long deadline) throws IOException {
+        requireTime(deadline);
+        var members = List.copyOf(declarations);
+        var units = List.copyOf(declaredUnits);
+        if (members.isEmpty() || members.size() > 1024 || units.isEmpty() || units.size() > 32) {
+            throw new IOException("Unit material tables exceed their original D2 bounds");
+        }
+        try {
+            SegmentClassicLinuxDeploymentV2.requireUnitFileReferences(members, units);
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("Unit file references differ from their original roles or indices", invalid);
+        }
+        var result = new ArrayList<LinuxUnitFileObservation>();
+        for (int i = 0; i < units.size(); i++) {
+            var unit = units.get(i);
+            result.add(observeLinuxUnitFile(i, -1, unit.fragment(), members, deadline));
+            for (int j = 0; j < unit.dropIns().size(); j++) {
+                result.add(observeLinuxUnitFile(i, j, unit.dropIns().get(j), members, deadline));
+            }
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+        return List.copyOf(result);
+    }
+
+    private LinuxUnitFileObservation observeLinuxUnitFile(int unit, int dropIn, int member,
+            List<SegmentClassicLinuxDeploymentV2.File> members, long deadline) throws IOException {
+        var file = members.get(member);
+        Path path = linuxMaterialPath(file.path(), deadline);
+        var observed = hashFile(path, file.length(), file.sha256(), false, LinuxContentKind.NONE, true, deadline);
+        return new LinuxUnitFileObservation(unit, dropIn, member, path, observed.content().sha256(), observed.legacy());
+    }
+
     /** Independent member/subgraph data only; does not establish a complete program, typed source or backend. */
     synchronized LinuxJdkHelperObservation readLinuxJdkHelper(String javaHome,
             List<SegmentClassicLaunchProgram.File> program, List<SegmentClassicLinuxDeploymentV2.File> members,
@@ -3416,7 +3487,8 @@ final class SegmentClassicLaunchTrust {
                 requireTime(deadlineNanos);
                 if (held.device() != before.device() || held.inode() != before.inode()) {
                     throw new IOException("Original " + (kind == LinuxContentKind.ELF2 ? "ELF2"
-                            : kind == LinuxContentKind.LDCONFIG ? "configuration" : "cache")
+                            : kind == LinuxContentKind.LDCONFIG ? "configuration"
+                            : kind == LinuxContentKind.CACHE ? "cache" : "file")
                             + " fd identity differs from its checked material path");
                 }
             }
@@ -3427,7 +3499,8 @@ final class SegmentClassicLaunchTrust {
                 requireTime(deadlineNanos);
                 if (!held.equals(after)) {
                     throw new IOException("Original " + (kind == LinuxContentKind.ELF2 ? "ELF2"
-                            : kind == LinuxContentKind.LDCONFIG ? "configuration" : "cache")
+                            : kind == LinuxContentKind.LDCONFIG ? "configuration"
+                            : kind == LinuxContentKind.CACHE ? "cache" : "file")
                             + " fd identity changed during its hash/parser read");
                 }
             }
