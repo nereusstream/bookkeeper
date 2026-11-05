@@ -1450,6 +1450,16 @@ D2 present cache在原`observeLoaderConfiguration`路径上复用私有Entry及s
 
 证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-preload-evidence-c48530e7`，保留原源码/class/日志/XML及静态rtld.c原字节（88632 bytes，SHA-256 `03681f7c7cea6f542a6416e3478a8c6bfe6c3a7969d1bb081dbba4f18395ed49`）。正常D2消费点与先后顺序按实际直线代码静态确认；临时树动态测试不是原批准D2 typed阳性，实际Linux/vendor启动仍NOT_EXECUTED。检查仅表示此时系统preload路径的受保护缺失，不证明已运行父JVM的历史、helper的LD_PRELOAD/--preload、未来exec时不变或完整加载闭包。boot身份的可信procfs来源仍待设计，不能把普通路径UUID读数补成authority；原childCommand/diagnostics拒绝和整体parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled及持续目标active保持。
 
+## 正常 D2 launcher 的祖先 RPATH 候选检查
+
+在原 cached helper 可达声明图中，每个请求者使用有界反向遍历找出能到达它的 context，排除自身。共享和环按 context 索引去重。这个保守范围包含未选中分支，环也可能纳入实际加载时不会成为祖先的对象。无法核验这些对象带来的目录或候选时拒绝启动。
+
+请求者的实际 ELF 只要存在 RUNPATH，祖先 RPATH 阶段即跳过，空 RUNPATH 也适用。祖先存在 RUNPATH 时忽略其自身 RPATH，并继续向上遍历。目录来自原 owner 实读 ELF 中的有效 RPATH，并在使用前和整组末轮复核来源身份。沿用原绝对路径、DST、CWD 和目录声明规则。 [glibc 搜索分支](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c) [glibc 双标签规则](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/get-dynamic-info.h)
+
+每条规则使用当前请求者的原始 `DT_NEEDED` 序号及批准集合，检查祖先目录下现有的四个固定候选位置。先前 cache、自身路径标签和默认目录检查仍参与同一规则的完成判断。保留路径、fd、SHA-256、真实首次关闭与首错纪律。工作顺序仅用于取证。
+
+真实文件反例在补齐检查前放行了未批准间接库，补齐后拒绝。最终 77 项定向 JUnit 和 Java 样式通过，覆盖空 RUNPATH、经 RUNPATH 祖先继续向上、同一路径在不同请求中的独立批准、同字节来源替换及原关闭失败。沿用已封存的宿主 JNI。实际加载者链、对象复用、token/hwcap 选择、执行环境连续性及批准 Linux/vendor 执行为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-d2-helper-inherited-rpath-evidence-0f039e2c`。
+
 ## 正常 D2 launcher 的 helper 可达依赖候选检查
 
 正常 D2 在原 JDK backend 与 native 环境采样之后，以原 owner 已绑定的 cached `jspawnhelper` 为根。复核其原 program/deployment 声明、路径与 PT_INTERP。解释器继续要求现有 self-contained ET_DYN 条件。沿每条原 `NeededRule.candidates` 的 context 索引求可达范围，包括未选中的候选。每个 context 只入队一次，同文件的不同逻辑路径及同名依赖的不同 ordinal 各自检查。队列与规则范围沿用原表界限。

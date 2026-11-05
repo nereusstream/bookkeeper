@@ -50,6 +50,7 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
@@ -2795,7 +2796,8 @@ final class SegmentClassicLaunchTrust {
         for (int i = 0; i < loading.needed().size(); i++) {
             requireTime(deadline);
             if (loading.needed().get(i).requester() == helper.context()) {
-                observeLinuxNeededCandidateStages(members, loading, helper, i, cacheRule, aliases, deadline);
+                observeLinuxNeededCandidateStages(members, loading, helper, i, cacheRule, aliases, List.of(),
+                        deadline);
                 completedRules.add(i);
             }
         }
@@ -2822,36 +2824,134 @@ final class SegmentClassicLaunchTrust {
         }
         ruleStarts[loading.contexts().size()] = next;
         boolean[] reached = reachableLinuxNeededContexts(loading, ruleStarts, helper.context(), deadline);
+        var predecessors = reachableLinuxNeededPredecessors(loading, reached, deadline);
+        var retainedPaths = new LinuxPathObservation[reached.length];
+        var rpathDirectories = observeLinuxHelperRpathSources(members, loading, helper, reached,
+                retainedPaths, aliases, deadline);
         var completedRules = new ArrayList<Integer>();
-        var retainedPaths = new ArrayList<LinuxPathObservation>();
         // Original context order makes the observations reproducible and carries no loader ordering semantics.
         for (int index = 0; index < reached.length; index++) {
             requireTime(deadline);
             if (!reached[index]) {
                 continue;
             }
-            var requester = helper;
-            if (index != helper.context()) {
-                var context = loading.contexts().get(index);
-                requester = observeLinuxLoadPath(index, context, members.get(context.file()),
-                        linuxElfDeclaration(loading, context.file()), loading.interpreter(), aliases, deadline);
-                retainedPaths.add(requester.path());
+            var requester = observeLinuxHelperContext(members, loading, helper, index, aliases, deadline);
+            if (retainedPaths[index] != null && !retainedPaths[index].equals(requester.path())) {
+                throw new IOException("Reachable NEEDED context changed across the JDK helper observations");
             }
+            retainedPaths[index] = requester.path();
+            List<Integer> inherited = ruleStarts[index] == ruleStarts[index + 1]
+                    || requester.content().elf().runpath().present() ? List.of()
+                    : inheritedLinuxRpathDirectories(index, predecessors, rpathDirectories, retainedPaths,
+                            aliases, deadline);
             for (int rule = ruleStarts[index]; rule < ruleStarts[index + 1]; rule++) {
-                observeLinuxNeededCandidateStages(members, loading, requester, rule, cacheRule, aliases, deadline);
+                observeLinuxNeededCandidateStages(members, loading, requester, rule, cacheRule, aliases,
+                        inherited, deadline);
                 completedRules.add(rule);
             }
         }
-        for (var path : retainedPaths) {
-            var after = observeLinuxPath(LinuxPathKind.LOOKUP, path.entry(), aliases, true, deadline);
-            if (!path.equals(after)) {
-                throw new IOException("Reachable NEEDED context changed across the JDK helper observations");
+        for (int index = 0; index < retainedPaths.length; index++) {
+            if (index != helper.context() && retainedPaths[index] != null) {
+                recheckLinuxHelperGraphPath(retainedPaths[index], aliases, deadline);
             }
         }
         recheckLinuxJdkHelperMaterial(helper, interpreter, aliases, deadline);
         files.requireHealthy();
         requireTime(deadline);
         return List.copyOf(completedRules);
+    }
+
+    private LinuxLoadPathObservation observeLinuxHelperContext(List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, LinuxLoadPathObservation helper, int index,
+            Map<Path, String> aliases, long deadline) throws IOException {
+        if (index == helper.context()) {
+            return helper;
+        }
+        var context = loading.contexts().get(index);
+        return observeLinuxLoadPath(index, context, members.get(context.file()),
+                linuxElfDeclaration(loading, context.file()), loading.interpreter(), aliases, deadline);
+    }
+
+    private BitSet[] observeLinuxHelperRpathSources(List<SegmentClassicLinuxDeploymentV2.File> members,
+            SegmentClassicLinuxDeploymentV2.Loading loading, LinuxLoadPathObservation helper, boolean[] reached,
+            LinuxPathObservation[] retainedPaths, Map<Path, String> aliases, long deadline) throws IOException {
+        var sources = new BitSet[reached.length];
+        for (int index = 0; index < reached.length; index++) {
+            requireTime(deadline);
+            if (!reached[index]) {
+                continue;
+            }
+            var declared = linuxElfDeclaration(loading, loading.contexts().get(index).file());
+            if (declared.runpath().present() || !declared.rpath().present() || declared.rpath().value().isEmpty()) {
+                continue;
+            }
+            // Declarations only identify which material to read. Use the actual ELF as the tag source.
+            var observed = observeLinuxHelperContext(members, loading, helper, index, aliases, deadline);
+            var directories = new BitSet(loading.directories().size());
+            for (int directory : fixedLinuxTagDirectories(loading, observed.content().elf().rpath(), deadline)) {
+                directories.set(directory);
+            }
+            retainedPaths[index] = observed.path();
+            sources[index] = directories;
+        }
+        return sources;
+    }
+
+    private static BitSet[] reachableLinuxNeededPredecessors(SegmentClassicLinuxDeploymentV2.Loading loading,
+            boolean[] reached, long deadline) throws IOException {
+        var predecessors = new BitSet[reached.length];
+        for (var rule : loading.needed()) {
+            requireTime(deadline);
+            if (!reached[rule.requester()]) {
+                continue;
+            }
+            for (int candidate : rule.candidates()) {
+                requireTime(deadline);
+                if (predecessors[candidate] == null) {
+                    predecessors[candidate] = new BitSet();
+                }
+                predecessors[candidate].set(rule.requester());
+            }
+        }
+        return predecessors;
+    }
+
+    /** Conservative graph predecessors, including unselected branches. No actual loading chain is established. */
+    private List<Integer> inheritedLinuxRpathDirectories(int requester, BitSet[] predecessors, BitSet[] sources,
+            LinuxPathObservation[] retainedPaths, Map<Path, String> aliases, long deadline) throws IOException {
+        var visited = new BitSet(predecessors.length);
+        var directories = new BitSet();
+        var pending = new ArrayDeque<Integer>();
+        visited.set(requester);
+        pending.add(requester);
+        while (!pending.isEmpty()) {
+            requireTime(deadline);
+            var parents = predecessors[pending.removeFirst()];
+            if (parents == null) {
+                continue;
+            }
+            for (int parent = parents.nextSetBit(0); parent >= 0; parent = parents.nextSetBit(parent + 1)) {
+                requireTime(deadline);
+                if (!visited.get(parent)) {
+                    visited.set(parent);
+                    pending.add(parent);
+                    // A RUNPATH-bearing ancestor supplies no RPATH but does not stop the reverse walk.
+                    if (sources[parent] != null) {
+                        recheckLinuxHelperGraphPath(retainedPaths[parent], aliases, deadline);
+                        directories.or(sources[parent]);
+                    }
+                }
+            }
+        }
+        return directories.stream().boxed().toList();
+    }
+
+    private void recheckLinuxHelperGraphPath(LinuxPathObservation path, Map<Path, String> aliases, long deadline)
+            throws IOException {
+        var after = observeLinuxPath(LinuxPathKind.LOOKUP, path.entry(), aliases, true, deadline);
+        if (!path.equals(after)) {
+            throw new IOException("Reachable NEEDED context changed across the JDK helper observations");
+        }
     }
 
     /** Each index is enqueued once. Rules and candidates remain in their original bounded tables. */
@@ -2888,13 +2988,23 @@ final class SegmentClassicLaunchTrust {
 
     private void observeLinuxNeededCandidateStages(List<SegmentClassicLinuxDeploymentV2.File> members,
             SegmentClassicLinuxDeploymentV2.Loading loading, LinuxLoadPathObservation boundRequester,
-            int ruleIndex, int cacheRule, Map<Path, String> aliases, long deadline) throws IOException {
+            int ruleIndex, int cacheRule, Map<Path, String> aliases, List<Integer> inherited, long deadline)
+            throws IOException {
         // Keep only this requester's observation across the stages, not either parsed cache image.
         var requester = observeLinuxNeededCache(members, loading, ruleIndex, cacheRule, boundRequester, deadline)
                 .requester();
         var tag = planLinuxNeededRequesterTag(loading, ruleIndex, deadline);
         recheckLinuxJdkHelperMaterial(requester, null, aliases, deadline);
         observeLinuxRequesterTagDirectories(members, loading, ruleIndex, requester, tag, aliases, null, deadline);
+        if (!inherited.isEmpty()) {
+            var inheritedPlans = new ArrayList<LinuxDirectoryPlan>();
+            for (int directory : inherited) {
+                inheritedPlans.add(new LinuxDirectoryPlan(directory,
+                        builtinLogicalPaths(loading, directory, tag.name(), deadline)));
+            }
+            observeLinuxPlannedDirectories(members, loading, ruleIndex, requester, inheritedPlans, aliases,
+                    null, deadline);
+        }
         var plan = planLinuxNeededDefaults(loading, ruleIndex, deadline);
         recheckLinuxJdkHelperMaterial(requester, null, aliases, deadline);
         observeLinuxDefaultDirectories(members, loading, ruleIndex, requester, plan, aliases, null, deadline);
@@ -3667,22 +3777,30 @@ final class SegmentClassicLaunchTrust {
                 : tag == LinuxRequesterTag.RPATH ? metadata.rpath() : null;
         var plans = new ArrayList<LinuxDirectoryPlan>();
         if (declaration != null) {
-            var unknown = SegmentClassicLinuxTokens.Value.unobserved();
-            var expanded = SegmentClassicLinuxDynamicPath.expand(declaration, unknown, unknown, unknown, deadline);
-            if (expanded.state() != SegmentClassicLinuxTokens.State.AVAILABLE) {
-                throw new IOException("Unsupported requester tag depends on unobserved token sources");
-            }
-            for (var directory : expanded.directories()) {
-                requireTime(deadline);
-                if (directory.kind() != SegmentClassicLinuxDynamicPath.Kind.DIRECTORY
-                        || !directory.dirname().startsWith("/")) {
-                    throw new IOException("Unsupported requester tag contains CWD or a relative directory");
-                }
-                int index = requesterTagDirectory(loading, directory.dirname(), deadline);
+            for (int index : fixedLinuxTagDirectories(loading, declaration, deadline)) {
                 plans.add(new LinuxDirectoryPlan(index, builtinLogicalPaths(loading, index, name, deadline)));
             }
         }
         return new LinuxNeededRequesterTagPlan(rule, context, metadata, name, tag, declaration, plans);
+    }
+
+    private static List<Integer> fixedLinuxTagDirectories(SegmentClassicLinuxDeploymentV2.Loading loading,
+            SegmentClassicLinuxDeploymentV2.DynamicPath declaration, long deadline) throws IOException {
+        var unknown = SegmentClassicLinuxTokens.Value.unobserved();
+        var expanded = SegmentClassicLinuxDynamicPath.expand(declaration, unknown, unknown, unknown, deadline);
+        if (expanded.state() != SegmentClassicLinuxTokens.State.AVAILABLE) {
+            throw new IOException("Unsupported requester tag depends on unobserved token sources");
+        }
+        var indices = new ArrayList<Integer>();
+        for (var directory : expanded.directories()) {
+            requireTime(deadline);
+            if (directory.kind() != SegmentClassicLinuxDynamicPath.Kind.DIRECTORY
+                    || !directory.dirname().startsWith("/")) {
+                throw new IOException("Unsupported requester tag contains CWD or a relative directory");
+            }
+            indices.add(requesterTagDirectory(loading, directory.dirname(), deadline));
+        }
+        return List.copyOf(indices);
     }
 
     private void observeLinuxRequesterTagDirectories(

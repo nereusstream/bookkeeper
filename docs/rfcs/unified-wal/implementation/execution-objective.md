@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+正常 D2 的 helper 依赖检查增加固定绝对路径的祖先 RPATH 候选取证。目录来自实读祖先 ELF，依赖名称和批准集合来自当前请求者的原 ordinal。真实文件反例先失败后通过，77 项定向 JUnit 与 Java 样式通过。实际加载者链、候选选择及批准 Linux 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的祖先-rpath-候选检查)。
+
 正常 D2 的 cached JDK helper 检查已覆盖所有声明候选可达的 context。每个实际 ELF 请求者保留原 ordinal，逐条核验 cache、自身路径标签及默认目录。55 项定向 JUnit 与 Java 样式通过。glibc 实际搜索选择、获批 Linux 执行链与 manager 查询仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可达依赖候选检查)。
 
 正常 D2 两轮启动检查在同一次原 cgroup 挂载观察中读取调用线程的 unified membership，并从原 fd 相对解析实际成员目录。每轮两次冷读必须给出相同原路径，首个成员 fd 持有期间重新解析的目录必须匹配。33 项定向 JUnit 和 10 项宿主 Rust 检查通过，2 项 Linux 实读跳过。批准 Linux 实读、进程与 manager 对照、episode 成员关系与排空仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的调用线程-cgroup-成员关系)。

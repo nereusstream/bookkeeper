@@ -2589,6 +2589,162 @@ public class SegmentClassicLaunchTrustTest {
                 List.of(defaults.toString()), metadata));
     }
 
+    private CandidateFixture withHelperGraphTags(CandidateFixture fixture, int context, DynamicPath rpath,
+                                                 DynamicPath runpath) throws IOException {
+        var loading = fixture.loading();
+        var members = new java.util.ArrayList<>(fixture.files());
+        var metadata = new java.util.ArrayList<>(loading.elf());
+        int member = loading.contexts().get(context).file();
+        int index = 0;
+        while (metadata.get(index).file() != member) {
+            index++;
+        }
+        var original = metadata.get(index);
+        var elf = new SegmentClassicLinuxDeploymentV2.Elf(member, original.needed(), rpath, runpath,
+                original.flags(), original.flags1());
+        var file = members.get(member);
+        boolean helper = file.role() == SegmentClassicLinuxDeployment.Role.START_CHAIN;
+        byte[] bytes = launcherDropperImage(elf, helper ? loading.interpreter() : null);
+        Path path = Path.of(file.path());
+        write(path, bytes);
+        if (helper) {
+            Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwxr-xr-x"));
+        }
+        members.set(member, new SegmentClassicLinuxDeploymentV2.File(file.path(), file.role(), bytes.length,
+                SegmentClassicHandoff.digest(bytes)));
+        metadata.set(index, elf);
+        return new CandidateFixture(members, new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(),
+                loading.loader(), loading.interpreter(), loading.aliases(), loading.directories(),
+                loading.configuration(), loading.policy(), metadata, loading.contexts(), loading.needed(),
+                loading.modules()));
+    }
+
+    private CandidateFixture helperInheritedRpathFixture(boolean requesterRunpath) throws Exception {
+        var fixture = jdkHelperTransitiveFixture(true);
+        Path directory = Files.createDirectory(root.resolve("inherited-rpath"));
+        Path source = Path.of(fixture.loading().contexts().get(5).logicalLoadName());
+        Files.copy(source, directory.resolve(source.getFileName()), StandardCopyOption.COPY_ATTRIBUTES);
+        var directories = new java.util.ArrayList<>(fixture.loading().directories());
+        directories.add(new SegmentClassicLinuxDeploymentV2.Directory(directory.toString(), true));
+        var absent = new DynamicPath(false, "");
+        var tagged = withHelperGraphTags(tagDirectories(fixture, directories), 3,
+                new DynamicPath(true, directory.toString()), absent);
+        return requesterRunpath ? withHelperGraphTags(tagged, 4, absent, new DynamicPath(true, "")) : tagged;
+    }
+
+    @Test
+    public void jdkHelperInheritedRpathRejectsARealUnapprovedIndirectCandidate() throws Exception {
+        var fixture = helperInheritedRpathFixture(false);
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(4, 5, 6, 7), owner.readLinuxJdkHelperNeededCandidates(fixture.files(),
+                    fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
+                    fixture.files(), fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("exact approved logical context"));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperInheritedRpathIsSuppressedByAPresentEmptyRequesterRunpath() throws Exception {
+        var fixture = helperInheritedRpathFixture(true);
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(4, 5, 6, 7, 8, 9), owner.readLinuxJdkHelperReachableCandidates(fixture.files(),
+                    fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperInheritedRpathContinuesPastARunpathAncestorAndUsesTheLeafApproval() throws Exception {
+        var fixture = helperInheritedRpathFixture(true);
+        Path masked = Files.createDirectory(root.resolve("masked-rpath"));
+        var directories = new java.util.ArrayList<>(fixture.loading().directories());
+        directories.add(new SegmentClassicLinuxDeploymentV2.Directory(masked.toString(), true));
+        fixture = withHelperGraphTags(tagDirectories(fixture, directories), 4,
+                new DynamicPath(true, masked.toString()), new DynamicPath(true, ""));
+        var loading = fixture.loading();
+        var members = new java.util.ArrayList<>(fixture.files());
+        var metadata = new java.util.ArrayList<>(loading.elf());
+        var contexts = new java.util.ArrayList<>(loading.contexts());
+        var rules = new java.util.ArrayList<>(loading.needed());
+        var absent = new DynamicPath(false, "");
+        var elf = new SegmentClassicLinuxDeploymentV2.Elf(members.size(), List.of(), absent, absent, 0, 0);
+        byte[] bytes = launcherDropperImage(elf, null);
+        Path grandparentCandidate = root.resolve("inherited-rpath/libz.so.1");
+        write(grandparentCandidate, bytes);
+        write(masked.resolve("libz.so.1"), bytes);
+        int candidate = contexts.size();
+        members.add(new SegmentClassicLinuxDeploymentV2.File(grandparentCandidate.toString(),
+                SegmentClassicLinuxDeployment.Role.LIBRARY, bytes.length, SegmentClassicHandoff.digest(bytes)));
+        metadata.add(elf);
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(elf.file(), grandparentCandidate.toString()));
+        rules.set(4, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, 4, candidate)));
+        rules.set(5, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1, List.of(0, candidate)));
+        rules.set(9, new SegmentClassicLinuxDeploymentV2.NeededRule(5, 0, List.of(0, 4, candidate)));
+        var approved = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
+                loading.policy(), metadata, contexts, rules, loading.modules());
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(4, 5, 6, 7, 8, 9), owner.readLinuxJdkHelperReachableCandidates(members,
+                    approved, 3, 0, SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+
+        rules.set(9, new SegmentClassicLinuxDeploymentV2.NeededRule(5, 0, List.of(0, 4)));
+        var refused = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
+                loading.policy(), metadata, contexts, rules, loading.modules());
+        var retry = owner();
+        retry.initialize();
+        try {
+            var failure = assertThrows(IOException.class, () -> retry.readLinuxJdkHelperReachableCandidates(
+                    members, refused, 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("exact approved logical context"));
+            assertSame(failure, retry.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(retry.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperInheritedRpathRejectsSameBytesAtAReplacedTagSource() throws Exception {
+        var fixture = helperInheritedRpathFixture(true);
+        var owner = owner();
+        owner.initialize();
+        Path helper = Path.of(fixture.loading().contexts().get(3).logicalLoadName());
+        Path descendant = Path.of(fixture.loading().contexts().get(5).logicalLoadName());
+        Path old = root.resolve("old-rpath-source");
+        var replaced = new AtomicBoolean();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && descendant.equals(invocation.getArgument(0))
+                    && replaced.compareAndSet(false, true)) {
+                Files.move(helper, old);
+                Files.copy(old, helper, StandardCopyOption.COPY_ATTRIBUTES);
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
+                    fixture.files(), fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(replaced.get());
+            assertArrayEquals(Files.readAllBytes(old), Files.readAllBytes(helper));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("Reachable NEEDED context changed"));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
     @Test
     public void jdkHelperReachableCandidatesRejectAnUnapprovedIndirectDefault() throws Exception {
         var fixture = jdkHelperTransitiveFixture(false);
