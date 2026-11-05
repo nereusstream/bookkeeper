@@ -41,6 +41,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.apache.bookkeeper.bookie.BookieImpl;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.profile.ZKBookieRouteBindingStore;
@@ -392,9 +393,22 @@ public final class SegmentClassicLauncher {
     }
 
     private void requireRoot() throws IOException {
-        var credentials = new NativeIOImpl().currentProcessCredentials();
+        requireParentCredentials(input, new NativeIOImpl().currentProcessCredentials());
+    }
+
+    /** Value comparison only; actual production credentials come from the original native read at each call. */
+    static void requireParentCredentials(SegmentClassicLauncherInputs input, NativeIO.ProcessCredentials credentials)
+            throws IOException {
         if (credentials.realUid() != 0 || credentials.effectiveUid() != 0) {
             throw new IOException("Controlled Classic launcher requires actual real/effective UID zero");
+        }
+        var deployment = input.linuxDeployment();
+        if (deployment != null && deployment.schema() == 2) {
+            var original = deployment.versionTwo();
+            long group = original.units().get(original.launcherUnit()).service().group();
+            if (credentials.realGid() != group || credentials.effectiveGid() != group) {
+                throw new IOException("Controlled Classic launcher real/effective GID differs from its D2 service");
+            }
         }
     }
 

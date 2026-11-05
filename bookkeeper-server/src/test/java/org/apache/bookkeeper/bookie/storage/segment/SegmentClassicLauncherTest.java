@@ -34,15 +34,76 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.server.ControlledClassicLauncherMain;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-/** Actual heap and unqualified Main failures only; no fake installed issuer, Process adoption or START context. */
+/** Parent credential values, actual heap and unqualified Main only; no installed issuer or START context. */
 public class SegmentClassicLauncherTest {
     @Rule
     public final TemporaryFolder temporary = new TemporaryFolder();
+
+    private static SegmentClassicLauncherInputs groupInput(long group) throws IOException {
+        var d = SegmentClassicLinuxDeployment.decode(
+                SegmentClassicLinuxDeploymentTest.vector("classic-linux-deployment-v2")).versionTwo();
+        var service = d.units().get(d.launcherUnit());
+        var target = d.units().get(1);
+        // Keep the complete validated descriptor, but put the launcher at a nonzero original index.
+        target = new SegmentClassicLinuxDeploymentV2.Unit(target.kind(), "default.target", target.names(),
+                target.fileState(), target.fragment(), target.dropIns(), target.commonRule(), target.relations(), null);
+        service = new SegmentClassicLinuxDeploymentV2.Unit(service.kind(), service.id(), service.names(),
+                service.fileState(), service.fragment(), service.dropIns(), service.commonRule(), service.relations(),
+                new SegmentClassicLinuxDeploymentV2.Service(group, service.service().execution(),
+                        service.service().constraint()));
+        var links = d.installLinks().stream().map(l -> new SegmentClassicLinuxDeploymentV2.InstallLink(l.kind(),
+                l.path(), l.target(), l.sourceUnit() < 0 ? -1 : 1 - l.sourceUnit(), 1 - l.targetUnit())).toList();
+        var deployment = new SegmentClassicLinuxDeployment(new SegmentClassicLinuxDeploymentV2(d.platform(),
+                d.files(), d.provider(), d.loading(), d.startChain(), List.of(target, service), 1, links,
+                d.isolation(), d.operations()));
+        var old = SegmentClassicLauncherInputs.decode(
+                SegmentClassicLinuxDeploymentTest.vector("classic-launcher-inputs-v2"));
+        var child = SegmentClassicLaunchProgram.identity(
+                SegmentClassicLinuxDeploymentTest.vector("classic-linux-program-v1"));
+        var dropper = d.files().get(d.isolation().dropper());
+        return new SegmentClassicLauncherInputs(old.recipeId(), old.recipe(), old.signerKeyId(),
+                SegmentClassicLauncherInputs.parentProgramIdentity(child, deployment), old.os(), old.architecture(),
+                new SegmentClassicLaunchProgram.File(Path.of(dropper.path()), SegmentClassicLaunchProgram.NATIVE,
+                        dropper.length(), dropper.sha256()), old.supervisorDirectory(), old.targetUid(), old.manifest(),
+                old.proof(), old.policy(), old.aesKey(), deployment);
+    }
+
+    @Test
+    public void d2ParentRequiresBothPrimaryGroupsFromItsOriginalLauncherUnit() throws Exception {
+        for (long group : List.of(20L, 0xffff_fffeL)) {
+            var input = groupInput(group);
+            assertEquals(1, input.linuxDeployment().versionTwo().launcherUnit());
+            SegmentClassicLauncher.requireParentCredentials(input,
+                    new NativeIO.ProcessCredentials(0, 0, group, group, List.of(7L)));
+            assertThrows(IOException.class, () -> SegmentClassicLauncher.requireParentCredentials(input,
+                    new NativeIO.ProcessCredentials(0, 0, 0, group, List.of(group))));
+            assertThrows(IOException.class, () -> SegmentClassicLauncher.requireParentCredentials(input,
+                    new NativeIO.ProcessCredentials(0, 0, group, 0, List.of(group))));
+            assertThrows(IOException.class, () -> SegmentClassicLauncher.requireParentCredentials(input,
+                    new NativeIO.ProcessCredentials(1, 0, group, group, List.of(group))));
+            assertThrows(IOException.class, () -> SegmentClassicLauncher.requireParentCredentials(input,
+                    new NativeIO.ProcessCredentials(0, 1, group, group, List.of(group))));
+        }
+    }
+
+    @Test
+    public void legacyAndD1ParentKeepUidOnlyChecksWithoutConstrainingPrimaryGroups() throws Exception {
+        for (String name : List.of("classic-launcher-inputs-v1", "classic-launcher-inputs-v2")) {
+            var input = SegmentClassicLauncherInputs.decode(SegmentClassicLinuxDeploymentTest.vector(name));
+            SegmentClassicLauncher.requireParentCredentials(input,
+                    new NativeIO.ProcessCredentials(0, 0, 123, 0xffff_fffeL, List.of()));
+            assertThrows(IOException.class, () -> SegmentClassicLauncher.requireParentCredentials(input,
+                    new NativeIO.ProcessCredentials(1, 0, 123, 0xffff_fffeL, List.of())));
+            assertThrows(IOException.class, () -> SegmentClassicLauncher.requireParentCredentials(input,
+                    new NativeIO.ProcessCredentials(0, 1, 123, 0xffff_fffeL, List.of())));
+        }
+    }
 
     @Test
     public void passiveWaitInvalidDeadlinesAndRejectedHandoffDoNotStartOrRetireTheOwner() throws Exception {

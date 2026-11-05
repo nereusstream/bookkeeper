@@ -1218,6 +1218,16 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 父进程主 GID 对应
+
+2026-11-05在父`d05698034399ccffa208c221e263f1c1db111b09`上，原`requireRoot()`的三个调用点（初次启动、child创建前、START签发前）不变。每次仍只调用一次原`currentProcessCredentials()`，并将同一不可变读数交给最小包内值比较体。共同real/effective UID均为0要求保持；仅schema2从原D2的`units[launcherUnit].service.group()`取long，realGid与effectiveGid各自须精确相等。D1及无Linux部署不增加主组约束。没有group=0默认、固定unit下标、账号查找、补充组或child recipe主组替代，也没有新JNI、配置、缓存或资格位。
+
+新增2项值测试使用完整验证的D2/outer inputs，将TARGET排序在前、launcherUnit设为1，分别用20和`0xffff_fffeL`：正确双主组通过，即使supplementary不含该组；单独realGid或effectiveGid不符均拒绝，即使supplementary含批准组；两个UID单独不符仍拒绝。旧格式与D1的不同/高位主组通过，UID拒绝保持。先仅提取旧UID-only主体实跑2项，D2反例出现1个预期失败（应抛IOException而未抛），原源码/class/XML保留；修复后server Launcher5＋Inputs6＋DeploymentV2 13共24项全过。另用精确原9406191e…库执行既有`NativeIOCredentialsTest`2项，实际host取值与独立POSIX C/id oracle一致；共26唯一最终用例、0失败/错误/跳过，Java Spotless/Checkstyle退出0，JNI/库未改或重建。
+
+证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-gid-evidence-d0569803`，三阶段1450原输入分别核验，最终两code与host/server/style绑定，旧UID-only red不移绑。三个正常调用点及每次单native读取为实际源码静态核对；host原生取值和D2纯值比较不是root/Installed/source阳性，没有修改现场UID/GID。后两个D2点仍在原childCommand资格拒绝之后，本机未动态到达。
+
+[systemd v255的enforce_groups](https://github.com/systemd/systemd/blob/v255/src/core/exec-invoke.c#L954-L969)在有效主GID上使用setresgid，补充组另行处理；这是参考语义，不是现场manager有效Group或saved IDs证明。本节点只对应当前launcher主组与原D2声明，manager MainPID/InvocationID、saved IDs、user namespace与子进程降权仍待独立验证。批准Linux/vendor正常启动NOT_EXECUTED，原provider/source和childCommand/diagnostics拒绝不松，完整Unix及parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled和完整目标active保持。
+
 ## 正常 D2 launcher 的 systemd 安装符号链接观察
 
 2026-11-05在父`d67206d76ce7af97d5626cc59518a209d8d7685f`上，正常schema2启动在unit文件检查之后、独立dropper/childCommand/私钥之前调用`verifyLinuxInstallLinks(deadline)`。先取owner的`originalLinuxDeployment`，再复用D2有序install path及原unit关系检查：targetUnit、sourceUnit、leaf属于目标Names、依赖目录后缀与TARGET/声明关系均在首目标I/O前核验。冻结units最多32、links最多1024，空links合法；数据入口仅units/links/deadline并共用私有体，不授生产来源或资格。
