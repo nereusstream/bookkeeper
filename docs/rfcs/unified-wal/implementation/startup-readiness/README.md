@@ -1218,6 +1218,16 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的固定 JDK helper 文件观察
+
+2026-11-05在父`e615f7d893ef54b4dedb570dbabba2914fec5f57`上，正常schema2块在候选全集之后、独立dropper之前，一次调用原`verifyLinuxJdkHelper(deadline)`。只消费原owner的raw javaHome、verifiedProgram和D2表，固定`lib/jspawnhelper`须同时对应program JDK成员、D2 START_CHAIN成员及exact执行context，三索引/长度/SHA/角色先核，再复用原owned ELF2/实际fd、PT_INTERP字面匹配及helper/interpreter末端复核。原观察器未改，不从向量或宿主JDK补材料，也不推断backend实际会执行helper。
+
+本次只接文件观察，不调用`verifyLinuxJdkProcess`/`NativeIOImpl.jdkProcessLaunch`，不显式初始化ProcessImpl或设launch机制属性。[OpenJDK21u 21.0.10 Java初始化](https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.10-ga/src/java.base/unix/classes/java/lang/ProcessImpl.java)调用native init；其[原生实现](https://raw.githubusercontent.com/openjdk/jdk21u/jdk-21.0.10-ga/src/java.base/unix/native/libjava/ProcessImpl_md.c)读取父PATH并通过sigaction设置SIGCHLD为SIG_DFL，是将缓存观察留到需要它的阶段的静态理由，不是目标vendor/现场信号处置证明。本节点不探测/恢复sigaction，不强制FORK、运行helper或解除任何进程guard；不把历史独立VM的backend观察记成本次运行。
+
+既有Trust helper相关8＋Inputs6＋DeploymentV2 13＋Launcher3共30项全通过，0失败/错误/跳过，无新增测试或JNI；Java Spotless/Checkstyle退出0。真实临时文件覆盖精确三索引/NEEDED原序、PT_INTERP有无、同物理异字面值、读中同字节换inode、缺材料pre-I/O及typed缺source拒绝；Launcher独立Main的缺安装拒绝仅作原进程回归，不是backend/正式启动阳性。单阶段1450原输入按snapshot/父Git blob核验，唯一code与test/style绑定，沿用9406191e…库不重建。
+
+证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-helper-evidence-e615f7d8`；静态ProcessImpl.java29123 bytes/SHA `3c501366c6ebfe3699da9a4bc4c68bbe8dd0df48b49d5984efb3c0954549a71f`及ProcessImpl_md.c28806 bytes/SHA `ab8186c096bc6d07d6ab072ce0c4d54379a4061769a2026d56786bcba4122df3`独立保留。正常唯一消费顺序静态核对，动态是原data/shared材料，批准Linux/vendor阳性仍NOT_EXECUTED；helper传递加载闭包、实际backend/执行语义、完整Unix资格及parent/child/Main/G1/full-bytes/full16/生产Gate OPEN，原childCommand/diagnostics拒绝、defaults/disabled及目标active保持。
+
 ## 正常 D2 launcher 的全部候选上下文观察
 
 2026-11-05在父`8c2ac1f3ea6893304b3b9d056deec73029d2ef4a`上，正常schema2启动在整表目录检查成功后、独立dropper专项之前，一次调用原`verifyLinuxCandidateContexts(deadline)`。使用原绝对期限，不另调逐context/interpreter入口、不按物理路径合并、不缓存/转发结果。原观察器未改：source/provider门后依原顺序关联全部logical context与实际路径、physical、owned fd、批准SHA和现有ELF2读数，另读固定interpreter，从实读ELF按requester/ordinal取NEEDED名，原重复module声明保持；包括未选中候选在内任一项失败就停止，独立dropper字面解释器及终端身份检查保持。
