@@ -21,6 +21,7 @@
 package org.apache.bookkeeper.common.util.nativeio;
 
 import java.util.ArrayList;
+import java.util.UUID;
 
 /**
  * NativeIOImpl.
@@ -180,6 +181,28 @@ public class NativeIOImpl implements NativeIO {
         } catch (LinkageError unavailable) {
             var failure = new NativeIOException(
                     "Current cgroup root filesystem type is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
+    public UUID currentLinuxBootId() throws NativeIOException {
+        try {
+            String text = NativeIOJni.currentLinuxBootId();
+            try {
+                UUID actual = UUID.fromString(text);
+                if (!actual.toString().equals(text) || actual.equals(new UUID(0, 0))) {
+                    throw new IllegalArgumentException("Noncanonical or zero boot ID");
+                }
+                return actual;
+            } catch (IllegalArgumentException | NullPointerException invalid) {
+                var failure = new NativeIOException("Invalid native current Linux boot ID");
+                failure.initCause(invalid);
+                throw failure;
+            }
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Current Linux boot ID is unavailable in this JNI library");
             failure.initCause(unavailable);
             throw failure;
         }

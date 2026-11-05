@@ -23,6 +23,7 @@ import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.TreeSet;
+import java.util.UUID;
 
 /**
  * NativeIO API.
@@ -211,6 +212,11 @@ public interface NativeIO {
     /** One statfs of the current Linux mount view's literal /sys/fs/cgroup/; no episode or membership proof. */
     default long currentCgroupRootFileSystemType() throws NativeIOException {
         throw new NativeIOException("Current cgroup root filesystem type query is unsupported");
+    }
+
+    /** Cold read through a held verified procfs root and fixed openat2 path; no host namespace qualification. */
+    default UUID currentLinuxBootId() throws NativeIOException {
+        throw new NativeIOException("Current Linux boot ID query is unsupported");
     }
 
     /**

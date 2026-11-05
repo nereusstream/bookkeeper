@@ -58,6 +58,8 @@ class NativeIOJni {
 
     static native long currentCgroupRootFileSystemType() throws NativeIOException;
 
+    static native String currentLinuxBootId() throws NativeIOException;
+
     static native NativeIO.JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException;
 
     static native long[] unixPeerCredentials(java.nio.channels.SocketChannel channel) throws NativeIOException;

@@ -284,6 +284,7 @@ public final class SegmentClassicLauncher {
             var deployment = input.linuxDeployment().versionTwo();
             trust.verifyLinuxProvider(deadline);
             trust.verifyLinuxKernelAndCgroupRoot(deadline);
+            trust.verifyLinuxBootId(deadline);
             trust.verifyLinuxLoaderConfiguration(deployment.preloadAbsentConfigurationIndex(), deadline);
             trust.verifyLinuxLoaderConfiguration(SegmentClassicLaunchTrust.fixedLinuxCacheRule(deployment.loading()),
                     deadline);
@@ -293,6 +294,7 @@ public final class SegmentClassicLauncher {
             trust.verifyLinuxJdkHelper(deadline);
             trust.verifyLinuxUnitFiles(deadline);
             trust.verifyLinuxInstallLinks(deadline);
+            trust.verifyLinuxBootId(deadline);
         }
         trust.verifyLauncherDropper(input, deadline);
         final List<String> childCommand = input.childCommand(material, program);

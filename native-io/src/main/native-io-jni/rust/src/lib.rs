@@ -26,7 +26,7 @@
 
 use jni::objects::{JByteArray, JClass, JObject, JString, JThrowable};
 use jni::signature::{Primitive, ReturnType};
-use jni::sys::{jint, jlong, jlongArray, jobjectArray};
+use jni::sys::{jint, jlong, jlongArray, jobjectArray, jstring};
 use jni::JNIEnv;
 use std::ffi::{c_void, CString};
 use std::ptr;
@@ -291,6 +291,244 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
             libc::ENOSYS,
         );
         0
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_boot_id(bytes: &[u8]) -> Result<String, libc::c_int> {
+    if bytes.len() != 37 || bytes[36] != b'\n' {
+        return Err(libc::EINVAL);
+    }
+    let mut nonzero = false;
+    for (i, byte) in bytes[..36].iter().copied().enumerate() {
+        if matches!(i, 8 | 13 | 18 | 23) {
+            if byte != b'-' {
+                return Err(libc::EINVAL);
+            }
+        } else if byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) {
+            nonzero |= byte != b'0';
+        } else {
+            return Err(libc::EINVAL);
+        }
+    }
+    if !nonzero {
+        return Err(libc::EINVAL);
+    }
+    String::from_utf8(bytes[..36].to_vec()).map_err(|_| libc::EINVAL)
+}
+
+#[cfg(target_os = "linux")]
+type BootIdResult = Result<String, (&'static str, libc::c_int)>;
+
+#[cfg(target_os = "linux")]
+fn boot_id_errno(operation: &'static str) -> (&'static str, libc::c_int) {
+    (
+        operation,
+        std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO),
+    )
+}
+
+// Each opened fd has exactly one explicit close, even on read/validation failure. Never retry close.
+#[cfg(target_os = "linux")]
+fn close_boot_id_fd(fd: libc::c_int, outcome: BootIdResult) -> BootIdResult {
+    let closed = unsafe { libc::close(fd) };
+    let close_error = if closed == 0 {
+        None
+    } else {
+        Some(boot_id_errno("boot ID close failed"))
+    };
+    match outcome {
+        Err(first) => Err(first),
+        Ok(value) => match close_error {
+            None => Ok(value),
+            Some(error) => Err(error),
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn boot_id_proc_stat(fd: libc::c_int) -> Result<libc::stat, (&'static str, libc::c_int)> {
+    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatfs(fd, &mut fs) } != 0 {
+        return Err(boot_id_errno("boot ID held-fd fstatfs failed"));
+    }
+    if fs.f_type != 0x9fa0 {
+        // Linux UAPI PROC_SUPER_MAGIC, full f_type.
+        return Err(("boot ID source is not procfs", libc::EINVAL));
+    }
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return Err(boot_id_errno("boot ID held-fd fstat failed"));
+    }
+    Ok(stat)
+}
+
+#[cfg(target_os = "linux")]
+fn boot_id_proc_root(fd: libc::c_int) -> Result<libc::stat, (&'static str, libc::c_int)> {
+    let stat = boot_id_proc_stat(fd)?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR || stat.st_ino != 1 {
+        // PROCFS_ROOT_INO
+        return Err(("boot ID source is not the procfs root", libc::EINVAL));
+    }
+    Ok(stat)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_boot_id() -> BootIdResult {
+    let root = unsafe {
+        libc::open(
+            b"/proc\0".as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root < 0 {
+        return Err(boot_id_errno("boot ID fixed proc root open failed"));
+    }
+    let outcome = (|| {
+        let root_stat = boot_id_proc_root(root)?;
+        // Linux UAPI open_how: exactly three u64 fields, zero mode. No open/realpath fallback.
+        let how = [
+            (libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) as u64,
+            0,
+            0x08 | 0x01 | 0x04 | 0x02, // BENEATH | NO_XDEV | NO_SYMLINKS | NO_MAGICLINKS
+        ];
+        let leaf = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                root,
+                b"sys/kernel/random/boot_id\0"
+                    .as_ptr()
+                    .cast::<libc::c_char>(),
+                how.as_ptr(),
+                std::mem::size_of_val(&how),
+            )
+        };
+        if leaf < 0 {
+            return Err(boot_id_errno("boot ID fixed openat2 failed"));
+        }
+        let leaf = leaf as libc::c_int;
+        let outcome = (|| {
+            let before = boot_id_proc_stat(leaf)?;
+            if before.st_mode & libc::S_IFMT != libc::S_IFREG || before.st_dev != root_stat.st_dev {
+                return Err(("boot ID leaf differs from its held procfs", libc::EINVAL));
+            }
+            // Proc sysctl st_size may be zero. Read at most the canonical line plus one byte, then require EOF.
+            let mut bytes = [0_u8; 38];
+            let mut used = 0;
+            loop {
+                let count = unsafe {
+                    libc::read(leaf, bytes[used..].as_mut_ptr().cast(), bytes.len() - used)
+                };
+                if count < 0 {
+                    return Err(boot_id_errno("boot ID bounded read failed"));
+                }
+                if count == 0 {
+                    break;
+                }
+                used += count as usize;
+                if used > 37 {
+                    return Err(("boot ID output exceeds its canonical line", libc::EOVERFLOW));
+                }
+            }
+            let value = parse_boot_id(&bytes[..used])
+                .map_err(|error| ("Invalid kernel boot ID line", error))?;
+            let after = boot_id_proc_stat(leaf)?;
+            let root_after = boot_id_proc_root(root)?;
+            if before.st_dev != after.st_dev
+                || before.st_ino != after.st_ino
+                || before.st_mode != after.st_mode
+                || root_stat.st_dev != root_after.st_dev
+                || root_stat.st_ino != root_after.st_ino
+            {
+                return Err(("boot ID held source changed during read", libc::EAGAIN));
+            }
+            Ok(value)
+        })();
+        close_boot_id_fd(leaf, outcome)
+    })();
+    close_boot_id_fd(root, outcome)
+}
+
+/// Fixed Linux procfs boot identity only. No caller pathname/fd, cached value or namespace qualification.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxBootId(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    #[cfg(target_os = "linux")]
+    {
+        match linux_boot_id() {
+            Ok(value) => env
+                .new_string(value)
+                .map_or(ptr::null_mut(), |value| value.into_raw()),
+            Err((operation, error)) => {
+                throw_exception_with_error_code(&mut env, operation, error);
+                ptr::null_mut()
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Current Linux boot ID query unsupported",
+            libc::ENOSYS,
+        );
+        ptr::null_mut()
+    }
+}
+
+#[cfg(test)]
+mod boot_id_tests {
+    use super::parse_boot_id;
+
+    #[test]
+    fn canonical_boot_line_preserves_its_complete_uuid() {
+        assert_eq!(
+            parse_boot_id(b"12345678-9abc-def0-1234-56789abcdef0\n").unwrap(),
+            "12345678-9abc-def0-1234-56789abcdef0"
+        );
+    }
+
+    #[test]
+    fn boot_line_rejects_truncation_overflow_noncanonical_and_zero() {
+        let valid = b"12345678-9abc-def0-1234-56789abcdef0\n";
+        for length in 0..valid.len() {
+            assert!(parse_boot_id(&valid[..length]).is_err());
+        }
+        for invalid in [
+            b"12345678-9abc-def0-1234-56789abcdef0\nX".as_slice(),
+            b"12345678-9ABC-def0-1234-56789abcdef0\n",
+            b"00000000-0000-0000-0000-000000000000\n",
+            b"12345678_9abc-def0-1234-56789abcdef0\n",
+            b"12345678-9abc-def0-1234-56789abcdef0\r\n",
+        ] {
+            assert!(parse_boot_id(invalid).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn held_ordinary_directory_and_real_proc_subdirectory_are_not_proc_roots() {
+        use std::os::fd::AsRawFd;
+        let ordinary = std::fs::File::open(std::env::temp_dir()).unwrap();
+        assert!(super::boot_id_proc_root(ordinary.as_raw_fd()).is_err());
+        let subdirectory = std::fs::File::open("/proc/sys").unwrap();
+        assert!(super::boot_id_proc_stat(subdirectory.as_raw_fd()).is_ok());
+        assert!(super::boot_id_proc_root(subdirectory.as_raw_fd()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn close_failure_cannot_replace_an_earlier_read_failure_or_publish_success() {
+        let first = ("earlier read failure", libc::EIO);
+        assert_eq!(super::close_boot_id_fd(-1, Err(first)), Err(first));
+        assert_eq!(
+            super::close_boot_id_fd(-1, Ok("unpublished".to_string())),
+            Err(("boot ID close failed", libc::EBADF))
+        );
     }
 }
 

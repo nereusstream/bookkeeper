@@ -56,6 +56,7 @@ import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -4861,6 +4862,119 @@ public class SegmentClassicLaunchTrustTest {
         } else {
             assertThrows(IOException.class,
                     () -> SegmentClassicLaunchTrust.requireLinuxKernelIdentity(matchingText, actual));
+        }
+    }
+
+    @Test
+    public void bootIdEveryReadIsColdAndChangedIdentityPoisonsTheOwner() throws Exception {
+        UUID first = UUID.fromString("12345678-9abc-def0-1234-56789abcdef0");
+        var reads = new AtomicInteger();
+        SegmentClassicLaunchTrust owner;
+        try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                (mock, context) -> doAnswer(call -> reads.incrementAndGet() <= 2
+                        ? first : UUID.fromString("22345678-9abc-def0-1234-56789abcdef0"))
+                        .when(mock).currentLinuxBootId())) {
+            owner = owner();
+        }
+        owner.initialize();
+        try {
+            assertEquals(first, owner.readLinuxBootId(SegmentClassicLinuxElfTest.deadline()));
+            assertEquals(first, owner.readLinuxBootId(SegmentClassicLinuxElfTest.deadline()));
+            assertEquals(2, reads.get());
+            var failure = assertThrows(IOException.class,
+                    () -> owner.readLinuxBootId(SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("changed during original startup"));
+            assertEquals(3, reads.get());
+            assertThrows(IOException.class, owner::parsed);
+            var drained = owner.closeAndDrain();
+            assertTrue(drained.drained());
+            assertSame(failure, drained.launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void bootIdNativeSourceFailureRemainsOriginalThroughDrain() throws Exception {
+        var failure = new NativeIOException("boot ID held source injected rejection", 22);
+        SegmentClassicLaunchTrust owner;
+        try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                (mock, context) -> doAnswer(call -> {
+                    throw failure;
+                }).when(mock).currentLinuxBootId())) {
+            owner = owner();
+        }
+        owner.initialize();
+        assertSame(failure, assertThrows(NativeIOException.class,
+                () -> owner.readLinuxBootId(SegmentClassicLinuxElfTest.deadline())));
+        var drained = owner.closeAndDrain();
+        assertTrue(drained.drained());
+        assertSame(failure, drained.launcherFailure());
+    }
+
+    @Test
+    public void bootIdDeadlineIsCheckedBeforeAndAfterActualReadReturn() throws Exception {
+        for (int mode = 0; mode < 2; mode++) {
+            var reads = new AtomicInteger();
+            SegmentClassicLaunchTrust owner;
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> {
+                        reads.incrementAndGet();
+                        Thread.sleep(1100);
+                        return UUID.fromString("12345678-9abc-def0-1234-56789abcdef0");
+                    }).when(mock).currentLinuxBootId())) {
+                owner = owner();
+            }
+            owner.initialize();
+            long deadline = System.nanoTime() + (mode == 0 ? 0 : TimeUnit.SECONDS.toNanos(1));
+            try {
+                var failure = assertThrows(IOException.class, () -> owner.readLinuxBootId(deadline));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("deadline elapsed"));
+                assertEquals(mode, reads.get());
+                assertThrows(IOException.class, owner::parsed);
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void bootIdInvalidNativeValuesCannotBecomeTheFirstObservation() throws Exception {
+        for (int mode = 0; mode < 2; mode++) {
+            UUID value = mode == 0 ? null : new UUID(0, 0);
+            SegmentClassicLaunchTrust owner;
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> value).when(mock).currentLinuxBootId())) {
+                owner = owner();
+            }
+            owner.initialize();
+            try {
+                assertThrows(IOException.class, () -> owner.readLinuxBootId(SegmentClassicLinuxElfTest.deadline()));
+                assertThrows(IOException.class, owner::parsed);
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void bootIdOriginalSourceAndDeadlineRejectBeforeNativeQueries() throws Exception {
+        for (int mode = 0; mode < 2; mode++) {
+            long deadline = mode == 0 ? SegmentClassicLinuxElfTest.deadline() : System.nanoTime();
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> {
+                        throw new AssertionError("Unbound or expired D2 reached native boot ID");
+                    }).when(mock).currentLinuxBootId())) {
+                var owner = owner();
+                owner.initialize();
+                try {
+                    var failure = assertThrows(IOException.class, () -> owner.verifyLinuxBootId(deadline));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains(mode == 0
+                            ? "original provider/source binding" : "deadline elapsed"));
+                } finally {
+                    assertTrue(owner.closeAndDrain().drained());
+                }
+            }
         }
     }
 

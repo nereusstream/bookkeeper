@@ -53,6 +53,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 import java.util.jar.Attributes;
 import java.util.jar.JarFile;
 import java.util.jar.Manifest;
@@ -437,6 +438,7 @@ final class SegmentClassicLaunchTrust {
     private Throwable programFailure;
     private SegmentClassicLaunchProgram.Decoded verifiedProgram;
     private LinuxFileObservation verifiedRuntimeImage;
+    private UUID linuxBootId;
     private boolean configurationAttempted;
     private Throwable configurationFailure;
     private boolean launcherDescriptorAttempted;
@@ -878,6 +880,52 @@ final class SegmentClassicLaunchTrust {
         } finally {
             initializingThread = null;
         }
+    }
+
+    /** Independently cold-read on every call; private first value is only this owner's startup comparison. */
+    synchronized void verifyLinuxBootId(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            originalLinuxDeployment(deadline);
+            observeLinuxBootId(deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Data-only source/owner failure tests; no caller UUID, pathname, fd or qualification. */
+    synchronized UUID readLinuxBootId(long deadline) throws IOException {
+        if (production) {
+            throw new IOException("Data-only boot ID reads cannot seed a production owner");
+        }
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxBootId(deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private UUID observeLinuxBootId(long deadline) throws IOException {
+        requireTime(deadline);
+        var actual = nativeIo.currentLinuxBootId();
+        requireTime(deadline);
+        files.requireHealthy();
+        if (actual == null || actual.equals(new UUID(0, 0)) || linuxBootId != null && !linuxBootId.equals(actual)) {
+            throw new IOException("Current kernel boot ID is missing, zero or changed during original startup");
+        }
+        requireTime(deadline);
+        linuxBootId = actual;
+        return actual;
     }
 
     static void requireLinuxCgroupRootType(long actual) throws IOException {

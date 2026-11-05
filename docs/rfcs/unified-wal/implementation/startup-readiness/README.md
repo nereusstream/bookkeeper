@@ -1218,6 +1218,20 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的可信 procfs boot ID 冷读
+
+2026-11-05在父`4c4c2102fe9bd4a7bf6c97d8767893fb78c65d9f`上，正常D2在原source/provider、kernel/cgroup检查之后第一次`verifyLinuxBootId(deadline)`，原unit/link检查结束后、独立dropper/childCommand/私钥之前第二次调用。每次均实际重新打开、验证并读取；owner私有首UUID只作本轮比较，不替代第二读或产生boot许可。typed入口先`originalLinuxDeployment`；包内data-only入口只接deadline且最先拒绝production owner，不能提前建立正式首次值。共享体在native返回后核原绝对期限、资源健康、非零值和一致性，全部通过才记首值；失败按原owner失败/drain合同处理，超期不等于已取消在途syscall。
+
+固定无参`NativeIO.currentLinuxBootId`不接caller path/fd/backend，不用Files、realpath、环境或systemd线程缓存补来源。native打开字面`/proc`为O_RDONLY/O_DIRECTORY/O_NOFOLLOW/O_CLOEXEC，对**持有根fd**核fstatfs完整PROC_SUPER_MAGIC及fstat目录/PROCFS_ROOT_INO=1；依据[Linux UAPI根inode约定](https://github.com/torvalds/linux/blob/v6.17/include/uapi/linux/fs.h#L56-L64)。只从根fd用openat2解析固定`sys/kernel/random/boot_id`，how为初版三u64/mode0，BENEATH、NO_XDEV、NO_SYMLINKS、NO_MAGICLINKS全开；[解析约束](https://github.com/torvalds/linux/blob/v6.8/include/uapi/linux/openat2.h#L21-L30)连同同文件系统bind mount也不能穿越。`/proc`本身是proc挂载合法，proc子目录或普通目录不能冒充其根。leaf必须regular且在同一真实procfs/dev；不依赖proc的st_size。38-byte私有缓冲到EOF，要求36-byte小写UUID加LF、拒零/截断/过长/非法格式，与[内核boot sysctl输出](https://github.com/torvalds/linux/blob/v6.8/drivers/char/random.c#L1500-L1527)对应；读后再核held leaf/root身份。
+
+不支持openat2、策略拒绝、错误来源或I/O错误均拒绝，不回退open或规范化路径。每个成功打开的fd由本次调用明确close一次，先leaf再root，任何较早的open/read/校验/close错误均不被后错覆盖；全部close尝试有结论后才构造JNI返回String。Java边界核canonical非零UUID，非Linux实际ENOSYS、旧库缺新符号明确拒绝。D1/noLinux不上新ABI，不初始化ProcessImpl或运行systemctl/helper/子进程，不读写或挂载宿主/proc作fixture。
+
+实际宿主Darwin库构建退出0，库354096 bytes/SHA `189d9294c01d325d65992bc27cd62199d44a59a63ed5fdc3e2e7613d82a299b9`。Linux x86_64 `cargo check --tests`退出0，包含普通临时目录/真实proc子目录不能冒充根及close首错误测试；这些Linux syscall测试**未执行**。生产parser及原测试的精确片段在宿主独立编译，只有errno类型/常量声明，无来源或syscall后备，规范/非法/截断/过长/零值两项通过；不算整个JNI crate测试通过。Java最终native Boot3＋Credentials2＋Kernel3＋Cgroup2共10项，Darwin实际ENOSYS78及default拒绝通过，Linux阳性1项跳过；server Trust19（boot新增5、kernel/cgroup4、unit/link10）＋Launcher5＋Inputs6＋DeploymentV2 13共43项全过。最终共53个唯一JUnit用例，52通过/1跳过；同3项CheckedJNI复验无新唯一数，精确旧9406库在独立VM拒绝新符号且原credential ABI前后有效。新增owner mock仅证两次相同仍冷读、变化/源失败/期限前后/非法值及首失败生命周期，不证明proc内核来源或native取消。
+
+初版Linux阳性测试过宽的错误分类已修正：仅首读的明确环境/来源拒绝可记NOT_EXECUTED，未独立证明环境限制的openat2 EINVAL须失败；[EINVAL也表示how参数错误](https://man7.org/linux/man-pages/man2/openat2.2.html)。独立内核值对照与第二次冷读均在环境catch之外，第一次成功后再读异常必须失败。修正前后四测试阶段及两个style阶段保留各自源码/class/XML/probe，旧PASS不移绑。最终八code与native/server/style快照、1451输入绑定；Java Spotless/Checkstyle退出0，Rustfmt退出1且全部差异与父相同，新区域已格式化。证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/native-boot-id-evidence-4c4c2102`。
+
+正常D2接线/生产data guard为静态核对；批准Linux/vendor/source阳性及上述Linux私有fd测试NOT_EXECUTED，交叉编译、host拒绝和portable/mock成功均不替代。两次当前可见真实内核值不证明中间挂载未变、初始PID/mount/user namespace、PID1 host systemd、MainPID/InvocationID、未来episode/跨重启连续性或cgroup归属。原childCommand/diagnostics拒绝保持，完整Unix及parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled与完整目标active保持。
+
 ## 正常 D2 launcher 父进程主 GID 对应
 
 2026-11-05在父`d05698034399ccffa208c221e263f1c1db111b09`上，原`requireRoot()`的三个调用点（初次启动、child创建前、START签发前）不变。每次仍只调用一次原`currentProcessCredentials()`，并将同一不可变读数交给最小包内值比较体。共同real/effective UID均为0要求保持；仅schema2从原D2的`units[launcherUnit].service.group()`取long，realGid与effectiveGid各自须精确相等。D1及无Linux部署不增加主组约束。没有group=0默认、固定unit下标、账号查找、补充组或child recipe主组替代，也没有新JNI、配置、缓存或资格位。
