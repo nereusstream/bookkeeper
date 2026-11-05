@@ -684,6 +684,18 @@ supervisor文件名按clusterId、原cluster birth和Bookie固定，绑定UUID�
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-sources-evidence-78a31704`保留上述原阶段与终态；最终声明1329项源码/资源及十项文档输入，native runner实际1302项，相关class快照108项，其余源码逐项核对父Git blob。实际终态、归档硬链接/内容/身份及两次独立lsof检查后，仅移除本次三个raw scope的六个目录、26个文件路径，共3,904,880逻辑字节；归档保留，regular-file数据块回收为0。PDF、默认目录及其他任务产物未触碰。本增量只交付真实来源读取及其资源子owner，完整交接loader/issuer/Unix隔离、公开bootstrap与Classic恢复封口仍OPEN。
 
 
+## Classic bootstrap 在 supervisor guard 下的来源绑定
+
+在父 `9c619d579a` 上，包内 `SegmentClassicBootstrapPreparation` 把真实 ZK 冷读和材料文件接入同一个一次性离线准备过程。构造冻结原 manager、requirements store、完整 manifest、材料引用与外部信任输入。首次冷读 A 只接受匹配完整 manifest 的 PREPARED。材料 owner 使用 A 的原 native observation、immutable requirements 出生和 commissioned generations，取得原 supervisor guard 后核验签名、retirement、policy、实际目标 UID 和独立 AES key。ENABLED 重开有独立的恢复入口要求。
+
+持同一 guard 重新读取 B，比较原 native 版本和出生、requirements 的原始来源和 commissioned 值、完整 required devices，并在两轮分别检查两类 registration 缺失。B 前后按原 manifest 的角色和序号读取 Classic、control 与全部 Arena 根目录，比较规范路径下实际 device、inode、UID、GID 和 mode 与签名成员。这个结果只记录输入关联，后续仍需实时验证旧 UID/进程/fd、ACL、重启策略与根排他。
+
+关闭请求可在初始化 I/O 期间关闭后续准入，迟到结果沿原阶段失败收束。实际初始化返回和借用 ZK 回调全部归还后，才排空材料并释放 supervisor。材料首次关闭失败保留原资源和原因，借用的 client、manager 与 store 由原 owner 持有。准备阶段使用材料原有的 guard 别名检查，依赖共同 guard 文件已存在。读取期间未取得 Classic、Arena 或 control 锁。
+
+使用真实 ZooKeeper、测试签名与现存文件验证六项组合场景。实际重现的只读注册及同字节重建的 requirements 出生均被第二轮拒绝，同路径替换 Arena 目录被 inode 检查拒绝。正向保持原 PREPARED、Journal 与 index 字节，未创建 marker 或打开 control。独立进程观测了实际读关闭、迟到回调与首次文件关闭失败期间的 guard。首轮测试编译因误用包内 ZK 路径方法失败，改用原 manager 的完整原生观察后六项通过。最终材料 14、交接 codec 8、ZK 冷读 9、owned 文件 7、文件锁 10 共 48 项通过，Java Spotless 与 Checkstyle 通过。沿用原 acf9afec… native 库，证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-preparation-evidence-9c619d57`。
+
+真实旧服务退役、实时 Unix 采用、完整 bootstrap owner、受保护导入、replay/flush、封口和批准 Linux 运行继续待验收。隔离测试的签名与退役数据来自 fixture。
+
 ## 固定交接的原子不覆盖改名
 
 2026-10-31在父源码`facda20fcc9ef6ce31202fee1ddcdc02a1d53648`上，接续规划裁决，为固定retirement/proof发布增加既有native-io的窄renameNoReplace依赖。NativeIO新增默认拒绝，旧方法集合的Java实现无需增加实现即可明确拒绝新能力；NativeIOImpl/NativeIOJni及原Rust库增加一次原子改名。Linux走libc架构常量与syscall(RENAME_NOREPLACE)，不直接链接较新的glibc renameat2符号；macOS走renamex_np(RENAME_EXCL)。不增加通用flags、I/O后端、客户端线程或自动重试，不复制/删除源、fsync或打开业务fd；只有原生明确返回0才成功，其余保留真实errno或明确报能力不可用。旧库缺符号/装载失败不回退到Java move或hardlink。JNI直接读取UTF-16并严格转换，NUL、null或未配对surrogate拒绝，不经lossy转换改名另一路径；有效非BMP/非ASCII路径保持。

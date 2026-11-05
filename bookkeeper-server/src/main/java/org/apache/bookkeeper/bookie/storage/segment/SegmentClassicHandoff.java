@@ -35,6 +35,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.discover.BookieRouteBinding;
@@ -112,8 +113,11 @@ final class SegmentClassicHandoff {
         }
 
         static Requirements from(ZKProfileStartupRequirementsStore.Observation observation) {
-            var c = observation.commissionedCompatibility();
-            return new Requirements(observation.sourceIdentity(), c.deviceManifestGeneration().value(),
+            return from(observation.sourceIdentity(), observation.commissionedCompatibility());
+        }
+
+        static Requirements from(ZKProfileStartupRequirementsStore.SourceIdentity source, BookieCompatibilityFact c) {
+            return new Requirements(source, c.deviceManifestGeneration().value(),
                     c.localFormatGeneration().value(), c.migrationGeneration().value(),
                     c.effectiveDeleteAssignmentGeneration().value(), c.minimumReaderVersion(),
                     c.minimumWriterVersion());

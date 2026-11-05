@@ -22,6 +22,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
@@ -31,13 +32,16 @@ import com.sun.security.auth.module.UnixSystem;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.security.MessageDigest;
 import java.security.Signature;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -46,19 +50,40 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.bookkeeper.bookie.ClassicClaimTestHistory;
+import org.apache.bookkeeper.bookie.Cookie;
+import org.apache.bookkeeper.bookie.IndexPersistenceMgr;
+import org.apache.bookkeeper.common.profile.EngineProfile;
+import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
+import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
+import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.BookieRouteBinding;
+import org.apache.bookkeeper.discover.ZKRegistrationManager;
 import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 import org.apache.bookkeeper.net.BookieId;
+import org.apache.bookkeeper.test.ZooKeeperUtil;
+import org.apache.bookkeeper.versioning.Version;
+import org.apache.zookeeper.AsyncCallback.DataCallback;
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.Op;
+import org.apache.zookeeper.Watcher;
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.ZooKeeper;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.mockito.MockedStatic;
 
-/** Signed I/O fixtures only. No actual old-service issuer, live metadata/Unix isolation or adoptable session. */
+/** Handoff material I/O and cold native source binding under the original supervisor guard. */
 public class SegmentClassicHandoffMaterialsTest {
     @Rule
     public final TemporaryFolder temporary = new TemporaryFolder();
@@ -71,6 +96,8 @@ public class SegmentClassicHandoffMaterialsTest {
     private SegmentClassicHandoffMaterials.Expected expected;
     private Path guardPath;
     private Path intentPath;
+    private ZooKeeperUtil cluster;
+    private HeldReadClient client;
 
     private static byte[] filled(int length, int value) {
         byte[] bytes = new byte[length];
@@ -124,14 +151,19 @@ public class SegmentClassicHandoffMaterialsTest {
         var requirements = new SegmentClassicHandoff.Requirements(
                 new ZKProfileStartupRequirementsStore.SourceIdentity("/commissioned/materials", new UUID(0, 5),
                         106, 106, 0, filled(32, 6)), 1, 2, 3, 4, 1, 1);
-        expected = new SegmentClassicHandoffMaterials.Expected("deployment", digest(8), digest(9), signing.getPublic(),
-                nativeScope, requirements, oldUid, uid, uid);
         Path materials = directory(root.resolve("materials"));
         references = new SegmentClassicHandoffMaterials.References(materials, materials.resolve("proof"),
                 materials.resolve("policy"), materials.resolve("key"));
+        writeMaterials(requirements);
+    }
+
+    private void writeMaterials(SegmentClassicHandoff.Requirements requirements) throws Exception {
+        expected = new SegmentClassicHandoffMaterials.Expected("deployment", digest(8), digest(9), signing.getPublic(),
+                nativeScope, requirements, oldUid, uid, uid);
+        var binding = nativeScope.binding();
         String stem = SegmentClassicHandoffMaterials.scopeName(binding);
-        guardPath = materials.resolve(stem + ".lock");
-        intentPath = materials.resolve(stem + ".retirement");
+        guardPath = references.directory().resolve(stem + ".lock");
+        intentPath = references.directory().resolve(stem + ".retirement");
         privateFile(guardPath, new byte[0]);
         var policy = new SegmentClassicHandoff.Policy(binding.bindingId(), binding.bookieId(), binding.incarnation(),
                 binding.manifest(), uid);
@@ -141,13 +173,14 @@ public class SegmentClassicHandoffMaterialsTest {
                 SegmentClassicHandoff.digest(SegmentClassicHandoff.encodePolicy(policy)));
         var members = new ArrayList<SegmentClassicHandoff.Member>();
         int member = 0;
-        for (Path path : List.of(journal, ledger, control, arena)) {
+        for (Path path : List.of(manifest.classicRoots().get(0).directory(), manifest.classicRoots().get(1).directory(),
+                manifest.controlDirectory(), manifest.arenas().get(0).directory())) {
             int kind = member < 2 ? 1 : member == 2 ? 2 : 3;
             int index = member < 2 ? member : 0;
             members.add(new SegmentClassicHandoff.Member(new SegmentClassicHandoff.Physical(kind, index,
                     ((Number) Files.getAttribute(path, "unix:dev")).longValue(),
                     ((Number) Files.getAttribute(path, "unix:ino")).longValue()), uid,
-                    new UnixSystem().getGid(), 0700));
+                    Integer.toUnsignedLong((Integer) Files.getAttribute(path, "unix:gid")), 0700));
             member++;
         }
         var retirement = new SegmentClassicHandoff.Retirement(operation,
@@ -163,6 +196,332 @@ public class SegmentClassicHandoffMaterialsTest {
         privateFile(references.policy(), SegmentClassicHandoff.encodePolicy(policy));
         privateFile(references.aesKey(), filled(32, 10));
         privateFile(intentPath, intent);
+    }
+
+    private record NativeSources(ZKRegistrationManager manager, ZKProfileStartupRequirementsStore requirements) { }
+
+    private NativeSources realSources() throws Exception {
+        cluster = new ZooKeeperUtil();
+        cluster.startCluster();
+        var connected = new CountDownLatch(1);
+        client = new HeldReadClient(cluster.getZooKeeperConnectString(), connected);
+        assertTrue(connected.await(10, TimeUnit.SECONDS));
+        String ledgers = "/ledgers";
+        String instancePath = ledgers + "/INSTANCEID";
+        if (client.exists(instancePath, false) == null) {
+            client.create(instancePath, "bootstrap-preparation".getBytes(StandardCharsets.UTF_8),
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        }
+        var instance = new String(client.getData(instancePath, false, null), StandardCharsets.UTF_8);
+        var conf = new ServerConfiguration().setBookieId(manifest.bookieId().toString())
+                .setJournalDirsName(new String[]{manifest.classicRoots().get(0).directory().toString()})
+                .setLedgerDirNames(new String[]{manifest.classicRoots().get(1).directory().toString()});
+        var manager = new ZKRegistrationManager(conf, client, ledgers);
+        var cookie = Cookie.generateCookie(conf).setInstanceId(instance).build();
+        cookie.writeToRegistrationManager(manager, conf, Version.NEW);
+        for (var member : manifest.classicRoots()) {
+            cookie.writeToDirectory(member.directory().resolve("current").toFile());
+        }
+        var nativeCookie = client.exists(manager.getCookiePath(manifest.bookieId()), false);
+        var digest = MessageDigest.getInstance("SHA-256").digest(manager.readCookie(manifest.bookieId()).getValue());
+        var binding = new BookieRouteBinding(instance, client.exists(instancePath, false).getCzxid(),
+                manifest.bookieId(), manifest.incarnation(), new UUID(0, 2), manifest.identity(),
+                manifest.controlDirectory().toString(), new BookieRouteBinding.SourceCookie(
+                        nativeCookie.getCzxid(), nativeCookie.getVersion(), digest),
+                BookieRouteBinding.Phase.PREPARED, Optional.empty());
+        nativeScope = manager.prepareBookieRouteBinding(binding).observation().orElseThrow();
+        String requirementsRoot = ledgers + "/commissioned-test";
+        client.create(requirementsRoot, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var store = new ZKProfileStartupRequirementsStore(client, requirementsRoot, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                Duration.ofSeconds(5));
+        var one = new Generation(1);
+        var compatibility = new BookieCompatibilityFact(manifest.bookieId().toString(), manifest.incarnation(),
+                EngineProfile.SEGMENT_WAL_ENGINE, 1, 0, 1, List.of(1), manifest.identity(),
+                one, one, one, 1, 1, BookieCompatibilityFact.MigrationState.FORMAT_READY, one);
+        var devices = new RequiredDeviceManifest(manifest.identity(), one, List.of(
+                new RequiredDeviceManifest.RequiredDeviceFact(manifest.arenas().get(0).id().toString(),
+                        manifest.incarnation(), one, RequiredDeviceManifest.DeviceStatus.READY, 1, 1, 1,
+                        one, List.of(1))));
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                store.provision(compatibility, devices));
+        writeMaterials(SegmentClassicHandoff.Requirements.from(
+                store.read(manifest.bookieId().toString()).observation().orElseThrow()));
+        return new NativeSources(manager, store);
+    }
+
+    @After
+    public void closeNativeFixture() throws Exception {
+        try {
+            if (client != null) {
+                client.close();
+            }
+        } finally {
+            if (cluster != null) {
+                cluster.killCluster();
+            }
+        }
+    }
+
+    private SegmentClassicBootstrapPreparation prepare(NativeSources nativeSources, Duration timeout) {
+        var trust = new SegmentClassicBootstrapPreparation.Trust(expected.deployment(),
+                expected.programConfiguration(), expected.signerKeyId(), expected.trustedSigner(), oldUid, uid, uid);
+        return new SegmentClassicBootstrapPreparation(nativeSources.manager(), nativeSources.requirements(),
+                manifest, references, trust, timeout);
+    }
+
+    @Test(timeout = 30000)
+    public void preparationBindsRealNativeInputsAndHoldsTheOriginalGuardWithoutStorageWrites() throws Exception {
+        var nativeSources = realSources();
+        Path journal = manifest.classicRoots().get(0).directory().resolve("current/1.txn");
+        Path indexRoot = manifest.classicRoots().get(1).directory().resolve("current");
+        ClassicClaimTestHistory.writeJournal(journal, 11);
+        ClassicClaimTestHistory.writeIndex(indexRoot, 11);
+        Path index = indexRoot.resolve(IndexPersistenceMgr.getLedgerName(11));
+        byte[] journalBytes = Files.readAllBytes(journal);
+        byte[] indexBytes = Files.readAllBytes(index);
+        var preparation = prepare(nativeSources, Duration.ofSeconds(5));
+        assertFalse(preparation.inputsBound());
+        probe("AVAILABLE");
+        try {
+            preparation.initialize();
+            assertTrue(preparation.inputsBound());
+            probe("HELD");
+            assertThrows(IOException.class, preparation::initialize);
+            assertArrayEquals(journalBytes, Files.readAllBytes(journal));
+            assertArrayEquals(indexBytes, Files.readAllBytes(index));
+            assertEquals(nativeScope, nativeSources.manager().readBookieRouteBinding(manifest.bookieId())
+                    .observation().orElseThrow());
+            for (var root : manifest.classicRoots()) {
+                Path marker = root.directory().resolve("current").resolve(SegmentClassicRootBindings.FILE_NAME);
+                assertFalse(Files.exists(marker));
+            }
+            assertFalse(Files.exists(manifest.controlDirectory().resolve(SegmentClassicRootBindings.FILE_NAME)));
+            assertFalse(Files.exists(manifest.controlDirectory().resolve("bookie-control")));
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        assertFalse(preparation.inputsBound());
+        probe("AVAILABLE");
+        assertTrue(client.getState().isAlive());
+        var seal = new BookieRouteBinding.BootstrapSeal(new UUID(0, 20), 0, -1);
+        assertEquals(BookieRouteBinding.WriteStatus.APPLIED,
+                nativeSources.manager().completeBookieRouteBinding(nativeScope, seal).status());
+        var enabled = prepare(nativeSources, Duration.ofSeconds(5));
+        try {
+            var failure = assertThrows(IOException.class, enabled::initialize);
+            assertTrue(failure.getMessage().contains("ENABLED recovery is separate"));
+            probe("AVAILABLE");
+        } finally {
+            assertTrue(enabled.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void preparationRejectsRegistrationAndRecreatedRequirementsDuringTheMaterialRead() throws Exception {
+        var nativeSources = realSources();
+        String registration = "/ledgers/available/readonly/" + manifest.bookieId();
+        var first = prepare(nativeSources, Duration.ofSeconds(5));
+        try (var opens = whileOpeningKey(() -> client.create(registration, new byte[0],
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL))) {
+            var failure = assertThrows(IOException.class, first::initialize);
+            assertTrue(failure.getMessage(), failure.getMessage().contains("still has a Bookie registration"));
+            assertFalse(first.inputsBound());
+        } finally {
+            assertTrue(first.closeAndDrain().drained());
+        }
+        assertNotNull(client.exists(registration, false));
+        client.delete(registration, 0);
+
+        var source = expected.requirements().source();
+        String path = source.nodePath();
+        String marker = path + "/birth-" + source.birthId();
+        byte[] bytes = client.getData(path, false, null);
+        var second = prepare(nativeSources, Duration.ofSeconds(5));
+        try (var opens = whileOpeningKey(() -> client.multi(List.of(Op.delete(marker, 0), Op.delete(path, 0),
+                Op.create(path, bytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+                Op.create(marker, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT))))) {
+            var failure = assertThrows(IOException.class, second::initialize);
+            assertTrue(failure.getMessage(), failure.getMessage().contains("changed under the supervisor guard"));
+            assertFalse(second.inputsBound());
+            assertNotEquals(source.birthZxid(), client.exists(path, false).getCzxid());
+        } finally {
+            assertTrue(second.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void preparationRejectsAReplacementAtTheSameArenaPath() throws Exception {
+        var nativeSources = realSources();
+        var arena = manifest.arenas().get(0).directory();
+        Files.move(arena, arena.resolveSibling("original-arena"));
+        directory(arena);
+        privateFile(arena.resolve("isolated.lock"), new byte[0]);
+        privateFile(arena.resolve("arena-control.lock"), new byte[0]);
+        var preparation = prepare(nativeSources, Duration.ofSeconds(5));
+        try {
+            var failure = assertThrows(IOException.class, preparation::initialize);
+            assertTrue(failure.getMessage().contains("physical member differs"));
+            assertFalse(preparation.inputsBound());
+            probe("HELD");
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void preparationCloseDuringActualMaterialReadRejectsLateSuccess() throws Exception {
+        var preparation = prepare(realSources(), Duration.ofSeconds(5));
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var task = new FutureTask<Void>(() -> {
+            try (var opens = whileOpeningKey(() -> {
+                assertThrows(IllegalStateException.class, preparation::closeAndDrain);
+                entered.countDown();
+                assertTrue(release.await(10, TimeUnit.SECONDS));
+            })) {
+                preparation.initialize();
+            }
+            return null;
+        });
+        var reader = new Thread(task, "bootstrap-material-preparation");
+        reader.start();
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertFalse(preparation.closeAndDrain().drained());
+            assertFalse(preparation.inputsBound());
+            assertFalse(task.isDone());
+            probe("HELD");
+        } finally {
+            release.countDown();
+            reader.join(5000);
+            assertFalse(reader.isAlive());
+        }
+        var failure = assertThrows(ExecutionException.class, () -> task.get(5, TimeUnit.SECONDS)).getCause();
+        assertTrue(failure.getMessage(), failure.getMessage().contains("preparation is closing"));
+        var drain = preparation.closeAndDrain();
+        assertTrue(drain.drained());
+        assertSame(failure, drain.initializationFailure());
+        assertFalse(preparation.inputsBound());
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void preparationRetainsSupervisorThroughTheOriginalLateZooKeeperCallback() throws Exception {
+        var preparation = prepare(realSources(), Duration.ofSeconds(2));
+        var task = new FutureTask<Void>(() -> {
+            try (var opens = whileOpeningKey(() -> client.holdNextRead.set(true))) {
+                preparation.initialize();
+            }
+            return null;
+        });
+        var reader = new Thread(task, "bootstrap-zookeeper-preparation");
+        reader.start();
+        try {
+            assertTrue(client.replyHeld.await(5, TimeUnit.SECONDS));
+            assertFalse(preparation.closeAndDrain().drained());
+            assertFalse(preparation.inputsBound());
+            var failure = assertThrows(ExecutionException.class, () -> task.get(5, TimeUnit.SECONDS)).getCause();
+            var pending = preparation.closeAndDrain();
+            assertFalse(pending.drained());
+            assertEquals(1, pending.sources().pendingCallbacks());
+            assertSame(failure, pending.sources().firstReadFailure());
+            assertNull(pending.materials());
+            probe("HELD");
+        } finally {
+            Runnable reply = client.lateReply.getAndSet(null);
+            if (reply != null) {
+                reply.run();
+            }
+            reader.join(5000);
+            assertFalse(reader.isAlive());
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        assertFalse(preparation.inputsBound());
+        assertTrue(client.getState().isAlive());
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void preparationKeepsTheFirstMaterialCloseFailureAndSupervisor() throws Exception {
+        var preparation = prepare(realSources(), Duration.ofSeconds(5));
+        var captured = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        var firstClose = new IOException("bootstrap key first native close");
+        try (var opens = mockStatic(FileChannel.class, invocation -> {
+            Object result = invocation.callRealMethod();
+            if (isKeyOpen(invocation.getMethod().getName(), invocation.getMethod().getParameterTypes(),
+                    invocation.getArgument(0))) {
+                var fault = new SegmentDataFileLockTest.FaultChannel((FileChannel) result);
+                fault.closeFailure = firstClose;
+                captured.set(fault);
+                return fault;
+            }
+            return result;
+        })) {
+            assertSame(firstClose, assertThrows(IOException.class, preparation::initialize));
+        }
+        try {
+            var drain = preparation.closeAndDrain();
+            assertFalse(drain.drained());
+            assertTrue(drain.sources().drained());
+            assertSame(firstClose, drain.initializationFailure());
+            assertSame(firstClose, drain.materials().files().closeFailure());
+            assertSame(drain, preparation.closeAndDrain());
+            assertEquals(1, captured.get().closes.get());
+            assertFalse(preparation.inputsBound());
+            assertTrue(client.getState().isAlive());
+            probe("HELD");
+        } finally {
+            captured.get().actual.close();
+            var member = SegmentClassicBootstrapPreparation.class.getDeclaredField("materials");
+            member.setAccessible(true);
+            guard((SegmentClassicHandoffMaterials) member.get(preparation)).close();
+        }
+        assertFalse(preparation.closeAndDrain().drained());
+        probe("AVAILABLE");
+    }
+
+    @FunctionalInterface
+    private interface KeyOpening {
+        void run() throws Exception;
+    }
+
+    private MockedStatic<FileChannel> whileOpeningKey(KeyOpening action) {
+        return mockStatic(FileChannel.class, invocation -> {
+            if (isKeyOpen(invocation.getMethod().getName(), invocation.getMethod().getParameterTypes(),
+                    invocation.getArgument(0))) {
+                action.run();
+            }
+            return invocation.callRealMethod();
+        });
+    }
+
+    private static final class HeldReadClient extends ZooKeeper {
+        final AtomicBoolean holdNextRead = new AtomicBoolean();
+        final AtomicReference<Runnable> lateReply = new AtomicReference<>();
+        final CountDownLatch replyHeld = new CountDownLatch(1);
+
+        HeldReadClient(String connect, CountDownLatch connected) throws IOException {
+            super(connect, 10000, event -> {
+                if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
+                    connected.countDown();
+                }
+            });
+        }
+
+        @Override
+        public void getData(String path, boolean watch, DataCallback callback, Object context) {
+            boolean hold = holdNextRead.getAndSet(false);
+            super.getData(path, watch, (code, returnedPath, original, bytes, stat) -> {
+                if (hold) {
+                    lateReply.set(() -> callback.processResult(code, returnedPath, original, bytes, stat));
+                    replyHeld.countDown();
+                } else {
+                    callback.processResult(code, returnedPath, original, bytes, stat);
+                }
+            }, context);
+        }
     }
 
     private SegmentClassicHandoffMaterials owner() {
