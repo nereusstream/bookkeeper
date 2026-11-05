@@ -1861,6 +1861,46 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void neededCacheSameBytesFromADifferentActualFdRejectBeforeCacheContentRead() throws Exception {
+        var f = withLookupCache(lookupFixture("libz.so.1"),
+                cacheLookupBytes(new String[0], new byte[0][], new int[0], new long[0]));
+        Path cache = root.resolve("loader.cache");
+        Path other = Files.copy(cache, root.resolve("same-bytes-other-cache"));
+        assertFalse(Files.isSameFile(cache, other));
+        var owner = owner();
+        owner.initialize();
+        var cacheReads = new AtomicInteger();
+        var redirected = new AtomicInteger();
+        try (FileChannel wrong = FileChannel.open(other, StandardOpenOption.READ);
+             var channels = mockStatic(FileChannel.class, call -> {
+                 if (call.getMethod().getName().equals("open") && call.getMethod().getParameterCount() == 3
+                         && cache.equals(call.getArgument(0)) && redirected.compareAndSet(0, 1)) {
+                     return wrong;
+                 }
+                 return call.callRealMethod();
+             }); var contents = mockStatic(SegmentClassicLaunchTrust.class, call -> {
+                 if (call.getMethod().getName().equals("readLinuxContent")
+                         && call.getArgument(2) == SegmentClassicLaunchTrust.LinuxContentKind.CACHE) {
+                     cacheReads.incrementAndGet();
+                 }
+                 return call.callRealMethod();
+             })) {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxNeededCache(f.files(), f.loading(),
+                    0, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("fd identity differs"));
+            assertEquals(0, cacheReads.get());
+            assertFalse(wrong.isOpen());
+            assertThrows(IOException.class, owner::parsed);
+            var drained = owner.closeAndDrain();
+            assertSame(failure, drained.launcherFailure());
+            assertTrue(drained.drained());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertArrayEquals(Files.readAllBytes(cache), Files.readAllBytes(other));
+    }
+
+    @Test
     public void neededCacheOtherLogicalApprovalCannotOpenAnExistingCandidate() throws Exception {
         var original = lookupFixture("libz.so.1");
         String logical = original.loading().contexts().get(3).logicalLoadName();

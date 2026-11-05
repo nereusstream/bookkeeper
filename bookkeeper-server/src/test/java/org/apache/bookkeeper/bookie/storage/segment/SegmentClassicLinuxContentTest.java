@@ -23,12 +23,14 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.spy;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
@@ -219,6 +221,60 @@ public class SegmentClassicLinuxContentTest {
             assertTrue(channel.isOpen());
         }
         assertTrue(owner.drain().drained());
+    }
+
+    @Test
+    public void cacheDigestAndParsedRowsUseTheSameBytesWhenTheFileChangesAfterTheFirstRead() throws Exception {
+        byte[] original = SegmentClassicLinuxCacheTest.vector();
+        byte[] replacement = original.clone();
+        int pathOffset = ByteBuffer.wrap(replacement).order(ByteOrder.LITTLE_ENDIAN).getInt(48 + 8);
+        replacement[pathOffset + 1] = 'X';
+        Path path = write(original);
+        Path other = write(replacement);
+        SegmentClassicLinuxCache.Image first;
+        try (FileChannel a = FileChannel.open(path, StandardOpenOption.READ);
+             FileChannel b = FileChannel.open(other, StandardOpenOption.READ)) {
+            first = SegmentClassicLinuxCache.read(a, original.length, deadline());
+            var second = SegmentClassicLinuxCache.read(b, replacement.length, deadline());
+            assertFalse(first.entries().get(0).path().equals(second.entries().get(0).path()));
+        }
+        var owner = new SegmentOwnedFiles();
+        var changed = new AtomicInteger();
+        var retained = new AtomicReference<ByteBuffer>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && path.equals(invocation.getArgument(0))) {
+                var fault = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
+                org.mockito.stubbing.Answer<Integer> changeAfterRead = call -> {
+                    int read = (int) call.callRealMethod();
+                    ByteBuffer target = call.getArgument(0);
+                    if (read > 0 && target.position() == original.length && changed.compareAndSet(0, 1)) {
+                        retained.set(target.duplicate());
+                        Files.write(path, replacement);
+                    }
+                    return read;
+                };
+                doAnswer(changeAfterRead).when(fault).read(any(ByteBuffer.class));
+                doAnswer(changeAfterRead).when(fault).read(any(ByteBuffer.class), anyLong());
+                return fault;
+            }
+            return actual;
+        })) {
+            try (FileChannel channel = SegmentOwnedFiles.open(owner, path, StandardOpenOption.READ)) {
+                channel.position(17);
+                var content = SegmentClassicLaunchTrust.readLinuxContent(channel, original.length,
+                        LinuxContentKind.CACHE, deadline());
+                retained.get().put(pathOffset + 1, (byte) 'Y');
+                assertEquals(SegmentClassicHandoff.digest(original), content.sha256());
+                assertEquals(first, content.cache());
+                assertEquals(original.length, channel.position());
+                assertTrue(channel.isOpen());
+                assertEquals(1, changed.get());
+            }
+        }
+        assertTrue(owner.drain().drained());
+        assertTrue(java.util.Arrays.equals(replacement, Files.readAllBytes(path)));
     }
 
     @Test

@@ -22,6 +22,8 @@ import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
@@ -99,6 +101,8 @@ final class SegmentClassicLinuxCache {
         }
     }
 
+    record HashedImage(Image image, SegmentClassicHandoff.Digest sha256) { }
+
     /** Explicit assumed data, not an observation of the running loader. Empty platform means observed absence. */
     record Capabilities(long dlHwcap, long hwcapMask, Optional<String> platform, long isa1,
                         List<String> activeHwcaps) { }
@@ -139,28 +143,65 @@ final class SegmentClassicLinuxCache {
 
     /** Caller owns original open/close. Positional reads neither map nor move the original channel. */
     static Image read(FileChannel channel, long length, long deadline) throws IOException {
-        requireTime(deadline);
-        if (length < 48 || length > MAX_BYTES || channel.size() != length) {
-            throw new IOException("Invalid bounded new-cache file length");
-        }
-        ByteBuffer bytes = ByteBuffer.allocate((int) length);
-        while (bytes.hasRemaining()) {
-            requireTime(deadline);
-            if (channel.read(bytes, bytes.position()) <= 0) {
-                throw new IOException("Cache original file read ended or made no progress");
-            }
-        }
-        Image result;
-        try {
-            result = parse(bytes.array(), deadline);
-        } catch (ArithmeticException | IllegalArgumentException malformed) {
-            throw new IOException("Invalid or unsupported glibc new-cache structure", malformed);
-        }
+        var result = parseImage(readBytes(channel, length, deadline), deadline);
         if (channel.size() != length) {
             throw new IOException("Original cache length changed during observation");
         }
         requireTime(deadline);
         return result;
+    }
+
+    /** Owns SHA-256 and the sole private byte image shared with the parser; no mutable image escapes. */
+    static HashedImage readHashed(FileChannel channel, long length, long deadline) throws IOException {
+        byte[] bytes = readBytes(channel, length, deadline);
+        var image = parseImage(bytes, deadline);
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException unavailable) {
+            throw new IOException("Required cache SHA-256 is unavailable", unavailable);
+        }
+        for (int offset = 0; offset < bytes.length; offset += 64 * 1024) {
+            requireTime(deadline);
+            digest.update(bytes, offset, Math.min(64 * 1024, bytes.length - offset));
+        }
+        if (channel.size() != length) {
+            throw new IOException("Original cache length changed during observation");
+        }
+        var result = new HashedImage(image, new SegmentClassicHandoff.Digest(digest.digest()));
+        requireTime(deadline);
+        return result;
+    }
+
+    private static byte[] readBytes(FileChannel channel, long length, long deadline) throws IOException {
+        requireTime(deadline);
+        if (length < 48 || length > MAX_BYTES || channel.size() != length) {
+            throw new IOException("Invalid bounded new-cache file length");
+        }
+        byte[] image = new byte[(int) length];
+        ByteBuffer bytes = ByteBuffer.allocate(Math.min(64 * 1024, image.length));
+        int offset = 0;
+        while (offset < image.length) {
+            requireTime(deadline);
+            bytes.clear().limit(Math.min(bytes.capacity(), image.length - offset));
+            int read = channel.read(bytes, offset);
+            if (read <= 0) {
+                throw new IOException("Cache original file read ended or made no progress");
+            }
+            bytes.flip();
+            bytes.get(image, offset, read);
+            offset += read;
+        }
+        requireTime(deadline);
+        return image;
+    }
+
+    private static Image parseImage(byte[] bytes, long deadline) throws IOException {
+        try {
+            return parse(bytes, deadline);
+        } catch (ArithmeticException | IllegalArgumentException malformed) {
+            throw new IOException("Invalid or unsupported glibc new-cache structure", malformed);
+        }
     }
 
     private static Image parse(byte[] data, long deadline) throws IOException {

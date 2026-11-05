@@ -280,10 +280,12 @@ public final class SegmentClassicLauncher {
         requireRoot();
         program.requireCurrentLauncher(recipeId);
         if (input.linuxDeployment() != null && input.linuxDeployment().schema() == 2) {
+            var deployment = input.linuxDeployment().versionTwo();
             trust.verifyLinuxProvider(deadline);
             trust.verifyLinuxKernelAndCgroupRoot(deadline);
-            trust.verifyLinuxLoaderConfiguration(
-                    input.linuxDeployment().versionTwo().preloadAbsentConfigurationIndex(), deadline);
+            trust.verifyLinuxLoaderConfiguration(deployment.preloadAbsentConfigurationIndex(), deadline);
+            trust.verifyLinuxLoaderConfiguration(SegmentClassicLaunchTrust.fixedLinuxCacheRule(deployment.loading()),
+                    deadline);
         }
         trust.verifyLauncherDropper(input, deadline);
         final List<String> childCommand = input.childCommand(material, program);

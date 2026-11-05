@@ -1218,6 +1218,20 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的固定 cache 与同次字节及 fd 绑定
+
+2026-11-05在父`a83b22dde9d409bab7977cbdfdb52cd461d24584`上，正常launcher在固定preload缺失检查之后、dropper/childCommand/私钥之前，用原`fixedLinuxCacheRule(original loading)`选择`/etc/ld.so.cache`的CACHE原index并调用既有typed配置观察器。不硬编码表位置、不要求cache一定存在，也不为NEEDED打开候选或计算能力/winner；ld.so.conf图保持独立，未接入本节点。[glibc 2.39运行时cache源码](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-cache.c)仅为静态依据，不提升运行资格。
+
+CACHE内容原先先stream SHA、再同fd positional重读解析；新的`readHashed`内部创建SHA-256，与原三参`read`共用私有读取/解析，从唯一有界byte image取得完整格式结果与摘要。实际channel只接触至多64KiB scratch，每块拷入私有image，保留短读/零进展/长度/期限；Text切片及摘要共享的原数组不交给caller digest或channel，不分配第二份16MiB整图。直接Cache.read仍不移动原channel，readLinuxContent(CACHE)成功后position为length；摘要finalization、结果构造及外层结果/position完成后均检查原期限。其他内容kind的读取合同保持。
+
+D2 present cache在原`observeLoaderConfiguration`路径上复用私有Entry及sealed JNI：打开后、内容前将真实fd dev/ino与checked physical匹配，读后再核同fd身份，随后沿原首次close、leaf/parents/path/alias/批准SHA检查。旧hashFile入口仅ELF2保留原身份检查，D1 cache没有新增fileIdentity ABI前提。typed CACHE两次独立完整读取后复用`requireLinuxCacheBinding`比较原路径、presence、实际leaf/parents和绑定解析字节的SHA，不再对重复Text执行一次深equals；PRELOAD_ABSENT/LDCONFIG原行为保持。
+
+两个新增反例先在父实现取红：真实首次读取后同长度有效cache A→B，返回A摘要/B解析；只将首次cache open替换为同字节不同inode实际FileChannel时，父实现未拒绝。fd首轮夹具曾重复返回已关闭fd，drain断言干扰原失败；该记录保留，修正为只替换首次open后取得明确“应抛IOException但成功”的红。只读评审先移除caller digest造成的数组外露，再发现channel可保留整图ByteBuffer；扩展同一Content反例，返回后改写保留的duplicate，隔离前再次取红，scratch隔离后通过。
+
+最终Cache16＋Content9＋Trust相关25＋DeploymentV2 12＋Inputs6＋Launcher3共71项全通过，0失败/错误/跳过，包含新增2项。最终Java Spotless/Checkstyle退出0；另用精确旧75e59684…库（337024 bytes，实际导出不含fileIdentity/uname/cgroup新符号）运行两个既有D1 cache用例全过，属于71项中的兼容性重复，不累加唯一数。原2项绿色/style、隔离前71项/旧库2项/style分别绑定各自原版本，不移绑最终代码；8个Maven测试阶段各1450原输入按snapshot/父Git blob核验，最终五code与最终两组测试及style一致。沿用9406191e…受控库，未重建native或重跑无关矩阵。
+
+证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-cache-evidence-a83b22dd`，保留各原源码/class/日志/XML、失败及库输入；静态dl-cache.c原字节16400 bytes，SHA-256 `8c9fcaa06f745976efa7970235d07bb248dc09fc5e2c37a49f0cc35fb3a5e8b0`。正常D2调用顺序按实际代码静态确认，动态证据为真实临时文件/data入口和原owner生命周期，不能补认原批准D2来源；实际Linux/vendor启动仍NOT_EXECUTED。该结果仅为当次材料验收，不证明loader实际mmap、后续exec不变、搜索闭包或完整资格。原childCommand/diagnostics拒绝及整体parent/child/Main/G1/full-bytes/full16/生产Gate仍OPEN，默认OFF/SYSTEM/PARK、advanced disabled及持续目标active保持。
+
 ## 正常 D2 launcher 的固定系统 preload 缺失检查
 
 2026-11-05在父`c48530e7db5db39e4d234608c85e31de034e3e7e`上，正常launcher在原D2 provider、uname/cgroup检查之后，dropper、childCommand与私钥读取之前，调用原`verifyLinuxLoaderConfiguration(index, deadline)`。index由同一原D2不可变有界configuration表中的`preloadAbsentConfigurationIndex()`选出，只匹配原字面`/etc/ld.so.preload`、PRELOAD_ABSENT、format 1、file -1；不硬编码表位置，也不接受caller Path、环境或可调根。原构造器的固定规则、唯一性与presence保证保持，未改schema或codec。[glibc 2.39的系统preload读取](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/rtld.c)是静态依据，不作为运行资格。

@@ -3231,7 +3231,9 @@ final class SegmentClassicLaunchTrust {
             } else {
                 var first = observeLoaderConfiguration(deployment.files(), ruleIndex, rule, path, aliases, deadline);
                 var second = observeLoaderConfiguration(deployment.files(), ruleIndex, rule, path, aliases, deadline);
-                if (!first.equals(second)) {
+                if (rule.kind() == ConfigurationKind.CACHE) {
+                    requireLinuxCacheBinding(first, second);
+                } else if (!first.equals(second)) {
                     throw new IOException("Original loader cache or preload path changed between observations");
                 }
                 result = first;
@@ -3260,7 +3262,7 @@ final class SegmentClassicLaunchTrust {
         if (!observed.resolved().equals(physical)) {
             throw new IOException("Original cache path differs from its declared physical material");
         }
-        var material = hashFile(physical, file.length(), file.sha256(), false, LinuxContentKind.CACHE, deadline);
+        var material = hashFile(physical, file.length(), file.sha256(), false, LinuxContentKind.CACHE, true, deadline);
         if (!observed.identity().equals(material.identity())
                 || !observed.equals(observeLinuxPath(LinuxPathKind.CONFIGURATION, path, aliases, true, deadline))) {
             throw new IOException("Original cache identity or logical path changed during its hash/parser read");
@@ -3338,6 +3340,12 @@ final class SegmentClassicLaunchTrust {
     private HashedFile hashFile(Path path, long declaredLength, SegmentClassicHandoff.Digest sha256,
             boolean executable, LinuxContentKind kind, long deadlineNanos)
             throws IOException {
+        return hashFile(path, declaredLength, sha256, executable, kind, kind == LinuxContentKind.ELF2, deadlineNanos);
+    }
+
+    private HashedFile hashFile(Path path, long declaredLength, SegmentClassicHandoff.Digest sha256,
+            boolean executable, LinuxContentKind kind, boolean bindIdentity, long deadlineNanos)
+            throws IOException {
         requireTime(deadlineNanos);
         Identity before = checked(path);
         if (before.directory() || before.uid() != ownerUid || before.links() != 1
@@ -3354,21 +3362,23 @@ final class SegmentClassicLaunchTrust {
                 throw new IOException("Program file length changed during open");
             }
             NativeIO.FileIdentity held = null;
-            if (kind == LinuxContentKind.ELF2) {
+            if (bindIdentity) {
                 requireTime(deadlineNanos);
                 held = files.fileIdentity(channel, nativeIo);
                 requireTime(deadlineNanos);
                 if (held.device() != before.device() || held.inode() != before.inode()) {
-                    throw new IOException("Original ELF2 fd identity differs from its checked material path");
+                    throw new IOException("Original " + (kind == LinuxContentKind.ELF2 ? "ELF2" : "cache")
+                            + " fd identity differs from its checked material path");
                 }
             }
             content = readLinuxContent(channel, declaredLength, kind, deadlineNanos);
-            if (kind == LinuxContentKind.ELF2) {
+            if (bindIdentity) {
                 requireTime(deadlineNanos);
                 var after = files.fileIdentity(channel, nativeIo);
                 requireTime(deadlineNanos);
                 if (!held.equals(after)) {
-                    throw new IOException("Original ELF2 fd identity changed during its hash/parser read");
+                    throw new IOException("Original " + (kind == LinuxContentKind.ELF2 ? "ELF2" : "cache")
+                            + " fd identity changed during its hash/parser read");
                 }
             }
             if (channel.size() != declaredLength || !before.equals(checked(path))) {
@@ -3393,6 +3403,13 @@ final class SegmentClassicLaunchTrust {
                 && (length < 48 || length > SegmentClassicLinuxCache.MAX_BYTES)
                 || kind == LinuxContentKind.LDCONFIG && length > SegmentClassicLinuxConfiguration.MAX_BYTES) {
             throw new IOException("Unsupported bounded Linux content kind or length");
+        }
+        if (kind == LinuxContentKind.CACHE) {
+            var cache = SegmentClassicLinuxCache.readHashed(channel, length, deadline);
+            channel.position(length);
+            var result = new LinuxContent(cache.sha256(), null, null, cache.image(), null);
+            requireTime(deadline);
+            return result;
         }
         MessageDigest digest;
         try {
@@ -3421,11 +3438,9 @@ final class SegmentClassicLaunchTrust {
                 ? SegmentClassicLinuxElf.read(channel, length, deadline) : null;
         SegmentClassicLinuxElf.Image2 elf2 = kind == LinuxContentKind.ELF2
                 ? SegmentClassicLinuxElf.readVersionTwo(channel, length, deadline) : null;
-        SegmentClassicLinuxCache.Image cache = kind == LinuxContentKind.CACHE
-                ? SegmentClassicLinuxCache.read(channel, length, deadline) : null;
         SegmentClassicLinuxConfiguration.Image configuration = kind == LinuxContentKind.LDCONFIG
                 ? SegmentClassicLinuxConfiguration.read(channel, length, deadline) : null;
-        var result = new LinuxContent(new SegmentClassicHandoff.Digest(digest.digest()), elf, elf2, cache,
+        var result = new LinuxContent(new SegmentClassicHandoff.Digest(digest.digest()), elf, elf2, null,
                 configuration);
         requireTime(deadline);
         return result;
