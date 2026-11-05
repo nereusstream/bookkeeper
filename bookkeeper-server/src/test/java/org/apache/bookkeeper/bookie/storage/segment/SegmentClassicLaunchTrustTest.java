@@ -2581,6 +2581,7 @@ public class SegmentClassicLaunchTrustTest {
                     first ? (approveIndirect ? List.of(leafContext) : List.of(0)) : List.of(0, branchContext)));
         }
         rules.set(4, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, branchContext)));
+        rules.set(5, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1, List.of(0, branchContext)));
         var declarations = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
                 loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
                 loading.policy(), metadata, contexts, rules, loading.modules());
@@ -2687,7 +2688,7 @@ public class SegmentClassicLaunchTrustTest {
         metadata.add(elf);
         contexts.add(new SegmentClassicLinuxDeploymentV2.Context(elf.file(), grandparentCandidate.toString()));
         rules.set(4, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, 4, candidate)));
-        rules.set(5, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1, List.of(0, candidate)));
+        rules.set(5, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1, List.of(0, 4, candidate)));
         rules.set(9, new SegmentClassicLinuxDeploymentV2.NeededRule(5, 0, List.of(0, 4, candidate)));
         var approved = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
                 loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
@@ -2759,6 +2760,224 @@ public class SegmentClassicLaunchTrustTest {
             assertSame(failure, owner.closeAndDrain().launcherFailure());
         } finally {
             assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    private CandidateFixture jdkHelperReuseFixture(String firstSoname, boolean approveReuse) throws Exception {
+        var fixture = jdkHelperCacheFixture(false, true);
+        var loading = fixture.loading();
+        var members = new java.util.ArrayList<>(fixture.files());
+        var metadata = new java.util.ArrayList<>(loading.elf());
+        var contexts = new java.util.ArrayList<>(loading.contexts());
+        var absent = new DynamicPath(false, "");
+        String firstName = "libfirst.so";
+        String secondName = "libsecond.so";
+        Path directory = Files.createDirectory(root.resolve("reuse-default"));
+        int first = contexts.size();
+        for (String name : List.of(firstName, secondName)) {
+            var path = directory.resolve(name);
+            var elf = new SegmentClassicLinuxDeploymentV2.Elf(members.size(), List.of(), absent, absent, 0, 0);
+            byte[] bytes = launcherDropperImage(elf, null, name.equals(firstName) ? firstSoname : null);
+            write(path, bytes);
+            members.add(new SegmentClassicLinuxDeploymentV2.File(path.toString(),
+                    SegmentClassicLinuxDeployment.Role.LIBRARY, bytes.length, SegmentClassicHandoff.digest(bytes)));
+            metadata.add(elf);
+            contexts.add(new SegmentClassicLinuxDeploymentV2.Context(elf.file(), path.toString()));
+        }
+        var helper = members.get(1);
+        var helperElf = new SegmentClassicLinuxDeploymentV2.Elf(1, List.of(firstName, secondName), absent, absent,
+                0, 0);
+        byte[] bytes = launcherDropperImage(helperElf, loading.interpreter());
+        write(Path.of(helper.path()), bytes);
+        Files.setPosixFilePermissions(Path.of(helper.path()), PosixFilePermissions.fromString("rwxr-xr-x"));
+        members.set(1, new SegmentClassicLinuxDeploymentV2.File(helper.path(), helper.role(), bytes.length,
+                SegmentClassicHandoff.digest(bytes)));
+        metadata.set(1, helperElf);
+        var second = approveReuse ? List.of(first, first + 1) : List.of(first + 1);
+        var rules = List.of(new SegmentClassicLinuxDeploymentV2.NeededRule(2, 0, List.of(first)),
+                new SegmentClassicLinuxDeploymentV2.NeededRule(2, 1, second),
+                new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(first)),
+                new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1, second));
+        var graph = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
+                loading.policy(), metadata, contexts, rules, List.of());
+        return new CandidateFixture(members, defaultLoading(graph,
+                List.of(new SegmentClassicLinuxDeploymentV2.Directory(directory.toString(), true)),
+                List.of(directory.toString()), metadata));
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesRejectUnapprovedSonameReuseDespiteApprovedPaths() throws Exception {
+        var fixture = jdkHelperReuseFixture("libsecond.so", false);
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(2, 3), owner.readLinuxJdkHelperNeededCandidates(fixture.files(),
+                    fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
+                    fixture.files(), fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("reuse"));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesAcceptExplicitSonameReuseApproval() throws Exception {
+        var fixture = jdkHelperReuseFixture("libsecond.so", true);
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(2, 3), owner.readLinuxJdkHelperReachableCandidates(fixture.files(),
+                    fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesDoNotMergeSameBytesAcrossInodes() throws Exception {
+        var fixture = jdkHelperReuseFixture(null, false);
+        var contexts = fixture.loading().contexts();
+        assertEquals(fixture.files().get(contexts.get(4).file()).sha256(),
+                fixture.files().get(contexts.get(5).file()).sha256());
+        assertFalse(Files.isSameFile(Path.of(contexts.get(4).logicalLoadName()),
+                Path.of(contexts.get(5).logicalLoadName())));
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(2, 3), owner.readLinuxJdkHelperReachableCandidates(fixture.files(),
+                    fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesRequireTheOriginalContextAfterFileIdReuse() throws Exception {
+        var fixture = jdkHelperReuseFixture(null, false);
+        var loading = fixture.loading();
+        var members = new java.util.ArrayList<>(fixture.files());
+        var metadata = new java.util.ArrayList<>(loading.elf());
+        var contexts = new java.util.ArrayList<>(loading.contexts());
+        var aliases = new java.util.ArrayList<>(loading.aliases());
+        var rules = new java.util.ArrayList<>(loading.needed());
+        var first = contexts.get(4);
+        var second = contexts.get(5);
+        Path firstPath = Path.of(first.logicalLoadName());
+        Path secondPath = Path.of(second.logicalLoadName());
+        Files.delete(secondPath);
+        Files.createSymbolicLink(secondPath, firstPath.getFileName());
+        assertTrue(Files.isSameFile(firstPath, secondPath));
+        members.remove(second.file());
+        metadata.remove(metadata.size() - 1);
+        contexts.set(5, new SegmentClassicLinuxDeploymentV2.Context(first.file(), second.logicalLoadName()));
+        aliases.add(new SegmentClassicLinuxDeploymentV2.Alias(second.logicalLoadName(), "libfirst.so"));
+        rules.set(2, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(4, 5)));
+        var refused = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), aliases, loading.directories(), loading.configuration(), loading.policy(),
+                metadata, contexts, rules, List.of());
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(2, 3), owner.readLinuxJdkHelperNeededCandidates(members, refused, 3, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
+                    members, refused, 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("reuse lacks approval for context 4"));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+
+        rules.set(3, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1, List.of(4, 5)));
+        var approved = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), aliases, loading.directories(), loading.configuration(), loading.policy(),
+                metadata, contexts, rules, List.of());
+        var retry = owner();
+        retry.initialize();
+        try {
+            assertEquals(List.of(2, 3), retry.readLinuxJdkHelperReachableCandidates(members, approved, 3, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(retry.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesCheckTheSonameOfAnUnselectedAlternative() throws Exception {
+        var fixture = jdkHelperReuseFixture(null, false);
+        var loading = fixture.loading();
+        var members = new java.util.ArrayList<>(fixture.files());
+        var metadata = new java.util.ArrayList<>(loading.elf());
+        var contexts = new java.util.ArrayList<>(loading.contexts());
+        var rules = new java.util.ArrayList<>(loading.needed());
+        var absent = new DynamicPath(false, "");
+        Path path = root.resolve("unselected-alternative.so");
+        var elf = new SegmentClassicLinuxDeploymentV2.Elf(members.size(), List.of(), absent, absent, 0, 0);
+        byte[] bytes = launcherDropperImage(elf, null, "libsecond.so");
+        write(path, bytes);
+        members.add(new SegmentClassicLinuxDeploymentV2.File(path.toString(),
+                SegmentClassicLinuxDeployment.Role.LIBRARY, bytes.length, SegmentClassicHandoff.digest(bytes)));
+        metadata.add(elf);
+        rules.set(2, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(4, contexts.size())));
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(elf.file(), path.toString()));
+        var graph = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
+                loading.policy(), metadata, contexts, rules, List.of());
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(2, 3), owner.readLinuxJdkHelperNeededCandidates(members, graph, 3, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
+                    members, graph, 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("reuse lacks approval for context 6"));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperReachableCandidatesBindInterpreterReuseToItsOriginalContext() throws Exception {
+        var fixture = jdkHelperReuseFixture(null, false);
+        var loading = fixture.loading();
+        var members = new java.util.ArrayList<>(fixture.files());
+        var loader = members.get(loading.loader());
+        var elf = loading.elf().get(0);
+        byte[] bytes = launcherDropperImage(elf, null, "libsecond.so");
+        Path path = Path.of(loader.path());
+        write(path, bytes);
+        Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rwxr-xr-x"));
+        members.set(loading.loader(), new SegmentClassicLinuxDeploymentV2.File(loader.path(), loader.role(),
+                bytes.length, SegmentClassicHandoff.digest(bytes)));
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(2, 3), owner.readLinuxJdkHelperNeededCandidates(members, loading, 3, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
+                    members, loading, 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("interpreter reuse lacks its original"));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+
+        var rules = new java.util.ArrayList<>(loading.needed());
+        rules.set(3, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1, List.of(0, 5)));
+        var approved = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
+                loading.policy(), loading.elf(), loading.contexts(), rules, List.of());
+        var retry = owner();
+        retry.initialize();
+        try {
+            assertEquals(List.of(2, 3), retry.readLinuxJdkHelperReachableCandidates(members, approved, 3, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+        } finally {
+            assertTrue(retry.closeAndDrain().drained());
         }
     }
 
@@ -5443,11 +5662,19 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     private static byte[] launcherDropperImage(SegmentClassicLinuxDeploymentV2.Elf metadata, String interpreter) {
+        return launcherDropperImage(metadata, interpreter, null);
+    }
+
+    private static byte[] launcherDropperImage(SegmentClassicLinuxDeploymentV2.Elf metadata, String interpreter,
+            String soname) {
         var strings = new ByteArrayOutputStream();
         strings.write(0);
         var entries = new java.util.ArrayList<long[]>();
         for (String name : metadata.needed()) {
             entries.add(tagText(strings, 1, name));
+        }
+        if (soname != null) {
+            entries.add(tagText(strings, 14, soname));
         }
         if (metadata.rpath().present()) {
             entries.add(tagText(strings, 15, metadata.rpath().value()));

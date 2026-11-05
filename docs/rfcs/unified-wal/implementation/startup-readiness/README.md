@@ -1450,6 +1450,16 @@ D2 present cache在原`observeLoaderConfiguration`路径上复用私有Entry及s
 
 证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-preload-evidence-c48530e7`，保留原源码/class/日志/XML及静态rtld.c原字节（88632 bytes，SHA-256 `03681f7c7cea6f542a6416e3478a8c6bfe6c3a7969d1bb081dbba4f18395ed49`）。正常D2消费点与先后顺序按实际直线代码静态确认；临时树动态测试不是原批准D2 typed阳性，实际Linux/vendor启动仍NOT_EXECUTED。检查仅表示此时系统preload路径的受保护缺失，不证明已运行父JVM的历史、helper的LD_PRELOAD/--preload、未来exec时不变或完整加载闭包。boot身份的可信procfs来源仍待设计，不能把普通路径UUID读数补成authority；原childCommand/diagnostics拒绝和整体parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled及持续目标active保持。
 
+## 正常 D2 launcher 的 helper 可能复用检查
+
+在 `258f473584` 的代码上，原 D2 helper 的递归取证增加逐 NEEDED ordinal 的可能复用检查。glibc 在查路径前匹配已加载对象的名称或 SONAME，也可在打开文件后按 file ID 命中并记住请求名。因此每条规则除了查 cache、自身标签、祖先 RPATH 和默认目录，还要核验可能被复用的原 context。[glibc 2.39 名称与 file ID 检查](https://github.com/bminor/glibc/blob/glibc-2.39/elf/dl-load.c)
+
+原 owner 从已核验的可达 ELF 保留原逻辑名称、SONAME、原请求名称和与 owned fd 对照过的 dev/ino。逻辑名称、实际 SONAME 和原候选边可能引入的普通请求名称都进入可能命中范围。相同 dev/ino 共享名称关系，各 context 仍须在本 ordinal 单独获批。helper 和已验 PT_INTERP 文件同样参与，若命中解释器且未匹配其原声明 context 则拒绝。整组规则检查结束后再做末轮路径身份复核，保留首次关闭、首错和原期限。范围包含未选中候选，允许保守拒绝。
+
+真实文件夹具使前一库的 SONAME 等于后一依赖名。旧实现验证两个实际路径后错误放行，修复后仅显式批准前一库原 context 才通过。另覆盖同 inode 的两个逻辑 context、同字节不同 inode、未选中候选和固定解释器，以及既有实际文件替换与关闭。首轮扩展测试夹具误用 Java 21 的集合 API，在 release 17 编译时退出。修正后最终 107 项定向 JUnit 全部通过，Java Spotless 与 Checkstyle 通过。沿用封存的 macOS arm64 JNI。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-d2-helper-reuse-evidence-258f4735`。
+
+本轮覆盖的是已实读文件范围内的可能复用约束。实际初始 namespace 与 vDSO、加载先后和选择、初始化行为、执行期间父进程环境及批准 Linux/vendor 实跑仍未验收。首次 diagnostics、child 和 handoff 的执行门继续拒绝。
+
 ## 首次 D2 loader diagnostics 的来源审计
 
 以 `1199e85016c` 为代码基线。正常启动从独立的 `ControlledClassicLauncherMain` 转入 launcher worker。它先由纯 JDK preload 检查环境快照、参数和固定材料，再核验固定 JNI 的长度、摘要和路径后调用 `System.load`。随后校验完整 JDK 树、原 classpath、配置和 D2 描述，核对实际进程及 provider，再读取平台、cgroup、加载材料、unit 和 systemd 私有 socket 的 peer。此时还未创建 ZooKeeper session、普通 child 或 systemctl 查询。JNI 的 `jdkProcessLaunch` 读取 bootstrap `ProcessImpl` 的静态字段，可能触发其初始化。正常路径在该调用前后各采样一次 libc `environ`，再检查 helper 图。正常 launcher 尚未调用 `verifyLinuxLoaderDiagnostics`，该入口也会在构造 ProcessBuilder 前拒绝。

@@ -2,6 +2,8 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
+正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。
+
 首次 D2 loader diagnostics 的来源审计以 `1199e85016c` 为代码基线。固定路径与保守候选核验可先于 diagnostics，但原 POSIX_SPAWN 需要独立证明父进程 `environ` 连续为空，且实际已加载对象复用和初始化入口仍须闭合。已核对 Corretto 参考源码的 JLI 环境修改分支、HotSpot 动态 attach 及 helper 两次 exec 的环境边界。在当前仓库、既有验证材料和本机固定安装位置中，未取得目标 Linux JDK/glibc/JNI 对应构建与源码、启动期实际载入范围和运行期约束的批准证据。执行拒绝保留，批准 Linux 运行记为 NOT_EXECUTED。详见 [startup-readiness](startup-readiness/README.md#首次-d2-loader-diagnostics-的来源审计)。
 
 正常 D2 的 helper 依赖检查增加固定绝对路径的祖先 RPATH 候选取证。目录来自实读祖先 ELF，依赖名称和批准集合来自当前请求者的原 ordinal。真实文件反例先失败后通过，77 项定向 JUnit 与 Java 样式通过。实际加载者链、候选选择及批准 Linux 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的祖先-rpath-候选检查)。

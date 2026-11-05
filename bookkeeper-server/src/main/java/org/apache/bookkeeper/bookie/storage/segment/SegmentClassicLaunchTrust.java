@@ -2828,7 +2828,8 @@ final class SegmentClassicLaunchTrust {
         var retainedPaths = new LinuxPathObservation[reached.length];
         var rpathDirectories = observeLinuxHelperRpathSources(members, loading, helper, reached,
                 retainedPaths, aliases, deadline);
-        var completedRules = new ArrayList<Integer>();
+        var sonames = new String[reached.length];
+        var requestNames = new String[loading.needed().size()];
         // Original context order makes the observations reproducible and carries no loader ordering semantics.
         for (int index = 0; index < reached.length; index++) {
             requireTime(deadline);
@@ -2840,6 +2841,7 @@ final class SegmentClassicLaunchTrust {
                 throw new IOException("Reachable NEEDED context changed across the JDK helper observations");
             }
             retainedPaths[index] = requester.path();
+            sonames[index] = requester.content().elf().soname();
             List<Integer> inherited = ruleStarts[index] == ruleStarts[index + 1]
                     || requester.content().elf().runpath().present() ? List.of()
                     : inheritedLinuxRpathDirectories(index, predecessors, rpathDirectories, retainedPaths,
@@ -2847,9 +2849,11 @@ final class SegmentClassicLaunchTrust {
             for (int rule = ruleStarts[index]; rule < ruleStarts[index + 1]; rule++) {
                 observeLinuxNeededCandidateStages(members, loading, requester, rule, cacheRule, aliases,
                         inherited, deadline);
-                completedRules.add(rule);
+                requestNames[rule] = requester.content().elf().needed().get(loading.needed().get(rule).ordinal());
             }
         }
+        var completedRules = verifyLinuxHelperReuseCandidates(loading, interpreter, retainedPaths, sonames,
+                requestNames, deadline);
         for (int index = 0; index < retainedPaths.length; index++) {
             if (index != helper.context() && retainedPaths[index] != null) {
                 recheckLinuxHelperGraphPath(retainedPaths[index], aliases, deadline);
@@ -2858,7 +2862,95 @@ final class SegmentClassicLaunchTrust {
         recheckLinuxJdkHelperMaterial(helper, interpreter, aliases, deadline);
         files.requireHealthy();
         requireTime(deadline);
+        return completedRules;
+    }
+
+    private static final class LinuxHelperReuseFile {
+        private final BitSet contexts = new BitSet();
+        private boolean unboundInterpreter;
+    }
+
+    /** Conservative possible hits, including unselected contexts, without assuming a loaded order. */
+    private static List<Integer> verifyLinuxHelperReuseCandidates(SegmentClassicLinuxDeploymentV2.Loading loading,
+            LinuxLoadPathObservation interpreter, LinuxPathObservation[] paths, String[] sonames,
+            String[] requestNames, long deadline) throws IOException {
+        var byFileId = new HashMap<NativeIO.FileIdentity, LinuxHelperReuseFile>();
+        var byContext = new LinuxHelperReuseFile[paths.length];
+        var byName = new HashMap<String, Set<LinuxHelperReuseFile>>();
+        boolean interpreterBound = false;
+        for (int context = 0; context < paths.length; context++) {
+            requireTime(deadline);
+            if (paths[context] == null) {
+                continue;
+            }
+            var declared = loading.contexts().get(context);
+            var identity = paths[context].identity();
+            var file = byFileId.computeIfAbsent(new NativeIO.FileIdentity(identity.device(), identity.inode()),
+                    ignored -> new LinuxHelperReuseFile());
+            byContext[context] = file;
+            file.contexts.set(context);
+            addLinuxHelperReuseName(byName, declared.logicalLoadName(), file);
+            addLinuxHelperReuseName(byName, sonames[context], file);
+            if (interpreter != null && declared.file() == interpreter.member()
+                    && declared.logicalLoadName().equals(interpreter.logical())
+                    && identity.equals(interpreter.content().identity())) {
+                interpreterBound = true;
+            }
+        }
+        if (interpreter != null) {
+            var identity = interpreter.content().identity();
+            var file = byFileId.computeIfAbsent(new NativeIO.FileIdentity(identity.device(), identity.inode()),
+                    ignored -> new LinuxHelperReuseFile());
+            file.unboundInterpreter = !interpreterBound;
+            addLinuxHelperReuseName(byName, interpreter.logical(), file);
+            addLinuxHelperReuseName(byName, interpreter.content().elf().soname(), file);
+        }
+        for (int rule = 0; rule < requestNames.length; rule++) {
+            requireTime(deadline);
+            if (requestNames[rule] != null) {
+                for (int candidate : loading.needed().get(rule).candidates()) {
+                    requireTime(deadline);
+                    // A file-id hit can add this name to an object loaded through any view of the same file.
+                    addLinuxHelperReuseName(byName, requestNames[rule], byContext[candidate]);
+                }
+            }
+        }
+        var approved = new BitSet(paths.length);
+        var completedRules = new ArrayList<Integer>();
+        for (int rule = 0; rule < requestNames.length; rule++) {
+            requireTime(deadline);
+            if (requestNames[rule] == null) {
+                continue;
+            }
+            approved.clear();
+            for (int candidate : loading.needed().get(rule).candidates()) {
+                requireTime(deadline);
+                approved.set(candidate);
+            }
+            for (var file : byName.getOrDefault(requestNames[rule], Set.of())) {
+                requireTime(deadline);
+                if (file.unboundInterpreter) {
+                    throw new IOException("Possible JDK helper interpreter reuse lacks its original context");
+                }
+                for (int context = file.contexts.nextSetBit(0); context >= 0;
+                        context = file.contexts.nextSetBit(context + 1)) {
+                    requireTime(deadline);
+                    if (!approved.get(context)) {
+                        throw new IOException("Possible JDK helper reuse lacks approval for context " + context
+                                + " in original NEEDED rule " + rule);
+                    }
+                }
+            }
+            completedRules.add(rule);
+        }
         return List.copyOf(completedRules);
+    }
+
+    private static void addLinuxHelperReuseName(Map<String, Set<LinuxHelperReuseFile>> names, String name,
+            LinuxHelperReuseFile file) {
+        if (name != null) {
+            names.computeIfAbsent(name, ignored -> new HashSet<>()).add(file);
+        }
     }
 
     private LinuxLoadPathObservation observeLinuxHelperContext(List<SegmentClassicLinuxDeploymentV2.File> members,
