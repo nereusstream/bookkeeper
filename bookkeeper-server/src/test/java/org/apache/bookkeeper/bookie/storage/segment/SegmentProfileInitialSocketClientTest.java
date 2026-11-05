@@ -14779,11 +14779,7 @@ public class SegmentProfileInitialSocketClientTest {
                         writer.stopLocalWrites().get(5, TimeUnit.SECONDS);
                     }
                 }
-                pool = new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool(
-                        episodes.get(0).persistent, fixture.clientGroup, fixture.peerTls, fixture.cold,
-                        fixture.identities.stream().map(identity -> identity.bookieId()).toList(),
-                        new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
-                                2 * cohortSize, 4 * cohortSize, 2, 1060, Duration.ofSeconds(5)));
+                pool = newPeerPool();
             } catch (Exception failure) {
                 try {
                     close();
@@ -14792,6 +14788,13 @@ public class SegmentProfileInitialSocketClientTest {
                 }
                 throw failure;
             }
+        }
+
+        ProfileRecoveryPeerPool newPeerPool() {
+            var cohort = fixture.identities.stream().map(identity -> identity.bookieId()).toList();
+            return new ProfileRecoveryPeerPool(episodes.get(0).persistent, fixture.clientGroup, fixture.peerTls,
+                    fixture.cold, cohort, new ProfileRecoveryPeerPool.Limits(
+                            2 * cohort.size(), 4 * cohort.size(), 2, 1060, Duration.ofSeconds(5)));
         }
 
         @Override
@@ -16049,6 +16052,146 @@ public class SegmentProfileInitialSocketClientTest {
                 awaitProfileConnectionDrain(restarted.budget);
             }
         }
+    }
+
+    @Test
+    public void wholePointRecoveryClosesOpenLedgerAfterHealthyRegisteredServiceRestart() throws Exception {
+        try (var episode = new PublicProfileReadonlyEpisode(3, false, 3)) {
+            var fixture = episode.fixture;
+            var sdk = episode.sdk;
+            var context = fixture.context();
+            long ledger = context.ledgerId();
+            int target = 0;
+            var previous = episode.episodes.get(target);
+            var identity = fixture.identities.get(target);
+            var bookieId = identity.bookieId();
+            var oldPeer = previous.persistent.readPeer(bookieId.toString()).peer();
+            assertNotNull(oldPeer);
+            byte[] first = bytes(16, 8);
+            byte[] second = bytes(19, 9);
+            long length = first.length + second.length;
+            try {
+                var initial = episode.pool.acquire();
+                try {
+                    var lease = initial.completion().get(5, TimeUnit.SECONDS);
+                    assertEquals(1, lease.data().get(bookieId).hello().readinessGeneration());
+                    fixture.clients.putAll(lease.controls());
+                    var available = fixture.initialize().get(5, TimeUnit.SECONDS);
+                    var writer = ProfileLedgerHandle.fromInitialAvailability(sdk.getClientCtx(), available,
+                            lease.data(), 8, 1024, 3, Duration.ofSeconds(5), Duration.ofMillis(5));
+                    try {
+                        assertEquals(0, writer.addEntry(first));
+                        assertEquals(1, writer.addEntry(second));
+                        assertEquals(1, writer.getLastAddConfirmed());
+                        assertEquals(length, writer.getLength());
+                    } finally {
+                        writer.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    }
+                } finally {
+                    fixture.clients.clear();
+                    initial.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+                assertRegisteredPoolDrained(episode.pool);
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var open = metadata.readMembership(ledger).snapshot();
+                assertNotNull(open);
+                assertEquals(LedgerMetadata.State.OPEN, open.metadata().getValue().getState());
+                var root = fixture.reservations.read(ledger).snapshot();
+                assertNotNull(root);
+
+                var listener = fixture.listeners.get(target);
+                var address = (InetSocketAddress) listener.localAddress();
+                previous.service.close();
+                assertTrue(listener.closeFuture().isSuccess());
+                for (var lane : ProfileReceiveBudget.Lane.values()) {
+                    assertEquals(0, previous.budget.used(lane));
+                    assertEquals(0, previous.budget.usedConnections(lane));
+                }
+                assertNull(previous.persistent.readPeer(bookieId.toString()).peer());
+                var policy = servicePolicy(previous.config, identity, 2);
+                var restarted = new ServiceEpisode(fixture, target, previous.config, policy, null,
+                        address, sdk.getClientCtx().getScheduler(), false, false,
+                        serviceRestartHeadroom(previous.config));
+                episode.episodes.add(restarted);
+                restarted.replaceNode(fixture, target, true);
+                var peer = restarted.persistent.readPeer(bookieId.toString()).peer();
+                assertNotNull(peer);
+                assertEquals(oldPeer.projection().endpoint(), peer.projection().endpoint());
+                assertEquals(oldPeer.projection().storageIncarnation(), peer.projection().storageIncarnation());
+                assertEquals(2, peer.projection().readinessGeneration().value());
+                assertNull(restarted.persistent.revalidatePeer(oldPeer).peer());
+                var stale = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                        restarted.persistent, oldPeer, fixture.cold, 4, 1060, Duration.ofSeconds(5));
+                try {
+                    assertThrows(ExecutionException.class, () -> stale.completion().get(5, TimeUnit.SECONDS));
+                } finally {
+                    stale.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+                assertEquals(0, stale.backingBytes());
+                assertEquals(0, stale.codecWorkspaceBytes());
+                awaitProfileConnectionDrain(restarted.budget);
+                var stillOpen = fixture.manager.readLedgerMetadata(ledger).get(5, TimeUnit.SECONDS);
+                assertEquals(open.metadata().getVersion(), stillOpen.getVersion());
+                assertEquals(LedgerMetadata.State.OPEN, stillOpen.getValue().getState());
+
+                var fresh = episode.pool.acquire();
+                try {
+                    var lease = fresh.completion().get(5, TimeUnit.SECONDS);
+                    var control = lease.controls().get(bookieId.toString()).hello();
+                    var data = lease.data().get(bookieId).hello();
+                    assertEquals(2, control.readinessGeneration());
+                    assertEquals(2, data.readinessGeneration());
+                    assertArrayEquals(identity.incarnation().value(), control.storageIncarnation());
+                    assertArrayEquals(identity.incarnation().value(), data.storageIncarnation());
+                    var recovered = episode.coordinator.recover(ledger, bytes(16, 31), sdk.getClientCtx(),
+                            fixture.descriptorBytes, VALIDATOR, fixture.credential, lease.data(), lease.controls(),
+                            4, Duration.ofSeconds(30)).get(35, TimeUnit.SECONDS);
+                    assertEquals(recovered.reason().toString(),
+                            ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED, recovered.status());
+                    assertEquals(1, recovered.prefixEntryId());
+                    assertEquals(length, recovered.prefixLength());
+                    assertEquals(context, recovered.context().ledger());
+                    assertEquals(open.birthZxid(), recovered.context().metadataBirth());
+                    assertEquals(root.birthZxid(), recovered.context().lifecycleBirthZxid());
+                    assertEquals(root.lifecycle().birthId(), recovered.context().lifecycleBirth());
+                    assertNotNull(recovered.publication());
+                    assertEquals(recovered.context(), recovered.publication().selection().boundary().context());
+                } finally {
+                    fresh.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+                assertRegisteredPoolDrained(episode.pool);
+                var closed = fixture.manager.readLedgerMetadata(ledger).get(5, TimeUnit.SECONDS);
+                assertEquals(LedgerMetadata.State.CLOSED, closed.getValue().getState());
+                assertEquals(1, closed.getValue().getLastEntryId());
+                assertEquals(length, closed.getValue().getLength());
+                assertEquals(open.metadata().getValue().getAllEnsembles(), closed.getValue().getAllEnsembles());
+                var readPool = episode.newPeerPool();
+                sdk.enableProfileReadOnly(episode.coordinator, readPool, 4);
+                try (var reader = sdk.openProfileLedgerReadOnly(ledger, fixture.password).get(5, TimeUnit.SECONDS);
+                        var entries = reader.readAsync(0, 1).get(5, TimeUnit.SECONDS)) {
+                    assertArrayEquals(first, entries.getEntry(0).getEntryBytes());
+                    assertArrayEquals(second, entries.getEntry(1).getEntryBytes());
+                }
+                assertEquals(closed.getVersion(),
+                        fixture.manager.readLedgerMetadata(ledger).get(5, TimeUnit.SECONDS).getVersion());
+                sdk.close();
+                assertTrue(readPool.usage().closing());
+                assertRegisteredPoolDrained(readPool);
+                for (var budget : fixture.budgets) {
+                    awaitProfileConnectionDrain(budget);
+                }
+            } finally {
+                episode.pool.closeAsync().get(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private static void assertRegisteredPoolDrained(ProfileRecoveryPeerPool pool) {
+        assertEquals(0, pool.usage().reservedConnections());
+        assertEquals(0, pool.usage().reservedRpcSlots());
+        assertEquals(0, pool.backingBytes());
+        assertEquals(0, pool.codecWorkspaceBytes());
     }
 
     private static void awaitProfileConnectionDrain(ProfileReceiveBudget budget) {

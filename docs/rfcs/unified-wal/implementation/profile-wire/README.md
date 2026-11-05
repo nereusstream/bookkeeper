@@ -2746,3 +2746,13 @@ native共同owner已实现schema2根清单、真实ROUTE variant、混合batch�
 证据位于`/Users/liusinan/.codex/artifacts/unified-wal/rolling-readonly-evidence-982a18da`。本项是同主机、同JVM、三Bookie、单Arena及健康CLOSED storage session的服务逐台重开；fixture的ZK/TLS/event loops和显式外部信任输入仍为借用。它不证明进程崩溃/unclosed-session恢复、同ID新incarnation接管、跨版本进程rolling、Main实际issuer/受保护装载、全部target-specific恢复/auth或共同Classic/Profile route claim。完整G1继续BLOCKED_UNVERIFIED，full-bytes/B11及其余16步和生产Gate仍OPEN，目标active，OFF/SYSTEM/PARK与disabled保持；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 
 Spotless/Checkstyle实际exit0；独立RAT实际exit1，仍为父982a18dad9既有434个未批准路径，路径集合和bytes全同、无新增，不称CI全绿。1203项非本测试声明输入与父Git blob全部相同，新增测试及小型drain观察helper之外的原测试整份字节保持；最终48份测试class已归档。两份终结run的8个文件经SHA/uid/gid/mode、同inode硬链接和两次无reader核对后移除原临时根，逻辑路径829323 bytes；原命令、输入、XML及Maven日志继续保留，常规文件数据块回收0 bytes。
+
+## 单台服务健康重开后的 OPEN 账本恢复
+
+2026-11-05 在父 `964ce25c6e` 上扩展原 `SegmentProfileInitialSocketClientTest`。三台真实 ProfileService 使用 ZooKeeper、mTLS、文件 I/O 和 3/3/3 quorum。原 ProfileLedgerHandle 确认写入 entry 0 和 1，应用 payload 分别为 16 和 19 字节。停止本地 writer 并排空原注册 lease 后，标准 metadata 仍为 OPEN。
+
+健康关闭一台服务，观察 listener 终结、服务端预算归零以及原 writable peer 撤销。复用原目录、BookieId、storage incarnation 和端点，通过真实启动流程发布 readiness generation 2。旧 RegisteredPeer 无法建立连接并归还全部资源，metadata 版本和 OPEN 状态保持。原注册池取得新 lease，目标 CTRL/DATA 的 HELLO 均报告 generation 2 和原 incarnation。原 recovery coordinator 只消费这份新 lease，成功发布 CLOSED，保持原 ensemble、ledger context、metadata birth 和 lifecycle birth，核对最后 entry 1 与累计应用长度 35。
+
+恢复 lease 排空后，同一 SDK 用独占的新池公开只读打开，逐条核对两份原始 payload，CLOSED metadata 版本保持。两份池的连接、RPC、backing 和 codec workspace 归零，服务端连接份额及 fixture 实际关闭。首轮到达 CLOSED 后因尝试把已使用的池移交 SDK 而被保护条件拒绝。修正测试接线后，新增场景与原 whole-point、registered pool、rolling readonly 共四项全部通过，Java Spotless 和 Checkstyle 通过。沿用原 acf9afec… native 库，生产代码和协议无需改动。原始阶段记录位于 `/Users/liusinan/.codex/artifacts/unified-wal/open-recovery-restart-evidence-964ce25c`。
+
+此证据覆盖同主机、同 JVM、同版本、单 Arena 和一台服务的健康关闭后重开。进程崩溃、掉电、跨版本重启、新 incarnation rejoin、批准 Linux 运行及完整步骤 14/16 验收仍待验证，生产 Gate 保持 OPEN。
