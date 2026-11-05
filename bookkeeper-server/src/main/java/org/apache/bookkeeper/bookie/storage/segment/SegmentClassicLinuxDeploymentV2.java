@@ -379,22 +379,12 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
             }
         }
         requireInterpreterReference(files, loading);
+        requireConfigurationReferences(files, loading);
         Map<String, Configuration> configuration = new HashMap<>();
         Set<Integer> materials = new HashSet<>();
         for (Configuration entry : loading.configuration()) {
             configuration.put(entry.path(), entry);
-            String resolved = resolve(entry.path(), loading.aliases());
-            if (entry.file() == -1) {
-                if (files.stream().anyMatch(f -> f.path().equals(resolved))
-                        || loading.aliases().stream().anyMatch(a -> a.link().equals(entry.path()))) {
-                    throw new IllegalArgumentException("Absent configuration conflicts with a present member");
-                }
-            } else {
-                role(files, entry.file(), entry.kind() == ConfigurationKind.CACHE ? Role.LOADER_CACHE
-                        : Role.LOADER_CONFIG);
-                if (!files.get(entry.file()).path().equals(resolved)) {
-                    throw new IllegalArgumentException("Configuration physical reference differs");
-                }
+            if (entry.file() >= 0) {
                 materials.add(entry.file());
             }
         }
@@ -429,6 +419,25 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
         requireContextReferences(files, loading);
     }
 
+    /** Configuration subtable relations only, shared by full deployment validation and owned D2 data observation. */
+    static void requireConfigurationReferences(List<File> files, Loading loading) {
+        for (Configuration entry : loading.configuration()) {
+            String resolved = resolve(entry.path(), loading.aliases());
+            if (entry.file() == -1) {
+                if (files.stream().anyMatch(f -> f.path().equals(resolved))
+                        || loading.aliases().stream().anyMatch(a -> a.link().equals(entry.path()))) {
+                    throw new IllegalArgumentException("Absent configuration conflicts with a present member");
+                }
+            } else {
+                role(files, entry.file(), entry.kind() == ConfigurationKind.CACHE ? Role.LOADER_CACHE
+                        : Role.LOADER_CONFIG);
+                if (!files.get(entry.file()).path().equals(resolved)) {
+                    throw new IllegalArgumentException("Configuration physical reference differs");
+                }
+            }
+        }
+    }
+
     /** Original fixed preload rule index; no caller path, I/O or startup qualification. */
     int preloadAbsentConfigurationIndex() throws IOException {
         for (int i = 0; i < loading.configuration().size(); i++) {
@@ -439,6 +448,18 @@ record SegmentClassicLinuxDeploymentV2(Platform platform, List<File> files, Prov
             }
         }
         throw new IOException("Missing original fixed preload absence rule");
+    }
+
+    /** Exact fixed ldconfig root, distinct from other include-file LDCONFIG rules. */
+    int ldconfigConfigurationIndex() throws IOException {
+        for (int i = 0; i < loading.configuration().size(); i++) {
+            var rule = loading.configuration().get(i);
+            if (rule.path().equals("/etc/ld.so.conf") && rule.kind() == ConfigurationKind.LDCONFIG
+                    && rule.format() == 1) {
+                return i;
+            }
+        }
+        throw new IOException("Missing original fixed ldconfig configuration rule");
     }
 
     /** Exact raw declarations, in policy search order; no physical normalization or runtime selection. */

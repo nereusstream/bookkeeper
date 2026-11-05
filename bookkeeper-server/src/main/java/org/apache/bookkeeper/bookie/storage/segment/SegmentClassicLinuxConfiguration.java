@@ -21,6 +21,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
 
 /** Bounded glibc 2.39 ldconfig input observations; never loader search order or an include-file approval. */
@@ -143,6 +145,8 @@ final class SegmentClassicLinuxConfiguration {
         }
     }
 
+    record HashedImage(Image image, SegmentClassicHandoff.Digest sha256) { }
+
     /** Sequential facts without a potentially enormous retained object table for very short lines. */
     static final class Cursor {
         private final byte[] data;
@@ -261,32 +265,72 @@ final class SegmentClassicLinuxConfiguration {
 
     /** Positional read of the caller's original handle; no open, close, mmap or include path lookup. */
     static Image read(FileChannel channel, long length, long deadline) throws IOException {
+        var result = parseImage(readBytes(channel, length, deadline), deadline);
+        if (channel.size() != length) {
+            throw new IOException("Original loader configuration length changed during observation");
+        }
+        requireTime(deadline);
+        return result;
+    }
+
+    /** SHA-256 and directives retain one private image; caller channel sees only bounded scratch storage. */
+    static HashedImage readHashed(FileChannel channel, long length, long deadline) throws IOException {
+        byte[] bytes = readBytes(channel, length, deadline);
+        var image = parseImage(bytes, deadline);
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException unavailable) {
+            throw new IOException("Required configuration SHA-256 is unavailable", unavailable);
+        }
+        for (int offset = 0; offset < bytes.length; offset += 64 * 1024) {
+            requireTime(deadline);
+            digest.update(bytes, offset, Math.min(64 * 1024, bytes.length - offset));
+        }
+        if (channel.size() != length) {
+            throw new IOException("Original loader configuration length changed during observation");
+        }
+        var result = new HashedImage(image, new SegmentClassicHandoff.Digest(digest.digest()));
+        requireTime(deadline);
+        return result;
+    }
+
+    private static byte[] readBytes(FileChannel channel, long length, long deadline) throws IOException {
         requireTime(deadline);
         if (length < 0 || length > MAX_BYTES || channel.size() != length) {
             throw new IOException("Invalid bounded loader configuration length");
         }
-        ByteBuffer bytes = ByteBuffer.allocate((int) length);
-        while (bytes.hasRemaining()) {
+        byte[] image = new byte[(int) length];
+        ByteBuffer bytes = ByteBuffer.allocate(Math.min(64 * 1024, image.length));
+        int offset = 0;
+        while (offset < image.length) {
             requireTime(deadline);
-            if (channel.read(bytes, bytes.position()) <= 0) {
+            bytes.clear().limit(Math.min(bytes.capacity(), image.length - offset));
+            int read = channel.read(bytes, offset);
+            if (read <= 0) {
                 throw new IOException("Original loader configuration read ended or made no progress");
             }
+            bytes.flip();
+            bytes.get(image, offset, read);
+            offset += read;
         }
-        for (int i = 0; i < bytes.capacity(); i++) {
+        requireTime(deadline);
+        return image;
+    }
+
+    private static Image parseImage(byte[] bytes, long deadline) throws IOException {
+        for (int i = 0; i < bytes.length; i++) {
             if ((i & 65535) == 0) {
                 requireTime(deadline);
             }
-            if (bytes.array()[i] == 0) {
+            if (bytes[i] == 0) {
                 throw new Unsupported("NUL anywhere in loader configuration is unsupported at byte " + i);
             }
         }
-        Image image = new Image(bytes.array());
+        Image image = new Image(bytes);
         Cursor cursor = image.cursor(deadline);
         while (cursor.next() != null) {
             // Validate every effective token before publishing the immutable image, retaining no directive table.
-        }
-        if (channel.size() != length) {
-            throw new IOException("Original loader configuration length changed during observation");
         }
         requireTime(deadline);
         return image;

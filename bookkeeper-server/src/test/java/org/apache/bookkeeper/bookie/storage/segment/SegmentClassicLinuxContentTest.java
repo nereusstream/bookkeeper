@@ -16,6 +16,7 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
@@ -32,6 +33,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
@@ -275,6 +277,65 @@ public class SegmentClassicLinuxContentTest {
         }
         assertTrue(owner.drain().drained());
         assertTrue(java.util.Arrays.equals(replacement, Files.readAllBytes(path)));
+    }
+
+    @Test
+    public void configurationDigestAndDirectivesUseOneReadWhenDiskBytesChange() throws Exception {
+        configurationContentAfterRead(true);
+    }
+
+    @Test
+    public void configurationCallerRetainedReadBufferCannotChangeReturnedDirectives() throws Exception {
+        configurationContentAfterRead(false);
+    }
+
+    private void configurationContentAfterRead(boolean replaceDisk) throws Exception {
+        byte[] original = "include child-A.conf\n".getBytes(StandardCharsets.UTF_8);
+        byte[] replacement = "include child-B.conf\n".getBytes(StandardCharsets.UTF_8);
+        assertEquals(original.length, replacement.length);
+        Path path = write(original);
+        var owner = new SegmentOwnedFiles();
+        var changed = new AtomicInteger();
+        var retained = new AtomicReference<ByteBuffer>();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && path.equals(invocation.getArgument(0))) {
+                var fault = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
+                org.mockito.stubbing.Answer<Integer> afterRead = call -> {
+                    int read = (int) call.callRealMethod();
+                    ByteBuffer target = call.getArgument(0);
+                    if (read > 0 && target.position() == original.length) {
+                        retained.set(target.duplicate());
+                        if (replaceDisk && changed.compareAndSet(0, 1)) {
+                            Files.write(path, replacement);
+                        }
+                    }
+                    return read;
+                };
+                doAnswer(afterRead).when(fault).read(any(ByteBuffer.class));
+                doAnswer(afterRead).when(fault).read(any(ByteBuffer.class), anyLong());
+                return fault;
+            }
+            return actual;
+        })) {
+            try (FileChannel channel = SegmentOwnedFiles.open(owner, path, StandardOpenOption.READ)) {
+                channel.position(17);
+                var content = SegmentClassicLaunchTrust.readLinuxContent(channel, original.length,
+                        LinuxContentKind.LDCONFIG, deadline());
+                assertEquals(SegmentClassicHandoff.digest(original), content.sha256());
+                assertArrayEquals(original, content.configuration().bytes());
+                retained.get().put("include child-".length(), (byte) 'C');
+                assertArrayEquals(original, content.configuration().bytes());
+                var directive = content.configuration().cursor(deadline()).next();
+                assertEquals(SegmentClassicLinuxConfiguration.Kind.INCLUDE, directive.kind());
+                assertEquals("child-A.conf", directive.value().utf8());
+                assertEquals(original.length, channel.position());
+                assertTrue(channel.isOpen());
+                assertEquals(replaceDisk ? 1 : 0, changed.get());
+            }
+        }
+        assertTrue(owner.drain().drained());
     }
 
     @Test

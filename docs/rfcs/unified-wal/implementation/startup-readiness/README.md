@@ -1218,6 +1218,20 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的固定 conf 与实际 include 图
+
+2026-11-05在父`64bc49c1918065a0c78325505699e604f026d062`上，正常D2 launcher在cache之后、dropper/childCommand/私钥之前，从同一原表按exact `/etc/ld.so.conf`、LDCONFIG、format 1选出原index，调用既有typed配置观察器。不选第一个LDCONFIG或固定下标，保留明确file -1与present空文件的区别；向量前插另一LDCONFIG仍选择原固定根。原source/provider门成功后，才进入provider-aware路径及完整include扫描。
+
+每个实际根/子文件的SHA、完整语法验证及include指令改由`Configuration.readHashed`的同一私有image取得。原read与readHashed共用0…1MiB读取/验证，实际channel只见至多64KiB独立scratch，按实际read量复制到私有image；内部指定SHA-256，无caller digest或channel数组别名，无第二份整图。直接read保持原channel位置，Trust内容入口成功position为length，摘要finalization、结果构造和外层结果后均查原期限；空文件摘要/空Cursor有效，NUL、短读、零进展及语法拒绝合同保持。
+
+typed LDCONFIG与包内`readLinuxDeploymentConfigurationGraph(files, Loading, ruleIndex, deadline)`共用一个私有观察主体和原递归扫描器。数据入口只返回图，不能建立source/provider/Installed/ready；没有caller bool/rootPath/预构图/授权参数。冻结成员表后核实际1024上限，复用从完整D2构造器原样提取的`requireConfigurationReferences`，在Path转换/I/O前核索引/角色、alias解算后的exact physical，以及显式absence与file/直接alias冲突，不要求无关ELF上下文。D2在私有graph/scan内部固定将真实Entry/JNI fd身份核验传到每个实际readFile，读前对checked dev/ino、读后对原held fd，再沿原first-close/path/parents/SHA。原D1及旧materials数据入口固定沿原无新增fd ABI合同；两遍完整图、原预算、顺序/重复、MODULE_RUNTIME命中拒绝及owner/sticky/drain保持。
+
+父内容实现的两项独立反例已取红：首次实际读取后等长A→B得到A摘要/B指令；返回后改写保留的dst得到C指令。新增D2数据adapter最初共用旧无fd扫描体，正确child通过、同字节异inode child也被接受，红单独绑定此adapter阶段；修正后在child内容读取前拒绝并实际关闭/drain，不冒称原父生产D2来源阳性。只读评审还发现decoy.conf声明能被物理child.conf绕过，实际图成功的红保留；共享D2配置引用校验后以IOException及零次目标Files调用证明预检拒绝。明确缺失与实际空根、原索引移动、无效引用及正确include均覆盖。
+
+最终Configuration7＋Graph22＋Content11＋Trust相关15＋DeploymentV2 13＋Inputs6＋Launcher3共77项全通过，0失败/错误/跳过，含新增8项；最终Java Spotless/Checkstyle退出0。精确旧75e59684…库另跑5个既有D1图、旧materials和配置用例全过，属于77中的兼容性重复。原首8及76/style绑定修正前源，不移绑最终代码；7个测试阶段各1450原输入按snapshot/父Git blob核验，最终七code与checked-final77、legacy5及final style一致。原9406191e…受控库沿用，没有native重建、ldconfig执行、cache改写或子进程启动。
+
+证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-conf-evidence-64bc49c1`，保留原source/class/日志/XML及各红色阶段。[静态glibc 2.39 ldconfig输入实现](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/ldconfig.c)原字节35213 bytes、SHA-256 `32752e37eaa6fb3253ca7bb5f1653ef575788cccf47f41780d5ecae865ee0afe`；它与[运行时cache查询](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-cache.c)是不同观察对象，不证明当前cache由本图生成。正常D2消费顺序为静态核对，动态证据为真实临时图及data/原owner；批准Linux/vendor阳性仍NOT_EXECUTED。加载winner、实际mmap/后续exec、完整资格与parent/child/Main/G1/full-bytes/full16/生产Gate仍OPEN，原拒绝、OFF/SYSTEM/PARK、advanced disabled及持续目标active保持。
+
 ## 正常 D2 launcher 的固定 cache 与同次字节及 fd 绑定
 
 2026-11-05在父`a83b22dde9d409bab7977cbdfdb52cd461d24584`上，正常launcher在固定preload缺失检查之后、dropper/childCommand/私钥之前，用原`fixedLinuxCacheRule(original loading)`选择`/etc/ld.so.cache`的CACHE原index并调用既有typed配置观察器。不硬编码表位置、不要求cache一定存在，也不为NEEDED打开候选或计算能力/winner；ld.so.conf图保持独立，未接入本节点。[glibc 2.39运行时cache源码](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-cache.c)仅为静态依据，不提升运行资格。

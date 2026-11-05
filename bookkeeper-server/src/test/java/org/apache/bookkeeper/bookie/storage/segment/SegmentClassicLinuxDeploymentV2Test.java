@@ -130,6 +130,23 @@ public class SegmentClassicLinuxDeploymentV2Test {
     }
 
     @Test
+    public void fixedLdconfigSelectionKeepsTheRootAfterAnEarlierIncludeRuleIsInserted() throws Exception {
+        var d = original();
+        var l = d.loading();
+        var root = l.configuration().get(d.ldconfigConfigurationIndex());
+        assertEquals("/etc/ld.so.conf", root.path());
+        assertEquals(ConfigurationKind.LDCONFIG, root.kind());
+        assertEquals(1, root.format());
+        var configuration = new ArrayList<>(l.configuration());
+        configuration.add(0, new Configuration("/etc/aaa.conf", -1, ConfigurationKind.LDCONFIG, 1));
+        var shifted = withLoading(d, new Loading(l.systemctl(), l.loader(), l.interpreter(), l.aliases(),
+                l.directories(), configuration, l.policy(), l.elf(), l.contexts(), l.needed(), l.modules()));
+        assertTrue(shifted.ldconfigConfigurationIndex() > d.ldconfigConfigurationIndex());
+        assertEquals(configuration.indexOf(root), shifted.ldconfigConfigurationIndex());
+        assertEquals(root, shifted.loading().configuration().get(shifted.ldconfigConfigurationIndex()));
+    }
+
+    @Test
     public void legacyTypedAccessorsAndLegacyRoleCannotSilentlyConsumeNewSchema() throws Exception {
         var d = SegmentClassicLinuxDeployment.decode(vector());
         assertThrows(IllegalStateException.class, d::platform);

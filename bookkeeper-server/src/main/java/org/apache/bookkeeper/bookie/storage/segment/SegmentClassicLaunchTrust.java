@@ -1565,6 +1565,12 @@ final class SegmentClassicLaunchTrust {
 
     private LinuxConfigurationGraph configurationGraph(List<LinuxConfigurationMaterial> declarations,
             Map<Path, String> aliasDeclarations, Path rootPath, int rootFile, long deadline) throws IOException {
+        return configurationGraph(declarations, aliasDeclarations, rootPath, rootFile, false, deadline);
+    }
+
+    private LinuxConfigurationGraph configurationGraph(List<LinuxConfigurationMaterial> declarations,
+            Map<Path, String> aliasDeclarations, Path rootPath, int rootFile, boolean bindIdentity, long deadline)
+            throws IOException {
         requireTime(deadline);
         var materials = List.copyOf(declarations);
         if (materials.size() > 1024 || rootFile < -1 || rootFile >= 1024) {
@@ -1593,8 +1599,8 @@ final class SegmentClassicLaunchTrust {
         }
         var fixed = Map.copyOf(configuration);
         var aliases = fixedLoadingAliases(aliasDeclarations, deadline);
-        var first = new ConfigurationScan(fixed, aliases, deadline).read(rootPath, rootFile);
-        var second = new ConfigurationScan(fixed, aliases, deadline).read(rootPath, rootFile);
+        var first = new ConfigurationScan(fixed, aliases, bindIdentity, deadline).read(rootPath, rootFile);
+        var second = new ConfigurationScan(fixed, aliases, bindIdentity, deadline).read(rootPath, rootFile);
         if (!first.equals(second)) {
             throw new IOException("Complete configuration graph changed between original observations");
         }
@@ -1615,12 +1621,14 @@ final class SegmentClassicLaunchTrust {
         private final List<LinuxDirectoryObservation> directories = new ArrayList<>();
         private final Map<Path, Integer> directoryIndices = new HashMap<>();
         private final MessageDigest observed;
+        private final boolean bindIdentity;
         private final long deadline;
 
         ConfigurationScan(Map<Path, LinuxConfigurationMaterial> configuration, Map<Path, String> aliases,
-                          long deadline) throws IOException {
+                          boolean bindIdentity, long deadline) throws IOException {
             this.configuration = configuration;
             this.aliases = aliases;
+            this.bindIdentity = bindIdentity;
             this.deadline = deadline;
             try {
                 observed = MessageDigest.getInstance("SHA-256");
@@ -1666,7 +1674,7 @@ final class SegmentClassicLaunchTrust {
                 budget.retainFile(file.length());
                 requireLoadingPathBytes(file.path(), deadline);
                 var material = hashFile(file.path(), file.length(), file.sha256(), false, LinuxContentKind.LDCONFIG,
-                        deadline).legacy();
+                        bindIdentity, deadline).legacy();
                 if (!path.identity().equals(material.identity())) {
                     throw new IOException("Included configuration identity changed before original hash/parser read");
                 }
@@ -3214,21 +3222,14 @@ final class SegmentClassicLaunchTrust {
         try {
             var deployment = originalLinuxDeployment(deadline);
             var rule = selectLinuxConfiguration(deployment, ruleIndex);
-            var aliases = originalLinuxAliases(deployment, deadline);
-            Path path = linuxPhysicalPath(rule.path(), deadline);
             LinuxLoaderConfigurationObservation result;
             if (rule.kind() == ConfigurationKind.LDCONFIG) {
-                var materials = new ArrayList<LinuxConfigurationMaterial>();
-                for (var entry : deployment.loading().configuration()) {
-                    if (entry.file() >= 0) {
-                        var file = deployment.files().get(entry.file());
-                        materials.add(new LinuxConfigurationMaterial(entry.file(),
-                                linuxPhysicalPath(file.path(), deadline), file.length(), file.sha256(), entry.kind()));
-                    }
-                }
-                var graph = configurationGraph(materials, aliases, path, rule.file(), deadline);
+                var graph = observeLinuxConfigurationGraph(deployment.files(), deployment.loading(), ruleIndex,
+                        deadline);
                 result = new LinuxLoaderConfigurationObservation(ruleIndex, rule.kind(), null, null, null, graph);
             } else {
+                var aliases = originalLinuxAliases(deployment, deadline);
+                Path path = linuxPhysicalPath(rule.path(), deadline);
                 var first = observeLoaderConfiguration(deployment.files(), ruleIndex, rule, path, aliases, deadline);
                 var second = observeLoaderConfiguration(deployment.files(), ruleIndex, rule, path, aliases, deadline);
                 if (rule.kind() == ConfigurationKind.CACHE) {
@@ -3247,6 +3248,53 @@ final class SegmentClassicLaunchTrust {
         } finally {
             initializingThread = null;
         }
+    }
+
+    /** D2 graph data only; cannot establish this owner's original source/provider, Installed or qualification. */
+    synchronized LinuxConfigurationGraph readLinuxDeploymentConfigurationGraph(
+            List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex, long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxConfigurationGraph(members, loading, ruleIndex, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    private LinuxConfigurationGraph observeLinuxConfigurationGraph(
+            List<SegmentClassicLinuxDeploymentV2.File> declared, SegmentClassicLinuxDeploymentV2.Loading loading,
+            int ruleIndex, long deadline) throws IOException {
+        var members = List.copyOf(declared);
+        if (members.size() > 1024) {
+            throw new IOException("D2 configuration members exceed their original bounds");
+        }
+        var rule = selectLinuxConfiguration(members, loading, ruleIndex);
+        if (rule.kind() != ConfigurationKind.LDCONFIG) {
+            throw new IOException("D2 configuration graph requires its original LDCONFIG rule");
+        }
+        try {
+            SegmentClassicLinuxDeploymentV2.requireConfigurationReferences(members, loading);
+        } catch (IllegalArgumentException invalid) {
+            throw new IOException("D2 configuration references differ from their original declarations", invalid);
+        }
+        requireTime(deadline);
+        var aliases = linuxContextAliases(loading, deadline);
+        var materials = new ArrayList<LinuxConfigurationMaterial>();
+        for (var entry : loading.configuration()) {
+            if (entry.file() >= 0) {
+                var file = members.get(entry.file());
+                materials.add(new LinuxConfigurationMaterial(entry.file(), linuxMaterialPath(file.path(), deadline),
+                        file.length(), file.sha256(), entry.kind()));
+            }
+        }
+        return configurationGraph(materials, aliases, linuxMaterialPath(rule.path(), deadline), rule.file(), true,
+                deadline);
     }
 
     private LinuxLoaderConfigurationObservation observeLoaderConfiguration(
@@ -3367,7 +3415,8 @@ final class SegmentClassicLaunchTrust {
                 held = files.fileIdentity(channel, nativeIo);
                 requireTime(deadlineNanos);
                 if (held.device() != before.device() || held.inode() != before.inode()) {
-                    throw new IOException("Original " + (kind == LinuxContentKind.ELF2 ? "ELF2" : "cache")
+                    throw new IOException("Original " + (kind == LinuxContentKind.ELF2 ? "ELF2"
+                            : kind == LinuxContentKind.LDCONFIG ? "configuration" : "cache")
                             + " fd identity differs from its checked material path");
                 }
             }
@@ -3377,7 +3426,8 @@ final class SegmentClassicLaunchTrust {
                 var after = files.fileIdentity(channel, nativeIo);
                 requireTime(deadlineNanos);
                 if (!held.equals(after)) {
-                    throw new IOException("Original " + (kind == LinuxContentKind.ELF2 ? "ELF2" : "cache")
+                    throw new IOException("Original " + (kind == LinuxContentKind.ELF2 ? "ELF2"
+                            : kind == LinuxContentKind.LDCONFIG ? "configuration" : "cache")
                             + " fd identity changed during its hash/parser read");
                 }
             }
@@ -3411,6 +3461,13 @@ final class SegmentClassicLaunchTrust {
             requireTime(deadline);
             return result;
         }
+        if (kind == LinuxContentKind.LDCONFIG) {
+            var configuration = SegmentClassicLinuxConfiguration.readHashed(channel, length, deadline);
+            channel.position(length);
+            var result = new LinuxContent(configuration.sha256(), null, null, null, configuration.image());
+            requireTime(deadline);
+            return result;
+        }
         MessageDigest digest;
         try {
             digest = MessageDigest.getInstance("SHA-256");
@@ -3438,10 +3495,8 @@ final class SegmentClassicLaunchTrust {
                 ? SegmentClassicLinuxElf.read(channel, length, deadline) : null;
         SegmentClassicLinuxElf.Image2 elf2 = kind == LinuxContentKind.ELF2
                 ? SegmentClassicLinuxElf.readVersionTwo(channel, length, deadline) : null;
-        SegmentClassicLinuxConfiguration.Image configuration = kind == LinuxContentKind.LDCONFIG
-                ? SegmentClassicLinuxConfiguration.read(channel, length, deadline) : null;
         var result = new LinuxContent(new SegmentClassicHandoff.Digest(digest.digest()), elf, elf2, null,
-                configuration);
+                null);
         requireTime(deadline);
         return result;
     }

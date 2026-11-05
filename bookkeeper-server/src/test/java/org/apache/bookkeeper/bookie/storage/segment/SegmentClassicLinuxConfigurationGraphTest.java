@@ -16,6 +16,7 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
@@ -30,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -136,6 +138,170 @@ public class SegmentClassicLinuxConfigurationGraphTest {
     private static LinuxConfigurationMaterial material(int index, SegmentClassicLinuxDeployment.File file,
                                                        ConfigurationKind kind) {
         return new LinuxConfigurationMaterial(index, file.path(), file.length(), file.sha256(), kind);
+    }
+
+    private record DeploymentGraph(List<SegmentClassicLinuxDeploymentV2.File> files,
+            SegmentClassicLinuxDeploymentV2.Loading loading, int rule) { }
+
+    private DeploymentGraph deploymentGraph(List<SegmentClassicLinuxDeployment.File> files, Path rootPath,
+            int rootFile) throws Exception {
+        var original = SegmentClassicLinuxDeployment.decode(
+                SegmentClassicLinuxDeploymentTest.vector("classic-linux-deployment-v2")).versionTwo().loading();
+        var members = files.stream().map(f -> new SegmentClassicLinuxDeploymentV2.File(f.path().toString(), f.role(),
+                f.length(), f.sha256())).toList();
+        var rules = new ArrayList<SegmentClassicLinuxDeploymentV2.Configuration>();
+        for (int i = 0; i < files.size(); i++) {
+            rules.add(new SegmentClassicLinuxDeploymentV2.Configuration(files.get(i).path().toString(), i,
+                    ConfigurationKind.LDCONFIG, 1));
+        }
+        var rootRule = new SegmentClassicLinuxDeploymentV2.Configuration(rootPath.toString(), rootFile,
+                ConfigurationKind.LDCONFIG, 1);
+        if (rootFile == -1) {
+            rules.add(rootRule);
+        }
+        rules.sort(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Configuration::path));
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(original.systemctl(), original.loader(),
+                original.interpreter(), List.of(), List.of(), rules, original.policy(), original.elf(),
+                original.contexts(), original.needed(), original.modules());
+        return new DeploymentGraph(members, loading, rules.indexOf(rootRule));
+    }
+
+    @Test
+    public void deploymentGraphReadsTheRootAndTheActualIncludedChildWithoutGrantingSource() throws Exception {
+        var first = config("root.conf", "include child.conf\n");
+        var child = config("child.conf", "/library/child\n");
+        var f = deploymentGraph(List.of(first, child), first.path(), 0);
+        var owner = owner();
+        try {
+            var graph = owner.readLinuxDeploymentConfigurationGraph(f.files(), f.loading(), f.rule(),
+                    SegmentClassicLinuxElfTest.deadline());
+            assertFalse(graph.absent());
+            assertEquals(List.of(0, 1), graph.files().stream().map(v -> v.file()).toList());
+            assertEquals(List.of(child.path().toString()), graph.includes().get(0).matches());
+            assertThrows(IOException.class, owner::installed);
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void deploymentGraphRejectsOnlyTheChildFdSubstitutedWithSameBytesOnAnotherInode() throws Exception {
+        var first = config("root.conf", "include child.conf\n");
+        var child = config("child.conf", "/library/child\n");
+        var f = deploymentGraph(List.of(first, child), first.path(), 0);
+        Path other = Files.copy(child.path(), root.resolve("same-bytes-other-child"));
+        assertFalse(Files.isSameFile(child.path(), other));
+        var owner = owner();
+        var redirected = new AtomicBoolean();
+        var childReads = new AtomicInteger();
+        try (FileChannel wrong = FileChannel.open(other, StandardOpenOption.READ);
+             var channels = mockStatic(FileChannel.class, call -> {
+                 if (call.getMethod().getName().equals("open") && call.getMethod().getParameterCount() == 3
+                         && child.path().equals(call.getArgument(0)) && redirected.compareAndSet(false, true)) {
+                     return wrong;
+                 }
+                 return call.callRealMethod();
+             }); var contents = mockStatic(SegmentClassicLaunchTrust.class, call -> {
+                 if (call.getMethod().getName().equals("readLinuxContent") && redirected.get()) {
+                     childReads.incrementAndGet();
+                 }
+                 return call.callRealMethod();
+             })) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.readLinuxDeploymentConfigurationGraph(f.files(), f.loading(), f.rule(),
+                            SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("fd identity differs"));
+            assertEquals(0, childReads.get());
+            assertFalse(wrong.isOpen());
+            assertThrows(IOException.class, owner::parsed);
+            var drain = owner.closeAndDrain();
+            assertSame(failure, drain.launcherFailure());
+            assertTrue(drain.drained());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+        assertArrayEquals(Files.readAllBytes(child.path()), Files.readAllBytes(other));
+    }
+
+    @Test
+    public void deploymentGraphDistinguishesProtectedAbsentRootFromAnActuallyPresentEmptyFile() throws Exception {
+        Path missing = root.resolve("missing.conf");
+        var empty = config("empty.conf", "");
+        var fixtures = List.of(deploymentGraph(List.of(), missing, -1),
+                deploymentGraph(List.of(empty), empty.path(), 0));
+        for (int i = 0; i < fixtures.size(); i++) {
+            var f = fixtures.get(i);
+            var owner = owner();
+            try {
+                var graph = owner.readLinuxDeploymentConfigurationGraph(f.files(), f.loading(), f.rule(),
+                        SegmentClassicLinuxElfTest.deadline());
+                assertEquals(i == 0, graph.absent());
+                assertEquals(i, graph.files().size());
+                assertEquals(new SegmentClassicLinuxConfiguration.Usage(1, 0, 0), graph.usage());
+                assertTrue(graph.includes().isEmpty());
+                assertThrows(IOException.class, owner::installed);
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void deploymentGraphInvalidRootIndexAndMemberRoleRejectBeforeTargetIo() throws Exception {
+        var first = config("root.conf", "");
+        var f = deploymentGraph(List.of(first), first.path(), 0);
+        var wrong = new SegmentClassicLinuxDeploymentV2.File(first.path().toString(),
+                SegmentClassicLinuxDeployment.Role.LOADER_CACHE, first.length(), first.sha256());
+        for (int mode = 0; mode < 3; mode++) {
+            var owner = owner();
+            var members = mode == 2 ? List.of(wrong) : f.files();
+            int rule = mode == 0 ? -1 : mode == 1 ? Integer.MAX_VALUE : f.rule();
+            try (var paths = mockStatic(Files.class, call -> {
+                throw new AssertionError("Invalid D2 graph reference reached target I/O");
+            })) {
+                var failure = assertThrows(IOException.class,
+                        () -> owner.readLinuxDeploymentConfigurationGraph(members, f.loading(), rule,
+                                SegmentClassicLinuxElfTest.deadline()));
+                assertThrows(IOException.class, owner::parsed);
+                var drain = owner.closeAndDrain();
+                assertSame(failure, drain.launcherFailure());
+                assertTrue(drain.drained());
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test
+    public void deploymentGraphContradictoryChildDeclarationRejectsBeforeAnyTargetIo() throws Exception {
+        var first = config("root.conf", "include child.conf\n");
+        var child = config("child.conf", "/library/child\n");
+        var f = deploymentGraph(List.of(first, child), first.path(), 0);
+        var l = f.loading();
+        var rules = new ArrayList<>(l.configuration());
+        rules.replaceAll(c -> c.file() == 1 ? new SegmentClassicLinuxDeploymentV2.Configuration(
+                root.resolve("decoy.conf").toString(), 1, ConfigurationKind.LDCONFIG, 1) : c);
+        rules.sort(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Configuration::path));
+        var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
+                l.aliases(), l.directories(), rules, l.policy(), l.elf(), l.contexts(), l.needed(), l.modules());
+        int rootRule = rules.indexOf(l.configuration().get(f.rule()));
+        var owner = owner();
+        var targetIo = new AtomicInteger();
+        try (var paths = mockStatic(Files.class, call -> {
+            targetIo.incrementAndGet();
+            return call.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.readLinuxDeploymentConfigurationGraph(f.files(), loading, rootRule,
+                            SegmentClassicLinuxElfTest.deadline()));
+            assertEquals(0, targetIo.get());
+            assertThrows(IOException.class, owner::parsed);
+            var drain = owner.closeAndDrain();
+            assertSame(failure, drain.launcherFailure());
+            assertTrue(drain.drained());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
     }
 
     @Test

@@ -286,6 +286,7 @@ public final class SegmentClassicLauncher {
             trust.verifyLinuxLoaderConfiguration(deployment.preloadAbsentConfigurationIndex(), deadline);
             trust.verifyLinuxLoaderConfiguration(SegmentClassicLaunchTrust.fixedLinuxCacheRule(deployment.loading()),
                     deadline);
+            trust.verifyLinuxLoaderConfiguration(deployment.ldconfigConfigurationIndex(), deadline);
         }
         trust.verifyLauncherDropper(input, deadline);
         final List<String> childCommand = input.childCommand(material, program);
