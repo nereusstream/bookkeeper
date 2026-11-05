@@ -1218,6 +1218,14 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的全部候选上下文观察
+
+2026-11-05在父`8c2ac1f3ea6893304b3b9d056deec73029d2ef4a`上，正常schema2启动在整表目录检查成功后、独立dropper专项之前，一次调用原`verifyLinuxCandidateContexts(deadline)`。使用原绝对期限，不另调逐context/interpreter入口、不按物理路径合并、不缓存/转发结果。原观察器未改：source/provider门后依原顺序关联全部logical context与实际路径、physical、owned fd、批准SHA和现有ELF2读数，另读固定interpreter，从实读ELF按requester/ordinal取NEEDED名，原重复module声明保持；包括未选中候选在内任一项失败就停止，独立dropper字面解释器及终端身份检查保持。
+
+既有Trust相关14＋Inputs6＋DeploymentV2 13＋Launcher3共36项全通过，0失败/错误/跳过，无新增测试或入口；Java Spotless/Checkstyle退出0。覆盖多logical视图/原ordinal/重复module、未选中候选损坏整次失败、引用pre-I/O及typed缺source拒绝，另含原load-path/dropper真实文件/资源回归。单测试阶段1450原输入与snapshot/父Git blob一致，唯一改动code与test/style绑定一致，沿用9406191e…库不重建。
+
+证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-candidates-evidence-8c2ac1f3`。正常唯一调用及顺序静态核对，动态证据走原data/shared真实临时文件，正式批准Linux/vendor阳性仍NOT_EXECUTED。结果是逐项冷观察，不是跨文件原子快照、namespace/搜索序、候选winner或module已执行；module仍仅声明。本节点不调用helper/diagnostics或启动进程，不松childCommand，parent/child/Main/G1/full-bytes/full16/生产Gate仍OPEN，原defaults/disabled及持续目标active保持。
+
 ## 已有 ELF2 消费者的摘要与元数据字节对应
 
 2026-11-05在父`98d5b317d4b3ceb5f60c870fab5ed029179dbf21`上，修正已有normal dropper及其他共享ELF2内容生产路径。原实现先stream SHA，再从同fd positional解析，内容入口可返回A摘要与等长B的NEEDED等元数据；原外层fd/ctime/mtime/path/parents会拒绝许多普通改写，本反例不宣称已绕过生产启动资格。
