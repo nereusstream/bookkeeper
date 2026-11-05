@@ -35,12 +35,12 @@ import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -440,8 +440,9 @@ public class IndexPersistenceMgr {
                 getActiveLedgers();
             } else {
                 // Validate every candidate before any .rloc mutation. The second pass restores the legacy layout.
-                scanHistoricalIndexes(false);
-                scanHistoricalIndexes(true);
+                var roots = ledgerDirsManager.getAllLedgerDirs();
+                scanHistoricalIndexes(roots, history, false, ledger -> { });
+                scanHistoricalIndexes(roots, history, true, ledger -> activeLedgers.put(ledger, true));
             }
             synchronized (freshAdmission) {
                 freshInitialized = true;
@@ -458,6 +459,56 @@ public class IndexPersistenceMgr {
         }
     }
 
+    @FunctionalInterface
+    interface HistoricalLedgerVisitor {
+        void visit(long ledgerId) throws IOException;
+    }
+
+    /** Owns only the read resources for an offline inventory of the effective index current directories. */
+    static final class HistoricalIndexReader {
+        record Drain(boolean drained, int retainedResources, Throwable readFailure, Throwable closeFailure) { }
+
+        private final List<File> roots;
+        private final ClassicHistoryFiles files = new ClassicHistoryFiles();
+        private Thread reading;
+        private Throwable readFailure;
+
+        HistoricalIndexReader(List<File> effectiveIndexRoots) {
+            roots = List.copyOf(effectiveIndexRoots);
+            if (roots.isEmpty()) {
+                throw new IllegalArgumentException("Historical index inventory requires its effective roots");
+            }
+        }
+
+        /**
+         * Visits each validated file, so a ledger can occur more than once. Only normal return after the
+         * traversal and all closes proves a complete inventory. The outer owner supplies root exclusion.
+         */
+        synchronized void readLedgerIds(HistoricalLedgerVisitor visitor) throws IOException {
+            Objects.requireNonNull(visitor, "visitor");
+            if (reading != null || readFailure != null || !files.healthy()) {
+                throw new IOException("Historical index inventory is active, closing or failed", readFailure);
+            }
+            reading = Thread.currentThread();
+            try {
+                scanHistoricalIndexes(roots, files, false, visitor);
+            } catch (IOException | RuntimeException | Error failure) {
+                readFailure = failure;
+                throw failure;
+            } finally {
+                reading = null;
+            }
+        }
+
+        synchronized Drain closeAndDrain() {
+            if (reading == Thread.currentThread()) {
+                throw new IllegalStateException("Historical index reader cannot drain its own actual operation");
+            }
+            var result = files.closeAndDrain();
+            return new Drain(result.drained(), result.retainedResources(), readFailure, result.closeFailure());
+        }
+    }
+
     private static boolean historicalDirectory(Path path) throws IOException {
         var attributes = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
         if (attributes.isSymbolicLink()) {
@@ -466,9 +517,11 @@ public class IndexPersistenceMgr {
         return attributes.isDirectory();
     }
 
-    private void scanHistoricalIndexes(boolean recover) throws IOException {
-        for (File root : ledgerDirsManager.getAllLedgerDirs()) {
-            try (var grandparents = history.openDirectory(root.toPath())) {
+    private static void scanHistoricalIndexes(List<File> roots, ClassicHistoryFiles history, boolean recover,
+            HistoricalLedgerVisitor visitor) throws IOException {
+        for (File root : roots) {
+            Path rootPath = root.toPath();
+            try (var grandparents = history.openDirectory(rootPath)) {
                 for (Path grandparent : grandparents.listing) {
                     if (!historicalDirectory(grandparent)) {
                         continue;
@@ -479,17 +532,18 @@ public class IndexPersistenceMgr {
                                 continue;
                             }
                             if (recover) {
-                                recoverHistoricalParent(root.toPath(), parent);
+                                recoverHistoricalParent(roots, history, rootPath, parent, visitor);
                             }
                             try (var indexes = history.openDirectory(parent)) {
                                 for (Path index : indexes.listing) {
                                     String name = index.getFileName().toString();
                                     if (name.endsWith(IDX) || name.endsWith(RLOC)) {
-                                        historicalIndex(root.toPath(), index, false);
-                                        if (recover) {
-                                            long ledger = Long.parseLong(name.substring(0, name.length() - 4), 16);
-                                            activeLedgers.put(ledger, true);
+                                        long ledger = historicalIndex(roots, history, rootPath, index, false);
+                                        if (recover && name.endsWith(RLOC)) {
+                                            throw new IOException("Historical relocation appeared after recovery: "
+                                                    + index);
                                         }
+                                        visitor.visit(ledger);
                                     }
                                 }
                             }
@@ -500,7 +554,8 @@ public class IndexPersistenceMgr {
         }
     }
 
-    private void recoverHistoricalParent(Path root, Path parent) throws IOException {
+    private static void recoverHistoricalParent(List<File> roots, ClassicHistoryFiles history, Path root,
+            Path parent, HistoricalLedgerVisitor visitor) throws IOException {
         while (true) {
             Path candidate = null;
             try (var indexes = history.openDirectory(parent)) {
@@ -515,17 +570,17 @@ public class IndexPersistenceMgr {
                 return;
             }
             // Close this leaf's iterator before changing its entries. Never act on a stale directory snapshot.
-            historicalIndex(root, candidate, true);
+            visitor.visit(historicalIndex(roots, history, root, candidate, true));
         }
     }
 
-    private List<Path> historicalCandidates(long ledger, String suffix) throws IOException {
-        List<Path> found = new ArrayList<>();
-        for (File root : ledgerDirsManager.getAllLedgerDirs()) {
+    private static int historicalCandidates(List<File> roots, long ledger, String suffix) throws IOException {
+        int found = 0;
+        for (File root : roots) {
             Path path = root.toPath().resolve(getLedgerName(ledger) + suffix);
             try {
                 ClassicHistoryFiles.fileIdentity(path);
-                found.add(path);
+                found++;
             } catch (NoSuchFileException absent) {
                 // Only absent names are omitted. Permission/read/close/format errors never become absence.
             }
@@ -533,7 +588,8 @@ public class IndexPersistenceMgr {
         return found;
     }
 
-    private void historicalIndex(Path root, Path index, boolean recover) throws IOException {
+    private static long historicalIndex(List<File> roots, ClassicHistoryFiles history, Path root, Path index,
+            boolean recover) throws IOException {
         String name = index.getFileName().toString();
         boolean relocation = name.endsWith(IDX + RLOC);
         long ledger;
@@ -547,23 +603,22 @@ public class IndexPersistenceMgr {
             throw new IOException("Historical index is not in its canonical ledger path: " + index);
         }
         var header = history.readPrefix(index, (int) FileInfo.START_OF_DATA);
-        FileInfo.requireHistoricalHeader(header.bytes(), header.fileSize());
-        var originals = historicalCandidates(ledger, "");
-        var pending = historicalCandidates(ledger, RLOC);
-        if (originals.size() > 1 || originals.isEmpty() && pending.size() > 1) {
+        FileInfo.requireHistoricalHeader(header.bytes(), header.identity().size());
+        int originals = historicalCandidates(roots, ledger, "");
+        int pending = historicalCandidates(roots, ledger, RLOC);
+        if (originals > 1 || originals == 0 && pending > 1) {
             throw new IOException("Historical index has ambiguous authoritative copies: " + ledger);
         }
-        if (recover) {
-            if (relocation) {
-                if (originals.isEmpty()) {
-                    new NativeIOImpl().renameNoReplace(index.toString(), destination.toString());
-                } else {
-                    Files.delete(index);
-                }
-                history.syncDirectory(index.getParent());
+        ClassicHistoryFiles.requireSame(index, header.identity());
+        if (recover && relocation) {
+            if (originals == 0) {
+                new NativeIOImpl().renameNoReplace(index.toString(), destination.toString());
+            } else {
+                Files.delete(index);
             }
-            activeLedgers.put(ledger, true);
+            history.syncDirectory(index.getParent());
         }
+        return ledger;
     }
 
     void requireFreshAdmission() throws IOException {

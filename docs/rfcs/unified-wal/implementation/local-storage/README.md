@@ -2299,3 +2299,13 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 原始阶段保持独立：首轮testCompile因新测试误写不存在的openManifestControl方法退出1，没有执行新测试；修正为既有open重载后十项通过。随后加入guard channel首次失败和外层Classic guard别名覆盖，最终421项通过。首次style退出1，仅一处import顺序诊断，修正后两次不同输入阶段的style各退出0；最终源码与delivery/style-delivery输入一致。本次是新增离线输入能力，未把编译或格式失败标作产品RED。RAT实际退出1，431项未批准路径集合与前次封存一致，逐项字节与父提交相同，无新增或解决；受保护PDF在扫描前排除，不宣称全量CI通过。
 
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/classic-arena-input-evidence-5d840598`分别保留初轮编译失败、十项定向与421项最终运行的原源码/日志/XML/class；最终声明1321项源码及九项文档输入，native runner实际记录1294项，相关class快照46项。其他历史输入与父Git blob逐项核对，不移绑早期结果。完成实际终态及两次独立lsof检查后，仅移除本次三个raw scope的六个目录、20个文件路径，共1,990,156逻辑字节；归档硬链接完整保留，regular-file数据块回收为0。用户PDF、默认目录和其他任务产物未触碰。本子项不补充真实外部issuer或整体bootstrap验收，后续继续公开owner/可信材料与Classic恢复/封口的实际接线。
+
+## 离线 bootstrap 的历史 index 只读清单
+
+在父 `af8d9e41bf` 上，包内 `IndexPersistenceMgr.HistoricalIndexReader` 接收外层提供的完整有效 index current 根集合，逐个同步交付校验过的 ledger ID。读取只持有当前文件、三层目录遍历资源和跨根候选计数。规范 .idx 和 .idx.rloc 都会被读取，因此同一 ledger 可以出现多次，每次都要通过原 V1 header、路径、单链接和候选歧义校验。跨根检查后复核刚读过的文件身份，以捕获关闭期间的替换。仅当全遍历和各次实际关闭成功才返回完整清单，visitor 已收到的前缀本身没有完成含义。
+
+原历史初始化共用遍历和校验，全部只读核验完成后才处理 .rloc 和填充 activeLedgers。独立 reader 只拥有读取资源。由外层负责取得根排他权，后续消费者还须绑定原 commissioned/native 来源。reader 保留首次读取或 visitor 错误，以及 reader/listing 首次关闭结果，排空不会重试已经失败的 native close。
+
+真实独立 index 根上的五项新增用例覆盖 .idx 和 .idx.rloc 字节及 inode 保留、重复 ledger 的晚项坏 header、关闭时同字节换 inode、文件首次关闭失败及 visitor 与目录关闭双失败。首轮因目录夹具的泛型推断在 testCompile 失败。修正夹具并保留原恢复后迟到 .rloc 拒绝后，历史 index/entry-log、Journal 和子资源三组共 25 项通过，Java Spotless 与 Checkstyle 通过。沿用原 acf9afec… native 库，证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-index-inventory-evidence-af8d9e41`。
+
+本项交付 index 文件数据来源。Journal suffix、持久 CLASSIC claim、受控重放与 flush、BOOTSTRAP_COMPLETE、PREPARED 到 ENABLED 及运行期 route 接线仍待完成。批准 Linux 运行和生产 Gate 仍待验收。

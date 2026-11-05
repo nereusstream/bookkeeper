@@ -35,7 +35,7 @@ import org.apache.bookkeeper.util.BookKeeperConstants;
 /** Startup readers shared by the owned Classic Journal, index and entry logger. Never startup authority. */
 final class ClassicHistoryFiles {
     record Drain(boolean drained, int retainedResources, Throwable closeFailure) { }
-    record Prefix(ByteBuffer bytes, long fileSize) { }
+    record Prefix(ByteBuffer bytes, BasicFileAttributes identity) { }
 
     final class Read implements AutoCloseable {
         FileChannel channel;
@@ -140,7 +140,7 @@ final class ClassicHistoryFiles {
             requireSame(path, before, read.channel);
         }
         bytes.flip();
-        return new Prefix(bytes.asReadOnlyBuffer(), before.size());
+        return new Prefix(bytes.asReadOnlyBuffer(), before);
     }
 
     void syncDirectory(Path path) throws IOException {
@@ -178,9 +178,16 @@ final class ClassicHistoryFiles {
     }
 
     static void requireSame(Path path, BasicFileAttributes before, FileChannel channel) throws IOException {
+        requireSame(path, before);
+        if (channel.size() != before.size()) {
+            throw new IOException("Historical Classic file changed during its owned read: " + path);
+        }
+    }
+
+    static void requireSame(Path path, BasicFileAttributes before) throws IOException {
         var after = fileIdentity(path);
         if (!before.fileKey().equals(after.fileKey()) || before.size() != after.size()
-                || !before.lastModifiedTime().equals(after.lastModifiedTime()) || channel.size() != before.size()) {
+                || !before.lastModifiedTime().equals(after.lastModifiedTime())) {
             throw new IOException("Historical Classic file changed during its owned read: " + path);
         }
     }

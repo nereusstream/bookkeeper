@@ -33,13 +33,16 @@ import io.netty.buffer.UnpooledByteBufAllocator;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.bookkeeper.bookie.FreshClassicEntryLogDrainTest.ControlledFileChannel;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.stats.NullStatsLogger;
@@ -158,6 +161,164 @@ public class ClassicHistoryIndexEntryLogTest {
             assertThrows(IOException.class, fresh::initializeForFresh);
             DefaultEntryLogger freshLogger = f.logger(false);
             assertThrows(IOException.class, freshLogger::initializeForFresh);
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void historicalIndexInventoryStreamsOriginalsAndRelocationsWithoutChangingFiles() throws Exception {
+        try (var f = new Fixture()) {
+            Path original = f.writeIndex(0, 7, FileInfo.V1, 101);
+            Path redundant = f.writeIndex(1, 7, FileInfo.V1, 202);
+            Path orphan = f.writeIndex(1, 8, FileInfo.V1, 303);
+            Path redundantRelocation = Files.move(redundant, Path.of(redundant + IndexPersistenceMgr.RLOC));
+            Path orphanRelocation = Files.move(orphan, Path.of(orphan + IndexPersistenceMgr.RLOC));
+            var observed = new ArrayList<Long>();
+            var paths = List.of(original, redundantRelocation, orphanRelocation);
+            byte[][] bytes = new byte[paths.size()][];
+            var identities = new ArrayList<Object>();
+            for (int i = 0; i < paths.size(); i++) {
+                bytes[i] = Files.readAllBytes(paths.get(i));
+                identities.add(Files.getAttribute(paths.get(i), "unix:ino"));
+            }
+            var reader = new IndexPersistenceMgr.HistoricalIndexReader(f.indexDirectories.getAllLedgerDirs());
+            try {
+                reader.readLedgerIds(observed::add);
+                assertEquals(List.of(7L, 7L, 8L), observed.stream().sorted().toList());
+                assertFalse(Files.exists(orphan));
+                assertFalse(Files.exists(redundant));
+                for (int i = 0; i < paths.size(); i++) {
+                    assertArrayEquals(bytes[i], Files.readAllBytes(paths.get(i)));
+                    assertEquals(identities.get(i), Files.getAttribute(paths.get(i), "unix:ino"));
+                }
+            } finally {
+                assertTrue(reader.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void historicalIndexInventoryFailsOnTheLaterCorruptHeaderOfAnObservedLedger() throws Exception {
+        try (var f = new Fixture()) {
+            Path destination = f.writeIndex(0, 7, FileInfo.V1, 101);
+            Path originalRelocation = Files.move(destination, Path.of(destination + IndexPersistenceMgr.RLOC));
+            // Root 0's valid relocation is redundant against the original in root 1.
+            f.writeIndex(1, 7, FileInfo.V0, 202);
+            byte[] bytes = Files.readAllBytes(originalRelocation);
+            var observed = new ArrayList<Long>();
+            var reader = new IndexPersistenceMgr.HistoricalIndexReader(f.indexDirectories.getAllLedgerDirs());
+            try {
+                var failure = assertThrows(IOException.class, () -> reader.readLedgerIds(observed::add));
+                assertEquals(List.of(7L), observed);
+                assertSame(failure, assertThrows(IOException.class, () -> reader.readLedgerIds(observed::add))
+                        .getCause());
+                assertSame(failure, reader.closeAndDrain().readFailure());
+                assertFalse(Files.exists(destination));
+                assertArrayEquals(bytes, Files.readAllBytes(originalRelocation));
+            } finally {
+                assertTrue(reader.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void historicalIndexInventoryRejectsSameByteReplacementOnFirstHeaderClose() throws Exception {
+        try (var f = new Fixture()) {
+            Path index = f.writeIndex(0, 7, FileInfo.V1, 101);
+            Path retired = index.resolveSibling("retired");
+            var reader = new IndexPersistenceMgr.HistoricalIndexReader(f.indexDirectories.getAllLedgerDirs());
+            var channel = new ControlledFileChannel(FileChannel.open(index, StandardOpenOption.READ));
+            channel.beforeClose = () -> {
+                try {
+                    Files.move(index, retired);
+                    Files.copy(retired, index);
+                } catch (IOException failure) {
+                    throw new java.io.UncheckedIOException(failure);
+                }
+            };
+            var observed = new ArrayList<Long>();
+            try (var files = mockStatic(FileChannel.class, CALLS_REAL_METHODS)) {
+                files.when(() -> FileChannel.open(index, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))
+                        .thenReturn(channel);
+                var failure = assertThrows(IOException.class, () -> reader.readLedgerIds(observed::add));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("file changed"));
+                assertTrue(observed.isEmpty());
+                assertSame(failure, reader.closeAndDrain().readFailure());
+                assertEquals(1, channel.closeAttempts.get());
+                assertArrayEquals(Files.readAllBytes(retired), Files.readAllBytes(index));
+            } finally {
+                assertTrue(reader.closeAndDrain().drained());
+                channel.delegate.close();
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void historicalIndexInventoryDoesNotRetryAFailedHeaderClose() throws Exception {
+        try (var f = new Fixture()) {
+            Path index = f.writeIndex(0, 7, FileInfo.V1, 101);
+            var reader = new IndexPersistenceMgr.HistoricalIndexReader(f.indexDirectories.getAllLedgerDirs());
+            var channel = new ControlledFileChannel(FileChannel.open(index, StandardOpenOption.READ));
+            channel.closeFailure = new IOException("inventory first header close failed");
+            channel.beforeClose = () -> assertThrows(IllegalStateException.class, reader::closeAndDrain);
+            var observed = new ArrayList<Long>();
+            try (var files = mockStatic(FileChannel.class, CALLS_REAL_METHODS)) {
+                files.when(() -> FileChannel.open(index, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))
+                        .thenReturn(channel);
+                assertSame(channel.closeFailure, assertThrows(IOException.class,
+                        () -> reader.readLedgerIds(observed::add)));
+                assertTrue(observed.isEmpty());
+            } finally {
+                var drain = reader.closeAndDrain();
+                assertFalse(drain.drained());
+                assertEquals(1, drain.retainedResources());
+                assertSame(channel.closeFailure, drain.readFailure());
+                assertSame(channel.closeFailure, drain.closeFailure());
+                assertEquals(drain, reader.closeAndDrain());
+                assertEquals(1, channel.closeAttempts.get());
+                assertTrue(channel.delegate.isOpen());
+                channel.delegate.close();
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void historicalIndexInventoryPreservesVisitorAndListingCloseFailures() throws Exception {
+        try (var f = new Fixture()) {
+            Path index = f.writeIndex(0, 7, FileInfo.V1, 101);
+            Path leaf = index.getParent();
+            var reader = new IndexPersistenceMgr.HistoricalIndexReader(f.indexDirectories.getAllLedgerDirs());
+            var visitorFailure = new IOException("inventory visitor failed");
+            var closeFailure = new IOException("inventory first listing close failed");
+            var closeAttempts = new AtomicInteger();
+            try (var delegate = Files.newDirectoryStream(leaf);
+                    var files = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+                var failing = new DirectoryStream<Path>() {
+                    @Override
+                    public Iterator<Path> iterator() {
+                        return delegate.iterator();
+                    }
+
+                    @Override
+                    public void close() throws IOException {
+                        closeAttempts.incrementAndGet();
+                        throw closeFailure;
+                    }
+                };
+                files.when(() -> Files.newDirectoryStream(leaf)).thenReturn(failing);
+                assertSame(visitorFailure, assertThrows(IOException.class, () -> reader.readLedgerIds(ledger -> {
+                    assertEquals(7, ledger);
+                    throw visitorFailure;
+                })));
+                assertArrayEquals(new Throwable[]{closeFailure}, visitorFailure.getSuppressed());
+            } finally {
+                var drain = reader.closeAndDrain();
+                assertFalse(drain.drained());
+                assertEquals(1, drain.retainedResources());
+                assertSame(visitorFailure, drain.readFailure());
+                assertSame(closeFailure, drain.closeFailure());
+                assertEquals(drain, reader.closeAndDrain());
+                assertEquals(1, closeAttempts.get());
+            }
         }
     }
 
