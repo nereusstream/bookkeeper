@@ -1192,16 +1192,20 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 operation.sequence(), bootstrapComplete.value()));
     }
 
+    synchronized int unsealedBootstrapClaimLimit() throws IOException {
+        requireBootstrapControl();
+        if (bootstrapComplete != null) {
+            throw new IOException("Classic bootstrap is already sealed");
+        }
+        return config.maxPendingEntries();
+    }
+
     /** A local control observation only. The bootstrap owner still has to prove its scope and submit new claims. */
     synchronized BootstrapClaim prepareBootstrapClaim(long ledgerId) throws IOException {
         if (ledgerId < 0) {
             throw new IllegalArgumentException("Classic bootstrap requires a nonnegative ledger ID");
         }
-        requireWritable();
-        if (routeBinding == null || ownedFiles != null && !ownedFiles.healthy()
-                || !quiescentForRotation() || durableThrough != appliedThrough) {
-            throw new IOException("Classic bootstrap requires quiescent, applied common Bookie control");
-        }
+        requireBootstrapControl();
         if (ledgers.containsKey(ledgerId) || tombstones.containsKey(ledgerId)) {
             throw new IOException("Classic bootstrap claim conflicts with a Profile route or tombstone: " + ledgerId);
         }
@@ -1226,6 +1230,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw new IOException("Classic bootstrap claim operation is already occupied: " + ledgerId);
         }
         return new BootstrapClaim(candidate, Optional.empty());
+    }
+
+    private void requireBootstrapControl() throws IOException {
+        requireWritable();
+        if (routeBinding == null || ownedFiles != null && !ownedFiles.healthy()
+                || !quiescentForRotation() || durableThrough != appliedThrough) {
+            throw new IOException("Classic bootstrap requires quiescent, applied common Bookie control");
+        }
     }
 
     synchronized void requireCommonBinding(UUID bindingId, ManifestIdentity manifest) throws IOException {

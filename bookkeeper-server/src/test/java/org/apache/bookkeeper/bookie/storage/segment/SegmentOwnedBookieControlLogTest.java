@@ -29,6 +29,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mockStatic;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.OpenOption;
@@ -44,9 +45,12 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.crypto.spec.SecretKeySpec;
+import org.apache.bookkeeper.bookie.ClassicClaimTestHistory;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
@@ -64,6 +68,8 @@ public class SegmentOwnedBookieControlLogTest {
     private SegmentArenaManifest manifest;
     private IsolatedSegmentConfig config;
     private SegmentBookieControlLog.RouteBinding binding;
+    private Path journalRoot;
+    private Path ledgerRoot;
     private final SecretKeySpec key = new SecretKeySpec(new byte[32], "AES");
     private final ProfileDescriptorValidator validator = new ProfileDescriptorValidator((i, v) -> false,
             (i, v) -> false);
@@ -71,18 +77,19 @@ public class SegmentOwnedBookieControlLogTest {
     @Before
     public void formattedControl() throws Exception {
         Path parent = temporary.getRoot().toPath().toRealPath();
-        Path journal = Files.createDirectory(parent.resolve("classic-0-journal"));
-        Path ledger = Files.createDirectory(parent.resolve("classic-1-ledger-index"));
+        journalRoot = Files.createDirectory(parent.resolve("classic-0-journal"));
+        ledgerRoot = Files.createDirectory(parent.resolve("classic-1-ledger-index"));
         byte[] incarnation = new byte[16];
         incarnation[0] = 1;
         manifest = new SegmentArenaManifest(new StorageIncarnation(incarnation), BookieId.parse("owned:3181"),
                 List.of(new SegmentArenaManifest.Arena(new UUID(0, 9), parent.resolve("arena"), 1, 16384)),
                 parent.resolve("control"), List.of(0), List.of(
-                        new SegmentArenaManifest.ClassicRoot(journal, Set.of(SegmentArenaManifest.ClassicRole.JOURNAL)),
-                        new SegmentArenaManifest.ClassicRoot(ledger, Set.of(SegmentArenaManifest.ClassicRole.LEDGER,
-                                SegmentArenaManifest.ClassicRole.INDEX))));
-        config = new IsolatedSegmentConfig(manifest.controlDirectory(), 1, 1, 1, 16384, 4096, 1024, 16,
-                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+                        new SegmentArenaManifest.ClassicRoot(journalRoot,
+                                Set.of(SegmentArenaManifest.ClassicRole.JOURNAL)),
+                        new SegmentArenaManifest.ClassicRoot(ledgerRoot,
+                                Set.of(SegmentArenaManifest.ClassicRole.LEDGER,
+                                        SegmentArenaManifest.ClassicRole.INDEX))));
+        config = controlConfig(16);
         binding = new SegmentBookieControlLog.RouteBinding(new UUID(0, 20), manifest.identity());
         try (var created = SegmentBookieControlLog.createManifestControl(config, manifest, manifest.identity(),
                 65536, key, validator, new SegmentFileIo(), binding)) {
@@ -90,12 +97,21 @@ public class SegmentOwnedBookieControlLogTest {
         }
     }
 
+    private IsolatedSegmentConfig controlConfig(int batchLimit) {
+        return new IsolatedSegmentConfig(manifest.controlDirectory(), 1, 1, 1, 16384, 4096, 1024, batchLimit,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+    }
+
     private SegmentBookieControlLog.Owned owned() throws IOException {
         return owned(new SegmentFileIo());
     }
 
     private SegmentBookieControlLog.Owned owned(SegmentFileIo io) throws IOException {
-        return SegmentBookieControlLog.ownedExisting(config, manifest, manifest.identity(), 65536,
+        return owned(io, config);
+    }
+
+    private SegmentBookieControlLog.Owned owned(SegmentFileIo io, IsolatedSegmentConfig limits) throws IOException {
+        return SegmentBookieControlLog.ownedExisting(limits, manifest, manifest.identity(), 65536,
                 key, validator, io, binding);
     }
 
@@ -306,6 +322,201 @@ public class SegmentOwnedBookieControlLogTest {
             assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, result.status());
         } finally {
             assertTrue(reopened.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void claimImportRetainsAppliedPrefixAndRescansRealHistoryAfterRotationAndReopen() throws Exception {
+        var history = history();
+        ClassicClaimTestHistory.writeIndex(history.ledger(), 44);
+        ClassicClaimTestHistory.writeIndex(history.ledger(), 47);
+        ClassicClaimTestHistory.writeJournal(history.journal().resolve("1.txn"), 47, 50, 50, 51);
+        Path last = history.journal().resolve("2.txn");
+        ClassicClaimTestHistory.writeBadRepeatedRecord(last, 47);
+
+        var io = new SegmentFileIo();
+        var owner = owned(io, controlConfig(2));
+        owner.initialize();
+        var log = owner.log();
+        SegmentBookieControlDriver originalDriver;
+        SegmentBookieControlLog.Result legacy;
+        SegmentBookieControlLog.Result first;
+        SegmentBookieControlLog.Result second;
+        try {
+            try (var driver = new Driver(log, 1)) {
+                originalDriver = driver.driver;
+                legacy = driver.submit(claim()).get(0);
+                var importer = new SegmentClassicBootstrapClaims(owner, originalDriver);
+                var failure = assertThrows(IOException.class, () -> history.scan(importer));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("metadata length differs"));
+                assertTrue(importer.drained());
+                assertEquals(0, driver.loop.controlPending());
+                assertEquals(2, io.forces);
+                assertFalse(log.bootstrapComplete());
+                first = assertImported(log, 47, 1);
+                second = assertImported(log, 50, 2);
+                assertTrue(log.prepareBootstrapClaim(51).applied().isEmpty());
+                assertEquals(second.sequence(), log.appliedThrough());
+            }
+            log.checkpoint();
+            log.rotate();
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+
+        ClassicClaimTestHistory.writeJournal(last, 52, 52, 53);
+        var restartedIo = new SegmentFileIo();
+        var reopened = owned(restartedIo, controlConfig(2));
+        reopened.initialize();
+        var restored = reopened.log();
+        try (var driver = new Driver(restored, 1)) {
+            var mismatched = new SegmentClassicBootstrapClaims(reopened, originalDriver);
+            var wrongDriver = assertThrows(IOException.class, () -> history.scan(mismatched));
+            assertTrue(wrongDriver.getMessage().contains("does not belong"));
+            assertTrue(mismatched.drained());
+
+            long maintenanceCut = restored.appliedThrough();
+            assertTrue(maintenanceCut > second.sequence());
+            int originalWrites = restartedIo.writes;
+            int originalForces = restartedIo.forces;
+            assertTrue(driver.driver.reserveMaintenance());
+            try {
+                var refused = new SegmentClassicBootstrapClaims(reopened, driver.driver);
+                var failure = assertThrows(IOException.class, () -> history.scan(refused));
+                assertTrue(failure.getMessage().contains("not admitted"));
+                assertTrue(refused.drained());
+                assertEquals(0, driver.loop.controlPending());
+                assertEquals(originalWrites, restartedIo.writes);
+                assertEquals(originalForces, restartedIo.forces);
+                assertEquals(maintenanceCut, restored.appliedThrough());
+            } finally {
+                driver.driver.releaseMaintenance();
+            }
+            var importer = new SegmentClassicBootstrapClaims(reopened, driver.driver);
+            history.scan(importer);
+            assertTrue(importer.drained());
+            assertEquals(0, driver.loop.controlPending());
+            assertEquals(originalForces + 2, restartedIo.forces);
+            assertEquals(claim(), restored.prepareBootstrapClaim(44).command());
+            assertEquals(legacy, restored.prepareBootstrapClaim(44).applied().orElseThrow());
+            assertEquals(first, assertImported(restored, 47, 1));
+            assertEquals(second, assertImported(restored, 50, 2));
+            assertImported(restored, 51, maintenanceCut + 1);
+            assertImported(restored, 52, maintenanceCut + 2);
+            assertImported(restored, 53, maintenanceCut + 3);
+            assertEquals(maintenanceCut + 3, restored.appliedThrough());
+            assertFalse(restored.bootstrapComplete());
+
+            int writes = restartedIo.writes;
+            history.scan(new SegmentClassicBootstrapClaims(reopened, driver.driver));
+            assertEquals(writes, restartedIo.writes);
+            assertEquals(originalForces + 2, restartedIo.forces);
+            assertEquals(maintenanceCut + 3, restored.appliedThrough());
+        } finally {
+            assertTrue(reopened.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void claimImportTimeoutKeepsTheAcceptedBatchUntilTerminal() throws Exception {
+        assertStoppedClaimImportDrains(false);
+    }
+
+    @Test(timeout = 30000)
+    public void claimImportInterruptAndActualForceFailureAreBothRetained() throws Exception {
+        assertStoppedClaimImportDrains(true);
+    }
+
+    private void assertStoppedClaimImportDrains(boolean interrupt) throws Exception {
+        var history = history();
+        ClassicClaimTestHistory.writeIndex(history.ledger(), 47);
+        ClassicClaimTestHistory.writeJournal(history.journal().resolve("1.txn"), 50, 51);
+        var forcing = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var io = new SegmentFileIo(Integer.MAX_VALUE, -1, interrupt ? 1 : -1, false, () -> {
+            forcing.countDown();
+            try {
+                assertTrue(release.await(5, TimeUnit.SECONDS));
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError(failure);
+            }
+        });
+        var owner = owned(io, controlConfig(2));
+        owner.initialize();
+        var log = owner.log();
+        try (var driver = new Driver(log, 1)) {
+            var importer = new SegmentClassicBootstrapClaims(owner, driver.driver);
+            var restoredInterrupt = new AtomicBoolean();
+            var scan = new FutureTask<Void>(() -> {
+                try {
+                    history.scan(importer);
+                    return null;
+                } finally {
+                    restoredInterrupt.set(Thread.currentThread().isInterrupted());
+                }
+            });
+            var thread = new Thread(scan, "classic-claim-inventory-test");
+            var timeout = new IOException("inventory deadline expired", new TimeoutException());
+            thread.start();
+            try {
+                assertTrue(forcing.await(5, TimeUnit.SECONDS));
+                if (interrupt) {
+                    thread.interrupt();
+                } else {
+                    importer.stop(timeout);
+                }
+                assertFalse(importer.drained());
+                assertFalse(scan.isDone());
+                assertEquals(1, driver.loop.controlPending());
+            } finally {
+                release.countDown();
+                thread.join(5000);
+                assertFalse(thread.isAlive());
+            }
+            Throwable failure = assertThrows(ExecutionException.class, () -> scan.get(5, TimeUnit.SECONDS)).getCause();
+            assertTrue(importer.drained());
+            assertEquals(0, driver.loop.controlPending());
+            assertEquals(1, io.forces);
+            assertEquals(interrupt, restoredInterrupt.get());
+            assertFalse(log.bootstrapComplete());
+            if (interrupt) {
+                assertTrue(failure instanceof InterruptedIOException);
+                assertEquals(1, failure.getSuppressed().length);
+                assertEquals("Injected force failure", failure.getSuppressed()[0].getMessage());
+                assertThrows(IOException.class, () -> log.prepareBootstrapClaim(47));
+            } else {
+                assertSame(timeout, failure);
+                assertImported(log, 47, 0);
+                assertImported(log, 50, 1);
+                assertTrue(log.prepareBootstrapClaim(51).applied().isEmpty());
+            }
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    private SegmentBookieControlLog.Result assertImported(SegmentBookieControlLog log, long ledger, long sequence)
+            throws IOException {
+        var claim = log.prepareBootstrapClaim(ledger);
+        assertEquals(binding.bootstrapClaim(ledger), claim.command());
+        var result = claim.applied().orElseThrow();
+        assertEquals(claim.command().operationId(), result.operationId());
+        assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, result.status());
+        assertEquals(sequence, result.sequence());
+        assertEquals(SegmentBookieControlLog.RouteState.UNAVAILABLE, log.routeState(ledger));
+        return result;
+    }
+
+    private History history() throws IOException {
+        return new History(Files.createDirectory(journalRoot.resolve("current")),
+                Files.createDirectory(ledgerRoot.resolve("current")));
+    }
+
+    private record History(Path journal, Path ledger) {
+        void scan(SegmentClassicBootstrapClaims importer) throws IOException {
+            importer.importClaims(visitor -> ClassicClaimTestHistory.readIndex(ledger, visitor::visit),
+                    visitor -> ClassicClaimTestHistory.readJournal(journal, ledger, visitor::visit));
         }
     }
 

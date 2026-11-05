@@ -71,6 +71,12 @@ final class SegmentBookieControlDriver {
         return owner.isOwnerThread();
     }
 
+    void requireLog(SegmentBookieControlLog expected) throws IOException {
+        if (log != expected) {
+            throw new IOException("Bookie control driver does not belong to the borrowed owner");
+        }
+    }
+
     long initialActiveGeneration(ProfileControlScope scope) {
         owner.requireOwner();
         return log.initialActiveGeneration(scope);
