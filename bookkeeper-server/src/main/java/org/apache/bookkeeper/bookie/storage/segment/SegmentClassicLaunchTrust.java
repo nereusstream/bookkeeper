@@ -3468,6 +3468,12 @@ final class SegmentClassicLaunchTrust {
             requireTime(deadline);
             return result;
         }
+        if (kind == LinuxContentKind.ELF2) {
+            var elf = SegmentClassicLinuxElf.readVersionTwoHashed(channel, length, deadline);
+            var result = new LinuxContent(elf.sha256(), null, elf.image(), null, null);
+            requireTime(deadline);
+            return result;
+        }
         MessageDigest digest;
         try {
             digest = MessageDigest.getInstance("SHA-256");
@@ -3493,9 +3499,7 @@ final class SegmentClassicLaunchTrust {
         }
         SegmentClassicLinuxElf.Image elf = kind == LinuxContentKind.ELF1
                 ? SegmentClassicLinuxElf.read(channel, length, deadline) : null;
-        SegmentClassicLinuxElf.Image2 elf2 = kind == LinuxContentKind.ELF2
-                ? SegmentClassicLinuxElf.readVersionTwo(channel, length, deadline) : null;
-        var result = new LinuxContent(new SegmentClassicHandoff.Digest(digest.digest()), elf, elf2, null,
+        var result = new LinuxContent(new SegmentClassicHandoff.Digest(digest.digest()), elf, null, null,
                 null);
         requireTime(deadline);
         return result;

@@ -1218,6 +1218,20 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 已有 ELF2 消费者的摘要与元数据字节对应
+
+2026-11-05在父`98d5b317d4b3ceb5f60c870fab5ed029179dbf21`上，修正已有normal dropper及其他共享ELF2内容生产路径。原实现先stream SHA，再从同fd positional解析，内容入口可返回A摘要与等长B的NEEDED等元数据；原外层fd/ctime/mtime/path/parents会拒绝许多普通改写，本反例不宣称已绕过生产启动资格。
+
+新`readVersionTwoHashed`先用有界私有区段解析，并按原long文件偏移登记实际读取的header/PHDR/dynamic/字符串区段。capture模式只将独立至多64KiB scratch交给channel，再复制到parser实际使用、同时登记的私有数组；原PHDR128、dynamic4096、NEEDED1024及单字符串4097读取上限保持。随后同fd只顺序扫描一次完整文件，scratch复制到私有块，同一私有块用于区段比较和SHA。区段按offset排序，游标只加入当前块前的区段，active保留跨块项并原位压缩已完成项；重复偏移、重叠、部分read和大空隙不要求每块重扫全表。任何区段不符明确拒绝，未读作元数据的payload仍进入完整摘要。
+
+文件length/流偏移保持long，仅区段/块内差值转int；不按整文件长分配或增加ELF大小上限。只在ELF2内容入口消费配对的Image2/Digest，成功channel.position为length、原size/短读零进展/最终deadline/close归属及hashFile前后真实fd/批准SHA保持。原ELF1/D1和raw readVersionTwo走原positional读取体，不新增整文件hash或移动channel；其他kind、JNI、搜索/候选及launcher guard不扩展，也没有新增正常消费者。
+
+父内容实现的等长有效NEEDED libz→liby实际改盘反例确定取红，A摘要断言通过而元数据变B。修正后新增四项：该边界返回内部一致A；parser后改盘并改写caller保留的所有positional dst仍因私有区段不符拒绝；160KiB合法ELF的字符串表移至65536−16，重复/重叠区段跨块且非元数据payload完整入SHA；同fixture每次边界前读都被限制到65535，真实到边界后才计数，随后仅改顺序流所见offset65536，要求由延续区段发现差异。一次临时突变将active保留条件改为region.end>fileLength，跨块拒绝用例明确失败；生产源码SHA `bfaa4823fa165e10c0aa393d2326fd792fd7551df923b752c288a4ab98a65553`逐字节恢复，突变源/class/XML另存。合法和拒绝场景允许底层合法短读，不要求首次读满。
+
+最终Elf13＋Content15＋Trust相关23共51项全部通过，0失败/错误/跳过，包含新增4项；Java Spotless/Checkstyle退出0。最终生产class与突变前相同、与突变不同，原首3及未收紧夹具cross2的PASS保留各自原测试绑定，突变红不计生产PASS。五阶段各1450原输入按snapshot/父Git blob核验，最终三code与final51/style一致。沿用9406191e…受控库，无native重建或无关矩阵重跑。
+
+证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-elf2-hash-binding-evidence-98d5b317`，保留原source/class/日志/XML和恢复记录。动态证据为真实临时文件及受控channel故障、原owner/fd/close/dropper材料回归，正式批准Linux/vendor启动阳性仍NOT_EXECUTED。没有测量超2GiB完整文件或性能，不将160KiB fixture提升为所有文件/平台证明；该结果只保证元数据可由送入本次SHA的同一字节序列解析，不证明实际loader执行/搜索winner/完整资格。parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，原拒绝、OFF/SYSTEM/PARK、advanced disabled与持续目标active保持。
+
 ## 正常 D2 launcher 的整张加载目录表观察
 
 2026-11-05在父`6f747aa7d07adc6f050f2cc5bec8834ef0acc0c7`上，正常schema2启动在固定conf图之后、dropper之前调用一次原`verifyLinuxSearchDirectories(deadline)`，成功返回才继续。不逐项调用、不遍历policy.defaultDirectories、不缓存或转发返回值，D1及无Linux部署分支按原路径执行。原观察器没有改写：来源/provider/期限门后从原loading.directories取整表，保留原index/raw logical/present与alias；A/B各自共用原固定成员/名称预算，同resolved每遍复用前核身份，比较全部路径、父链与成员，保持受保护缺失、实际空目录、首次close及sticky/drain。

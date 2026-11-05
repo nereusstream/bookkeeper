@@ -38,6 +38,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -333,6 +334,192 @@ public class SegmentClassicLinuxContentTest {
                 assertEquals(original.length, channel.position());
                 assertTrue(channel.isOpen());
                 assertEquals(replaceDisk ? 1 : 0, changed.get());
+            }
+        }
+        assertTrue(owner.drain().drained());
+    }
+
+    @Test
+    public void elf2DigestAndMetadataUseTheSameImageAfterAnEqualLengthFileChange() throws Exception {
+        byte[] original = image();
+        byte[] replacement = original.clone();
+        int name = new String(original, StandardCharsets.ISO_8859_1).indexOf("libz.so.1\0");
+        assertTrue(name >= 0);
+        replacement[name + 3] = 'y';
+        Path path = write(original);
+        Path other = write(replacement);
+        try (FileChannel changed = FileChannel.open(other, StandardOpenOption.READ)) {
+            assertEquals("liby.so.1", SegmentClassicLinuxElf.readVersionTwo(changed, replacement.length, deadline())
+                    .needed().get(0));
+        }
+        var owner = new SegmentOwnedFiles();
+        var changed = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && path.equals(invocation.getArgument(0))) {
+                var fault = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
+                doAnswer(call -> {
+                    int read = (int) call.callRealMethod();
+                    ByteBuffer target = call.getArgument(0);
+                    if (read > 0 && target.position() == original.length && changed.compareAndSet(0, 1)) {
+                        Files.write(path, replacement);
+                    }
+                    return read;
+                }).when(fault).read(any(ByteBuffer.class));
+                return fault;
+            }
+            return actual;
+        })) {
+            try (FileChannel channel = SegmentOwnedFiles.open(owner, path, StandardOpenOption.READ)) {
+                channel.position(17);
+                var content = SegmentClassicLaunchTrust.readLinuxContent(channel, original.length,
+                        LinuxContentKind.ELF2, deadline());
+                assertEquals(SegmentClassicHandoff.digest(original), content.sha256());
+                assertEquals(expected().needed(), content.elf2().needed());
+                assertEquals(original.length, channel.position());
+                assertEquals(1, changed.get());
+                assertTrue(channel.isOpen());
+            }
+        }
+        assertTrue(owner.drain().drained());
+        assertArrayEquals(replacement, Files.readAllBytes(path));
+    }
+
+    @Test
+    public void elf2PrivateParsedRangesRejectAChangedStreamDespiteRetainedChannelBuffers() throws Exception {
+        byte[] original = image();
+        byte[] replacement = original.clone();
+        int name = new String(original, StandardCharsets.ISO_8859_1).indexOf("libz.so.1\0");
+        assertTrue(name >= 0);
+        int changedByte = name + 3;
+        replacement[changedByte] = 'y';
+        Path path = write(original);
+        record Retained(long offset, ByteBuffer bytes) { }
+        var retained = new ArrayList<Retained>();
+        var changed = new AtomicInteger();
+        var owner = new SegmentOwnedFiles();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && path.equals(invocation.getArgument(0))) {
+                var fault = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
+                doAnswer(call -> {
+                    int read = (int) call.callRealMethod();
+                    if (read > 0) {
+                        ByteBuffer target = call.getArgument(0);
+                        retained.add(new Retained(call.getArgument(1), target.duplicate()));
+                    }
+                    return read;
+                }).when(fault).read(any(ByteBuffer.class), anyLong());
+                doAnswer(call -> {
+                    if (changed.compareAndSet(0, 1)) {
+                        assertFalse(retained.isEmpty());
+                        Files.write(path, replacement);
+                        for (var part : retained) {
+                            long relative = changedByte - part.offset();
+                            if (relative >= 0 && relative < part.bytes().position()) {
+                                part.bytes().put((int) relative, (byte) 'y');
+                            }
+                        }
+                    }
+                    return call.callRealMethod();
+                }).when(fault).read(any(ByteBuffer.class));
+                return fault;
+            }
+            return actual;
+        })) {
+            try (FileChannel channel = SegmentOwnedFiles.open(owner, path, StandardOpenOption.READ)) {
+                var failure = assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.readLinuxContent(
+                        channel, original.length, LinuxContentKind.ELF2, deadline()));
+                assertTrue(failure.getMessage().contains("metadata differs from the complete stream hash bytes"));
+                assertEquals(1, changed.get());
+                assertTrue(channel.isOpen());
+            }
+        }
+        assertTrue(owner.drain().drained());
+        assertArrayEquals(replacement, Files.readAllBytes(path));
+    }
+
+    @Test
+    public void elf2CrossBlockOverlappingMetadataStillHashesAllUnparsedPayload() throws Exception {
+        crossBlockElf2Hash(false);
+    }
+
+    @Test
+    public void elf2CrossBlockContinuationRejectsAChangedByteAfterALegalShortRead() throws Exception {
+        crossBlockElf2Hash(true);
+    }
+
+    private void crossBlockElf2Hash(boolean corrupt) throws Exception {
+        byte[] original = image();
+        byte[] bytes = java.util.Arrays.copyOf(original, 160 * 1024);
+        java.util.Arrays.fill(bytes, original.length, bytes.length, (byte) 0x5a);
+        ByteBuffer fixture = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
+        assertEquals(64, fixture.getLong(32));
+        assertEquals(3, Short.toUnsignedInt(fixture.getShort(56)));
+        int load = 64 + 56;
+        assertEquals(1, fixture.getInt(load));
+        long address = fixture.getLong(load + 16);
+        assertEquals(5, fixture.getLong(512));
+        assertEquals(10, fixture.getLong(528));
+        int strings = Math.toIntExact(fixture.getLong(536));
+        int oldOffset = Math.toIntExact(fixture.getLong(520) - address);
+        int newOffset = 64 * 1024 - 16;
+        System.arraycopy(original, oldOffset, bytes, newOffset, strings);
+        fixture.putLong(520, address + newOffset);
+        fixture.putLong(load + 32, bytes.length).putLong(load + 40, bytes.length);
+        bytes[128 * 1024 + 7] = 0x7b;
+        assertTrue(bytes[65536] != 'X');
+        Path path = write(bytes);
+        var owner = new SegmentOwnedFiles();
+        var boundaryReads = new AtomicInteger();
+        var changed = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object actual = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3
+                    && path.equals(invocation.getArgument(0))) {
+                var fault = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
+                doAnswer(call -> {
+                    ByteBuffer target = call.getArgument(0);
+                    long offset = fault.actual.position();
+                    if (offset < 65535) {
+                        target.limit((int) Math.min(target.limit(), 65535 - offset));
+                    }
+                    int read = (int) call.callRealMethod();
+                    if (offset < 65535 && offset + read == 65535) {
+                        boundaryReads.incrementAndGet();
+                    }
+                    if (corrupt && offset <= 65536 && 65536 < offset + read) {
+                        assertTrue(offset >= 65535);
+                        target.put((int) (65536 - offset), (byte) 'X');
+                        changed.incrementAndGet();
+                    }
+                    return read;
+                }).when(fault).read(any(ByteBuffer.class));
+                return fault;
+            }
+            return actual;
+        })) {
+            try (FileChannel channel = SegmentOwnedFiles.open(owner, path, StandardOpenOption.READ)) {
+                channel.position(17);
+                var raw = SegmentClassicLinuxElf.readVersionTwo(channel, bytes.length, deadline());
+                assertEquals(17, channel.position());
+                assertEquals(expected().needed(), raw.needed());
+                if (corrupt) {
+                    var failure = assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.readLinuxContent(
+                            channel, bytes.length, LinuxContentKind.ELF2, deadline()));
+                    assertTrue(failure.getMessage().contains("metadata differs from the complete stream hash bytes"));
+                } else {
+                    var content = SegmentClassicLaunchTrust.readLinuxContent(channel, bytes.length,
+                            LinuxContentKind.ELF2, deadline());
+                    assertEquals(raw, content.elf2());
+                    assertEquals(SegmentClassicHandoff.digest(bytes), content.sha256());
+                    assertEquals(bytes.length, channel.position());
+                }
+                assertEquals(1, boundaryReads.get());
+                assertEquals(corrupt ? 1 : 0, changed.get());
+                assertTrue(channel.isOpen());
             }
         }
         assertTrue(owner.drain().drained());

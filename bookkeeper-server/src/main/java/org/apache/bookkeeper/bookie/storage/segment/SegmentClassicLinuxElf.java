@@ -23,7 +23,11 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -62,15 +66,29 @@ final class SegmentClassicLinuxElf {
 
     private record Segment(long type, long flags, long offset, long address, long fileBytes, long memoryBytes) { }
 
+    record HashedImage(Image2 image, SegmentClassicHandoff.Digest sha256) { }
+
+    private record ReadRegion(long offset, byte[] bytes) {
+        long end() {
+            return offset + bytes.length;
+        }
+    }
+
     private final FileChannel channel;
     private final long length;
     private final long deadline;
+    private final List<ReadRegion> regions;
     private int retainedText;
 
     private SegmentClassicLinuxElf(FileChannel channel, long length, long deadline) {
+        this(channel, length, deadline, false);
+    }
+
+    private SegmentClassicLinuxElf(FileChannel channel, long length, long deadline, boolean capture) {
         this.channel = channel;
         this.length = length;
         this.deadline = deadline;
+        this.regions = capture ? new ArrayList<>() : null;
     }
 
     /** No open/close, mapping, native load, executable/helper invocation, search or approval fallback. */
@@ -114,6 +132,76 @@ final class SegmentClassicLinuxElf {
         } catch (ArithmeticException | IllegalArgumentException malformed) {
             throw new IOException("Unsupported or invalid bounded Linux ELF two metadata", malformed);
         }
+    }
+
+    /** Bounded private metadata reads must match one complete stream; file length remains a long. */
+    static HashedImage readVersionTwoHashed(FileChannel channel, long length, long deadline) throws IOException {
+        try {
+            var parser = new SegmentClassicLinuxElf(channel, length, deadline, true);
+            parser.requireTime();
+            if (channel.size() != length) {
+                throw new IOException("Held Linux content channel length differs from its declaration");
+            }
+            Image2 image = parser.read();
+            var result = new HashedImage(image, parser.hashAndCompare());
+            parser.requireTime();
+            return result;
+        } catch (ArithmeticException | IllegalArgumentException malformed) {
+            throw new IOException("Unsupported or invalid bounded Linux ELF two metadata", malformed);
+        }
+    }
+
+    private SegmentClassicHandoff.Digest hashAndCompare() throws IOException {
+        MessageDigest digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException unavailable) {
+            throw new IOException("Required ELF2 SHA-256 is unavailable", unavailable);
+        }
+        regions.sort(Comparator.comparingLong(ReadRegion::offset));
+        var active = new ArrayList<ReadRegion>();
+        int next = 0;
+        ByteBuffer scratch = ByteBuffer.allocate(64 * 1024);
+        byte[] block = new byte[scratch.capacity()];
+        channel.position(0);
+        long offset = 0;
+        while (offset < length) {
+            requireTime();
+            scratch.clear().limit((int) Math.min(scratch.capacity(), length - offset));
+            int read = channel.read(scratch);
+            if (read <= 0) {
+                throw new IOException("Program file read made no progress before the declared end");
+            }
+            scratch.flip();
+            scratch.get(block, 0, read);
+            long end = offset + read;
+            while (next < regions.size() && regions.get(next).offset() < end) {
+                active.add(regions.get(next++));
+            }
+            int keep = 0;
+            for (int i = 0; i < active.size(); i++) {
+                requireTime();
+                var region = active.get(i);
+                long from = Math.max(offset, region.offset());
+                long to = Math.min(end, region.end());
+                if (from < to && Arrays.mismatch(block, (int) (from - offset), (int) (to - offset),
+                        region.bytes(), (int) (from - region.offset()), (int) (to - region.offset())) != -1) {
+                    throw new IOException("ELF2 metadata differs from the complete stream hash bytes");
+                }
+                if (region.end() > end) {
+                    active.set(keep++, region);
+                }
+            }
+            active.subList(keep, active.size()).clear();
+            digest.update(block, 0, read);
+            offset = end;
+        }
+        if (channel.size() != length) {
+            throw new IOException("Original ELF2 length changed during its stream hash");
+        }
+        var result = new SegmentClassicHandoff.Digest(digest.digest());
+        requireTime();
+        return result;
     }
 
     private Image2 read() throws IOException {
@@ -345,12 +433,26 @@ final class SegmentClassicLinuxElf {
         requireTime();
         range(offset, bytes, length);
         ByteBuffer value = ByteBuffer.allocate(bytes).order(ByteOrder.LITTLE_ENDIAN);
-        while (value.hasRemaining()) {
-            requireTime();
-            int count = channel.read(value, offset + value.position());
-            if (count <= 0) {
-                throw new IOException("ELF metadata read ended or made no progress");
+        if (regions == null) {
+            while (value.hasRemaining()) {
+                requireTime();
+                int count = channel.read(value, offset + value.position());
+                if (count <= 0) {
+                    throw new IOException("ELF metadata read ended or made no progress");
+                }
             }
+        } else {
+            ByteBuffer scratch = ByteBuffer.allocate(Math.min(64 * 1024, bytes));
+            while (value.hasRemaining()) {
+                requireTime();
+                scratch.clear().limit(Math.min(scratch.capacity(), value.remaining()));
+                if (channel.read(scratch, offset + value.position()) <= 0) {
+                    throw new IOException("ELF metadata read ended or made no progress");
+                }
+                scratch.flip();
+                value.put(scratch);
+            }
+            regions.add(new ReadRegion(offset, value.array()));
         }
         requireTime();
         value.flip();
