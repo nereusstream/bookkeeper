@@ -872,6 +872,14 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 该改动只补本地 restart 的排他前置和移交，未实现独立 compatibility fence、device manifest authority、delete assignment/cursor、真实 readiness facts/生产启动、一般未 CLOSED 会话恢复、quorum、长期/多 Arena、掉电、性能或完整 A/C/D/组合。步骤 7/12 与生产 Gate 继续 PARTIAL；真实进程锁和文件测试不授予生产 authority。
 
+### Arena 重放后提前拒绝未关闭会话
+
+在 `f026619154` 的代码上，隔离 graph 持有原 DATA 锁并完成 Arena 重放后，立即调用既有 `requireQuiescentRecovery`。如果 Arena 已知不能物理重开，启动在打开 Bookie 控制 owner 和 RocksDB 派生索引前返回原错误。Arena 的原身份校验、重放和必要同步仍在前面，文件重开入口继续执行原检查。失败走原 graph 关闭路径。
+
+真实子进程在注入 DATA force 失败后直接退出，留下 epoch 1 的 OPEN 会话和没有持久 quarantine 的 Arena。旧实现最终拒绝，却先创建了派生索引。修复后同一入口返回原 unclosed 诊断，派生索引和覆盖页保持缺失，Bookie 锁文件未创建，现存文件字节一致。随后实际重新取得 DATA 和 Arena 排他，复查原 OPEN、epoch 和 quarantine 状态。最终八项定向回归通过，包含未关闭会话的三个索引崩溃窗口、健康重开覆盖和缺失索引重建、启动排他及失败清理。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/unclosed-session-preflight-evidence-f0266191`。
+
+当前 OPEN 记录仍可能来自进程退出，或来自尚未来得及持久化隔离的 I/O 失败。可读扫描与重新同步无法补认健康 CLOSE 或复用区间的已封口尾部。同身份异常重开的接受语义和完整步骤验收仍待完成。
+
 ## Profile 普通 Add 的真实接线
 
 2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。

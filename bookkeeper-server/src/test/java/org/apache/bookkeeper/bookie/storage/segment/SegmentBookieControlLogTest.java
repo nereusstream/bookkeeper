@@ -12272,6 +12272,33 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void unclosedSessionRejectsGraphRestartBeforeBookieAndIndexOpen() throws Exception {
+        IsolatedSegmentConfig config = config();
+        runAbruptWriter("session-force-error", config.directory(), 86, "DATA_FORCE_FAILED");
+        Path index = SegmentDerivedIndex.directory(config);
+        Path bookieLock = config.directory().resolve("bookie-control.lock");
+        assertFalse(Files.exists(index));
+        assertFalse(Files.exists(bookieLock));
+        Map<String, byte[]> before = inspectionImage(config.directory());
+
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4)) {
+            IOException failure = assertThrows(IOException.class, storage::restart);
+            assertTrue(failure.getMessage(), failure.getMessage().contains("Unclosed DATA writer session"));
+        }
+
+        assertFalse("A rejected restart must not create the derived index", Files.exists(index));
+        assertFalse("A rejected restart must not acquire the Bookie owner", Files.exists(bookieLock));
+        assertInspectionImage(before, config.directory());
+        try (SegmentDataFileLock released = SegmentDataFileLock.open(config.directory());
+                SegmentArenaControlLog replay = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertTrue(released.lock().isValid());
+            assertEquals(1, replay.dataSessionEpoch());
+            assertTrue(replay.hasUnclosedDataSession());
+            assertFalse(replay.hasDurableQuarantine(0));
+        }
+    }
+
+    @Test
     public void storageInspectorReplaysRotatedFilesWithoutChangingReadOnlySources() throws Exception {
         IsolatedSegmentConfig config = config();
         runAbruptWriter("normal-clean-close", config.directory(), 0, "SESSION_CLOSED");
