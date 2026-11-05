@@ -2155,6 +2155,8 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 
 ## 离线镜像接入当前 CLOSED repair-copy
 
+当前的镜像来源校验与准入见 [恢复准入绑定已封存镜像与原删除流](#恢复准入绑定已封存镜像与原删除流)。下列验证保留各自的源码与范围。
+
 2026-10-23，父源码 `b7c9e32bc6670fb168c47f56336bf6047271ab47`，按已冻结的 [首版接受语义](#backuprestore-的首版接受语义)，`SegmentBackupImage.Image` 接入原 `ProfileRecoveryCoordinator`，作为当前 CLOSED fragment 的附加数据源。要求不同 BookieId、不同 incarnation 的目标；当前 native metadata/context/birth 与 retained install 必须精确包含源身份及 ledgerInstanceId/descriptor，镜像旧权限不成为新 authority。当前 CLOSED 边界已是 terminal，不要求离线旧源再生产 fence RPC；目标仍走原 inactive install → RepairIntent admission → recovery-only grant → copy → native membership CAS → recovery close，不开放 normal writer，也不改变原 CLOSED P/length/cut。
 
 每个坐标先取原 reader 的当前 point evidence，再在原有界 cold executor 读取镜像。镜像缺项由当前副本补齐，不能降低所需范围；当前 source conflict/UNAUTHORIZED 不因镜像存在而绕过。镜像经原物理 parser、完整 context 与 SDK CRC32C/ledger/entry digest 验证，再检查 CLOSED length 上界和 terminal length，与可用当前副本的 payload/length 不一致则 QUARANTINED。无可用完整数据则保留原 DEFERRED/DATA_LOSS 分类，不发布 membership。原库的 OPEN/historical/empty/worker 路径保持原 authority 生产者。
@@ -2171,6 +2173,20 @@ bash scripts/unified-wal/run-local-storage-tests.sh 'SegmentProfileInitialSocket
 
 该切片接通 CLOSED 导入与 membership，不等于新目标整体恢复接受：新目标自己的 assignment/snapshot＋无洞 suffix/required-through/readiness/registration、ledgerId reuse 的 restore 专属组合、copy/cursor/registration crash/lost reply、完整恢复运维与接受下界仍须实施。旧 incarnation/Manifest/events/physical receipts/lineage/物理清理义务保持原绑定，WINDOW_ELAPSED 无 restore/GC/退役权限。同 incarnation 原地恢复、同 BookieId 切换、MetadataStore 回滚、在线一致性备份继续禁用。默认SDK/observe公共约定、Main/其他required producer/full-bytes/兼容/正式性能及完整16步继续OPEN，目标active、生产Gate OPEN；默认OFF/SYSTEM/PARK与disabled不变，Linux NUMA/真实掉电/正式性能/canary本轮NOT_EXECUTED。
 
+
+## 恢复准入绑定已封存镜像与原删除流
+
+公开 `SegmentProfileBackup` 在镜像验封及原生控制回放后签发私有构造的 `VerifiedSource`。协调器在同一 source 上使用镜像 UUID、manifest SHA-256、原 BookieId/incarnation、Bookie control cut、有效删除进度和最后一次 durable apply 的原事件绑定。有效 assignment 与原事件 assignment 分开读取。磁盘镜像和外部引用继续使用 v1。
+
+目标 inactive INSTALL 返回 durable receipt 后，恢复准入仍检查当前 CLOSED、ledger instance、lifecycle、membership 和 RepairIntent 的原生出生及版本。源必须有当前可验证的 G1 delete assignment、原 head 和出生记录。正进度须匹配同一 stream 的已提交前缀及原事件内容和 index 出生，验证使用现有 event 或完整选定 snapshot。镜像进度未知时，首次准入只接受当前原生已验证零头。已封存的零进度属于独立类别。已验证的旧前缀可以小于当前头。
+
+首次准入的 ZooKeeper multi 同时检查源 head 版本、assignment、birth 和所用 event/index/snapshot，并创建原 `/admitted`、原 admission guard 和 `/restore-source`。witness 使用 `UWRS` magic、版本 1 和 264 字节 big-endian 固定编码，依次保存 header 8 B、head birth 8 B、head version 4 B、原事件/index birth 8 B、stream ID 16 B、intent 出生绑定 24 B、image UUID 16 B、manifest SHA-256 32 B、源身份键 SHA-256 32 B、Bookie control cut 8 B、进度类别 4 B、through 8 B 和原 DeleteBinding 96 B。类别 0 表示 native verified-zero，1 表示 sealed zero，2 表示 sealed positive。零类别的事件出生和绑定字段为零。
+
+续接核对三条原生记录的同一次事务出生、版本和精确镜像，复核当前源 G1 lineage 和已有进度的原事件。当前头允许在准入后增长。缺 witness 的旧准入可沿普通 repair 使用，镜像续接拒绝。空范围镜像恢复也检查同一绑定，沿原空范围 terminal 协议结束。调用方取消后，仍等待实际工作完成再关闭镜像。
+
+跨 assignment 的源镜像和恢复续接暂不接受。恢复下界的发行与推进、旧目标终态和历史 GC 保持开放。目标 bootstrap 仍须完成自己的 assignment、snapshot 和无洞 suffix。旧 incarnation 的删除义务继续由原 Manifest、events、receipts 和 lineage 保留。
+
+2026-11-05，基线 `fafd9dfc0b`。实际文件、ZooKeeper 和 mTLS 覆盖源 type 13 持久应用后封存、源出生记录重建拒绝、未知进度对非零头拒绝、原生 verified-zero、同意图换镜像、空范围续接、witness 截断与未知版本、同字节 witness 重建及 admission 回复丢失后的实际排空。移除 source head 的事务版本检查时，真实删除头先推进，旧事务仍完成修复，定向断言失败。恢复检查后，最终三类 28 项定向测试通过，零失败、错误或跳过。Spotless 和 Checkstyle 通过。各阶段 1460 项输入、源码、命令和回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/restore-source-admission-evidence-fafd9dfc`。正式 Linux、掉电、性能和 canary 本轮未执行，生产 Gate 保持 OPEN。
 
 ## 恢复目标的首次 service bootstrap 组合验证
 

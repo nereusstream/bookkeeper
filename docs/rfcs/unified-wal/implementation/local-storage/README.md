@@ -1562,6 +1562,8 @@ service rotation仍顺序处理两个owner，模型保守相加各自一份snaps
 
 旧源码反例为一项断言失败。初版五项离线测试通过。最终两类八项定向测试通过，零失败、错误或跳过，覆盖真实捕获与点读、公开导入与实际 completion、无洞 suffix 和跨 JVM 同 intent 续接。Spotless 与 Checkstyle 通过。各阶段 1460 项输入、原始命令、源码和回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/backup-admission-evidence-ee71b398`。
 
+当前公开入口完成全部验证后，从同一封存 Bookie 控制历史冻结控制 cut、有效删除进度和最后一次实际 apply 的原事件绑定。有效进度缺失时保留缺失事实。镜像及 reference 字节延续 v1，集群的 G1 原生核验和同事务 witness 见 [恢复准入](../profile-wire/README.md#恢复准入绑定已封存镜像与原删除流)。
+
 
 [显式 SDK CLOSED 只读入口与依赖关闭顺序](../profile-wire/README.md#显式-sdk-closed-只读入口与依赖关闭顺序)：2026-10-25父cc7b8cdd82上，BookKeeper显式enable/open复用原registered pool与CLOSED coordinator，单个open/handle持有lease到实际read/output终结；SDK close先排空Profile再关闭原metadata/executors，中断可继续，self-drain提前拒绝。三项真实服务定向与相关两类23项全部通过、输入匹配，style通过；新增有限模型1正向/3指定反例符合预期，旧Spec/11cfg保持原绑定；独立RAT仍443父路径无新增，原证据由上述canonical节拥有。默认builder拒绝保持，writer create/默认routing/Main可信issuer/full-bytes及其余16步继续OPEN，目标active、生产Gate OPEN，OFF/SYSTEM/PARK与disabled保持。
 

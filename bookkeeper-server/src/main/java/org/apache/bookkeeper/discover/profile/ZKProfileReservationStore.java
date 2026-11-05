@@ -17,6 +17,7 @@
 package org.apache.bookkeeper.discover.profile;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -28,6 +29,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BooleanSupplier;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileBackup.VerifiedSource;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileDeleteAdoption;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
@@ -36,6 +38,7 @@ import org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority;
 import org.apache.bookkeeper.common.profile.control.ProfileAuthorityKey;
 import org.apache.bookkeeper.common.profile.control.ProfileAuthorityPurpose;
 import org.apache.bookkeeper.common.profile.control.ProfileControlOperation;
+import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus;
@@ -1903,6 +1906,11 @@ public final class ZKProfileReservationStore {
     the Bookie still independently requires its actual installed route. */
     public RepairResult admitRepair(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
             ProfileInstallReceipt installed) {
+        return admitRepair(metadata, expected, installed, null);
+    }
+
+    RepairResult admitRepair(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
+            ProfileInstallReceipt installed, VerifiedSource source) {
         requireRecoveryClient(metadata);
         var intent = expected.intent();
         if (!installed.scope().equals(intent.install())) {
@@ -1917,7 +1925,9 @@ public final class ZKProfileReservationStore {
             if (current.context() == null || !intent.recovery().equals(current.context())
                     || root.status() != ReadStatus.FOUND || !intent.recovery().matchesRoot(root.snapshot())
                     || actual == null || !actual.equals(expected)
-                    || !repairMatchesMetadata(intent, current.metadata().metadata().getValue())) {
+                    || !repairMatchesMetadata(intent, current.metadata().metadata().getValue())
+                    || source != null && current.metadata().metadata().getValue().getState()
+                        != LedgerMetadata.State.CLOSED) {
                 return new RepairResult(CreateStatus.CONFLICT, null);
             }
             String target = repairPath(ledger, intent.slot());
@@ -1925,6 +1935,9 @@ public final class ZKProfileReservationStore {
             var before = reads.get(target + "/admitted", deadline);
             if (before.code() == Code.OK.intValue()) {
                 validateRepairAdmission(actual, before, deadline);
+                if (source != null && admissionMatches(before, admission)) {
+                    verifyRestoreAdmission(metadata, actual, before, source, deadline);
+                }
                 return new RepairResult(admissionMatches(before, admission)
                         ? CreateStatus.ALREADY_APPLIED : CreateStatus.QUARANTINED,
                         admissionMatches(before, admission) ? actual : null);
@@ -1936,6 +1949,13 @@ public final class ZKProfileReservationStore {
             checks.addAll(metadata.checksForMembership(current.metadata()));
             checks.add(Op.check(marker(target, actual.birth()), 0));
             checks.add(Op.check(target, 0));
+            byte[] restoreWitness = null;
+            if (source != null) {
+                var nativeSource = restoreSourceChecks(metadata, source, null, checks, deadline);
+                restoreWitness = restoreWitnessBytes(actual, source, nativeSource);
+                checks.add(Op.create(target + "/restore-source", restoreWitness, immutableAcls,
+                        CreateMode.PERSISTENT));
+            }
             checks.add(Op.create(target + "/admitted", admission, immutableAcls, CreateMode.PERSISTENT));
             checks.add(Op.create(repairAdmissionGuardPath(actual), repairAdmissionGuardBytes(actual),
                     immutableAcls, CreateMode.PERSISTENT));
@@ -1946,6 +1966,12 @@ public final class ZKProfileReservationStore {
                     && admissionMatches(after, admission);
             if (equal) {
                 validateRepairAdmission(actual, after, deadline);
+                if (source != null) {
+                    var witnessed = readRestoreWitness(actual, after, deadline);
+                    if (!Arrays.equals(witnessed, restoreWitness)) {
+                        return new RepairResult(CreateStatus.QUARANTINED, null);
+                    }
+                }
             }
             return new RepairResult(equal ? code == Code.OK.intValue() ? CreateStatus.APPLIED
                     : CreateStatus.ALREADY_APPLIED : conditionalFailure(code) ? CreateStatus.CONFLICT
@@ -1960,7 +1986,7 @@ public final class ZKProfileReservationStore {
         }
     }
 
-    boolean repairAdmitted(RepairSnapshot expected) {
+    boolean repairAdmitted(ProfileLedgerMetadataStore metadata, RepairSnapshot expected, VerifiedSource source) {
         long deadline = System.nanoTime() + timeoutNanos;
         try {
             var actual = readRepair(expected.intent().recovery().ledger().ledgerId(),
@@ -1975,6 +2001,9 @@ public final class ZKProfileReservationStore {
             }
             requireFound(node);
             validateRepairAdmission(actual, node, deadline);
+            if (source != null) {
+                verifyRestoreAdmission(metadata, actual, node, source, deadline);
+            }
             return true;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
@@ -1996,6 +2025,11 @@ public final class ZKProfileReservationStore {
     /** Cold adoption of an already published result; no copied-at claim, recopy or metadata write is made. */
     public RepairCommitResult resolveRepairClose(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
             byte[] closeOperationId) {
+        return resolveRepairClose(metadata, expected, closeOperationId, null);
+    }
+
+    RepairCommitResult resolveRepairClose(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
+            byte[] closeOperationId, VerifiedSource source) {
         requireRecoveryClient(metadata);
         closeOperationId = ProfileLifecycleHead.fixed(closeOperationId, 16, true);
         var intent = expected.intent();
@@ -2021,6 +2055,13 @@ public final class ZKProfileReservationStore {
                             && ref.intentStoreVersion() == expected.storeVersion()
                             && Arrays.equals(ref.digest(), ProfileRepairIntent.digest(node.bytes())))) {
                 return new RepairCommitResult(CreateStatus.CONFLICT, null, null);
+            }
+            if (source != null) {
+                var admission = reads.get(repairPath(intent.recovery().ledger().ledgerId(), intent.slot())
+                        + "/admitted", deadline);
+                requireFound(admission);
+                validateRepairAdmission(actual, admission, deadline);
+                verifyRestoreAdmission(metadata, actual, admission, source, deadline);
             }
             var selected = selectedBoundary(intent.recovery(), value, deadline);
             validateEmptyBoundary(actual, commit, selected, deadline);
@@ -2408,6 +2449,129 @@ public final class ZKProfileReservationStore {
         return java.nio.ByteBuffer.allocate(24).putLong(repair.storeVersion())
                 .putLong(repair.birth().getMostSignificantBits()).putLong(repair.birth().getLeastSignificantBits())
                 .array();
+    }
+
+    private static final int RESTORE_WITNESS_MAGIC = 0x55575253;
+    private static final int RESTORE_WITNESS_BYTES = 168 + ProfileControlRequest.DeleteBinding.BYTES;
+
+    /** The originally checked G1 head and original event/index birth, independent of later appends. */
+    private record RestoreSourceNative(long headBirth, int headVersion, long eventBirth, byte[] streamId) { }
+
+    private static ProfileDeleteRecord.Target restoreTarget(VerifiedSource source) {
+        return new ProfileDeleteRecord.Target(source.bookieId().toString(), source.storageIncarnation());
+    }
+
+    private static byte[] restoreWitnessBytes(RepairSnapshot repair, VerifiedSource source,
+            RestoreSourceNative authority) {
+        var progress = source.deleteProgress();
+        var cursor = source.deleteCursor();
+        // Absence proven by the original native zero head, sealed zero and sealed positive are distinct.
+        int kind = progress == null ? 0 : cursor == null ? 1 : 2;
+        return ByteBuffer.allocate(RESTORE_WITNESS_BYTES).putInt(RESTORE_WITNESS_MAGIC).putInt(1)
+                .putLong(authority.headBirth()).putInt(authority.headVersion()).putLong(authority.eventBirth())
+                .put(authority.streamId()).put(repairAdmissionGuardBytes(repair))
+                .putLong(source.imageId().getMostSignificantBits()).putLong(source.imageId().getLeastSignificantBits())
+                .put(source.manifestDigest()).put(HexFormat.of().parseHex(deliveryTargetKey(restoreTarget(source))))
+                .putLong(source.bookieControlCut()).putInt(kind).putLong(progress == null ? 0 : progress.through())
+                .put(cursor == null ? new byte[ProfileControlRequest.DeleteBinding.BYTES] : cursor.encode()).array();
+    }
+
+    private byte[] readRestoreWitness(RepairSnapshot repair, ProfileZKReadClient.Node admitted, long deadline)
+            throws InterruptedException, TimeoutException {
+        var witness = reads.get(repairPath(repair.intent().recovery().ledger().ledgerId(), repair.intent().slot())
+                + "/restore-source", deadline);
+        var guard = reads.get(repairAdmissionGuardPath(repair), deadline);
+        requireFound(witness);
+        requirePersistent(witness, true);
+        requireFound(guard);
+        requirePersistent(guard, true);
+        if (witness.stat().getCzxid() != admitted.stat().getCzxid()
+                || guard.stat().getCzxid() != admitted.stat().getCzxid()
+                || !Arrays.equals(guard.bytes(), repairAdmissionGuardBytes(repair))
+                || witness.bytes().length != RESTORE_WITNESS_BYTES) {
+            throw new IllegalArgumentException("Restore source lost its original repair admission birth");
+        }
+        return witness.bytes();
+    }
+
+    private void verifyRestoreAdmission(ProfileLedgerMetadataStore metadata, RepairSnapshot repair,
+            ProfileZKReadClient.Node admitted, VerifiedSource source, long deadline)
+            throws InterruptedException, TimeoutException {
+        byte[] stored = readRestoreWitness(repair, admitted, deadline);
+        var input = ByteBuffer.wrap(stored);
+        if (input.getInt() != RESTORE_WITNESS_MAGIC || input.getInt() != 1) {
+            throw new IllegalArgumentException("Unsupported restore source witness");
+        }
+        long headBirth = input.getLong();
+        int version = input.getInt();
+        long eventBirth = input.getLong();
+        byte[] stream = new byte[16];
+        input.get(stream);
+        var original = new RestoreSourceNative(headBirth, version, eventBirth, stream);
+        if (!Arrays.equals(stored, restoreWitnessBytes(repair, source, original))) {
+            throw new IllegalArgumentException("Restore retry must reuse the admitted image and source");
+        }
+        restoreSourceChecks(metadata, source, original, new ArrayList<>(), deadline);
+    }
+
+    private RestoreSourceNative restoreSourceChecks(ProfileLedgerMetadataStore metadata, VerifiedSource source,
+            RestoreSourceNative original, List<Op> checks, long deadline)
+            throws InterruptedException, TimeoutException {
+        if (reads.sync(root, deadline) != Code.OK.intValue()) {
+            throw new IllegalStateException("Restore delete stream unavailable");
+        }
+        var target = restoreTarget(source);
+        var current = deleteHead(target, deadline);
+        if (current == null || current.head().assignmentGeneration() != 1) {
+            throw new IllegalArgumentException("Restore requires an original G1 delete assignment");
+        }
+        var head = current.head();
+        long headBirth = current.node().stat().getCzxid();
+        int version = current.node().stat().getVersion();
+        if (original != null && (original.headBirth() != headBirth || original.headVersion() < 0
+                || original.headVersion() > version || !Arrays.equals(original.streamId(), head.streamId()))) {
+            throw new IllegalArgumentException("Restore source delete assignment changed birth or regressed");
+        }
+        var progress = source.deleteProgress();
+        var cursor = source.deleteCursor();
+        long through = progress == null ? 0 : progress.through();
+        int checkedVersion = original == null ? version : original.headVersion();
+        if (progress == null && checkedVersion != 0 || through > checkedVersion
+                || progress != null && (progress.assignmentGeneration() != 1
+                    || progress.streamGeneration() != head.streamGeneration()
+                    || !Arrays.equals(progress.streamId(), head.streamId()))
+                || through == 0 && cursor != null || through > 0 && cursor == null) {
+            throw new IllegalArgumentException("Mirror delete progress does not prove a current stream prefix");
+        }
+        String stream = deliveryPath(target);
+        checks.add(Op.check(stream, version));
+        checks.add(Op.check(stream + "-assignment", 0));
+        checks.add(Op.check(stream + "/birth-" + HexFormat.of().formatHex(head.streamId()), 0));
+        long eventBirth = 0;
+        if (cursor != null) {
+            var committed = readDeleteDelivery(metadata, target, through);
+            if (committed.status() == DeliveryStatus.UNAVAILABLE) {
+                throw new IllegalStateException("Mirror delete cursor authority unavailable");
+            }
+            if (committed.status() != DeliveryStatus.COMMITTED || !cursor.equals(committed.event().deleteBinding())) {
+                throw new IllegalArgumentException("Mirror delete cursor differs from the committed effect");
+            }
+            var event = committed.event();
+            String indexPath = path(event.ledger().ledgerId()) + "/delete-delivery-" + deliveryTargetKey(target);
+            var index = reads.get(indexPath, deadline);
+            requireFound(index);
+            requirePersistent(index, true);
+            eventBirth = index.stat().getCzxid();
+            if (!Arrays.equals(index.bytes(), event.encode()) || eventBirth <= headBirth) {
+                throw new IllegalArgumentException("Mirror delete cursor lost its original native index");
+            }
+            checks.add(Op.check(indexPath, 0));
+            checks.addAll(deleteEventChecks(event, deadline));
+        }
+        if (original != null && original.eventBirth() != eventBirth) {
+            throw new IllegalArgumentException("Mirror delete cursor's original native birth changed");
+        }
+        return new RestoreSourceNative(headBirth, version, eventBirth, head.streamId());
     }
 
     private void validateRepairAdmission(RepairSnapshot repair, ProfileZKReadClient.Node node, long deadline)
@@ -3355,6 +3519,7 @@ public final class ZKProfileReservationStore {
         requirePersistent(assignment, true);
         var initial = ProfileDeleteDelivery.Head.decode(assignment.bytes());
         if (assignment.stat().getCzxid() != node.stat().getCzxid() || initial.committedThrough() != 0
+                || initial.assignmentGeneration() != 1 || initial.streamGeneration() != head.streamGeneration()
                 || !Arrays.equals(initial.streamId(), head.streamId()) || !initial.target().equals(head.target())) {
             throw new IllegalArgumentException("Initial delete assignment cannot be replaced with a new stream");
         }

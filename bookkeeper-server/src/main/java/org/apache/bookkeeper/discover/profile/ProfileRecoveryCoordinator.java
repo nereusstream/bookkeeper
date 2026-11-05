@@ -17,7 +17,6 @@
 package org.apache.bookkeeper.discover.profile;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
 import io.netty.util.ReferenceCounted;
 import java.io.IOException;
 import java.time.Duration;
@@ -32,6 +31,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileBackup.VerifiedSource;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.ClientContext;
 import org.apache.bookkeeper.client.ProfileRecoveryReadHandle;
@@ -2418,15 +2418,6 @@ public final class ProfileRecoveryCoordinator {
         }
     }
 
-    /** Verified offline input, borrowed until RepairAttempt.completion. A missing entry is not absence evidence.
-     * Reads run on the original bounded cold executor and return one owned, allocator-accounted BK entry. */
-    public interface BackupSource {
-        BookieId bookieId();
-        byte[] storageIncarnation();
-        ByteBuf readEntry(org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext context,
-                long entryId, ByteBufAllocator allocator) throws IOException;
-    }
-
     /** Caller cancellation never completes actual mirror, peer, metadata or output work. */
     public record RepairAttempt(CompletableFuture<RepairResult> result, CompletableFuture<Void> completion) { }
 
@@ -2434,7 +2425,7 @@ public final class ProfileRecoveryCoordinator {
     public RepairAttempt beginRestoreClosedFragment(ZKProfileReservationStore.ReadOnlySnapshot accepted,
             ZKProfileReservationStore.RepairSnapshot prepared, ClientContext sdk, byte[] descriptor,
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> data,
-            Map<String, ProfileInitialControlClient> controls, byte[] closeId, BackupSource source) {
+            Map<String, ProfileInitialControlClient> controls, byte[] closeId, VerifiedSource source) {
         Objects.requireNonNull(source, "source");
         var value = accepted.closed().metadata().metadata().getValue();
         var target = prepared.intent().install();
@@ -2499,7 +2490,7 @@ public final class ProfileRecoveryCoordinator {
             byte[] canonicalDescriptor, ProtectedProfileCredential credential,
             Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, byte[] closeOperationId, boolean last,
-            BackupSource backup) {
+            VerifiedSource backup) {
         if (accepted.context() == null || !accepted.context().equals(prepared.intent().recovery())
                 || suppliedData.size() > 64 || suppliedControl.size() > 64) {
             throw new IllegalArgumentException("Historical repair requires its frozen context and bounded peers");
@@ -2537,7 +2528,7 @@ public final class ProfileRecoveryCoordinator {
             ZKProfileReservationStore.RepairSnapshot prepared, ClientContext sdk, byte[] canonicalDescriptor,
             ProtectedProfileCredential credential, Map<BookieId, ProfileNormalDataClient> suppliedData,
             Map<String, ProfileInitialControlClient> suppliedControl, byte[] closeOperationId, boolean last,
-            AtomicBoolean stopped, BackupSource backup) {
+            AtomicBoolean stopped, VerifiedSource backup) {
         var input = accepted.metadata().metadata().getValue();
         boolean closedRepair = input.getState() == org.apache.bookkeeper.client.api.LedgerMetadata.State.CLOSED;
         var custom = new java.util.TreeMap<String, byte[]>();
@@ -2569,7 +2560,7 @@ public final class ProfileRecoveryCoordinator {
         byte[] closeId = ProfileLifecycleHead.fixed(closeOperationId, 16, true);
         var key = credential.copy();
         if (intent.empty() && backup == null) {
-            return repairEmptyOnce(frozen, prepared, descriptor, key, controls, control, closeId, stopped);
+            return repairEmptyOnce(frozen, prepared, descriptor, key, controls, control, closeId, stopped, null);
         }
         CompletableFuture<RepairResult> actual;
             actual = CompletableFuture.supplyAsync(() -> readers(frozen.context(), closedRepair), cold)
@@ -2590,7 +2581,8 @@ public final class ProfileRecoveryCoordinator {
                     return CompletableFuture.completedFuture(new RepairResult(RepairStatus.CONFLICT, 0, null));
                 }
                 if (intent.empty()) {
-                    return repairEmptyOnce(frozen, prepared, descriptor, key, controls, control, closeId, stopped);
+                    return repairEmptyOnce(frozen, prepared, descriptor, key, controls, control, closeId, stopped,
+                            backup);
                 }
                 Long end = value.getAllEnsembles().higherKey(intent.fragmentStart());
                 if (last != (end == null && intent.fragmentStart() == value.getAllEnsembles().lastKey())) {
@@ -2610,7 +2602,7 @@ public final class ProfileRecoveryCoordinator {
                             && ref.intentStoreVersion() == prepared.storeVersion());
                 if (published) {
                     return CompletableFuture.supplyAsync(() -> reservations.resolveRepairClose(metadata, prepared,
-                            closeId), cold).thenCompose(result -> closeRepair(result, intent,
+                            closeId, backup), cold).thenCompose(result -> closeRepair(result, intent,
                                     control, 0));
                 }
                 boolean sameContent;
@@ -2652,13 +2644,12 @@ public final class ProfileRecoveryCoordinator {
                         }
                         var receipt = ProfileInstallReceipt.from(intent.install(), control.hello(), installed);
                         return CompletableFuture.supplyAsync(
-                                () -> reservations.admitRepair(metadata, prepared, receipt), cold)
+                                () -> reservations.admitRepair(metadata, prepared, receipt, backup), cold)
                                     .thenCompose(admitted -> {
                             if (admitted.status() != ZKProfileReservationStore.CreateStatus.APPLIED
                                     && admitted.status() != ZKProfileReservationStore.CreateStatus.ALREADY_APPLIED
                                     || stopped.get()) {
-                                return CompletableFuture.completedFuture(
-                                        new RepairResult(RepairStatus.DEFERRED, 0, null));
+                                return CompletableFuture.completedFuture(repairAdmissionFailure(admitted, backup));
                             }
                             return control.recoveryGrant(org.apache.bookkeeper.common.profile.control
                                     .ProfileControlRequest.recoveryGrant(intent.grantScope(),
@@ -2689,7 +2680,7 @@ public final class ProfileRecoveryCoordinator {
     private CompletableFuture<RepairResult> repairEmptyOnce(ZKProfileReservationStore.RecoveryResult frozen,
             ZKProfileReservationStore.RepairSnapshot prepared, byte[] descriptor, ProtectedProfileCredential key,
             Map<String, ProfileInitialControlClient> controls, ProfileInitialControlClient control, byte[] closeId,
-            AtomicBoolean stopped) {
+            AtomicBoolean stopped, VerifiedSource backup) {
         var intent = prepared.intent();
         if (!Arrays.equals(closeId, intent.terminalOperationId()) || !control.hello().capabilities().contains(
                 org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec.terminalCapability(true))) {
@@ -2711,14 +2702,14 @@ public final class ProfileRecoveryCoordinator {
                         ref.slot() == intent.slot() && ref.intentBirth().equals(prepared.birth())
                             && ref.intentStoreVersion() == prepared.storeVersion());
             return new EmptyReady(current, selected.snapshot(), published,
-                    !published && reservations.repairAdmitted(prepared));
+                    !published && reservations.repairAdmitted(metadata, prepared, backup));
         }, cold).thenCompose(ready -> {
             if (ready == null || stopped.get()) {
                 return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, 0, null));
             }
             if (ready.published()) {
                 return CompletableFuture.supplyAsync(
-                        () -> reservations.resolveRepairClose(metadata, prepared, closeId), cold)
+                        () -> reservations.resolveRepairClose(metadata, prepared, closeId, backup), cold)
                             .thenCompose(published -> closeRepair(published, intent, control, 0));
             }
             if (ready.current().metadata().birthZxid() != frozen.metadata().birthZxid()
@@ -2742,9 +2733,9 @@ public final class ProfileRecoveryCoordinator {
                     }
                     var receipt = ProfileInstallReceipt.from(intent.install(), control.hello(), installed);
                     return CompletableFuture.supplyAsync(
-                            () -> reservations.admitRepair(metadata, prepared, receipt), cold)
+                            () -> reservations.admitRepair(metadata, prepared, receipt, backup), cold)
                             .thenCompose(admitted -> admitted.snapshot() == null || stopped.get()
-                                ? CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, 0, null))
+                                ? CompletableFuture.completedFuture(repairAdmissionFailure(admitted, backup))
                                 : emptyBoundaryThenPublish(prepared, ready, control, closeId, stopped));
                 });
             });
@@ -2754,6 +2745,12 @@ public final class ProfileRecoveryCoordinator {
 
     private record EmptyReady(ZKProfileReservationStore.RecoveryResult current,
             ZKProfileReservationStore.BoundarySnapshot selected, boolean published, boolean admitted) { }
+
+    private static RepairResult repairAdmissionFailure(ZKProfileReservationStore.RepairResult admitted,
+            VerifiedSource backup) {
+        return new RepairResult(backup != null && admitted.status() == ZKProfileReservationStore.CreateStatus
+                .QUARANTINED ? RepairStatus.QUARANTINED : RepairStatus.DEFERRED, 0, null);
+    }
 
     private CompletableFuture<RepairResult> emptyBoundaryThenPublish(ZKProfileReservationStore.RepairSnapshot prepared,
             EmptyReady ready, ProfileInitialControlClient control, byte[] closeId, AtomicBoolean stopped) {
@@ -2781,7 +2778,7 @@ public final class ProfileRecoveryCoordinator {
             Map<BookieId, ProfileNormalDataClient> data,
             Map<String, ProfileInitialControlClient> controls, ProfileNormalDataClient target,
             ProfileInitialControlClient control, ProtectedProfileCredential credential, byte[] closeId,
-            AtomicBoolean stopped, Readers ready, BackupSource backup) {
+            AtomicBoolean stopped, Readers ready, VerifiedSource backup) {
         if (ready.recovery().context() == null || !accepted.context().equals(ready.recovery().context())
                 || !ready.recovery().metadata().metadata().getVersion()
                     .equals(accepted.metadata().metadata().getVersion())) {
@@ -2850,12 +2847,12 @@ public final class ProfileRecoveryCoordinator {
         private final CompletableFuture<RepairResult> done = new CompletableFuture<>();
         private long next;
         private long copied;
-        private final BackupSource backup;
+        private final VerifiedSource backup;
         private final ThreadPoolExecutor cold;
 
         Copy(ProfileRecoveryReadHandle reader, ProfileNormalDataClient target,
                 ProfileRepairIntent intent, ProtectedProfileCredential credential,
-                AtomicBoolean stopped, BackupSource backup, ThreadPoolExecutor cold) {
+                AtomicBoolean stopped, VerifiedSource backup, ThreadPoolExecutor cold) {
             this.backup = backup;
             this.cold = cold;
             this.reader = reader;

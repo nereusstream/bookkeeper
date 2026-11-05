@@ -6,6 +6,8 @@
 
 所有数值为 big-endian，offset 从相应结构开头按字节计算。保留字段和 padding 必须为零；CRC 为 CRC32C，覆盖范围采用 `[start,end)`。长度先经固定 header 校验和上限检查，再分配/读取 body。未知版本、类型、generation 或 mandatory feature 均拒绝。
 
+离线备份的 v1 manifest 以原 Bookie control cut、文件长度和 SHA-256 封存现有控制历史。恢复入口验封后由该历史读取 effective progress 和最后实际 applied cursor。镜像保留原格式，恢复来源 witness 由集群在原准入事务中保存。详见 [恢复准入](../profile-wire/README.md#恢复准入绑定已封存镜像与原删除流)。
+
 ## 目录和文件身份
 
 `IsolatedSegmentFiles.create` 只创建不存在的目录，使用 `CREATE_NEW` 和独占 `isolated.lock`，不接管已有目录。默认两个 DATA 文件 `data-0`、`data-1`，各16 MiB；全容量写零后写入身份块，再 `force(true)`。`superblock-a`、`superblock-b`、`bookie-control`、`arena-control` 初始各4096字节，仅含身份块。随后同步 lock、目录和父目录。失败关闭本次打开的资源，保留未完成目录用于诊断，重试不自动采用该目录。

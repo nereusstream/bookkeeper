@@ -39,7 +39,9 @@ import java.util.Optional;
 import java.util.UUID;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
+import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 
 /** Offline immutable recovery input, never a current grant, absence proof or mountable storage scope. */
 final class SegmentBackupImage {
@@ -61,8 +63,7 @@ final class SegmentBackupImage {
     private record FileSeal(String name, long bytes, byte[] digest) { }
 
     /** Native locks and a bounded original recovery inventory; returned records borrow the caller's scratch. */
-    static final class Image implements AutoCloseable,
-            org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator.BackupSource {
+    static final class Image implements AutoCloseable {
         private final IsolatedSegmentConfig config;
         private final SegmentFileHeader identity;
         private final SegmentDataFileLock lock;
@@ -82,19 +83,28 @@ final class SegmentBackupImage {
             this.inventory = inventory;
         }
 
-        @Override
-        public org.apache.bookkeeper.net.BookieId bookieId() {
+        org.apache.bookkeeper.net.BookieId bookieId() {
             return identity.bookieId();
         }
 
-        @Override
-        public byte[] storageIncarnation() {
+        byte[] storageIncarnation() {
             return identity.incarnation().value();
         }
 
+        long bookieControlCut() {
+            return bookie.appliedThrough();
+        }
+
+        ProfileDeleteDelivery.Progress deleteProgress() {
+            return bookie.effectiveDeleteProgress();
+        }
+
+        ProfileControlRequest.DeleteBinding deleteCursor() {
+            return bookie.deleteAppliedCursor();
+        }
+
         /** One target-accounted aligned input; the retained entry keeps that capacity until its last release. */
-        @Override
-        public synchronized io.netty.buffer.ByteBuf readEntry(ProfileLedgerContext context, long entryId,
+        synchronized io.netty.buffer.ByteBuf readEntry(ProfileLedgerContext context, long entryId,
                 io.netty.buffer.ByteBufAllocator allocator) throws IOException {
             if (closed) {
                 throw new IOException("Backup input is closed");

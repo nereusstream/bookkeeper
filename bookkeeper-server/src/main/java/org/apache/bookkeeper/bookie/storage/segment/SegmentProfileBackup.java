@@ -16,6 +16,8 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -31,7 +33,10 @@ import java.util.concurrent.CompletableFuture;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.client.ClientContext;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
+import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileInitialControlClient;
 import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator;
@@ -55,6 +60,57 @@ public final class SegmentProfileBackup {
     private final int maximumEntries;
     private final String clusterScope;
     private final String deviceScope;
+
+    /** Borrowed by the coordinator until actual completion, and minted only after native image verification. */
+    public static final class VerifiedSource {
+        private final SegmentBackupImage.Image image;
+        private final SegmentBackupImage.Reference reference;
+        private final long bookieControlCut;
+        private final ProfileDeleteDelivery.Progress deleteProgress;
+        private final ProfileControlRequest.DeleteBinding deleteCursor;
+
+        private VerifiedSource(SegmentBackupImage.Image image, SegmentBackupImage.Reference reference) {
+            this.image = image;
+            this.reference = reference;
+            this.bookieControlCut = image.bookieControlCut();
+            this.deleteProgress = image.deleteProgress();
+            this.deleteCursor = image.deleteCursor();
+        }
+
+        public BookieId bookieId() {
+            return image.bookieId();
+        }
+
+        public byte[] storageIncarnation() {
+            return image.storageIncarnation();
+        }
+
+        public UUID imageId() {
+            return reference.imageId();
+        }
+
+        public byte[] manifestDigest() {
+            return HexFormat.of().parseHex(reference.digest());
+        }
+
+        public long bookieControlCut() {
+            return bookieControlCut;
+        }
+
+        public ProfileDeleteDelivery.Progress deleteProgress() {
+            return deleteProgress;
+        }
+
+        public ProfileControlRequest.DeleteBinding deleteCursor() {
+            return deleteCursor;
+        }
+
+        /** The result owns one allocator-accounted entry. A missing entry is not absence evidence. */
+        public ByteBuf readEntry(ProfileLedgerContext context, long entryId, ByteBufAllocator allocator)
+                throws IOException {
+            return image.readEntry(context, entryId, allocator);
+        }
+    }
 
     SegmentProfileBackup(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
             ProfileDescriptorValidator validator, long controlBytes, int maximumEntries,
@@ -107,8 +163,9 @@ public final class SegmentProfileBackup {
     /**
      * Verify a historical image and import a CLOSED fragment through current metadata/RepairIntent admission.
      * Target setup must use a new directory, BookieId and storage incarnation; normal startup retains its
-     * snapshot, gapless suffix and required-through checks. Retry reuses the frozen accepted/prepared intent
-     * and closeId. The original source directory need not remain available.
+     * snapshot, gapless suffix and required-through checks. The source needs a verified G1 delete assignment.
+     * Retry reuses the exact sealed image, frozen accepted/prepared intent and closeId. The original source
+     * directory need not remain available.
      *
      * <p>The returned result retains coordinator cancellation semantics: cancellation stops future work while
      * submitted I/O drains. Completion follows actual child completion and image close, including close failure.
@@ -128,12 +185,13 @@ public final class SegmentProfileBackup {
                 || Files.exists(config.directory()) && reference.startsWith(config.directory().toRealPath())) {
             throw new IOException("Backup reference must remain outside source and image");
         }
+        var original = readReference(reference);
         var image = SegmentBackupImage.open(config, identity, key, validator, controlBytes, maximumEntries,
-                clusterScope, deviceScope, imageDirectoryReal, readReference(reference));
+                clusterScope, deviceScope, imageDirectoryReal, original);
         ProfileRecoveryCoordinator.RepairAttempt core;
         try {
             core = coordinator.beginRestoreClosedFragment(accepted, prepared, sdk, descriptor, credential,
-                    data, controls, closeId, image);
+                    data, controls, closeId, new VerifiedSource(image, original));
         } catch (RuntimeException | Error failure) {
             try {
                 image.close();

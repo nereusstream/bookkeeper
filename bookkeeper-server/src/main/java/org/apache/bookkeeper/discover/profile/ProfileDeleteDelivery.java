@@ -161,8 +161,7 @@ public final class ProfileDeleteDelivery {
             byte[] encoded = encode();
             byte[] operation = Arrays.copyOf(ProfileRepairIntent.digest(
                     ByteBuffer.allocate(encoded.length + prefix.length).put(prefix).put(encoded).array()), 16);
-            var binding = new ProfileControlRequest.DeleteBinding(streamId, streamGeneration, assignmentGeneration,
-                    sequence, requestId, deleteEpoch, ProfileRepairIntent.digest(tombstone.encode()));
+            var binding = deleteBinding();
             var operationKind = ProfileControlOperation.TOMBSTONE_OR_DELETE_APPLY;
             var scope = new ProfileControlScope(operationKind, operationKind.purpose(), ledger.ledgerId(),
                     ledger.ledgerInstanceId(), ProfileDescriptorIdentity.fromBytes(ledger.descriptorIdentity()),
@@ -171,6 +170,11 @@ public final class ProfileDeleteDelivery {
                     ledger.ledgerId(), ledger.ledgerInstanceId(), scope.descriptorIdentity(), target.bookie(),
                     target.incarnation(), authorityDomain, deleteEpoch, operation,
                     ProfileControlRequest.deletePayloadIdentity(scope, binding), null), binding);
+        }
+
+        ProfileControlRequest.DeleteBinding deleteBinding() {
+            return new ProfileControlRequest.DeleteBinding(streamId, streamGeneration, assignmentGeneration,
+                    sequence, requestId, deleteEpoch, ProfileRepairIntent.digest(tombstone.encode()));
         }
 
         boolean belongsTo(Head head) {

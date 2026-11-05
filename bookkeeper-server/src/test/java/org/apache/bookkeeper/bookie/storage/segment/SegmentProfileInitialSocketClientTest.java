@@ -9825,6 +9825,246 @@ public class SegmentProfileInitialSocketClientTest {
         assertBackupRestoreScenarios(List.of(17));
     }
 
+    @Test
+    public void backupRestoreAdmissionBindsVerifiedSourceAndOrdersAgainstDeleteHead() throws Exception {
+        assertBackupRestoreScenarios(List.of(18, 19, 20));
+    }
+
+    @Test
+    public void emptyBackupRestoreAdmissionResumesOnlyTheOriginalImage() throws Exception {
+        assertBackupRestoreScenarios(List.of(21));
+    }
+
+    @Test
+    public void backupRestoreRejectsMalformedNativeSourceWitness() throws Exception {
+        assertBackupRestoreScenarios(List.of(22, 23));
+    }
+
+    private static final class RestoreAdmissionZk extends ZooKeeper {
+        private final AtomicReference<CompletableFuture<Runnable>> beforeAdmission = new AtomicReference<>();
+        private final AtomicReference<CompletableFuture<Runnable>> lostAdmissionReply = new AtomicReference<>();
+        private java.util.function.UnaryOperator<byte[]> corruptWitness;
+
+        RestoreAdmissionZk(String connect, ZooKeeperWatcherBase watcher) throws Exception {
+            super(connect, 10000, watcher);
+            watcher.waitForConnection();
+        }
+
+        @Override
+        public void multi(Iterable<org.apache.zookeeper.Op> operations,
+                org.apache.zookeeper.AsyncCallback.MultiCallback callback, Object context) {
+            var ops = new ArrayList<org.apache.zookeeper.Op>();
+            operations.forEach(ops::add);
+            if (ops.stream().noneMatch(op -> op.getType() == ZooDefs.OpCode.create
+                    && op.getPath().equals("/socket-initial/2c/repair-3/admitted"))) {
+                super.multi(ops, callback, context);
+                return;
+            }
+            if (corruptWitness != null) {
+                ops.replaceAll(op -> {
+                    if (!op.getPath().equals("/socket-initial/2c/repair-3/restore-source")) {
+                        return op;
+                    }
+                    var create = (org.apache.zookeeper.proto.CreateRequest) op.toRequestRecord();
+                    return org.apache.zookeeper.Op.create(op.getPath(), corruptWitness.apply(create.getData()),
+                            create.getAcl(), CreateMode.PERSISTENT);
+                });
+            }
+            var holdReply = lostAdmissionReply.getAndSet(null);
+            Runnable submit = () -> super.multi(ops, (code, path, ignored, results) -> {
+                if (holdReply != null && code == org.apache.zookeeper.KeeperException.Code.OK.intValue()) {
+                    holdReply.complete(() -> callback.processResult(
+                            org.apache.zookeeper.KeeperException.Code.CONNECTIONLOSS.intValue(), path, context,
+                            results));
+                } else {
+                    callback.processResult(code, path, context, results);
+                }
+            }, context);
+            var holdSubmit = beforeAdmission.getAndSet(null);
+            if (holdSubmit == null) {
+                submit.run();
+            } else {
+                holdSubmit.complete(submit);
+            }
+        }
+    }
+
+    private void assertRestoreSourceAdmission(int scenario, Fixture fixture, BookKeeper sdk,
+            SegmentProfileBackup backup, Path directory, Path reference, ProfileLedgerMetadataStore metadata,
+            ZKProfileReservationStore.ReadOnlySnapshot accepted, ZKProfileReservationStore.RepairSnapshot prepared,
+            Map<BookieId, ProfileNormalDataClient> data, ProfileDeleteRecord.Target sourceTarget) throws Exception {
+        String admission = "/socket-initial/2c/repair-3/admitted";
+        String witness = "/socket-initial/2c/repair-3/restore-source";
+        var before = fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS);
+        var targetIo = files(fixture.nodes.get(3)).dataIo;
+        int writes = targetIo.writes;
+        if (scenario == 19 || scenario == 20) {
+            if (scenario == 19) {
+                String stream = actualDeleteStreamPath(fixture, sourceTarget);
+                String birth = fixture.zk.getChildren(stream, false).stream()
+                        .filter(child -> child.startsWith("birth-")).findFirst().orElseThrow();
+                String path = stream + "/" + birth;
+                byte[] original = fixture.zk.getData(path, false, null);
+                // Only the private fixture's native birth is replaced. All image files and reference stay sealed.
+                fixture.zk.delete(path, 0);
+                fixture.zk.create(path, original, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            } else {
+                deleteRestoreNeighbor(fixture, sdk, metadata, sourceTarget, 1);
+            }
+            var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+            var refused = backup.beginRestoreClosedFragment(directory, reference, coordinator, accepted, prepared,
+                    sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential, data, fixture.clients,
+                    bytes(16, 73));
+            assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED,
+                    refused.result().get(15, TimeUnit.SECONDS).status());
+            refused.completion().get(10, TimeUnit.SECONDS);
+            assertNull(fixture.zk.exists(admission, false));
+            assertNull(fixture.zk.exists(witness, false));
+            assertEquals(writes, targetIo.writes);
+            assertEquals(before.getVersion(), fixture.manager.readLedgerMetadata(44).get().getVersion());
+            return;
+        }
+
+        Path alternative = directory.resolveSibling("alternate-image-" + scenario);
+        Path alternativeReference = reference.resolveSibling("alternate-reference-" + scenario);
+        backup.capture(alternative, alternativeReference);
+        try (var zk = new RestoreAdmissionZk(fixture.cluster.getZooKeeperConnectString(),
+                new ZooKeeperWatcherBase(10000, false))) {
+            var timed = Duration.ofSeconds(20);
+            var mutator = new ProfileLedgerMetadataStore(zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, timed);
+            var reservations = new ZKProfileReservationStore(zk, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    timed);
+            var coordinator = new ProfileRecoveryCoordinator(reservations, mutator, fixture.cold);
+            if (scenario >= 22) {
+                zk.corruptWitness = value -> scenario == 22
+                        ? java.nio.ByteBuffer.wrap(value.clone()).putInt(4, 2).array()
+                        : Arrays.copyOf(value, value.length - 1);
+                for (int attempt = 0; attempt < 2; attempt++) {
+                    var refused = backup.beginRestoreClosedFragment(directory, reference, coordinator,
+                            accepted, prepared, sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential,
+                            data, fixture.clients, bytes(16, 73));
+                    assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED,
+                            refused.result().get(15, TimeUnit.SECONDS).status());
+                    refused.completion().get(10, TimeUnit.SECONDS);
+                }
+                assertEquals(fixture.zk.exists(admission, false).getCzxid(),
+                        fixture.zk.exists(witness, false).getCzxid());
+                assertEquals(writes, targetIo.writes);
+                assertEquals(before.getVersion(), fixture.manager.readLedgerMetadata(44).get().getVersion());
+                return;
+            }
+            if (scenario == 18) {
+                var paused = new CompletableFuture<Runnable>();
+                zk.beforeAdmission.set(paused);
+                var raced = backup.beginRestoreClosedFragment(directory, reference, coordinator, accepted, prepared,
+                        sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential, data, fixture.clients,
+                        bytes(16, 73));
+                Runnable submit = paused.get(10, TimeUnit.SECONDS);
+                try {
+                    deleteRestoreNeighbor(fixture, sdk, metadata, sourceTarget, 2);
+                } finally {
+                    submit.run();
+                }
+                assertEquals(ProfileRecoveryCoordinator.RepairStatus.DEFERRED,
+                        raced.result().get(15, TimeUnit.SECONDS).status());
+                raced.completion().get(10, TimeUnit.SECONDS);
+                assertNull(fixture.zk.exists(admission, false));
+                assertNull(fixture.zk.exists(witness, false));
+                assertEquals(writes, targetIo.writes);
+                assertEquals(before.getVersion(), fixture.manager.readLedgerMetadata(44).get().getVersion());
+            }
+
+            var lost = new CompletableFuture<Runnable>();
+            zk.lostAdmissionReply.set(lost);
+            var first = backup.beginRestoreClosedFragment(directory, reference, coordinator, accepted, prepared,
+                    sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential, data, fixture.clients,
+                    bytes(16, 73));
+            Runnable failReply = lost.get(10, TimeUnit.SECONDS);
+            byte[] sealedWitness;
+            long nativeBirth;
+            try {
+                assertTrue(first.result().cancel(false));
+                assertFalse(first.completion().isDone());
+                var stat = new org.apache.zookeeper.data.Stat();
+                sealedWitness = fixture.zk.getData(witness, false, stat);
+                nativeBirth = stat.getCzxid();
+                assertEquals(nativeBirth, fixture.zk.exists(admission, false).getCzxid());
+                assertEquals(0, stat.getVersion());
+                assertEquals(264, sealedWitness.length);
+                var fields = java.nio.ByteBuffer.wrap(sealedWitness);
+                assertEquals(0x55575253, fields.getInt(0));
+                assertEquals(1, fields.getInt(4));
+                assertEquals(scenario == 18 ? 2 : 0, fields.getInt(16));
+                assertArrayEquals(Arrays.copyOfRange(Files.readAllBytes(reference), 8, 56),
+                        Arrays.copyOfRange(sealedWitness, 68, 116));
+                assertEquals(scenario == 18 ? 2 : 0, fields.getInt(156));
+                assertEquals(scenario == 18 ? 1 : 0, fields.getLong(160));
+                if (scenario == 18) {
+                    var event = fixture.reservations.readDeleteDelivery(metadata, sourceTarget, 1).event();
+                    assertArrayEquals(event.deleteApply("ledger-profile").deleteBinding().orElseThrow().encode(),
+                            Arrays.copyOfRange(sealedWitness, 168, 264));
+                }
+            } finally {
+                failReply.run();
+            }
+            first.completion().get(10, TimeUnit.SECONDS);
+            if (scenario == 21) {
+                deleteRestoreNeighbor(fixture, sdk, metadata, sourceTarget, 1);
+            }
+            var refused = backup.beginRestoreClosedFragment(alternative, alternativeReference, coordinator,
+                    accepted, prepared, sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential,
+                    data, fixture.clients, bytes(16, 73));
+            if (scenario == 21) {
+                var failure = assertThrows(ExecutionException.class,
+                        () -> refused.result().get(15, TimeUnit.SECONDS));
+                assertTrue(failure.getCause() instanceof IllegalArgumentException);
+            } else {
+                assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED,
+                        refused.result().get(15, TimeUnit.SECONDS).status());
+            }
+            refused.completion().get(10, TimeUnit.SECONDS);
+            assertArrayEquals(sealedWitness, fixture.zk.getData(witness, false, null));
+            assertEquals(writes, targetIo.writes);
+            assertEquals(before.getVersion(), fixture.manager.readLedgerMetadata(44).get().getVersion());
+
+            var same = backup.beginRestoreClosedFragment(directory, reference, coordinator, accepted, prepared,
+                    sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential, data, fixture.clients,
+                    bytes(16, 73));
+            var result = same.result().get(15, TimeUnit.SECONDS);
+            same.completion().get(10, TimeUnit.SECONDS);
+            assertEquals(ProfileRecoveryCoordinator.RepairStatus.REPAIRED_LAST_FRAGMENT, result.status());
+            assertEquals(scenario == 21 ? 0 : 2, result.copiedEntries());
+            var target = fixture.identities.get(3).bookieId();
+            var repaired = fixture.manager.readLedgerMetadata(44).get().getValue();
+            assertEquals(target, repaired.getAllEnsembles().get(0L).get(2));
+            assertEquals(LedgerMetadata.State.CLOSED, repaired.getState());
+            assertEquals(nativeBirth, fixture.zk.exists(witness, false).getCzxid());
+            if (scenario == 21) {
+                assertEquals(writes, targetIo.writes);
+            } else {
+                assertReadPayload(data.get(target), fixture.context(), 1, bytes(16, 8));
+                fixture.zk.delete(witness, 0);
+                fixture.zk.create(witness, sealedWitness, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                var rebuilt = backup.beginRestoreClosedFragment(directory, reference, coordinator,
+                        accepted, prepared, sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential,
+                        data, fixture.clients, bytes(16, 73));
+                assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED,
+                        rebuilt.result().get(15, TimeUnit.SECONDS).status());
+                rebuilt.completion().get(10, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private static void deleteRestoreNeighbor(Fixture fixture, BookKeeper sdk, ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Target sourceTarget, long expectedSequence) throws Exception {
+        var deleted = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                .deleteLedgerAsync(46, bytes(16, 91), sdk.getClientCtx(), Duration.ofSeconds(10))
+                .get(10, TimeUnit.SECONDS);
+        assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, deleted.status());
+        assertEquals(expectedSequence, fixture.reservations.readDeleteHead(sourceTarget).head().committedThrough());
+    }
+
     private static String restoreCoordinatorMarker(ServerConfiguration inputs, String phase, long pid)
             throws Exception {
         var digest = java.security.MessageDigest.getInstance("SHA-256");
@@ -10063,25 +10303,57 @@ public class SegmentProfileInitialSocketClientTest {
                 fixture.connectAll(Duration.ofSeconds(5));
                 fixture.initialize().get(5, TimeUnit.SECONDS);
                 var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                boolean empty = scenario == 21;
                 for (int node = 0; node < 3; node++) {
                     var peer = dataClient(fixture, node, 4, Duration.ofSeconds(5));
                     data.put(fixture.identities.get(node).bookieId(), peer);
+                    if (empty) {
+                        continue;
+                    }
                     evidenceEntry(fixture, peer, 0, -1, 16, bytes(16, scenario == 4 && node == 0 ? 9 : 8));
                     if (node != 0 || scenario != 3 && scenario != 5) {
                         evidenceEntry(fixture, peer, 1, 0, scenario == 6 && node == 0 ? 48 : 32, 16);
                     }
                 }
-                var sourceConfig = files(fixture.nodes.get(0)).config();
-                fixture.nodes.get(0).close();
-                data.remove(fixture.identities.get(0).bookieId());
                 var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
                         ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var sourceIdentity = fixture.identities.get(0);
+                var sourceTarget = new ProfileDeleteRecord.Target(sourceIdentity.bookieId().toString(),
+                        sourceIdentity.incarnation().value());
+                assertEquals(org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.FOUND,
+                        fixture.reservations.createInitialDeleteAssignment(sourceTarget).status());
+                if (scenario == 18 || scenario == 19) {
+                    prepareSnapshotLedger(fixture, sdk, metadata, 45, false, data);
+                    var delivery = fixture.reservations.readDeleteDelivery(metadata, sourceTarget, 1);
+                    assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED, delivery.status());
+                    assertEquals(Outcome.APPLIED, fixture.clients.get(sourceTarget.bookie())
+                            .deleteApply(delivery.event().deleteApply("ledger-profile"))
+                            .get(5, TimeUnit.SECONDS).outcome());
+                    assertEquals(1, fixture.nodes.get(0).profileDeleteProgress().sequence());
+                }
+                if (scenario == 18 || scenario == 20 || scenario == 21) {
+                    var neighbor = openHandoffTestLedger(fixture, sdk, metadata, 46, data);
+                    try {
+                        neighbor.closeAsync().get(30, TimeUnit.SECONDS);
+                    } finally {
+                        neighbor.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    }
+                }
+                var sourceConfig = files(fixture.nodes.get(0)).config();
+                if (!empty) {
+                    fixture.nodes.get(0).close();
+                    data.remove(sourceIdentity.bookieId());
+                }
                 var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
                 var closed = coordinator.recover(44, bytes(16, 31), sdk.getClientCtx(), fixture.descriptorBytes,
                         VALIDATOR, fixture.credential, data, fixture.clients, 6, Duration.ofSeconds(30))
                             .get(30, TimeUnit.SECONDS);
                 assertEquals("scenario " + scenario, ProfileRecoveryCoordinator.RecoveryStatus.RECOVERED_AND_CLOSED,
                         closed.status());
+                if (empty) {
+                    fixture.nodes.get(0).close();
+                    data.remove(sourceIdentity.bookieId());
+                }
                 Path directory = temporary.getRoot().toPath().resolve("restore-image-" + scenario);
                 var backupConfiguration = new ServerConfiguration();
                 serviceSettings(sourceConfig).forEach((name, value) -> backupConfiguration.setProperty(
@@ -10123,7 +10395,9 @@ public class SegmentProfileInitialSocketClientTest {
                         bytes(16, 43), bytes(32, 43), null);
                 var intent = new org.apache.bookkeeper.discover.profile.ProfileRepairIntent(context, 3,
                         bytes(16, 53), 0, 2, ZKProfileReservationStore.repairEnsembleDigest(original, 0), install,
-                        bytes(16, 63), new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 1));
+                        empty ? new byte[16] : bytes(16, 63),
+                        empty ? null : new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 1),
+                        empty ? bytes(16, 73) : null);
                 var prepared = fixture.reservations.prepareRepair(metadata, intent).snapshot();
                 assertNotNull(prepared);
                 if (scenario == 17) {
@@ -10134,6 +10408,11 @@ public class SegmentProfileInitialSocketClientTest {
                 fixture.connect(3, 4, Duration.ofSeconds(5));
                 var peer = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
                 data.put(target.bookieId(), peer);
+                if (scenario >= 18) {
+                    assertRestoreSourceAdmission(scenario, fixture, sdk, backup, directory, reference, metadata,
+                            accepted, prepared, data, sourceTarget);
+                    continue;
+                }
                 var socketField = ProfileNormalDataClient.class.getDeclaredField("socket");
                 socketField.setAccessible(true);
                 Object socket = socketField.get(peer);
