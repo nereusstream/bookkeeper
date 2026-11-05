@@ -9855,6 +9855,240 @@ public class SegmentProfileInitialSocketClientTest {
         assertBackupRestoreScenarios(List.of(26, 27));
     }
 
+    @Test
+    public void backupRestoreCompletionWaitsForActualCloseOutputAndNativeReply() throws Exception {
+        assertBackupRestoreScenarios(List.of(28));
+    }
+
+    @Test
+    public void backupRestoreCompletionRequiresProtectedCommitBirthOrExactLegacyPublication() throws Exception {
+        assertBackupRestoreScenarios(List.of(29, 30, 31));
+    }
+
+    private static final String TEST_RESTORE_REPAIR = "/socket-initial/2c/repair-3";
+
+    private static final class RestoreCompletionZk extends ZooKeeper {
+        private final CompletableFuture<Runnable> beforeMembership = new CompletableFuture<>();
+        private final CompletableFuture<Runnable> lostCompletionReply = new CompletableFuture<>();
+        private final int scenario;
+
+        RestoreCompletionZk(String connect, int scenario) throws Exception {
+            this(connect, new ZooKeeperWatcherBase(10000, false), scenario);
+        }
+
+        private RestoreCompletionZk(String connect, ZooKeeperWatcherBase watcher, int scenario) throws Exception {
+            super(connect, 10000, watcher);
+            watcher.waitForConnection();
+            this.scenario = scenario;
+        }
+
+        @Override
+        public void multi(Iterable<org.apache.zookeeper.Op> operations,
+                org.apache.zookeeper.AsyncCallback.MultiCallback callback, Object context) {
+            var ops = new ArrayList<org.apache.zookeeper.Op>();
+            operations.forEach(ops::add);
+            if (ops.stream().anyMatch(op -> op.getType() == ZooDefs.OpCode.create
+                    && op.getPath().equals(TEST_RESTORE_REPAIR + "/committed"))) {
+                if (scenario == 29) {
+                    ops.removeIf(op -> op.getPath().equals(TEST_RESTORE_REPAIR + "/restore-commit/proof"));
+                } else if (scenario >= 30 && beforeMembership.complete(() -> super.multi(ops, callback, context))) {
+                    return;
+                }
+            }
+            if (scenario == 28 && ops.stream().anyMatch(op -> op.getType() == ZooDefs.OpCode.create
+                    && op.getPath().equals(TEST_RESTORE_REPAIR + "/restore-completed"))) {
+                super.multi(ops, (code, path, ignored, results) -> {
+                    if (code != org.apache.zookeeper.KeeperException.Code.OK.intValue()
+                            || !lostCompletionReply.complete(() -> callback.processResult(
+                                    org.apache.zookeeper.KeeperException.Code.CONNECTIONLOSS.intValue(), path,
+                                    context, results))) {
+                        callback.processResult(code, path, context, results);
+                    }
+                }, context);
+                return;
+            }
+            super.multi(ops, callback, context);
+        }
+    }
+
+    private static void holdRestoreCloseOutput(ProfileInitialControlClient control,
+            CompletableFuture<ChannelPromise> output, CompletableFuture<CompletableFuture<?>> answer)
+            throws Exception {
+        var socketField = ProfileInitialControlClient.class.getDeclaredField("socket");
+        socketField.setAccessible(true);
+        Object socket = socketField.get(control);
+        var channelField = socket.getClass().getDeclaredField("channel");
+        channelField.setAccessible(true);
+        Channel channel = (Channel) channelField.get(socket);
+        var pendingField = socket.getClass().getDeclaredField("pending");
+        pendingField.setAccessible(true);
+        var pending = (Map<?, ?>) pendingField.get(socket);
+        channel.eventLoop().submit(() -> channel.pipeline().addAfter(channel.pipeline().context(SslHandler.class)
+                .name(), "holdRestoreCloseOutput", new ChannelOutboundHandlerAdapter() {
+                    @Override
+                    public void write(ChannelHandlerContext ctx, Object message, ChannelPromise promise)
+                            throws Exception {
+                        if (message instanceof ByteBuf body && body.getUnsignedShort(body.readerIndex() + 14)
+                                == ProfileOperation.RECOVERY_GRANT_CLOSE.wireValue() && !output.isDone()) {
+                            Object request = pending.values().iterator().next();
+                            var replyField = request.getClass().getDeclaredField("reply");
+                            replyField.setAccessible(true);
+                            answer.complete((CompletableFuture<?>) replyField.get(request));
+                            output.complete(promise);
+                            ctx.write(message, ctx.newPromise());
+                        } else {
+                            ctx.write(message, promise);
+                        }
+                    }
+                })).get(5, TimeUnit.SECONDS);
+    }
+
+    private void assertRestoreCompletion(int scenario, Fixture fixture, BookKeeper sdk, SegmentProfileBackup backup,
+            Path directory, Path reference, ProfileLedgerMetadataStore metadata,
+            ZKProfileReservationStore.ReadOnlySnapshot accepted, ZKProfileReservationStore.RepairSnapshot prepared,
+            Map<BookieId, ProfileNormalDataClient> data) throws Exception {
+        String completed = TEST_RESTORE_REPAIR + "/restore-completed";
+        String committed = TEST_RESTORE_REPAIR + "/committed";
+        var target = fixture.identities.get(3).bookieId();
+        var io = files(fixture.nodes.get(3)).dataIo;
+        byte[] closeId = bytes(16, 73);
+        try (var zk = new RestoreCompletionZk(fixture.cluster.getZooKeeperConnectString(), scenario)) {
+            var timeout = Duration.ofSeconds(scenario == 28 ? 3 : 15);
+            var store = new ZKProfileReservationStore(zk, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+            var borrowed = new ProfileLedgerMetadataStore(zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+            var coordinator = new ProfileRecoveryCoordinator(store, borrowed, fixture.cold);
+            java.util.concurrent.Callable<ProfileRecoveryCoordinator.RepairAttempt> start = () ->
+                    backup.beginRestoreClosedFragment(directory, reference, coordinator, accepted, prepared,
+                            sdk.getClientCtx(), fixture.descriptorBytes, fixture.credential, data, fixture.clients,
+                            closeId);
+            var output = new CompletableFuture<ChannelPromise>();
+            var answer = new CompletableFuture<CompletableFuture<?>>();
+            if (scenario == 28) {
+                holdRestoreCloseOutput(fixture.clients.get(target.toString()), output, answer);
+            }
+            var first = start.call();
+            long originalReceiptBirth = -1;
+            if (scenario == 28) {
+                ChannelPromise release = output.get(10, TimeUnit.SECONDS);
+                try {
+                    var ack = (ProfileControlResult) answer.get(10, TimeUnit.SECONDS).get(10, TimeUnit.SECONDS);
+                    assertTrue(ack.durable());
+                    assertNotNull(fixture.zk.exists(committed, false));
+                    assertNull(fixture.zk.exists(completed, false));
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> first.result().get(150, TimeUnit.MILLISECONDS));
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> zk.lostCompletionReply.get(500, TimeUnit.MILLISECONDS));
+                    assertNull(fixture.zk.exists(completed, false));
+                    assertFalse(first.completion().isDone());
+                    assertThrows(IOException.class, () -> SegmentDataFileLock.open(directory));
+                } catch (AssertionError failure) {
+                    zk.lostCompletionReply.thenAccept(Runnable::run);
+                    throw failure;
+                } finally {
+                    release.setSuccess();
+                }
+                Runnable fail = zk.lostCompletionReply.get(10, TimeUnit.SECONDS);
+                try {
+                    originalReceiptBirth = fixture.zk.exists(completed, false).getCzxid();
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> first.result().get(4, TimeUnit.SECONDS));
+                    assertFalse(first.completion().isDone());
+                    assertThrows(IOException.class, () -> SegmentDataFileLock.open(directory));
+                } finally {
+                    fail.run();
+                }
+            } else if (scenario >= 30) {
+                // This actual copy reached its membership CAS. Let the ordinary legacy commit win that CAS.
+                Runnable submit = zk.beforeMembership.get(10, TimeUnit.SECONDS);
+                try {
+                    assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, fixture.reservations.commitRepair(
+                            metadata, prepared, accepted.closed().metadata(), closeId).status());
+                } finally {
+                    submit.run();
+                }
+            }
+            var initial = first.result().get(15, TimeUnit.SECONDS);
+            first.completion().get(10, TimeUnit.SECONDS);
+            int writes = io.writes;
+            byte[] commitBytes = fixture.zk.getData(committed, false, null);
+            assertEquals(scenario <= 29, ProfileRepairCommit.decode(commitBytes).restoreGuardRequired());
+            if (scenario == 29) {
+                assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED, initial.status());
+                assertNull(fixture.zk.exists(completed, false));
+            } else if (scenario == 31) {
+                advanceOrdinaryRepairAfterLegacyRestore(fixture, sdk, metadata, prepared, data, closeId);
+            }
+            var repeat = start.call();
+            var result = repeat.result().get(15, TimeUnit.SECONDS);
+            repeat.completion().get(10, TimeUnit.SECONDS);
+            if (scenario == 29 || scenario == 31) {
+                assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED, result.status());
+                assertNull(fixture.zk.exists(completed, false));
+            } else {
+                assertEquals(ProfileRecoveryCoordinator.RepairStatus.REPAIRED_LAST_FRAGMENT, result.status());
+                assertEquals(0, result.copiedEntries());
+                var receipt = fixture.zk.exists(completed, false);
+                assertNotNull(receipt);
+                assertEquals(receipt.getCzxid(), fixture.zk.exists(completed + "/birth", false).getCzxid());
+                assertTrue(receipt.getCzxid() > fixture.zk.exists(committed, false).getCzxid());
+                byte[] recorded = fixture.zk.getData(completed, false, null);
+                assertEquals(268, recorded.length);
+                assertEquals(0x55575245, java.nio.ByteBuffer.wrap(recorded).getInt());
+                if (scenario == 28) {
+                    assertEquals(ProfileRecoveryCoordinator.RepairStatus.DEFERRED, initial.status());
+                    assertEquals(originalReceiptBirth, receipt.getCzxid());
+                    String anchor = TEST_RESTORE_REPAIR + "/restore-commit";
+                    assertThrows(org.apache.zookeeper.KeeperException.NoAuthException.class,
+                            () -> fixture.zk.delete(anchor + "/proof", 0));
+                    assertThrows(org.apache.zookeeper.KeeperException.NotEmptyException.class,
+                            () -> fixture.zk.delete(anchor, 0));
+                    fixture.zk.delete(committed, 0);
+                    fixture.zk.create(committed, commitBytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                    var rebuilt = start.call();
+                    assertEquals(ProfileRecoveryCoordinator.RepairStatus.QUARANTINED,
+                            rebuilt.result().get(15, TimeUnit.SECONDS).status());
+                    rebuilt.completion().get(10, TimeUnit.SECONDS);
+                    assertArrayEquals(recorded, fixture.zk.getData(completed, false, null));
+                }
+            }
+            assertEquals(writes, io.writes);
+        }
+    }
+
+    private void advanceOrdinaryRepairAfterLegacyRestore(Fixture fixture, BookKeeper sdk,
+            ProfileLedgerMetadataStore metadata, ZKProfileReservationStore.RepairSnapshot prepared,
+            Map<BookieId, ProfileNormalDataClient> data, byte[] closeId) throws Exception {
+        var published = fixture.reservations.resolveRepairClose(metadata, prepared, closeId);
+        var intent = prepared.intent();
+        var request = ProfileControlRequest.recoveryClose(published.closeScope(),
+                new ProfileControlRequest.RecoveryBinding(intent.intentId(), intent.intentGeneration(),
+                        intent.grantGeneration()), intent.grantOperationId());
+        assertTrue(fixture.clients.get(intent.install().targetBookie()).recoveryClose(request)
+                .get(5, TimeUnit.SECONDS).durable());
+        var current = fixture.reservations.readClosedForOpen(metadata, 44).snapshot();
+        var nextTarget = fixture.identities.get(4);
+        var install = new ProfileControlScope(ProfileControlOperation.INSTALL,
+                ProfileAuthorityPurpose.PREPARING_INSTALL, 44, current.context().ledger().ledgerInstanceId(),
+                intent.install().descriptorIdentity(),
+                nextTarget.bookieId().toString(), nextTarget.incarnation().value(), intent.install().authorityDomain(),
+                current.context().controlGeneration(), bytes(16, 111), bytes(32, 112), null);
+        var predecessor = current.closed().metadata().metadata().getValue();
+        var nextIntent = new ProfileRepairIntent(current.context(), 4, bytes(16, 113), 0, 1,
+                ZKProfileReservationStore.repairEnsembleDigest(predecessor, 0), install, bytes(16, 114),
+                intent.range());
+        var next = fixture.reservations.prepareRepair(metadata, nextIntent).snapshot();
+        assertNotNull(next);
+        fixture.connect(4, 4, Duration.ofSeconds(5));
+        data.put(nextTarget.bookieId(), dataClient(fixture, 4, 4, Duration.ofSeconds(5)));
+        var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+        var result = coordinator.repairClosedFragment(current, next, sdk.getClientCtx(), fixture.descriptorBytes,
+                fixture.credential, data, fixture.clients, bytes(16, 115)).get(20, TimeUnit.SECONDS);
+        assertEquals(ProfileRecoveryCoordinator.RepairStatus.REPAIRED_LAST_FRAGMENT, result.status());
+        assertNull(fixture.zk.exists("/socket-initial/2c/repair-4/restore-completed", false));
+    }
+
     private static final class RestoreAdmissionZk extends ZooKeeper {
         private final AtomicReference<CompletableFuture<Runnable>> beforeAdmission = new AtomicReference<>();
         private final AtomicReference<CompletableFuture<Runnable>> lostAdmissionReply = new AtomicReference<>();
@@ -10222,6 +10456,11 @@ public class SegmentProfileInitialSocketClientTest {
             assertEquals(nativeBirth, fixture.zk.exists(witness, false).getCzxid());
             if (empty) {
                 assertEquals(writes, targetIo.writes);
+                String completed = TEST_RESTORE_REPAIR + "/restore-completed";
+                var receipt = java.nio.ByteBuffer.wrap(fixture.zk.getData(completed, false, null));
+                assertEquals(1, receipt.getInt(232));
+                assertEquals(fixture.zk.exists(completed, false).getCzxid(),
+                        fixture.zk.exists(completed + "/birth", false).getCzxid());
             } else {
                 assertReadPayload(data.get(target), fixture.context(), 1, bytes(16, 8));
                 fixture.zk.delete(witness, 0);
@@ -10478,7 +10717,8 @@ public class SegmentProfileInitialSocketClientTest {
     private void assertBackupRestoreScenarios(List<Integer> scenarios) throws Exception {
         // Offline/partial/conflicting inputs, delete races, drain, bootstrap, metadata identity and lost replies.
         for (int scenario : scenarios) {
-            try (Fixture fixture = new Fixture(false, false, true, scenario == 13 ? 5 : 4, 2, true, true);
+            try (Fixture fixture = new Fixture(false, false, true, scenario == 13 || scenario == 31 ? 5 : 4,
+                    2, true, true);
                     BookKeeper sdk = sdk(fixture)) {
                 fixture.connectAll(Duration.ofSeconds(5));
                 fixture.initialize().get(5, TimeUnit.SECONDS);
@@ -10591,6 +10831,11 @@ public class SegmentProfileInitialSocketClientTest {
                 fixture.connect(3, 4, Duration.ofSeconds(5));
                 var peer = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
                 data.put(target.bookieId(), peer);
+                if (scenario >= 28) {
+                    assertRestoreCompletion(scenario, fixture, sdk, backup, directory, reference, metadata,
+                            accepted, prepared, data);
+                    continue;
+                }
                 if (scenario == 24) {
                     assertRestoreFloorAdvance(fixture, sdk, backup, sourceConfig, directory, reference, metadata,
                             accepted, prepared, data, sourceTarget);

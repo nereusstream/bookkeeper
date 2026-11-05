@@ -441,19 +441,11 @@ final class ProfileSocketClient implements AutoCloseable {
         return send(request, ProfileControlOperation.RECOVERY_GRANT, ProfileOperation.RECOVERY_GRANT);
     }
 
-    CompletableFuture<ProfileControlResult> recoveryClose(ProfileControlRequest request) {
-        return beginRecoveryClose(request).result();
-    }
-
     ProfileInitialControlClient.ControlAttempt beginRecoveryClose(ProfileControlRequest request) {
         if (!hello().capabilities().contains(RECOVERY_CLOSE_CAPABILITY)) {
             return completedControl(request.scope(), Outcome.UNSUPPORTED);
         }
         return send(request, ProfileControlOperation.RECOVERY_GRANT_CLOSE, ProfileOperation.RECOVERY_GRANT_CLOSE);
-    }
-
-    CompletableFuture<ProfileControlResult> terminalClose(ProfileControlRequest request) {
-        return beginTerminalClose(request).result();
     }
 
     ProfileInitialControlClient.ControlAttempt beginTerminalClose(ProfileControlRequest request) {

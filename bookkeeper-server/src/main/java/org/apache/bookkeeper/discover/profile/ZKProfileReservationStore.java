@@ -233,6 +233,7 @@ public final class ZKProfileReservationStore {
     private final List<ACL> acls;
     private final List<ACL> immutableAcls;
     private final List<ACL> pageAcls;
+    private final List<ACL> protectedChildAcls;
     private final long timeoutNanos;
 
     public ZKProfileReservationStore(ZooKeeper zk, String root, List<ACL> acls, Duration timeout) {
@@ -253,6 +254,9 @@ public final class ZKProfileReservationStore {
                 & (ZooDefs.Perms.READ | ZooDefs.Perms.CREATE | ZooDefs.Perms.DELETE),
                 new Id(acl.getId().getScheme(), acl.getId().getId())))
                 .filter(acl -> acl.getPerms() != 0).toList();
+        // A nonempty container cannot be removed, and its native proof child cannot be deleted by its writers.
+        protectedChildAcls = pageAcls.stream().map(acl -> new ACL(acl.getPerms() & ~ZooDefs.Perms.DELETE,
+                acl.getId())).filter(acl -> acl.getPerms() != 0).toList();
         if (immutableAcls.isEmpty()) {
             throw new IllegalArgumentException("Lifecycle markers/pages require a reader ACL");
         }
@@ -2033,6 +2037,11 @@ public final class ZKProfileReservationStore {
 
     RepairCommitResult resolveRepairClose(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
             byte[] closeOperationId, VerifiedSource source) {
+        return resolveRepairClose(metadata, expected, closeOperationId, source, null);
+    }
+
+    private RepairCommitResult resolveRepairClose(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
+            byte[] closeOperationId, VerifiedSource source, RestoreCompletionWrite completion) {
         requireRecoveryClient(metadata);
         closeOperationId = ProfileLifecycleHead.fixed(closeOperationId, 16, true);
         var intent = expected.intent();
@@ -2059,25 +2068,220 @@ public final class ZKProfileReservationStore {
                             && Arrays.equals(ref.digest(), ProfileRepairIntent.digest(node.bytes())))) {
                 return new RepairCommitResult(CreateStatus.CONFLICT, null, null);
             }
+            ProfileZKReadClient.Node admission = null;
+            byte[] witness = null;
+            List<Op> checks = source == null ? List.of() : new ArrayList<>();
             if (source != null) {
-                var admission = reads.get(repairPath(intent.recovery().ledger().ledgerId(), intent.slot())
+                admission = reads.get(repairPath(intent.recovery().ledger().ledgerId(), intent.slot())
                         + "/admitted", deadline);
                 requireFound(admission);
                 validateRepairAdmission(actual, admission, deadline);
-                verifyRestoreAdmission(metadata, actual, admission, source, deadline);
+                witness = verifyRestoreAdmission(metadata, actual, admission, source, checks, deadline);
             }
             var selected = selectedBoundary(intent.recovery(), value, deadline);
             validateEmptyBoundary(actual, commit, selected, deadline);
             var close = repairCloseTarget(intent, closeOperationId, commit.closeGeneration(), selected);
-            return new RepairCommitResult(CreateStatus.ALREADY_APPLIED, current.metadata(),
+            var status = completion == null ? CreateStatus.ALREADY_APPLIED : recordRestoreCompletion(metadata,
+                    current, actual, commit, node, admission, witness, selected, close, checks, completion, deadline);
+            if (status != CreateStatus.APPLIED && status != CreateStatus.ALREADY_APPLIED) {
+                return new RepairCommitResult(status, null, null);
+            }
+            return new RepairCommitResult(status, current.metadata(),
                     close.scope(), close.terminal());
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return new RepairCommitResult(CreateStatus.DURABILITY_UNKNOWN, null, null);
         } catch (TimeoutException | IllegalStateException unavailable) {
             return new RepairCommitResult(CreateStatus.DURABILITY_UNKNOWN, null, null);
-        } catch (IllegalArgumentException invalid) {
+        } catch (IOException | IllegalArgumentException invalid) {
             return new RepairCommitResult(CreateStatus.QUARANTINED, null, null);
+        }
+    }
+
+    record RestoreCompletionAttempt(CreateStatus status, CompletableFuture<Void> completion) { }
+
+    private static final class RestoreCompletionWrite {
+        final ProfileRecoveryCoordinator.RestoreCloseProof proof;
+        final BooleanSupplier live;
+        final CompletableFuture<Void> completion = new CompletableFuture<>();
+        boolean submitted;
+
+        RestoreCompletionWrite(ProfileRecoveryCoordinator.RestoreCloseProof proof, BooleanSupplier live) {
+            this.proof = proof;
+            this.live = live;
+        }
+    }
+
+    RestoreCompletionAttempt completeRestore(ProfileLedgerMetadataStore metadata,
+            ProfileRecoveryCoordinator.RestoreCloseProof proof, BooleanSupplier live) {
+        var write = new RestoreCompletionWrite(proof, live);
+        try {
+            var status = resolveRepairClose(metadata, proof.repair(), proof.request().scope().operationId(),
+                    proof.source(), write).status();
+            return new RestoreCompletionAttempt(status, write.completion);
+        } finally {
+            if (!write.submitted) {
+                write.completion.complete(null);
+            }
+        }
+    }
+
+    private CreateStatus recordRestoreCompletion(ProfileLedgerMetadataStore metadata, RecoveryResult current,
+            RepairSnapshot repair, ProfileRepairCommit commit, ProfileZKReadClient.Node committed,
+            ProfileZKReadClient.Node admission, byte[] witness, BoundarySnapshot selected, CloseTarget close,
+            List<Op> checks, RestoreCompletionWrite write, long deadline)
+            throws InterruptedException, TimeoutException, IOException {
+        var request = write.proof.request();
+        var scope = close.scope();
+        var member = current.metadata();
+        if (member.metadata().getValue().getState() != LedgerMetadata.State.CLOSED || !scope.equals(request.scope())
+                || !Objects.equals(close.terminal(), request.terminalBinding().orElse(null))
+                || committed.stat().getCzxid() <= admission.stat().getCzxid()) {
+            throw new IllegalArgumentException("Restore completion differs from the committed close authority");
+        }
+        String path = repairPath(scope.ledgerId(), repair.intent().slot());
+        String receipt = path + "/restore-completed";
+        var before = reads.get(receipt, deadline);
+        if (commit.restoreGuardRequired()) {
+            restoreCommitChecks(path, repair, committed, admission, witness, checks, deadline);
+        } else if (before.code() == Code.NONODE.intValue()) {
+            // The old format has no birth anchor. Only the actual, still-current membership transaction proves it.
+            var history = ProfileRepairCommit.head(member.metadata().getValue().getCustomMetadata()
+                    .get(ProfileRepairCommit.KEY));
+            if (history.get(history.size() - 1).slot() != repair.intent().slot()
+                    || ((org.apache.bookkeeper.versioning.LongVersion) member.metadata().getVersion())
+                        .getLongVersion() != commit.beforeVersion() + 1L
+                    || metadata.membershipCommit(member, deadline) != committed.stat().getCzxid()) {
+                throw new IllegalArgumentException("Legacy restore publication lacks its original native birth");
+            }
+        }
+        byte[] bytes = restoreCompletedBytes(repair, committed, admission, witness, close);
+        if (before.code() != Code.NONODE.intValue()) {
+            verifyRestoreCompleted(receipt, before, bytes, committed.stat().getCzxid(), deadline);
+            return CreateStatus.ALREADY_APPLIED;
+        }
+        var root = read(scope.ledgerId(), deadline);
+        if (root.status() == ReadStatus.UNAVAILABLE) {
+            return CreateStatus.UNAVAILABLE;
+        }
+        if (root.snapshot() == null || !current.context().matchesRoot(root.snapshot())) {
+            return CreateStatus.CONFLICT;
+        }
+        checks.addAll(recoveryRootChecks(root.snapshot(), deadline));
+        checks.addAll(metadata.checksForMembership(member));
+        checks.add(Op.check(marker(path, repair.birth()), 0));
+        checks.add(Op.check(path, 0));
+        checks.add(Op.check(path + "/admitted", 0));
+        checks.add(Op.check(repairAdmissionGuardPath(repair), 0));
+        checks.add(Op.check(path + "/restore-source", 0));
+        checks.add(Op.check(path + "/committed", 0));
+        if (selected != null) {
+            checks.add(Op.check(boundaryPath(scope.ledgerId()), 0));
+            checks.add(Op.check(boundaryBirthGuard(scope.ledgerId(), selected.birthZxid()), 0));
+        }
+        if (close.terminal() != null) {
+            var empty = reads.get(path + "/empty-boundary", deadline);
+            requireFound(empty);
+            requirePersistent(empty, true);
+            if (empty.stat().getCzxid() != committed.stat().getCzxid()
+                    || !Arrays.equals(ProfileRepairIntent.digest(empty.bytes()), commit.emptyBoundaryDigest())) {
+                throw new IllegalArgumentException("Restore completion lost its original EMPTY proof");
+            }
+            checks.add(Op.check(path + "/empty-boundary", 0));
+        }
+        checks.add(Op.create(receipt, bytes, protectedChildAcls, CreateMode.PERSISTENT));
+        checks.add(Op.create(receipt + "/birth", ProfileRepairIntent.digest(bytes), immutableAcls,
+                CreateMode.PERSISTENT));
+        ProfileZKReadClient.requireTime(deadline);
+        if (!write.live.getAsBoolean()) {
+            return CreateStatus.UNAVAILABLE;
+        }
+        var reply = new CompletableFuture<Integer>();
+        zk.multi(checks, (code, ignored, context, results) -> {
+            try {
+                reply.complete(code);
+            } finally {
+                write.completion.complete(null);
+            }
+        }, null);
+        write.submitted = true;
+        int code = ProfileZKReadClient.await(reply, deadline);
+        var after = reads.get(receipt, deadline);
+        if (after.code() == Code.NONODE.intValue()) {
+            return conditionalFailure(code) ? CreateStatus.CONFLICT : CreateStatus.DURABILITY_UNKNOWN;
+        }
+        verifyRestoreCompleted(receipt, after, bytes, committed.stat().getCzxid(), deadline);
+        var actual = readRepair(scope.ledgerId(), repair.intent().slot(), deadline);
+        var actualCommit = reads.get(path + "/committed", deadline);
+        var actualAdmission = reads.get(path + "/admitted", deadline);
+        requireFound(actualCommit);
+        requirePersistent(actualCommit, true);
+        requireFound(actualAdmission);
+        validateRepairAdmission(repair, actualAdmission, deadline);
+        if (!repair.equals(actual) || actualCommit.stat().getCzxid() != committed.stat().getCzxid()
+                || !Arrays.equals(actualCommit.bytes(), committed.bytes())
+                || actualAdmission.stat().getCzxid() != admission.stat().getCzxid()
+                || !Arrays.equals(actualAdmission.bytes(), admission.bytes())
+                || !Arrays.equals(readRestoreWitness(repair, actualAdmission, deadline), witness)) {
+            throw new IllegalArgumentException("Restore completion readback lost the original native publication");
+        }
+        if (commit.restoreGuardRequired()) {
+            restoreCommitChecks(path, repair, actualCommit, actualAdmission, witness, new ArrayList<>(), deadline);
+        }
+        return code == Code.OK.intValue() ? CreateStatus.APPLIED : CreateStatus.ALREADY_APPLIED;
+    }
+
+    private static byte[] restoreCommitGuard(RepairSnapshot repair, ProfileZKReadClient.Node admission,
+            byte[] witness, byte[] commit) {
+        return ByteBuffer.allocate(104).putLong(admission.stat().getCzxid())
+                .put(ProfileRepairIntent.digest(repair.intent().encode())).put(ProfileRepairIntent.digest(witness))
+                .put(ProfileRepairIntent.digest(commit)).array();
+    }
+
+    private void restoreCommitChecks(String path, RepairSnapshot repair, ProfileZKReadClient.Node committed,
+            ProfileZKReadClient.Node admission, byte[] witness, List<Op> checks, long deadline)
+            throws InterruptedException, TimeoutException {
+        String container = path + "/restore-commit";
+        var anchor = reads.get(container, deadline);
+        var proof = reads.get(container + "/proof", deadline);
+        requireFound(anchor);
+        requirePersistent(anchor, true);
+        requireFound(proof);
+        requirePersistent(proof, true);
+        if (anchor.stat().getCzxid() != committed.stat().getCzxid() || anchor.bytes().length != 0
+                || proof.stat().getCzxid() != committed.stat().getCzxid()
+                || !Arrays.equals(proof.bytes(), restoreCommitGuard(repair, admission, witness, committed.bytes()))) {
+            throw new IllegalArgumentException("Restore membership lost its protected native commit birth");
+        }
+        checks.add(Op.check(container, 0));
+        checks.add(Op.check(container + "/proof", 0));
+    }
+
+    private static byte[] restoreCompletedBytes(RepairSnapshot repair, ProfileZKReadClient.Node committed,
+            ProfileZKReadClient.Node admission, byte[] witness, CloseTarget close) {
+        var scope = close.scope();
+        return ByteBuffer.allocate(268).putInt(0x55575245).putInt(1).putLong(scope.ledgerId())
+                .put(scope.ledgerInstanceId()).put(repairAdmissionGuardBytes(repair))
+                .putLong(repair.intent().recovery().metadataBirth()).putLong(admission.stat().getCzxid())
+                .putLong(committed.stat().getCzxid()).put(ProfileRepairIntent.digest(repair.intent().encode()))
+                .put(ProfileRepairIntent.digest(witness)).put(ProfileRepairIntent.digest(committed.bytes()))
+                .put(HexFormat.of().parseHex(deliveryTargetKey(new ProfileDeleteRecord.Target(scope.targetBookie(),
+                        scope.targetStorageIncarnation()))))
+                .put(scope.operationId()).putLong(scope.authorityGeneration()).putInt(close.terminal() == null ? 0 : 1)
+                .put(scope.publicSemanticPayloadIdentity()).array();
+    }
+
+    private void verifyRestoreCompleted(String path, ProfileZKReadClient.Node receipt, byte[] expected,
+            long commitBirth, long deadline) throws InterruptedException, TimeoutException {
+        requireFound(receipt);
+        requirePersistent(receipt, true);
+        var birth = reads.get(path + "/birth", deadline);
+        requireFound(birth);
+        requirePersistent(birth, true);
+        if (receipt.stat().getCzxid() <= commitBirth || birth.stat().getCzxid() != receipt.stat().getCzxid()
+                || !Arrays.equals(receipt.bytes(), expected)
+                || !Arrays.equals(birth.bytes(), ProfileRepairIntent.digest(expected))) {
+            throw new IllegalArgumentException("Restore completion lost its original native birth or evidence");
         }
     }
 
@@ -2086,24 +2290,29 @@ public final class ZKProfileReservationStore {
      * Reuse the same intent, copied-at metadata snapshot and close ID after UNKNOWN. */
     public RepairCommitResult commitRepair(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
             ProfileLedgerMetadataStore.MembershipSnapshot copiedAt, byte[] closeOperationId) {
+        return commitRepair(metadata, expected, copiedAt, closeOperationId, null);
+    }
+
+    RepairCommitResult commitRepair(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
+            ProfileLedgerMetadataStore.MembershipSnapshot copiedAt, byte[] closeOperationId, VerifiedSource source) {
         if (expected.intent().empty()) {
             throw new IllegalArgumentException("EMPTY membership cannot use a caller DATA copied-at claim");
         }
-        return commitRepairOnce(metadata, expected, copiedAt, closeOperationId, null);
+        return commitRepairOnce(metadata, expected, copiedAt, closeOperationId, null, source);
     }
 
     RepairCommitResult commitEmptyRepair(ProfileLedgerMetadataStore metadata,
-            ProfileRecoveryCoordinator.EmptyRepairProof proof) {
+            ProfileRecoveryCoordinator.EmptyRepairProof proof, VerifiedSource source) {
         if (!proof.repair().intent().empty()) {
             throw new IllegalArgumentException("EMPTY publication requires its actual boundary proof");
         }
         return commitRepairOnce(metadata, proof.repair(), proof.before(), proof.boundary().operationId(),
-                proof.boundary());
+                proof.boundary(), source);
     }
 
     private RepairCommitResult commitRepairOnce(ProfileLedgerMetadataStore metadata, RepairSnapshot expected,
             ProfileLedgerMetadataStore.MembershipSnapshot copiedAt, byte[] closeOperationId,
-            ProfileRepairCommit.EmptyBoundary emptyProof) {
+            ProfileRepairCommit.EmptyBoundary emptyProof, VerifiedSource source) {
         requireRecoveryClient(metadata);
         var intent = expected.intent();
         closeOperationId = ProfileLifecycleHead.fixed(closeOperationId, 16, true);
@@ -2211,7 +2420,7 @@ public final class ZKProfileReservationStore {
             var commit = new ProfileRepairCommit(Math.toIntExact(((org.apache.bookkeeper.versioning.LongVersion)
                     before.metadata().getVersion()).getLongVersion()), ProfileRecoveryContext.metadataDigest(value),
                     ProfileRecoveryContext.metadataDigest(desired), old, closeOperationId, generation,
-                    emptyProof == null ? null : ProfileRepairIntent.digest(emptyProof.encode()));
+                    emptyProof == null ? null : ProfileRepairIntent.digest(emptyProof.encode()), source != null);
             var next = new java.util.ArrayList<>(head);
             next.add(new ProfileRepairCommit.Reference(intent.slot(), expected.birth(), expected.storeVersion(),
                     ProfileRepairIntent.digest(commit.encode())));
@@ -2231,6 +2440,14 @@ public final class ZKProfileReservationStore {
                         CreateMode.PERSISTENT));
             }
             checks.add(Op.create(path + "/committed", commit.encode(), immutableAcls, CreateMode.PERSISTENT));
+            if (source != null) {
+                byte[] witness = readRestoreWitness(actual, admitted, deadline);
+                checks.add(Op.check(path + "/restore-source", 0));
+                checks.add(Op.create(path + "/restore-commit", new byte[0], protectedChildAcls,
+                        CreateMode.PERSISTENT));
+                checks.add(Op.create(path + "/restore-commit/proof", restoreCommitGuard(actual, admitted, witness,
+                        commit.encode()), immutableAcls, CreateMode.PERSISTENT));
+            }
             int code = multi(checks, deadline);
             var after = readRepairable(metadata, ledger);
             var result = reads.get(path + "/committed", deadline);
@@ -2512,6 +2729,12 @@ public final class ZKProfileReservationStore {
     private void verifyRestoreAdmission(ProfileLedgerMetadataStore metadata, RepairSnapshot repair,
             ProfileZKReadClient.Node admitted, VerifiedSource source, long deadline)
             throws InterruptedException, TimeoutException {
+        verifyRestoreAdmission(metadata, repair, admitted, source, new ArrayList<>(), deadline);
+    }
+
+    private byte[] verifyRestoreAdmission(ProfileLedgerMetadataStore metadata, RepairSnapshot repair,
+            ProfileZKReadClient.Node admitted, VerifiedSource source, List<Op> checks, long deadline)
+            throws InterruptedException, TimeoutException {
         byte[] stored = readRestoreWitness(repair, admitted, deadline);
         var input = ByteBuffer.wrap(stored);
         int magic = input.getInt();
@@ -2537,7 +2760,8 @@ public final class ZKProfileReservationStore {
         if (!Arrays.equals(stored, restoreWitnessBytes(repair, source, original))) {
             throw new IllegalArgumentException("Restore retry must reuse the admitted image and source");
         }
-        restoreSourceChecks(metadata, source, original, new ArrayList<>(), deadline);
+        restoreSourceChecks(metadata, source, original, checks, deadline);
+        return stored;
     }
 
     private RestoreSourceNative restoreSourceChecks(ProfileLedgerMetadataStore metadata, VerifiedSource source,
@@ -2600,6 +2824,12 @@ public final class ZKProfileReservationStore {
         var revision = restoreFloorRevision(head, floor.revision(), deadline);
         if (!revision.value().equals(floor) || revision.node().stat().getCzxid() != original.revisionBirth()) {
             throw new IllegalArgumentException("Restore source lost the original admitted floor revision");
+        }
+        var target = head.head().target();
+        checks.add(Op.check(restoreFloorPath(target), -1));
+        checks.add(Op.check(restoreFloorRevisionPath(target, 0), 0));
+        if (floor.revision() != 0) {
+            checks.add(Op.check(restoreFloorRevisionPath(target, floor.revision()), 0));
         }
         return original;
     }
@@ -2839,7 +3069,7 @@ public final class ZKProfileReservationStore {
         requirePersistent(guard, true);
         var policy = retentionRevision(value.policy(), deadline);
         if (!value.matches(reference) || !Arrays.equals(bytes, node.bytes())
-                || node.stat().getCzxid() != metadata.deleteTombstoneCommit(member, deadline)
+                || node.stat().getCzxid() != metadata.membershipCommit(member, deadline)
                 || guard.stat().getCzxid() != node.stat().getCzxid()
                 || !Arrays.equals(guard.bytes(), retentionGuard(value.birthId(), bytes))
                 || policy.stat().getCzxid() != value.policyBirth() || node.stat().getCtime() < 0) {

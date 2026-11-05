@@ -38,6 +38,7 @@ import org.apache.bookkeeper.client.ProfileRecoveryReadHandle;
 import org.apache.bookkeeper.client.RoundRobinDistributionSchedule;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
+import org.apache.bookkeeper.common.profile.control.ProfileControlResult;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.wire.ProfileStatus;
@@ -2384,6 +2385,32 @@ public final class ProfileRecoveryCoordinator {
     public record RepairResult(RepairStatus status, long copiedEntries,
             ZKProfileReservationStore.RepairCommitResult publication) { }
 
+    /** Constructed only after one exact restore CLOSE and its actual CONTROL attempt have finished. */
+    static final class RestoreCloseProof {
+        private final ZKProfileReservationStore.RepairSnapshot repair;
+        private final VerifiedSource source;
+        private final ProfileControlRequest request;
+
+        private RestoreCloseProof(ZKProfileReservationStore.RepairSnapshot repair, VerifiedSource source,
+                ProfileControlRequest request) {
+            this.repair = repair;
+            this.source = source;
+            this.request = request;
+        }
+
+        ZKProfileReservationStore.RepairSnapshot repair() {
+            return repair;
+        }
+
+        VerifiedSource source() {
+            return source;
+        }
+
+        ProfileControlRequest request() {
+            return request;
+        }
+    }
+
     /** Only the actual terminalClose client completion can construct an EMPTY publication proof. */
     static final class EmptyRepairProof {
         private final ZKProfileReservationStore.RepairSnapshot repair;
@@ -2602,8 +2629,8 @@ public final class ProfileRecoveryCoordinator {
                             && ref.intentStoreVersion() == prepared.storeVersion());
                 if (published) {
                     return CompletableFuture.supplyAsync(() -> reservations.resolveRepairClose(metadata, prepared,
-                            closeId, backup), cold).thenCompose(result -> closeRepair(result, intent,
-                                    control, 0));
+                            closeId, backup), cold).thenCompose(result -> closeRepair(result, prepared,
+                                    control, 0, backup, stopped));
                 }
                 boolean sameContent;
                 try {
@@ -2710,7 +2737,7 @@ public final class ProfileRecoveryCoordinator {
             if (ready.published()) {
                 return CompletableFuture.supplyAsync(
                         () -> reservations.resolveRepairClose(metadata, prepared, closeId, backup), cold)
-                            .thenCompose(published -> closeRepair(published, intent, control, 0));
+                            .thenCompose(published -> closeRepair(published, prepared, control, 0, backup, stopped));
             }
             if (ready.current().metadata().birthZxid() != frozen.metadata().birthZxid()
                     || !ready.current().metadata().metadata().getVersion().equals(
@@ -2724,7 +2751,7 @@ public final class ProfileRecoveryCoordinator {
                     return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, 0, null));
                 }
                 if (ready.admitted()) {
-                    return emptyBoundaryThenPublish(prepared, ready, control, closeId, stopped);
+                    return emptyBoundaryThenPublish(prepared, ready, control, closeId, stopped, backup);
                 }
                 return control.install(ProfileControlRequest.install(intent.install(), descriptor,
                         EngineProfile.SEGMENT_WAL_ENGINE, key)).thenCompose(installed -> {
@@ -2736,7 +2763,7 @@ public final class ProfileRecoveryCoordinator {
                             () -> reservations.admitRepair(metadata, prepared, receipt, backup), cold)
                             .thenCompose(admitted -> admitted.snapshot() == null || stopped.get()
                                 ? CompletableFuture.completedFuture(repairAdmissionFailure(admitted, backup))
-                                : emptyBoundaryThenPublish(prepared, ready, control, closeId, stopped));
+                                : emptyBoundaryThenPublish(prepared, ready, control, closeId, stopped, backup));
                 });
             });
         }).thenApply(result -> result.status() == RepairStatus.REPAIRED_HISTORICAL_FRAGMENT
@@ -2753,7 +2780,8 @@ public final class ProfileRecoveryCoordinator {
     }
 
     private CompletableFuture<RepairResult> emptyBoundaryThenPublish(ZKProfileReservationStore.RepairSnapshot prepared,
-            EmptyReady ready, ProfileInitialControlClient control, byte[] closeId, AtomicBoolean stopped) {
+            EmptyReady ready, ProfileInitialControlClient control, byte[] closeId, AtomicBoolean stopped,
+            VerifiedSource backup) {
         var boundary = ready.selected().boundary();
         var binding = new ProfileControlRequest.TerminalBinding(boundary.prefixEntryId(), boundary.prefixLength(),
                 ready.selected().reference().digest());
@@ -2761,15 +2789,26 @@ public final class ProfileRecoveryCoordinator {
         if (stopped.get()) {
             return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, 0, null));
         }
-        return control.terminalClose(ProfileControlRequest.terminalClose(scope, binding)).thenCompose(result -> {
-            if (!result.durable() || stopped.get()) {
+        var request = ProfileControlRequest.terminalClose(scope, binding);
+        var reply = backup == null ? control.terminalClose(request)
+                : drainedClose(control.beginTerminalClose(request));
+        return reply.thenCompose(result -> {
+            if (result == null || !result.durable() || stopped.get()
+                    || backup != null && !exactRestoreClose(prepared, request, control, result)) {
                 return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, 0, null));
             }
             var proof = new EmptyRepairProof(prepared, ready.current().metadata(), scope, binding, control, result);
             return CompletableFuture.supplyAsync(() -> stopped.get() ? null
-                    : reservations.commitEmptyRepair(metadata, proof), cold).thenApply(published ->
-                        new RepairResult(published != null && published.metadata() != null
-                            ? RepairStatus.REPAIRED_LAST_FRAGMENT : RepairStatus.DEFERRED, 0, published));
+                    : reservations.commitEmptyRepair(metadata, proof, backup), cold).thenCompose(published -> {
+                        if (published == null || published.metadata() == null || backup == null) {
+                            return CompletableFuture.completedFuture(new RepairResult(
+                                    published != null && published.metadata() != null
+                                            ? RepairStatus.REPAIRED_LAST_FRAGMENT : RepairStatus.DEFERRED,
+                                    0, published));
+                        }
+                        return settleRestore(published, new RestoreCloseProof(prepared, backup, request), stopped,
+                                0, RepairStatus.REPAIRED_LAST_FRAGMENT);
+                    });
         });
     }
 
@@ -2805,10 +2844,10 @@ public final class ProfileRecoveryCoordinator {
                         ? new RepairResult(RepairStatus.DEFERRED, result.copiedEntries(), null) : result);
             }
             return CompletableFuture.supplyAsync(() -> stopped.get() ? null : reservations.commitRepair(metadata,
-                    prepared, accepted.metadata(), closeId), cold).thenCompose(published -> published == null
+                    prepared, accepted.metadata(), closeId, backup), cold).thenCompose(published -> published == null
                         ? CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED,
                                 result.copiedEntries(), null))
-                        : closeRepair(published, prepared.intent(), control, result.copiedEntries()));
+                        : closeRepair(published, prepared, control, result.copiedEntries(), backup, stopped));
         }));
     }
 
@@ -2821,15 +2860,82 @@ public final class ProfileRecoveryCoordinator {
                     : published.status() == ZKProfileReservationStore.CreateStatus.QUARANTINED
                         ? RepairStatus.QUARANTINED : RepairStatus.DEFERRED, copied, published));
         }
-        var request = published.terminal() != null ? control.terminalClose(ProfileControlRequest.terminalClose(
-                published.closeScope(), published.terminal())) : control.recoveryClose(
-                        ProfileControlRequest.recoveryClose(
-                published.closeScope(), new ProfileControlRequest
-                    .RecoveryBinding(intent.intentId(), intent.intentGeneration(), intent.grantGeneration()),
-                intent.grantOperationId()));
-        return request.handle((closed, failure) -> new RepairResult(failure == null
+        var request = repairCloseRequest(published, intent);
+        var reply = published.terminal() != null ? control.terminalClose(request) : control.recoveryClose(request);
+        return reply.handle((closed, failure) -> new RepairResult(failure == null
                         && closed.durable() ? RepairStatus.REPAIRED_HISTORICAL_FRAGMENT : RepairStatus.DEFERRED,
                         copied, published));
+    }
+
+    private static ProfileControlRequest repairCloseRequest(ZKProfileReservationStore.RepairCommitResult published,
+            ProfileRepairIntent intent) {
+        return published.terminal() != null ? ProfileControlRequest.terminalClose(published.closeScope(),
+                published.terminal()) : ProfileControlRequest.recoveryClose(published.closeScope(),
+                new ProfileControlRequest.RecoveryBinding(intent.intentId(), intent.intentGeneration(),
+                        intent.grantGeneration()), intent.grantOperationId());
+    }
+
+    private CompletableFuture<RepairResult> closeRepair(ZKProfileReservationStore.RepairCommitResult published,
+            ZKProfileReservationStore.RepairSnapshot repair, ProfileInitialControlClient control, long copied,
+            VerifiedSource backup, AtomicBoolean stopped) {
+        if (backup == null || published.closeScope() == null) {
+            return closeRepair(published, repair.intent(), control, copied);
+        }
+        if (stopped.get()) {
+            return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, copied, published));
+        }
+        var request = repairCloseRequest(published, repair.intent());
+        var attempt = published.terminal() != null ? control.beginTerminalClose(request)
+                : control.beginRecoveryClose(request);
+        return drainedClose(attempt).thenCompose(reply -> {
+            if (stopped.get() || !exactRestoreClose(repair, request, control, reply)) {
+                return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, copied, published));
+            }
+            return settleRestore(published, new RestoreCloseProof(repair, backup, request), stopped, copied,
+                    RepairStatus.REPAIRED_HISTORICAL_FRAGMENT);
+        });
+    }
+
+    private static CompletableFuture<ProfileControlResult> drainedClose(
+            ProfileInitialControlClient.ControlAttempt attempt) {
+        return attempt.result().handle((reply, failure) -> failure == null ? reply : null)
+                .thenCombine(attempt.completion().handle((unused, failure) -> failure == null),
+                        (reply, drained) -> drained ? reply : null);
+    }
+
+    private static boolean exactRestoreClose(ZKProfileReservationStore.RepairSnapshot repair,
+            ProfileControlRequest request, ProfileInitialControlClient control, ProfileControlResult reply) {
+        var scope = request.scope();
+        var hello = control.hello();
+        var target = repair.intent().install();
+        return reply != null && reply.durable() && reply.localGeneration() > 0
+                && (reply.outcome() == ProfileControlResult.Outcome.APPLIED
+                    || reply.outcome() == ProfileControlResult.Outcome.ALREADY_APPLIED)
+                && reply.operation() == scope.operation() && reply.ledgerId() == scope.ledgerId()
+                && reply.operationIdHex().equals(HexFormat.of().formatHex(scope.operationId()))
+                && reply.authorityGeneration() == scope.authorityGeneration()
+                && hello.activeEngine() == 3 && hello.bookieId().equals(scope.targetBookie())
+                && Arrays.equals(hello.storageIncarnation(), scope.targetStorageIncarnation())
+                && target.targetBookie().equals(scope.targetBookie())
+                && Arrays.equals(target.targetStorageIncarnation(), scope.targetStorageIncarnation())
+                && hello.capabilities().contains(org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec
+                        .terminalCapability(repair.intent().empty()));
+    }
+
+    private CompletableFuture<RepairResult> settleRestore(ZKProfileReservationStore.RepairCommitResult published,
+            RestoreCloseProof proof, AtomicBoolean stopped, long copied, RepairStatus success) {
+        try {
+            return CompletableFuture.supplyAsync(() -> reservations.completeRestore(metadata, proof,
+                    () -> !stopped.get()), cold).thenCompose(completed -> completed.completion().thenApply(unused ->
+                            new RepairResult(switch (completed.status()) {
+                                case APPLIED, ALREADY_APPLIED -> success;
+                                case QUARANTINED -> RepairStatus.QUARANTINED;
+                                case CONFLICT -> RepairStatus.CONFLICT;
+                                default -> RepairStatus.DEFERRED;
+                            }, copied, published)));
+        } catch (RejectedExecutionException unavailable) {
+            return CompletableFuture.completedFuture(new RepairResult(RepairStatus.DEFERRED, copied, published));
+        }
     }
 
     private static RepairResult repairFailure(ProfileLedgerMetadataStore.Outcome outcome) {

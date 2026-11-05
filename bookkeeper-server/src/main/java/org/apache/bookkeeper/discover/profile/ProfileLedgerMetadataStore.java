@@ -510,18 +510,18 @@ public final class ProfileLedgerMetadataStore {
                 .withCustomMetadata(custom).build(), true);
     }
 
-    long deleteTombstoneCommit(MembershipSnapshot expected, long deadline)
+    long membershipCommit(MembershipSnapshot expected, long deadline)
             throws InterruptedException, TimeoutException, IOException {
         String name = ((AbstractZkLedgerManager) manager).getLedgerPath(expected.metadata().getValue().getLedgerId());
         var node = mutationReads.get(name, deadline);
         if (node.code() != Code.OK.intValue()) {
-            throw new IllegalStateException("Delete retention metadata unavailable");
+            throw new IllegalStateException("Membership metadata unavailable");
         }
         if (node.stat().getEphemeralOwner() != 0 || node.stat().getCzxid() != expected.birthZxid()
                 || node.stat().getVersion() != ((LongVersion) expected.metadata().getVersion()).getLongVersion()
                 || !sameMetadata(expected.metadata().getValue(), new LedgerMetadataSerDe().parseConfig(node.bytes(),
                         expected.metadata().getValue().getLedgerId(), Optional.of(node.stat().getCtime())))) {
-            throw new IllegalArgumentException("Delete retention metadata changed or was recreated");
+            throw new IllegalArgumentException("Membership metadata changed or was recreated");
         }
         return node.stat().getMzxid();
     }

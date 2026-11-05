@@ -30,7 +30,8 @@ import org.apache.bookkeeper.net.BookieId;
 
 /** Immutable inverse/digest receipt for one guarded repair membership CAS, never a second membership authority. */
 public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[] afterDigest,
-        String oldBookie, byte[] closeOperationId, long closeGeneration, byte[] emptyBoundaryDigest) {
+        String oldBookie, byte[] closeOperationId, long closeGeneration, byte[] emptyBoundaryDigest,
+        boolean restoreGuardRequired) {
     public static final String KEY = "bookkeeper.experimental.profile.repair-commits";
     public static final int MAX_BYTES = 393;
     private static final int MAGIC = 0x5557524d; // UWRM, distinct from the UWRC recovery context
@@ -109,7 +110,13 @@ public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[]
 
     public ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[] afterDigest,
             String oldBookie, byte[] closeOperationId, long closeGeneration) {
-        this(beforeVersion, beforeDigest, afterDigest, oldBookie, closeOperationId, closeGeneration, null);
+        this(beforeVersion, beforeDigest, afterDigest, oldBookie, closeOperationId, closeGeneration, null, false);
+    }
+
+    public ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[] afterDigest,
+            String oldBookie, byte[] closeOperationId, long closeGeneration, byte[] emptyBoundaryDigest) {
+        this(beforeVersion, beforeDigest, afterDigest, oldBookie, closeOperationId, closeGeneration,
+                emptyBoundaryDigest, false);
     }
 
     @Override
@@ -147,7 +154,7 @@ public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[]
     public byte[] encode() {
         byte[] old = ProfileAuthorityCodec.text(oldBookie, 255);
         var out = ByteBuffer.allocate(106 + old.length + (emptyBoundaryDigest == null ? 0 : 32))
-                .putInt(MAGIC).putShort((short) (emptyBoundaryDigest == null ? 1 : 2))
+                .putInt(MAGIC).putShort((short) (restoreGuardRequired ? 3 : emptyBoundaryDigest == null ? 1 : 2))
                 .putShort((short) (emptyBoundaryDigest == null ? 0 : 1))
                 .putInt(beforeVersion).put(beforeDigest).put(afterDigest).put(closeOperationId)
                 .putLong(closeGeneration);
@@ -160,7 +167,9 @@ public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[]
 
     public static ProfileRepairCommit decode(byte[] bytes) {
         var in = checked(bytes, 107, MAX_BYTES, MAGIC, true);
-        boolean empty = ByteBuffer.wrap(bytes).getShort(4) == 2;
+        var header = ByteBuffer.wrap(bytes);
+        boolean restore = header.getShort(4) == 3;
+        boolean empty = header.getShort(6) == 1;
         int version = in.getInt();
         byte[] before = new byte[32];
         byte[] after = new byte[32];
@@ -184,7 +193,7 @@ public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[]
         if (!Arrays.equals(old, ProfileAuthorityCodec.text(member, 255))) {
             throw new IllegalArgumentException("Noncanonical repair commit member");
         }
-        return new ProfileRepairCommit(version, before, after, member, operation, generation, emptyDigest);
+        return new ProfileRepairCommit(version, before, after, member, operation, generation, emptyDigest, restore);
     }
 
     public static List<Reference> head(byte[] bytes) {
@@ -244,7 +253,7 @@ public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[]
         return checked(bytes, minimum, maximum, magic, false);
     }
 
-    private static ByteBuffer checked(byte[] bytes, int minimum, int maximum, int magic, boolean allowEmpty) {
+    private static ByteBuffer checked(byte[] bytes, int minimum, int maximum, int magic, boolean commitBody) {
         if (bytes == null || bytes.length < minimum || bytes.length > maximum) {
             throw new IllegalArgumentException("Invalid repair commit byte bound");
         }
@@ -256,7 +265,8 @@ public record ProfileRepairCommit(int beforeVersion, byte[] beforeDigest, byte[]
         }
         int schema = Short.toUnsignedInt(in.getShort());
         int kind = Short.toUnsignedInt(in.getShort());
-        if (!(schema == 1 && kind == 0) && !(allowEmpty && schema == 2 && kind == 1)) {
+        if (!(schema == 1 && kind == 0)
+                && !(commitBody && (schema == 2 && kind == 1 || schema == 3 && (kind == 0 || kind == 1)))) {
             throw new IllegalArgumentException("Unknown repair commit schema/kind");
         }
         return in;

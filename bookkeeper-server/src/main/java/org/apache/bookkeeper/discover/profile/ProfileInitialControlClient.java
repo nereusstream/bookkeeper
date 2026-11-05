@@ -107,14 +107,22 @@ public final class ProfileInitialControlClient implements ProfileInitialMetadata
 
     /** Independent UIC4 close; the target must cold-read exact committed close authority. */
     public CompletableFuture<ProfileControlResult> recoveryClose(ProfileControlRequest request) {
-        return scope == null ? socket.recoveryClose(request)
-                : scope.admit(() -> socket.beginRecoveryClose(request), ControlAttempt::completion).result();
+        return beginRecoveryClose(request).result();
+    }
+
+    ControlAttempt beginRecoveryClose(ProfileControlRequest request) {
+        return scope == null ? socket.beginRecoveryClose(request)
+                : scope.admit(() -> socket.beginRecoveryClose(request), ControlAttempt::completion);
     }
 
     /** Standalone selected-boundary close, including (-1, 0); never creates a DATA grant. */
     public CompletableFuture<ProfileControlResult> terminalClose(ProfileControlRequest request) {
-        return scope == null ? socket.terminalClose(request)
-                : scope.admit(() -> socket.beginTerminalClose(request), ControlAttempt::completion).result();
+        return beginTerminalClose(request).result();
+    }
+
+    ControlAttempt beginTerminalClose(ProfileControlRequest request) {
+        return scope == null ? socket.beginTerminalClose(request)
+                : scope.admit(() -> socket.beginTerminalClose(request), ControlAttempt::completion);
     }
 
     /** Apply one committed delete delivery; continuous local progress is durable with its TOMBSTONE. */

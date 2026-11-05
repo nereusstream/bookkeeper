@@ -2206,6 +2206,18 @@ floor 适用于显式 commissioning 的 G1 scope。既有 assignment 的升级�
 
 2026-11-05，基线 `5b253528c2`。真实 ZooKeeper、文件、mTLS 验证零下界、推进丢回复后的原 revision、同 head 版本下的 floor 与 admission 竞争、已验封镜像补齐到下界后的实际 copy 和读回、空范围凭原 revision 续接及历史损坏和降级拒绝。移除准入事务的 floor 条件时，源 head 未变，旧镜像在下界推进后仍完成修复，定向断言失败。恢复条件后，最终四类 35 项定向测试通过，零失败、错误或跳过。Spotless 与 Checkstyle 通过。各阶段 1460 项输入、命令及原始回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/restore-floor-evidence-5b253528`。Linux、掉电、正式性能和 canary 本轮未执行。
 
+## 镜像恢复的目标完成回执
+
+公开镜像恢复在原目标的 `RECOVERY_GRANT_CLOSE` 或空范围 `RECOVERY_TERMINAL_CLOSE` 得到精确、持久的成功响应后，继续等待同一 CONTROL attempt 的实际排空。校验绑定原 mTLS HELLO 的 BookieId/incarnation、ledger、操作 ID、authority generation 及操作类别。响应的本地 generation 须为正。`APPLIED`、`ALREADY_APPLIED` 和本地 generation 的后续变化都映射到同一原操作。
+
+新 restore 的 membership CAS 同时写入 `UWRM` schema 3 committed 记录及 `/restore-commit/proof`。schema 3 的 kind 继续区分 DATA 与 EMPTY，metadata head 保存 committed 字节摘要。`/restore-commit` 及 proof 与 committed 同原生出生，proof 绑定 admission czxid、intent、源 witness 和 commit 摘要。受保护容器仅有读与创建权限，常规 namespace 写者无法删其 proof 或移除非空容器。既有无此标记的发布若尚无完成回执，仅在它仍是当前标准 metadata 的最后一条修复、当前版本精确等于 beforeVersion + 1 且同一原生读的 mzxid 等于 committed czxid 时可结算。
+
+目标 CLOSE 实际排空后，原 cold store 核对当前 CLOSED 和 delete、原 intent/admission/镜像 witness、原 floor revision 与 committed 出生。完成事务检查这些原生条件，并写入不可变 `/restore-completed` 和同出生的摘要子节点 `/birth`。`UWRE` v1 的 268 字节按 big-endian 编码，绑定 ledger/instance、intent 出生、metadata/admission/commit 出生、intent/源 witness/commit/目标身份摘要、close ID/authority generation、DATA 或 EMPTY kind 和 close payload 摘要。
+
+成功在实际目标 CLOSE 和原生回执读回之后返回。回执提交后丢回复可凭原镜像、intent 和 CLOSE ID 解析相同出生。取消保留已提交 CONTROL 与 ZooKeeper callback 的实际排空及镜像锁。普通 repair 延续原完成路径。回执只证明该次恢复已结算。显式续接仍重验原源事件与 floor revision，源历史和旧目标义务继续由原权限保留。历史 GC、跨 assignment、外部退役及生产 Gate 仍开放。
+
+2026-11-05，基线 `2f5481d6eb`。真实 mTLS 测试在目标 CLOSE 持久成功响应已到时挂起原输出完成。回执尚未提交，原 completion 尚未结束，镜像锁继续持有。移除实际排空等待后，ZooKeeper 在原输出挂起期间提前提交回执，定向断言失败。恢复等待后，回执提交的回复挂过 store deadline，原操作继续持锁到实际 callback，随后返回 DEFERRED。重试读取同一原生回执且 copy 0。另验证不可删除的出生锚、同字节 committed 重建、必需 proof 缺失、旧原生发布及 metadata 前进后的拒绝，以及空范围完成。最终三类 32 项定向测试通过，零失败、错误或跳过。Spotless 和 Checkstyle 通过。各阶段 1460 项输入、原始命令和回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/restore-completion-evidence-2f5481d6`。Linux、掉电、正式性能和 canary 本轮未执行。
+
 ## 恢复目标的首次 service bootstrap 组合验证
 
 2026-10-23，父源码 `389b49fadaa265ba4d2b03afab0699372948caf2`。复用原ServiceEpisode、SegmentProfileService与ZK startup requirements/assignment/head/readiness/registration，在上一节真实镜像copy测试中补入两个恢复专属生命周期；不新增生产入口、控制协议或第二套bootstrap。目标使用原新BookieId/incarnation/目录，镜像仍只作历史source；通过当前repair获得的数据在目标本地恢复后，由目标自己的当前authority决定服务资格。

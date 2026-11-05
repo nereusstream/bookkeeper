@@ -6,6 +6,8 @@
 
 步骤 15 已为显式新建的 G1 源 assignment 接入恢复接受下界。源出生事务创建零 revision，推进核验同一源的已提交删除坐标。首次 CLOSED 准入与推进按 floor 版本排序，空范围同样适用。已受理恢复凭同一镜像和原 revision 续接。同 head 版本的竞争反例与最终 35 项定向测试已归档，Spotless 和 Checkstyle 通过。旧 assignment 的升级、跨 assignment、旧目标终态和历史 GC 仍开放。详见 [profile-wire](profile-wire/README.md#g1-恢复接受下界)。
 
+步骤 15 的镜像恢复已把精确目标 CLOSE 及原 RPC 实际排空接入不可变 ZooKeeper 完成回执。新 membership 发布原子记录受保护的 committed 出生，旧发布按当前原生版本与出生窄校验。实际 CLOSE 输出反例、ZooKeeper callback 超时后原回执续接及 32 项定向测试已归档，Spotless 和 Checkstyle 通过。完整依赖枚举、旧目标退役及历史 GC 仍开放。详见 [profile-wire](profile-wire/README.md#镜像恢复的目标完成回执)。
+
 步骤 14→15 的组合验证覆盖实际承载 3/3/3 已确认数据的 Bookie JVM 退出。临时注册自然消失后，原 auditor 产生任务，worker 将 CLOSED 账本修复到另一 BookieId/incarnation，保留原 CLOSED 边界并通过公开 SDK 读回。旧目录的原 owned restart 拒绝。后续逻辑删除包含原三个及新目标的确切义务，旧离线 incarnation 的物理终结回执仍缺失。详见 [profile-wire](profile-wire/README.md#已确认-data-的-bookie-jvm-退出后修复与删除)。
 
 步骤 7→12 的服务组合验证覆盖持原目录并完成真实注册、从未发 DATA grant 的 Bookie 子 JVM 异常退出。旧临时注册自然消失后，原 owned service 以同一身份、目录和端点重开，持久应用 action 4 后发布新 episode。旧观察在端点复用时仍拒绝，公开 SDK 经新注册池以 3/3/3 确认首次写入，正常关闭并逐条读回。详见 [profile-wire](profile-wire/README.md#未授权-data-的-bookie-jvm-退出后重新注册)。

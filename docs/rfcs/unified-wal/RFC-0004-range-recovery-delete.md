@@ -895,6 +895,8 @@ all historical targets acknowledged or durably decommissioned
 
 当前恢复准入将封存的源 G1 删除进度与当前原生删除流接入 CLOSED repair。显式新建的 G1 assignment 可从出生启用恢复接受下界。首次准入与下界推进使用同一 floor 版本竞争，已受理恢复凭精确镜像及原 revision 续接，空范围同样适用。旧 assignment、跨 assignment 和历史回收的接受条件继续开放。详见 [G1 恢复接受下界](implementation/profile-wire/README.md#g1-恢复接受下界)。
 
+当前镜像恢复在精确目标 CLOSE 的实际终态后，按当前原生条件提交不可变完成回执。该回执区分已经结算的恢复，并保留原源历史、删除义务和后续回收的独立前提。详见 [镜像恢复的目标完成回执](implementation/profile-wire/README.md#镜像恢复的目标完成回执)。
+
 恢复专属最小验收复用真实文件/ZK/mTLS/SDK/restart fixture：备份后删除不复活；ledgerId reuse 不混淆 instance；delete 与 admission/writable 两种先后均保留目标和 required-through；缺页/断 suffix/错误 scope 或 generation/recreated birth/旧权限重放 fail closed；copy force、cursor/readiness 与 registration 的 crash/lost-reply 重试幂等且 actual I/O 先排空；旧目标 offline、窗口已到期且新目标已恢复时，旧义务仍保留。未知 authority/timeout/UNKNOWN 不证明无义务，必要数据不足或历史不完整保持隔离/RECOVERING、不发布 writable。既有等价覆盖复用，不按场景数重复扩矩阵。
 
 ## 16. 安全不变量
