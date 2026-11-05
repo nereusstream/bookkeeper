@@ -890,6 +890,8 @@ OPEN 记录可能来自进程退出，或来自尚未来得及持久化隔离的
 
 修复前，首次 graph restart 在旧 unclosed 检查处失败。随后新增六项定向验证通过。五类回归 392 项通过，Arena 测试折行后重跑该整类，并补跑容量和 DATA 锁，共 59 项通过。两轮去重 405 项，零失败、错误或跳过。第二轮 1460 项输入与交付源码一致，第一轮唯一差异为该折行。Spotless 与 Checkstyle 通过。使用父提交的实际 Arena reader 重放独立向量，确认旧 reader 拒绝 action 4。命令、源码、字节码及原始回执保存在 `/Users/liusinan/.codex/artifacts/unified-wal/never-allocated-session-recovery-evidence-10383dcc`。
 
+服务级组合覆盖实际持锁并注册的 Bookie 子 JVM 异常退出。原启动路径持久化 action 4、开启新 DATA epoch，经同身份重新注册后由公开 SDK 首次写入并读回。[服务级回执](../profile-wire/README.md#未授权-data-的-bookie-jvm-退出后重新注册)
+
 ## Profile 普通 Add 的真实接线
 
 2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。

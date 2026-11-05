@@ -2765,4 +2765,16 @@ Spotless/Checkstyle实际exit0；独立RAT实际exit1，仍为父982a18dad9既�
 
 最终新增进程场景、健康服务重开、whole-point recovery、公开 fresh create 和公开只读共五项定向 JUnit 通过，Java Spotless 与 Checkstyle 通过。首次夹具把 SDK wrapper 错当成原生 ZK manager，第二次到达 CLOSED 后用含 byte[] 的对象相等断言比较元数据。修正为独立真实 manager 和逐出生、版本、序列化字节比较，分别保留原测试源码与结果。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/profile-writer-crash-evidence-c4d87e61`。
 
-证据覆盖同主机、同版本、三个服务保持运行时的客户端进程异常退出及新客户端恢复。Bookie 进程崩溃、同身份未关闭 DATA session 重开、掉电、跨版本、批准 Linux 和完整步骤 14/16 验收仍待完成，生产 Gate 保持 OPEN。
+证据覆盖同主机、同版本、三个服务保持运行时的客户端进程异常退出及新客户端恢复。Bookie 进程侧的窄范围验证见下一节。掉电、跨版本、批准 Linux 和完整步骤 14/16 验收仍待完成，生产 Gate 保持 OPEN。
+
+## 未授权 DATA 的 Bookie JVM 退出后重新注册
+
+以 `aab4299462` 为基线。三台实际 Profile Bookie 通过同一个 ZooKeeper 集群注册。目标目录以无 DATA 的健康关闭完成初始配置，再由独立 JVM 的 `SegmentProfileService.withOwnedResources` 在原目录和端点启动。父测试用真实 registry 取得 readiness generation 5 的注册，验证 writable 节点属于子进程实际 ZooKeeper session，完成 mTLS 和 DATA HELLO。子进程收到指定测试命令后直接 `Runtime.halt(23)`。回执核对唯一 nonce、PID、session 和退出码。
+
+父进程分别等待原 TCP 连接关闭、客户侧 backing 归还以及原 ZooKeeper 临时注册自然消失。该节点持久 READY 的版本与记录保留，另外两台原服务的注册观察继续有效。Arena 重放显示 DATA epoch 2 仍 OPEN，从初始健康关闭到退出只新增了一条 OPEN。实际服务重开沿原 DATA 锁、Arena、Bookie、索引及 startup/readiness 入口处理，原日志增加同 epoch 的 action 4 和 epoch 3 的 OPEN。新 episode 以相同 BookieId、incarnation、目录和端点发布 readiness generation 6。原 readiness znode 出生保持，版本和修改 zxid 增长，writable 节点属于新 session。旧 RegisteredPeer 在原端点上也无法建立连接。
+
+独立注册观察池从真实服务取得三组 CTRL/DATA 连接，核验新 HELLO 后排空。公开 SDK 独占新的池，通过 `enableProfile` 和 `createProfileLedger` 安装激活并以 3/3/3 确认两条不同 payload。正常 close 发布 `CLOSED(1, 35)`，公开只读 SDK 逐条读回原字节。关闭后两池连接、RPC、backing 和 codec workspace 归零，服务侧连接和新目标的 owned 资源实际排空。新目标最终健康 CLOSE，并保留这次写入产生的 grant。
+
+父提交上的两个健康重开对照通过。首轮新增用例到达新注册后，SDK 拒绝接管已用于 HELLO 检查的池。夹具分开观察池与 SDK 的未使用池后，最终两类共七项定向测试通过，零失败、错误或跳过。覆盖原 action 4、曾发 grant 的拒绝、滚动注册刷新、owned service 实际关闭和既有 restore 组合。Spotless 与 Checkstyle 通过。测试、子进程标记、各阶段 1460 项输入及原始日志位于 `/Users/liusinan/.codex/artifacts/unified-wal/profile-service-rejoin-evidence-aab42994`。
+
+此次验收限同主机、同版本、单 Arena、整个历史未授权 DATA 的 Bookie 进程异常退出和同身份重新注册。曾发 grant 的同身份异常重开、掉电、跨版本、D2 与批准 Linux 运行仍待验收。步骤 7/12 的完整验收和生产 Gate 保持 OPEN。
