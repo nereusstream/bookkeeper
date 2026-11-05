@@ -133,8 +133,11 @@ import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileLifecycleHead;
 import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
 import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
+import org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool;
+import org.apache.bookkeeper.discover.profile.ProfileRepairCommit;
+import org.apache.bookkeeper.discover.profile.ProfileRepairIntent;
 import org.apache.bookkeeper.discover.profile.ProfileReplacementCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileReplacementInstallPage;
 import org.apache.bookkeeper.discover.profile.ProfileReplacementPage;
@@ -14740,6 +14743,11 @@ public class SegmentProfileInitialSocketClientTest {
         }
 
         PublicProfileReadonlyEpisode(int cohortSize, boolean createClosed, int ackQuorum) throws Exception {
+            this(cohortSize, createClosed, ackQuorum, false);
+        }
+
+        PublicProfileReadonlyEpisode(int cohortSize, boolean createClosed, int ackQuorum, boolean ownsResources)
+                throws Exception {
             fixture = new Fixture(false, false, true, cohortSize, ackQuorum, true, true);
             try {
                 sdk = sdk(fixture);
@@ -14751,7 +14759,7 @@ public class SegmentProfileInitialSocketClientTest {
                             "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
                     var policy = servicePolicy(config, fixture.identities.get(target), 1);
                     var episode = new ServiceEpisode(fixture, target, config, policy, policy.compatibility(),
-                            new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup);
+                            new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup, false, ownsResources);
                     episodes.add(episode);
                     episode.replaceNode(fixture, target, false);
                     if (!createClosed) {
@@ -16086,8 +16094,7 @@ public class SegmentProfileInitialSocketClientTest {
             assertFalse(clean.sessionOpen());
             assertEquals(0, clean.currentAllocations());
 
-            String readinessPath = "/socket-service-readiness/" + java.util.Base64.getUrlEncoder().withoutPadding()
-                    .encodeToString(bookie.getBytes(StandardCharsets.UTF_8));
+            String readinessPath = serviceReadinessPath(bookie);
             var old = haltUnusedRegisteredService(fixture, prepared, identity, address, registry, readinessPath);
             for (var sibling : siblings) {
                 assertEquals(ProfileRegistrationStore.ReadStatus.FOUND, registry.revalidatePeer(sibling).status());
@@ -16224,42 +16231,9 @@ public class SegmentProfileInitialSocketClientTest {
     private ZKProfileRegistrationStore.RegisteredPeer haltUnusedRegisteredService(Fixture fixture,
             ServiceEpisode prepared, SegmentFileHeader identity, InetSocketAddress address,
             ZKProfileRegistrationStore registry, String readinessPath) throws Exception {
-        Path inputs = temporary.newFolder().toPath();
-        Path properties = inputs.resolve("service.properties");
-        Path ready = inputs.resolve("ready");
-        Path output = inputs.resolve("child.log");
-        String nonce = UUID.randomUUID().toString();
-        var configuration = new ServerConfiguration(prepared.bootstrapConfiguration);
-        configureOwnedProfileService(configuration, fixture.cluster.getZooKeeperConnectString());
-        var values = new java.util.Properties();
-        configuration.getKeys().forEachRemaining(name -> values.setProperty(name, configuration.getString(name)));
-        try (var stream = Files.newOutputStream(properties)) {
-            values.store(stream, "Disposable unused Profile service");
-        }
-        String bookie = identity.bookieId().toString();
-        var child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "-Xmx128m", "-XX:MaxDirectMemorySize=64m", "-cp", System.getProperty("java.class.path"),
-                UnusedProfileServiceCrashProbe.class.getName(), properties.toString(), ready.toString(), nonce,
-                bookie, identity.arenaId().toString(),
-                java.util.HexFormat.of().formatHex(identity.incarnation().value()),
-                Integer.toString(address.getPort()))
-                .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-        try {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
-            while (!Files.exists(ready) && child.isAlive() && System.nanoTime() < deadline) {
-                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(2));
-            }
-            assertTrue(Files.readString(output), Files.exists(ready) && child.isAlive());
-            var old = registry.readPeer(bookie).peer();
-            assertNotNull(old);
-            assertEquals(5, old.projection().readinessGeneration().value());
-            assertEquals(identity.incarnation(), old.projection().storageIncarnation());
-            assertEquals("tls://127.0.0.1:" + address.getPort(), old.projection().endpoint());
-            String marker = nonce + " " + child.pid() + " " + old.publisherSession();
-            assertEquals(marker, Files.readString(ready));
-            assertEquals(old.publisherSession(), fixture.zk.exists(readinessPath + "/writable", false)
-                    .getEphemeralOwner());
-            var persistent = registry.read(bookie).versionedRecord().orElseThrow();
+        try (var child = new RegisteredServiceCrashProcess(fixture, prepared, identity, address)) {
+            var old = child.awaitRegistered(fixture.zk, registry, identity, address);
+            var persistent = registry.read(identity.bookieId().toString()).versionedRecord().orElseThrow();
             assertEquals(old.readiness(), persistent.record());
             assertThrows(IOException.class, () -> {
                 try (var lock = SegmentDataFileLock.open(prepared.config.directory())) {
@@ -16274,15 +16248,7 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(5, data.hello().readinessGeneration());
                 assertArrayEquals(identity.incarnation().value(), data.hello().storageIncarnation());
                 var channel = dataChannel(data);
-                child.getOutputStream().write('H');
-                child.getOutputStream().flush();
-                boolean halted = child.waitFor(15, TimeUnit.SECONDS);
-                String log = Files.readString(output);
-                assertTrue(log, halted);
-                assertEquals(log, 23, child.exitValue());
-                assertEquals(log, List.of("UW_UNUSED_SERVICE_READY " + marker, "UW_UNUSED_SERVICE_HALT " + marker),
-                        log.lines().filter(line -> line.startsWith("UW_UNUSED_SERVICE_")).toList());
-                System.out.println("UW_UNUSED_SERVICE_CHILD\n" + log);
+                child.halt(old);
                 assertTrue(channel.closeFuture().await(5, TimeUnit.SECONDS));
             } finally {
                 connected.closeAsync().get(5, TimeUnit.SECONDS);
@@ -16290,16 +16256,95 @@ public class SegmentProfileInitialSocketClientTest {
             assertEquals(0, connected.backingBytes());
             assertEquals(0, connected.codecWorkspaceBytes());
 
-            deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
-            while (fixture.zk.exists(readinessPath + "/writable", false) != null && System.nanoTime() < deadline) {
-                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
-            }
-            assertNull(fixture.zk.exists(readinessPath + "/writable", false));
-            assertNull(fixture.zk.exists(readinessPath + "/service-info", false));
-            assertEquals(ProfileRegistrationStore.ReadStatus.NOT_FOUND, registry.readPeer(bookie).status());
+            String bookie = identity.bookieId().toString();
+            awaitLostServiceRegistration(fixture.zk, registry, bookie, readinessPath);
             assertEquals(persistent, registry.read(bookie).versionedRecord().orElseThrow());
             return old;
-        } finally {
+        }
+    }
+
+    private static String serviceReadinessPath(String bookie) {
+        return "/socket-service-readiness/" + java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(bookie.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void awaitLostServiceRegistration(ZooKeeper zk, ZKProfileRegistrationStore registry,
+            String bookie, String path) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        while (zk.exists(path + "/writable", false) != null && System.nanoTime() < deadline) {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+        }
+        assertNull(zk.exists(path + "/writable", false));
+        assertNull(zk.exists(path + "/service-info", false));
+        assertEquals(ProfileRegistrationStore.ReadStatus.NOT_FOUND, registry.readPeer(bookie).status());
+    }
+
+    private final class RegisteredServiceCrashProcess implements AutoCloseable {
+        private final Process child;
+        private final Path ready;
+        private final Path output;
+        private final String nonce = UUID.randomUUID().toString();
+
+        RegisteredServiceCrashProcess(Fixture fixture, ServiceEpisode prepared, SegmentFileHeader identity,
+                InetSocketAddress address) throws Exception {
+            Path inputs = temporary.newFolder().toPath();
+            Path properties = inputs.resolve("service.properties");
+            ready = inputs.resolve("ready");
+            output = inputs.resolve("child.log");
+            var configuration = new ServerConfiguration(prepared.bootstrapConfiguration);
+            configureOwnedProfileService(configuration, fixture.cluster.getZooKeeperConnectString());
+            var values = new java.util.Properties();
+            configuration.getKeys().forEachRemaining(name -> values.setProperty(name, configuration.getString(name)));
+            try (var stream = Files.newOutputStream(properties)) {
+                values.store(stream, "Disposable Profile service");
+            }
+            child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-Xmx128m", "-XX:MaxDirectMemorySize=64m", "-cp", System.getProperty("java.class.path"),
+                    RegisteredProfileServiceCrashProbe.class.getName(), properties.toString(), ready.toString(),
+                    nonce, identity.bookieId().toString(), identity.arenaId().toString(),
+                    java.util.HexFormat.of().formatHex(identity.incarnation().value()),
+                    Integer.toString(address.getPort()))
+                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        }
+
+        ZKProfileRegistrationStore.RegisteredPeer awaitRegistered(ZooKeeper zk, ZKProfileRegistrationStore registry,
+                SegmentFileHeader identity, InetSocketAddress address) throws Exception {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (!Files.exists(ready) && child.isAlive() && System.nanoTime() < deadline) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(2));
+            }
+            assertTrue(Files.readString(output), Files.exists(ready) && child.isAlive());
+            String bookie = identity.bookieId().toString();
+            var peer = registry.readPeer(bookie).peer();
+            assertNotNull(peer);
+            assertEquals(5, peer.projection().readinessGeneration().value());
+            assertEquals(identity.incarnation(), peer.projection().storageIncarnation());
+            assertEquals("tls://127.0.0.1:" + address.getPort(), peer.projection().endpoint());
+            assertEquals(marker(peer), Files.readString(ready));
+            assertEquals(peer.publisherSession(), zk.exists(serviceReadinessPath(bookie) + "/writable", false)
+                    .getEphemeralOwner());
+            return peer;
+        }
+
+        void halt(ZKProfileRegistrationStore.RegisteredPeer peer) throws Exception {
+            child.getOutputStream().write('H');
+            child.getOutputStream().flush();
+            boolean halted = child.waitFor(15, TimeUnit.SECONDS);
+            String log = Files.readString(output);
+            assertTrue(log, halted);
+            assertEquals(log, 23, child.exitValue());
+            String marker = marker(peer);
+            assertEquals(log, List.of("UW_PROFILE_SERVICE_READY " + marker, "UW_PROFILE_SERVICE_HALT " + marker),
+                    log.lines().filter(line -> line.startsWith("UW_PROFILE_SERVICE_")).toList());
+            System.out.println("UW_PROFILE_SERVICE_CHILD\n" + log);
+        }
+
+        private String marker(ZKProfileRegistrationStore.RegisteredPeer peer) {
+            return nonce + " " + child.pid() + " " + peer.publisherSession();
+        }
+
+        @Override
+        public void close() throws Exception {
             if (child.isAlive()) {
                 child.destroyForcibly();
                 assertTrue(Files.readString(output), child.waitFor(5, TimeUnit.SECONDS));
@@ -16308,7 +16353,7 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     /** Starts the original owned service, then halts it on the test command without service cleanup. */
-    public static final class UnusedProfileServiceCrashProbe {
+    public static final class RegisteredProfileServiceCrashProbe {
         public static void main(String[] args) throws Exception {
             if (args.length != 7) {
                 throw new IllegalArgumentException("Expected owned service crash inputs");
@@ -16346,7 +16391,7 @@ public class SegmentProfileInitialSocketClientTest {
             long session = ((ZooKeeper) ownedResourceField(service, "zk")).getSessionId();
             assertNotEquals(0L, session);
             String marker = args[2] + " " + ProcessHandle.current().pid() + " " + session;
-            System.out.println("UW_UNUSED_SERVICE_READY " + marker);
+            System.out.println("UW_PROFILE_SERVICE_READY " + marker);
             System.out.flush();
             Path ready = Path.of(args[1]);
             Path pending = ready.resolveSibling("ready.pending");
@@ -16355,7 +16400,7 @@ public class SegmentProfileInitialSocketClientTest {
             if (System.in.read() != 'H') {
                 throw new IllegalStateException("Expected test halt command");
             }
-            System.out.println("UW_UNUSED_SERVICE_HALT " + marker);
+            System.out.println("UW_PROFILE_SERVICE_HALT " + marker);
             System.out.flush();
             Runtime.getRuntime().halt(23);
         }
@@ -17641,6 +17686,284 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void profileAuditorRepairsClosedLedgerAfterAckedBookieJvmHaltsAndRetainsDeleteTargets() throws Exception {
+        try (var episode = new PublicProfileReadonlyEpisode(4, false, 3, true)) {
+            var fixture = episode.fixture;
+            var sdk = episode.sdk;
+            int failedSlot = 2;
+            var oldIdentity = fixture.identities.get(failedSlot);
+            var newIdentity = fixture.identities.get(3);
+            var oldBookie = oldIdentity.bookieId();
+            var newBookie = newIdentity.bookieId();
+            var registry = episode.episodes.get(0).persistent;
+            var prepared = episode.episodes.get(failedSlot);
+            var replacement = episode.episodes.get(3);
+            var address = (InetSocketAddress) fixture.listeners.get(failedSlot).localAddress();
+            assertNotEquals(oldBookie, newBookie);
+            assertNotEquals(oldIdentity.incarnation(), newIdentity.incarnation());
+            assertFalse(Files.isSameFile(prepared.config.directory(), replacement.config.directory()));
+            var standby = registry.readPeer(newBookie.toString()).peer();
+            assertNotNull(standby);
+            assertFalse(bookie(replacement.storage()).locallyReadableContext(fixture.context()));
+            prepared.service.close();
+            prepared.assertOwnedResourcesTerminal(true);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            byte[] first = bytes(16, 8);
+            byte[] second = bytes(19, 9);
+            long ledger = fixture.context().ledgerId();
+            var main = profileMembershipMain(fixture, org.apache.bookkeeper.stats.NullStatsLogger.INSTANCE, 0,
+                    "/socket-service-readiness");
+            var worker = main.getReplicationWorker();
+            ZKProfileReservationStore.ReadOnlySnapshot original;
+            try (var child = new RegisteredServiceCrashProcess(fixture, prepared, oldIdentity, address);
+                    var monitor = sdk.getLedgerManagerFactory().newLedgerUnderreplicationManager()) {
+                var oldPeer = child.awaitRegistered(fixture.zk, registry, oldIdentity, address);
+                sdk.enableProfile(episode.initializer, episode.coordinator, VALIDATOR, episode.pool, 4);
+                var writer = (ProfileLedgerHandle) sdk.createProfileLedger(publicCreateRequest(fixture))
+                        .get(10, TimeUnit.SECONDS);
+                try {
+                    assertEquals(0, writer.addEntry(first));
+                    assertEquals(1, writer.addEntry(second));
+                    assertEquals(1, writer.getLastAddConfirmed());
+                    assertEquals(first.length + second.length, writer.getLength());
+                    writer.closeAsync().get(30, TimeUnit.SECONDS);
+                } finally {
+                    writer.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                }
+                assertRegisteredPoolDrained(episode.pool);
+                original = fixture.reservations.readClosedForOpen(metadata, ledger).snapshot();
+                assertNotNull(original);
+                var closed = original.closed().metadata().metadata().getValue();
+                assertEquals(LedgerMetadata.State.CLOSED, closed.getState());
+                assertEquals(3, closed.getEnsembleSize());
+                assertEquals(3, closed.getWriteQuorumSize());
+                assertEquals(3, closed.getAckQuorumSize());
+                assertEquals(oldBookie, closed.getEnsembleAt(0).get(failedSlot));
+                assertEquals(1, closed.getLastEntryId());
+                assertEquals(first.length + second.length, closed.getLength());
+
+                startOnlyProfileAuditor(main);
+                assertNull(monitor.getLedgerUnreplicationInfo(ledger));
+                var connection = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                        registry, oldPeer, fixture.cold, 4, 1060, Duration.ofSeconds(5));
+                try {
+                    var peer = connection.completion().get(5, TimeUnit.SECONDS);
+                    assertReadPayload(peer, fixture.context(), 0, first);
+                    assertReadPayload(peer, fixture.context(), 1, second);
+                    var channel = dataChannel(peer);
+                    child.halt(oldPeer);
+                    assertTrue(channel.closeFuture().await(5, TimeUnit.SECONDS));
+                } finally {
+                    connection.closeAsync().get(5, TimeUnit.SECONDS);
+                }
+                assertEquals(0, connection.backingBytes());
+                assertEquals(0, connection.codecWorkspaceBytes());
+                awaitLostServiceRegistration(fixture.zk, registry, oldBookie.toString(),
+                        serviceReadinessPath(oldBookie.toString()));
+                assertEquals(oldPeer.readiness(), registry.read(oldBookie.toString()).versionedRecord()
+                        .orElseThrow().record());
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                var task = monitor.getLedgerUnreplicationInfo(ledger);
+                while (task == null && System.nanoTime() < deadline) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                    task = monitor.getLedgerUnreplicationInfo(ledger);
+                }
+                assertNotNull(task);
+                assertEquals(List.of(oldBookie.toString()), task.getReplicaList());
+                System.out.printf("UW_ACKED_PROFILE_LOSS ledger=%d old=%s session=%d task=%s%n",
+                        ledger, oldBookie, oldPeer.publisherSession(), task.getReplicaList());
+
+                worker.start();
+                awaitProfileWorkerStarted(worker);
+                deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(25);
+                while (monitor.getLedgerUnreplicationInfo(ledger) != null && System.nanoTime() < deadline) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                }
+                assertNull(monitor.getLedgerUnreplicationInfo(ledger));
+                assertEquals(0, main.getProfilePeerUsage().reservedConnections());
+            } finally {
+                main.shutdown();
+            }
+            assertTrue(main.getProfilePeerUsage().closing());
+            assertFalse(worker.isRunning());
+            assertEquals(ProfileRegistrationStore.ReadStatus.FOUND, registry.revalidatePeer(standby).status());
+            assertCrashedDataServiceCannotRestart(episode, prepared, failedSlot, address);
+
+            var repaired = fixture.reservations.readClosedForOpen(metadata, ledger).snapshot();
+            assertNotNull(repaired);
+            var before = original.closed().metadata();
+            var after = repaired.closed().metadata();
+            assertEquals(original.context(), repaired.context());
+            assertEquals(before.birthZxid(), after.birthZxid());
+            var previous = before.metadata().getValue();
+            var current = after.metadata().getValue();
+            assertEquals(LedgerMetadata.State.CLOSED, current.getState());
+            assertEquals(previous.getLastEntryId(), current.getLastEntryId());
+            assertEquals(previous.getLength(), current.getLength());
+            assertEquals(previous.getCToken(), current.getCToken());
+            assertArrayEquals(previous.getCustomMetadata().get(ProfileRecoveryBoundary.CLOSE_KEY),
+                    current.getCustomMetadata().get(ProfileRecoveryBoundary.CLOSE_KEY));
+            var expected = new ArrayList<>(previous.getEnsembleAt(0));
+            expected.set(failedSlot, newBookie);
+            assertEquals(Map.of(0L, expected), current.getAllEnsembles());
+            assertDurableWorkerRepair(fixture, metadata, original, repaired, failedSlot, oldIdentity, newIdentity);
+            assertFalse(fixture.normal(3));
+            verifyRepairedProfileReadsAndDelete(episode, metadata, oldIdentity, newIdentity, first, second);
+            sdk.close();
+            assertTrue(episode.pool.usage().closing());
+            assertRegisteredPoolDrained(episode.pool);
+            for (int survivor : List.of(0, 1, 3)) {
+                var service = episode.episodes.get(survivor);
+                awaitProfileConnectionDrain(service.budget);
+                service.service.close();
+                service.assertOwnedResourcesTerminal(true);
+                for (var lane : ProfileReceiveBudget.Lane.values()) {
+                    assertEquals(0, service.budget.used(lane));
+                }
+            }
+        }
+    }
+
+    private void assertCrashedDataServiceCannotRestart(PublicProfileReadonlyEpisode episode, ServiceEpisode prepared,
+            int target, InetSocketAddress address) throws Exception {
+        var fixture = episode.fixture;
+        var identity = fixture.identities.get(target);
+        String bookie = identity.bookieId().toString();
+        var registry = episode.episodes.get(0).persistent;
+        long logBytes = ServiceEpisode.CONTROL_LOG_BYTES;
+        var before = SegmentArenaControlLog.inspect(prepared.config, identity, logBytes);
+        assertTrue(before.sessionOpen());
+        assertTrue(before.currentAllocations() > 0);
+        var ready = registry.read(bookie).versionedRecord().orElseThrow();
+        var policy = servicePolicy(prepared.config, identity, 6);
+        try (var refused = new ServiceEpisode(fixture, target, prepared.config, policy, null, address,
+                episode.sdk.getClientCtx().getScheduler(), false, true, serviceRestartHeadroom(prepared.config))) {
+            var failure = assertThrows(IOException.class, () -> refused.service.start(true));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("Unclosed DATA writer session"));
+            refused.assertOwnedResourcesTerminal(true);
+        }
+        try (var lock = SegmentDataFileLock.open(prepared.config.directory())) {
+            assertTrue(lock.lock().isValid());
+        }
+        assertEquals(before, SegmentArenaControlLog.inspect(prepared.config, identity, logBytes));
+        assertEquals(ProfileRegistrationStore.ReadStatus.NOT_FOUND, registry.readPeer(bookie).status());
+        assertEquals(ready, registry.read(bookie).versionedRecord().orElseThrow());
+    }
+
+    private static void assertDurableWorkerRepair(Fixture fixture, ProfileLedgerMetadataStore metadata,
+            ZKProfileReservationStore.ReadOnlySnapshot original, ZKProfileReservationStore.ReadOnlySnapshot repaired,
+            int member, SegmentFileHeader oldIdentity, SegmentFileHeader newIdentity) throws Exception {
+        var previous = original.closed().metadata().metadata().getValue();
+        var current = repaired.closed().metadata().metadata().getValue();
+        byte[] originalHead = previous.getCustomMetadata().get(ProfileRepairCommit.KEY);
+        int prior = ProfileRepairCommit.head(originalHead).size();
+        var references = ProfileRepairCommit.head(current.getCustomMetadata().get(ProfileRepairCommit.KEY));
+        assertEquals(prior + 1, references.size());
+        if (prior > 0) {
+            assertArrayEquals(originalHead, ProfileRepairCommit.head(references.subList(0, prior)));
+        }
+        var ref = references.get(prior);
+        String path = "/socket-initial/" + Long.toHexString(current.getLedgerId()) + "/repair-" + ref.slot();
+        var stat = new org.apache.zookeeper.data.Stat();
+        var envelope = java.nio.ByteBuffer.wrap(fixture.zk.getData(path, false, stat));
+        assertEquals(ref.intentBirth(), new UUID(envelope.getLong(), envelope.getLong()));
+        assertEquals(ref.intentStoreVersion(), stat.getMzxid());
+        byte[] canonical = new byte[envelope.remaining()];
+        envelope.get(canonical);
+        var intent = ProfileRepairIntent.decode(canonical);
+        assertEquals(original.context(), intent.recovery());
+        assertEquals(0, intent.fragmentStart());
+        assertEquals(member, intent.replacedMemberSlot());
+        assertArrayEquals(ZKProfileReservationStore.repairEnsembleDigest(previous, 0), intent.oldEnsembleDigest());
+        assertEquals(newIdentity.bookieId().toString(), intent.install().targetBookie());
+        assertArrayEquals(newIdentity.incarnation().value(), intent.install().targetStorageIncarnation());
+        assertEquals(new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 1), intent.range());
+        assertNotNull(fixture.zk.exists(path + "/admitted", false));
+        var committed = ProfileRepairCommit.decode(fixture.zk.getData(path + "/committed", false, null));
+        assertEquals(oldIdentity.bookieId().toString(), committed.oldBookie());
+        var stored = new ZKProfileReservationStore.RepairSnapshot(intent, ref.intentBirth(), stat.getMzxid());
+        var resolved = fixture.reservations.resolveRepairClose(metadata, stored, committed.closeOperationId());
+        assertEquals(ZKProfileReservationStore.CreateStatus.ALREADY_APPLIED, resolved.status());
+        assertEquals(repaired.closed().metadata().metadata().getVersion(), resolved.metadata().metadata().getVersion());
+        int replacement = fixture.identities.indexOf(newIdentity);
+        assertTrue(bookie(fixture.nodes.get(replacement)).recoveryClosedGeneration(resolved.closeScope()) > 0);
+        System.out.printf("UW_ACKED_PROFILE_REPAIR ledger=%d slot=%d intentBirth=%s new=%s%n",
+                current.getLedgerId(), member, ref.intentBirth(), newIdentity.bookieId());
+    }
+
+    private static void verifyRepairedProfileReadsAndDelete(PublicProfileReadonlyEpisode episode,
+            ProfileLedgerMetadataStore metadata, SegmentFileHeader oldIdentity, SegmentFileHeader newIdentity,
+            byte[] first, byte[] second) throws Exception {
+        var fixture = episode.fixture;
+        long ledger = fixture.context().ledgerId();
+        var sdkPool = episode.newPeerPool();
+        try (var readonly = sdk(fixture)) {
+            readonly.enableProfileReadOnly(episode.coordinator, sdkPool, 4);
+            try (var reader = readonly.openProfileLedgerReadOnly(ledger, fixture.password).get(5, TimeUnit.SECONDS);
+                    var entries = reader.readAsync(0, 1).get(5, TimeUnit.SECONDS)) {
+                assertArrayEquals(first, entries.getEntry(0).getEntryBytes());
+                assertArrayEquals(second, entries.getEntry(1).getEntryBytes());
+            }
+        }
+        assertTrue(sdkPool.usage().closing());
+        assertRegisteredPoolDrained(sdkPool);
+        var peerPool = episode.newPeerPool();
+        var acquisition = peerPool.acquire();
+        try {
+            var lease = acquisition.completion().get(5, TimeUnit.SECONDS);
+            assertFalse(lease.data().containsKey(oldIdentity.bookieId()));
+            assertEquals(3, lease.data().size());
+            var target = lease.data().get(newIdentity.bookieId());
+            assertNotNull(target);
+            assertArrayEquals(newIdentity.incarnation().value(), target.hello().storageIncarnation());
+            assertReadPayload(target, fixture.context(), 0, first);
+            assertReadPayload(target, fixture.context(), 1, second);
+
+            var deleting = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+            byte[] request = bytes(16, 101);
+            var attempt = deleting.beginDelete(ledger, request, episode.sdk.getClientCtx(), Duration.ofSeconds(30));
+            var deleted = attempt.result().get(35, TimeUnit.SECONDS);
+            attempt.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, deleted.status());
+            var manifest = deleted.manifest();
+            assertEquals(fixture.context(), manifest.ledger());
+            assertEquals(fixture.identities.stream().map(identity -> new ProfileDeleteRecord.Target(
+                    identity.bookieId().toString(), identity.incarnation().value())).sorted().toList(),
+                    manifest.targets());
+            for (var obligated : manifest.targets()) {
+                var event = fixture.reservations.readLedgerDeleteDelivery(metadata, ledger, obligated);
+                assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED, event.status());
+                assertEquals(obligated, event.event().target());
+                assertEquals(manifest.ledger(), event.event().ledger());
+            }
+            var storage = fixture.nodes.get(fixture.identities.indexOf(newIdentity));
+            var control = bookie(storage);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (!control.hasTerminalTombstone(fixture.context()) && System.nanoTime() < deadline) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+            }
+            assertTrue(control.hasTerminalTombstone(fixture.context()));
+            for (long entry : List.of(0L, 1L)) {
+                assertEquals(ProfileReadEntryReplyCodec.Outcome.REFUSED,
+                        target.readEntry(fixture.context(), entry).get(5, TimeUnit.SECONDS).outcome());
+            }
+            var offline = new ProfileDeleteRecord.Target(oldIdentity.bookieId().toString(),
+                    oldIdentity.incarnation().value());
+            assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.ABSENT,
+                    fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, offline).status());
+            assertArrayEquals(manifest.encode(),
+                    fixture.reservations.readLogicalDeletion(metadata, ledger, request).manifest().encode());
+            System.out.printf("UW_ACKED_PROFILE_DELETE ledger=%d targets=%d offline=%s receipt=ABSENT%n",
+                    ledger, manifest.targets().size(), offline.bookie());
+        } finally {
+            acquisition.closeAsync().get(5, TimeUnit.SECONDS);
+            peerPool.closeAsync().get(5, TimeUnit.SECONDS);
+        }
+        assertRegisteredPoolDrained(peerPool);
+    }
+
+    @Test
     public void profileAuditorWatchCreatesOriginalTaskAndWorkerRepairsWithoutManualMarker() throws Exception {
         try (Fixture fixture = new Fixture(false, false, true, 4, 2, true, true);
                 BookKeeper sdk = sdk(fixture);
@@ -17794,6 +18117,12 @@ public class SegmentProfileInitialSocketClientTest {
 
     private static org.apache.bookkeeper.replication.AutoRecoveryMain profileMembershipMain(
             Fixture fixture, org.apache.bookkeeper.stats.StatsLogger stats, int interval) throws Exception {
+        return profileMembershipMain(fixture, stats, interval, "/socket-readiness");
+    }
+
+    private static org.apache.bookkeeper.replication.AutoRecoveryMain profileMembershipMain(
+            Fixture fixture, org.apache.bookkeeper.stats.StatsLogger stats, int interval, String readinessRoot)
+            throws Exception {
         var conf = profileWorkerConfiguration(fixture);
         conf.setAllowLoopback(true);
         conf.setLostBookieRecoveryDelay(0);
@@ -17802,7 +18131,7 @@ public class SegmentProfileInitialSocketClientTest {
         conf.setAuditorPeriodicReplicasCheckInterval(0);
         conf.setAuditorPeriodicPlacementPolicyCheckInterval(0);
         var settings = new org.apache.bookkeeper.replication.AutoRecoveryMain.ProfileSettings(
-                "/socket-initial", "/socket-readiness", ZooDefs.Ids.OPEN_ACL_UNSAFE, fixture.peerTls,
+                "/socket-initial", readinessRoot, ZooDefs.Ids.OPEN_ACL_UNSAFE, fixture.peerTls,
                 fixture.identities.stream().map(identity -> identity.bookieId()).toList(),
                 new org.apache.bookkeeper.discover.profile.ProfileRecoveryPeerPool.Limits(
                         2 * fixture.identities.size(), 4 * fixture.identities.size(), 2, 1060, Duration.ofSeconds(5)),

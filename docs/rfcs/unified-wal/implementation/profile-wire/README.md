@@ -2778,3 +2778,15 @@ Spotless/Checkstyle实际exit0；独立RAT实际exit1，仍为父982a18dad9既�
 父提交上的两个健康重开对照通过。首轮新增用例到达新注册后，SDK 拒绝接管已用于 HELLO 检查的池。夹具分开观察池与 SDK 的未使用池后，最终两类共七项定向测试通过，零失败、错误或跳过。覆盖原 action 4、曾发 grant 的拒绝、滚动注册刷新、owned service 实际关闭和既有 restore 组合。Spotless 与 Checkstyle 通过。测试、子进程标记、各阶段 1460 项输入及原始日志位于 `/Users/liusinan/.codex/artifacts/unified-wal/profile-service-rejoin-evidence-aab42994`。
 
 此次验收限同主机、同版本、单 Arena、整个历史未授权 DATA 的 Bookie 进程异常退出和同身份重新注册。曾发 grant 的同身份异常重开、掉电、跨版本、D2 与批准 Linux 运行仍待验收。步骤 7/12 的完整验收和生产 Gate 保持 OPEN。
+
+## 已确认 DATA 的 Bookie JVM 退出后修复与删除
+
+以 `fd4c86fdab` 为基线。四个 owned ProfileService 均经原启动路径发布真实注册。初始 ensemble 的第三个 Bookie 由独立 JVM 持有原目录，另一个不同 BookieId、incarnation 和目录的空节点待命。公开 SDK 以 3/3/3 确认两条不同 payload，正常关闭为 `CLOSED(1, 35)`。父进程通过注册连接直接从目标子 JVM 读回两条数据，再发测试命令令其 `Runtime.halt(23)`。实际连接关闭并排空，原临时注册自然消失，持久 READY 残留。退出回执核对 nonce、PID、session 和退出码。
+
+原 Profile auditor 在退出前已监视实际注册根，账本没有 underreplication task。旧目标失联后，审计器以真实注册观察产生仅包含该目标的任务。原 ReplicationWorker 从注册池取得健康来源和待命目标，执行实际 RepairIntent、admission、recovery-only copy、membership CAS 与本地 durable grant close，最终清除原任务。新 ensemble 仅替换第三个位置。原 context、metadata 和 lifecycle birth、CLOSED 边界及普通关闭留下的 SELF 引用保留。新增 repair 的原生 intent 出生、目标身份、range、admission、committed 引用和实际本地 close 逐项核对。新目标经 mTLS 直接读回两条数据，独立注册池的公开只读 SDK 也逐条核对了原 payload。repair 目标保持 normal-inactive。
+
+旧目录的一次实际 owned restart 因已发 grant 且 DATA epoch 仍 OPEN 而拒绝。原 Arena 状态和持久 READY 版本保持，未发布新 writable，实际 DATA 锁在失败清理后可以重新取得。原删除协调器完成 fenced-CLOSED logical delete。Manifest 和已提交的目标事件包含初始三个确切身份和 repair 目标，旧 incarnation 的物理终结回执仍缺失。新目标由原 follower 实际应用本地 tombstone 后拒绝两条点读。存活服务、客户连接池和 AutoRecovery 走原关闭路径。
+
+两个组件对照通过。首轮组合到达 repair 任务移除和旧目录拒绝重开后，测试错误地只期待一个 repair 引用。普通关闭已留三条 SELF 引用。修正后逐字节核对原引用，并验证唯一新增的替换引用。完整场景通过，最终与未授权 DATA 的 service rejoin、原 auditor watch、CLOSED repair 和离线删除回执共五项定向回归通过，零失败、错误或跳过。Spotless 与 Checkstyle 通过。各阶段 1460 项输入、实际 child 输出、原失败和最终回执保存在 `/Users/liusinan/.codex/artifacts/unified-wal/profile-acked-target-loss-evidence-fd4c86fd`。
+
+此次证据覆盖同主机、同版本、单 Arena 的已确认副本进程退出、不同身份修复和逻辑删除。已有 grant 的同身份异常恢复、全目标物理终结、永久退役、历史 GC 和跨版本验收仍待完成。批准 Linux、掉电、正式性能和 canary 本轮未执行，生产 Gate 保持 OPEN。
