@@ -64,6 +64,8 @@ class NativeIOJni {
 
     static native long[] currentLinuxThreadNamespaces() throws NativeIOException;
 
+    static native int currentLinuxNativeEnvironment() throws NativeIOException;
+
     static native NativeIO.JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException;
 
     static native long[] unixPeerCredentials(java.nio.channels.SocketChannel channel) throws NativeIOException;

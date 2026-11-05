@@ -2363,6 +2363,32 @@ final class SegmentClassicLaunchTrust {
         }
     }
 
+    /** Each check reads the current libc table again. An empty sample does not bind an exec environment. */
+    synchronized void verifyLinuxNativeEnvironment(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            originalLinuxDeployment(deadline);
+            requireTime(deadline);
+            var sample = nativeIo.currentLinuxNativeEnvironment();
+            requireTime(deadline);
+            files.requireHealthy();
+            requireEmptyLinuxNativeEnvironment(sample);
+            requireTime(deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    static void requireEmptyLinuxNativeEnvironment(NativeIO.NativeEnvironmentSample sample) throws IOException {
+        if (sample != NativeIO.NativeEnvironmentSample.EMPTY_SAMPLED) {
+            throw new IOException("Original launcher requires an empty Linux native environment sample");
+        }
+    }
+
     /** Fixed JNI initialization executes outside this monitor; late return cannot publish after close or expiry. */
     LinuxJdkProcessObservation verifyLinuxJdkProcess(long deadline) throws IOException {
         final SegmentClassicLaunchProgram.Decoded program;

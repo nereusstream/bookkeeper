@@ -806,6 +806,157 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn complete_environment_word(
+    copied: libc::c_long,
+    word: usize,
+) -> Result<usize, (&'static str, libc::c_int)> {
+    const OPERATION: &str = "Current Linux environ pointer copy failed";
+    if copied < 0 {
+        return Err((
+            OPERATION,
+            std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO),
+        ));
+    }
+    if copied as usize != std::mem::size_of::<usize>() {
+        return Err(("Current Linux environ pointer copy was short", libc::EIO));
+    }
+    Ok(word)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn sample_environment(
+    symbol: usize,
+    mut read_word: impl FnMut(usize) -> Result<usize, (&'static str, libc::c_int)>,
+) -> Result<bool, (&'static str, libc::c_int)> {
+    let table = read_word(symbol)?;
+    let first = if table == 0 { 0 } else { read_word(table)? };
+    if read_word(symbol)? != table {
+        return Err((
+            "Current Linux environ table changed during sampling",
+            libc::EAGAIN,
+        ));
+    }
+    Ok(first == 0)
+}
+
+#[cfg(target_os = "linux")]
+fn copy_linux_environment_word(
+    pid: libc::pid_t,
+    address: usize,
+) -> Result<usize, (&'static str, libc::c_int)> {
+    let mut word = 0usize;
+    let size = std::mem::size_of::<usize>();
+    let local = libc::iovec {
+        iov_base: ptr::addr_of_mut!(word).cast(),
+        iov_len: size,
+    };
+    let remote = libc::iovec {
+        iov_base: address as *mut c_void,
+        iov_len: size,
+    };
+    // Both iovecs live through the syscall. Only the kernel reads the sampled address.
+    let copied = unsafe {
+        libc::syscall(
+            libc::SYS_process_vm_readv,
+            pid,
+            &local as *const libc::iovec,
+            1 as libc::c_ulong,
+            &remote as *const libc::iovec,
+            1 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    };
+    complete_environment_word(copied, word)
+}
+
+/// Samples only the current process's libc environ pointers. This is not an atomic environment snapshot.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxNativeEnvironment(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    #[cfg(target_os = "linux")]
+    {
+        extern "C" {
+            static mut environ: *mut *mut libc::c_char;
+        }
+        let pid = unsafe { libc::getpid() };
+        // Take only the address of the foreign symbol, without a Rust reference or load.
+        let symbol = unsafe { ptr::addr_of!(environ) as usize };
+        match sample_environment(symbol, |address| copy_linux_environment_word(pid, address)) {
+            Ok(true) => 1,
+            Ok(false) => 2,
+            Err((operation, error)) => {
+                throw_exception_with_error_code(&mut env, operation, error);
+                0
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Current Linux native environment sampling unsupported",
+            libc::ENOSYS,
+        );
+        0
+    }
+}
+
+#[cfg(test)]
+mod native_environment_tests {
+    use super::{complete_environment_word, sample_environment};
+
+    #[test]
+    fn null_table_is_rechecked_and_present_table_reads_only_its_first_slot() {
+        for (reads, empty) in [
+            (vec![(1, 0), (1, 0)], true),
+            (vec![(1, 2), (2, 0), (1, 2)], true),
+            (vec![(1, 2), (2, 3), (1, 2)], false),
+        ] {
+            let mut reads = reads.into_iter();
+            assert_eq!(
+                sample_environment(1, |address| {
+                    let (expected, value) = reads.next().unwrap();
+                    assert_eq!(expected, address);
+                    Ok(value)
+                }),
+                Ok(empty),
+            );
+            assert!(reads.next().is_none());
+        }
+    }
+
+    #[test]
+    fn short_unreadable_or_changed_words_cannot_yield_an_empty_sample() {
+        let width = std::mem::size_of::<usize>() as libc::c_long;
+        for short in 0..width {
+            assert_eq!(
+                complete_environment_word(short, 0).unwrap_err().1,
+                libc::EIO,
+            );
+        }
+        for results in [vec![Ok(0), Ok(2)], vec![Ok(2), Ok(0), Ok(3)]] {
+            let mut results = results.into_iter();
+            assert_eq!(
+                sample_environment(1, |_| results.next().unwrap())
+                    .unwrap_err()
+                    .1,
+                libc::EAGAIN,
+            );
+        }
+        let unreadable = ("unreadable first slot", libc::EFAULT);
+        let mut results = [Ok(2), Err(unreadable)].into_iter();
+        assert_eq!(
+            sample_environment(1, |_| results.next().unwrap()),
+            Err(unreadable),
+        );
+    }
+}
+
 /// Fixed Linux procfs boot identity only. No caller pathname/fd, cached value or namespace qualification.
 #[no_mangle]
 pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxBootId(

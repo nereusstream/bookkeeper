@@ -305,8 +305,10 @@ public final class SegmentClassicLauncher {
         trust.verifyLauncherDropper(input, deadline);
         if (linuxD2) {
             checkStarting();
+            trust.verifyLinuxNativeEnvironment(deadline);
             trust.verifyLinuxJdkProcess(deadline);
             checkStarting();
+            trust.verifyLinuxNativeEnvironment(deadline);
         }
         final List<String> childCommand = input.childCommand(material, program);
         loadPrivateKey();

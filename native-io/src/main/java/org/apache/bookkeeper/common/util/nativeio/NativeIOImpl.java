@@ -251,6 +251,21 @@ public class NativeIOImpl implements NativeIO {
     }
 
     @Override
+    public NativeEnvironmentSample currentLinuxNativeEnvironment() throws NativeIOException {
+        try {
+            return switch (NativeIOJni.currentLinuxNativeEnvironment()) {
+                case 1 -> NativeEnvironmentSample.EMPTY_SAMPLED;
+                case 2 -> NativeEnvironmentSample.NONEMPTY_SAMPLED;
+                default -> throw new NativeIOException("Unknown current Linux native environment sample");
+            };
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Current Linux native environment sampling is unavailable");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
     public JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException {
         try {
             var type = Class.forName("java.lang.ProcessImpl", false, null);

@@ -3068,6 +3068,31 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void nativeEnvironmentRequiresEmptySampleAndRejectsUnboundOrExpiredOwnerBeforeReading() throws Exception {
+        SegmentClassicLaunchTrust.requireEmptyLinuxNativeEnvironment(NativeIO.NativeEnvironmentSample.EMPTY_SAMPLED);
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireEmptyLinuxNativeEnvironment(
+                NativeIO.NativeEnvironmentSample.NONEMPTY_SAMPLED));
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireEmptyLinuxNativeEnvironment(null));
+        for (boolean expired : List.of(false, true)) {
+            SegmentClassicLaunchTrust owner;
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> {
+                        throw new AssertionError("Unbound or expired D2 reached the native environment");
+                    }).when(mock).currentLinuxNativeEnvironment())) {
+                owner = owner();
+            }
+            owner.initialize();
+            long deadline = expired ? System.nanoTime() : SegmentClassicLinuxElfTest.deadline();
+            var failure = assertThrows(IOException.class, () -> owner.verifyLinuxNativeEnvironment(deadline));
+            assertTrue(failure.getMessage(), failure.getMessage().contains(
+                    expired ? "deadline elapsed" : "original provider/source binding"));
+            var drained = owner.closeAndDrain();
+            assertTrue(drained.drained());
+            assertSame(failure, drained.launcherFailure());
+        }
+    }
+
+    @Test
     public void typedJdkProcessMissingSourceRejectsBeforeObservationAndRetainsFailure() throws Exception {
         var owner = owner();
         owner.initialize();

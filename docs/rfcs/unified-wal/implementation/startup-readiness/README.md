@@ -1218,6 +1218,18 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的当前 native 环境采样
+
+原 D2 launcher 在 backend 观察前后的两个 `checkStarting()` 之后分别调用 `verifyLinuxNativeEnvironment(deadline)`。每次先核原 D2 source/provider 与期限，再冷读当前 native 环境。返回后检查原期限和资源健康，只有 `EMPTY_SAMPLED` 通过。非空、短读、变化或无法取得样本沿原 owner 的 sticky failure 阻止后续启动。D1 和无 Linux 部署不调用新 ABI。
+
+Linux JNI 只取固定 libc `environ` 数据符号的裸地址，通过直接 `SYS_process_vm_readv` 对 `getpid()` 逐次复制一个指针宽度。先读表指针，表非 NULL 时读首槽位，再复读表指针。NULL 表也须复读一致。每次必须复制完整宽度，表指针变化立即拒绝。Java 只收到 `EMPTY_SAMPLED` 或 `NONEMPTY_SAMPLED`，环境字符串和地址都留在 Java 边界之外。旧 JNI 库缺符号以及非 Linux 平台均明确拒绝。[process_vm_readv(2)](https://man7.org/linux/man-pages/man2/process_vm_readv.2.html)
+
+OpenJDK 在 POSIX_SPAWN 路径把当前 `environ` 交给 helper，随后才传递目标进程的环境块。Java 环境快照与 procfs 初始环境有各自的时间边界。内核复制避免在 Rust 中解引用可能因 glibc 环境更新而失效的表，复制本身不保证原子性，复读也无法排除 ABA。空样本仅描述本次读取。执行前还需要证明获批进程在执行期间的实际 native 环境稳定，并核验 helper 的传递依赖。原 childCommand 和 diagnostics 继续拒绝。[OpenJDK helper 继承环境](https://github.com/openjdk/jdk21u/blob/jdk-21.0.10-ga/src/java.base/unix/native/libjava/ProcessImpl_md.c#L556) · [Java 环境快照](https://github.com/openjdk/jdk21u/blob/jdk-21.0.10-ga/src/java.base/unix/classes/java/lang/ProcessEnvironment.java#L61-L92) · [proc_pid_environ(5)](https://man7.org/linux/man-pages/man5/proc_pid_environ.5.html) · [glibc 2.39 环境修改](https://github.com/bminor/glibc/blob/glibc-2.39/stdlib/setenv.c#L126-L159)
+
+在父 `cb5c25cc8e` 上，最终 Darwin 库 acf9afec… 为 354496 字节。最终 native 18 项中 14 项通过、4 项 Linux 实读跳过，server 45 项全通过。Checked JNI 重跑、旧 4e0a6d2e… 库缺符号拒绝及 Java style 通过。2 项便携测试验证空表、首槽、短读、不可读和指针变化，最终对应片段逐字节相同。首次 Linux 编译因外部可变符号取址缺少 `unsafe` 失败，修正后 Linux `cargo check --tests` 通过。Rustfmt 仅报告父版本已有差异。
+
+隔离 Linux JVM 的测试会先取得 Java 空环境快照，再由测试专用 JNI 写入固定变量，检查实际 libc 采样返回非空。当前宿主只验证了 Darwin 拒绝与 C 夹具语法，真实 Linux syscall、快照错配用例和批准 D2 全路径待实跑。生产 Gate 保持 OPEN。
+
 ## 正常 D2 launcher 的实际 JDK 后端与 helper 关联
 
 原 launcher worker 在专用 Main、原程序、D2 文件和身份、systemd 固定端点及 dropper 检查通过后，调用一次现有的 `verifyLinuxJdkProcess(deadline)`。同一个 schema2 判断控制该调用和先前的 D2 检查，调用前后各走一次原 `checkStarting()`。核验失败、过期或已请求关闭时，启动在 `childCommand`、私钥读取与 ZooKeeper 建连之前停止。

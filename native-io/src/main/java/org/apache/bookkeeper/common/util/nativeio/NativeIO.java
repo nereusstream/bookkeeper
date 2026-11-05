@@ -247,6 +247,16 @@ public interface NativeIO {
         throw new NativeIOException("Current Linux thread namespace query is unsupported");
     }
 
+    /** Only the sampled libc table and its first slot, without reading any environment strings. */
+    enum NativeEnvironmentSample {
+        EMPTY_SAMPLED, NONEMPTY_SAMPLED
+    }
+
+    /** Samples the current Linux native environment. The result is neither atomic nor an exec precondition proof. */
+    default NativeEnvironmentSample currentLinuxNativeEnvironment() throws NativeIOException {
+        throw new NativeIOException("Current Linux native environment sampling is unsupported");
+    }
+
     /**
      * Read only the fixed bootstrap ProcessImpl's cached mechanism and helper bytes. May initialize that class and
      * wait for class initialization; callers must not hold a trust monitor or infer termination from a timeout.
