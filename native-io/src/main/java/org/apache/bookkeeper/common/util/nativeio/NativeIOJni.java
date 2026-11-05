@@ -78,6 +78,8 @@ class NativeIOJni {
 
     static native long[] directoryFileSystem(java.nio.channels.FileChannel channel) throws NativeIOException;
 
+    static native long[] linuxCgroupMount(java.nio.channels.FileChannel channel) throws NativeIOException;
+
     static {
         NativeIOBootstrap.initializeJni();
     }

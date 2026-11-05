@@ -401,4 +401,22 @@ public class NativeIOImpl implements NativeIO {
             throw failure;
         }
     }
+
+    @Override
+    public LinuxCgroupMount linuxCgroupMount(java.nio.channels.FileChannel channel) throws NativeIOException {
+        try {
+            long[] values = NativeIOJni.linuxCgroupMount(channel);
+            if (values == null || values.length != 3
+                    || values[0] <= 0 || values[0] > Integer.MAX_VALUE
+                    || values[1] <= 0 || values[1] > Integer.MAX_VALUE
+                    || values[2] <= 0 || values[2] > 0xffff_ffffL) {
+                throw new NativeIOException("Invalid original Linux cgroup mount observation");
+            }
+            return new LinuxCgroupMount(values[0], values[1], values[2]);
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Original Linux cgroup mount is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
 }

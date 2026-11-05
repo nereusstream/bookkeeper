@@ -31,6 +31,9 @@ use jni::JNIEnv;
 use std::ffi::{c_void, CString};
 use std::ptr;
 
+#[cfg(any(target_os = "linux", test))]
+mod cgroup_mount;
+
 // Java flags (from NativeIO.java)
 const O_CREAT: jint = 0x01;
 const O_RDONLY: jint = 0x02;
@@ -948,8 +951,8 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
 
 #[cfg(any(target_os = "linux", test))]
 fn parse_namespace_inode(target: &[u8], prefix: &[u8]) -> Result<u32, libc::c_int> {
-    if target.len() > 17 {
-        // user:[4294967295] is the longest canonical value.
+    if target.len() > prefix.len() + 11 {
+        // At most ten decimal digits and the closing bracket.
         return Err(libc::EINVAL);
     }
     let digits = target
@@ -963,7 +966,9 @@ fn parse_namespace_inode(target: &[u8], prefix: &[u8]) -> Result<u32, libc::c_in
 }
 
 #[cfg(target_os = "linux")]
-fn linux_thread_namespaces() -> ProcIdentityResult<[u32; 2]> {
+fn linux_thread_namespaces<const N: usize>(
+    links: [(&[u8], &[u8]); N],
+) -> ProcIdentityResult<[u32; N]> {
     let root = unsafe {
         libc::open(
             b"/proc\0".as_ptr().cast(),
@@ -977,83 +982,7 @@ fn linux_thread_namespaces() -> ProcIdentityResult<[u32; 2]> {
     }
     let outcome = (|| {
         let root_stat = proc_identity_root(root)?;
-        let mut inodes = [0_u32; 2];
-        for (index, (path, prefix)) in [
-            (b"thread-self/ns/pid\0".as_slice(), b"pid:[".as_slice()),
-            (b"thread-self/ns/user\0".as_slice(), b"user:[".as_slice()),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            // thread-self is the ordinary kernel link. O_PATH|O_NOFOLLOW holds the final magic link itself.
-            let how = [
-                (libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
-                0,
-                0x08 | 0x01 | 0x02,
-            ]; // BENEATH | NO_XDEV | NO_MAGICLINKS
-            let link = unsafe {
-                libc::syscall(
-                    libc::SYS_openat2,
-                    root,
-                    path.as_ptr().cast::<libc::c_char>(),
-                    how.as_ptr(),
-                    std::mem::size_of_val(&how),
-                )
-            };
-            if link < 0 {
-                return Err(proc_identity_errno(
-                    "thread namespaces fixed openat2 failed",
-                ));
-            }
-            let link = link as libc::c_int;
-            let outcome = (|| {
-                let before = proc_identity_stat(link)?;
-                if before.st_mode & libc::S_IFMT != libc::S_IFLNK
-                    || before.st_dev != root_stat.st_dev
-                {
-                    return Err((
-                        "thread namespace link differs from its held procfs",
-                        libc::EINVAL,
-                    ));
-                }
-                let mut bytes = [0_u8; 18];
-                // Use the syscall directly: an unavailable readlinkat must not fall back to a pathname.
-                let count = unsafe {
-                    libc::syscall(
-                        libc::SYS_readlinkat,
-                        link,
-                        b"\0".as_ptr().cast::<libc::c_char>(),
-                        bytes.as_mut_ptr().cast::<libc::c_char>(),
-                        bytes.len(),
-                    )
-                };
-                if count < 0 {
-                    return Err(proc_identity_errno(
-                        "thread namespace held readlinkat failed",
-                    ));
-                }
-                if count as usize >= bytes.len() {
-                    return Err((
-                        "thread namespace link output exceeds its bound",
-                        libc::EOVERFLOW,
-                    ));
-                }
-                let inode = parse_namespace_inode(&bytes[..count as usize], prefix)
-                    .map_err(|error| ("Invalid canonical thread namespace link target", error))?;
-                let after = proc_identity_stat(link)?;
-                if before.st_dev != after.st_dev
-                    || before.st_ino != after.st_ino
-                    || before.st_mode != after.st_mode
-                {
-                    return Err((
-                        "thread namespace held link changed during read",
-                        libc::EAGAIN,
-                    ));
-                }
-                Ok(inode)
-            })();
-            inodes[index] = close_proc_identity_fd(link, outcome)?;
-        }
+        let inodes = read_thread_namespace_links(root, &root_stat, links)?;
         let after = proc_identity_root(root)?;
         if root_stat.st_dev != after.st_dev || root_stat.st_ino != after.st_ino {
             return Err((
@@ -1066,6 +995,85 @@ fn linux_thread_namespaces() -> ProcIdentityResult<[u32; 2]> {
     close_proc_identity_fd(root, outcome)
 }
 
+#[cfg(target_os = "linux")]
+fn read_thread_namespace_links<const N: usize>(
+    root: libc::c_int,
+    root_stat: &libc::stat,
+    links: [(&[u8], &[u8]); N],
+) -> ProcIdentityResult<[u32; N]> {
+    let mut inodes = [0_u32; N];
+    for (index, (path, prefix)) in links.into_iter().enumerate() {
+        // thread-self is the ordinary kernel link. O_PATH|O_NOFOLLOW holds the final magic link itself.
+        let how = [
+            (libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
+            0,
+            0x08 | 0x01 | 0x02,
+        ]; // BENEATH | NO_XDEV | NO_MAGICLINKS
+        let link = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                root,
+                path.as_ptr().cast::<libc::c_char>(),
+                how.as_ptr(),
+                std::mem::size_of_val(&how),
+            )
+        };
+        if link < 0 {
+            return Err(proc_identity_errno(
+                "thread namespaces fixed openat2 failed",
+            ));
+        }
+        let link = link as libc::c_int;
+        let outcome = (|| {
+            let before = proc_identity_stat(link)?;
+            if before.st_mode & libc::S_IFMT != libc::S_IFLNK || before.st_dev != root_stat.st_dev {
+                return Err((
+                    "thread namespace link differs from its held procfs",
+                    libc::EINVAL,
+                ));
+            }
+            let mut bytes = [0_u8; 20];
+            let limit = 18.max(prefix.len() + 12);
+            // Use the syscall directly: an unavailable readlinkat must not fall back to a pathname.
+            let count = unsafe {
+                libc::syscall(
+                    libc::SYS_readlinkat,
+                    link,
+                    b"\0".as_ptr().cast::<libc::c_char>(),
+                    bytes.as_mut_ptr().cast::<libc::c_char>(),
+                    limit,
+                )
+            };
+            if count < 0 {
+                return Err(proc_identity_errno(
+                    "thread namespace held readlinkat failed",
+                ));
+            }
+            if count as usize >= limit {
+                return Err((
+                    "thread namespace link output exceeds its bound",
+                    libc::EOVERFLOW,
+                ));
+            }
+            let inode = parse_namespace_inode(&bytes[..count as usize], prefix)
+                .map_err(|error| ("Invalid canonical thread namespace link target", error))?;
+            let after = proc_identity_stat(link)?;
+            if before.st_dev != after.st_dev
+                || before.st_ino != after.st_ino
+                || before.st_mode != after.st_mode
+            {
+                return Err((
+                    "thread namespace held link changed during read",
+                    libc::EAGAIN,
+                ));
+            }
+            Ok(inode)
+        })();
+        inodes[index] = close_proc_identity_fd(link, outcome)?;
+    }
+    Ok(inodes)
+}
+
 /// Read the calling thread's two fixed proc link targets, never follow a magic link into nsfs.
 #[no_mangle]
 pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxThreadNamespaces(
@@ -1074,7 +1082,10 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
 ) -> jlongArray {
     #[cfg(target_os = "linux")]
     {
-        match linux_thread_namespaces() {
+        match linux_thread_namespaces([
+            (b"thread-self/ns/pid\0", b"pid:["),
+            (b"thread-self/ns/user\0", b"user:["),
+        ]) {
             Ok(values) => {
                 let array = match env.new_long_array(2) {
                     Ok(array) => array,
@@ -1442,6 +1453,23 @@ mod thread_namespace_tests {
             assert!(parse_namespace_inode(bad, b"user:[").is_err());
         }
     }
+
+    #[test]
+    fn cgroup_namespace_preserves_the_initial_value_and_complete_u32_range() {
+        let prefix = b"cgroup:[";
+        assert_eq!(
+            parse_namespace_inode(b"cgroup:[4026531835]", prefix).unwrap(),
+            0xefff_fffb
+        );
+        assert_eq!(
+            parse_namespace_inode(b"cgroup:[4294967295]", prefix).unwrap(),
+            u32::MAX
+        );
+        assert!(parse_namespace_inode(b"cgroup:[4294967296]", prefix).is_err());
+        assert!(parse_namespace_inode(b"cgroup:[04026531835]", prefix).is_err());
+        assert!(parse_namespace_inode(b"cgroup:[4026531835", prefix).is_err());
+        assert!(parse_namespace_inode(b"user:[4026531835]", prefix).is_err());
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1587,11 +1615,35 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     }
 }
 
+/// Bind a held directory to the fixed cgroup path and the calling thread's mount view.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_linuxCgroupMount(
+    mut env: JNIEnv,
+    _class: JClass,
+    _channel: JObject,
+) -> jlongArray {
+    #[cfg(target_os = "linux")]
+    {
+        original_file_facts(&mut env, &_channel, OriginalFileQuery::CgroupMount)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Linux cgroup mount query is unsupported",
+            libc::ENOTSUP,
+        );
+        ptr::null_mut()
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy)]
 enum OriginalFileQuery {
     Identity,
     DirectoryFileSystem,
+    #[cfg(target_os = "linux")]
+    CgroupMount,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1616,6 +1668,8 @@ fn original_file_facts(
     let values = match query {
         OriginalFileQuery::Identity => &values[..2],
         OriginalFileQuery::DirectoryFileSystem => &values[..],
+        #[cfg(target_os = "linux")]
+        OriginalFileQuery::CgroupMount => &values[..],
     };
     let array = match env.new_long_array(values.len() as jint) {
         Ok(value) => value,
@@ -1740,8 +1794,9 @@ fn with_original_file_stat(
             return Ok(None);
         }
         let status = unsafe { status.assume_init() };
-        let filesystem_type = match query {
-            OriginalFileQuery::Identity => 0,
+        let identity = [status.st_dev as jlong, status.st_ino as jlong, 0];
+        let values = match query {
+            OriginalFileQuery::Identity => identity,
             OriginalFileQuery::DirectoryFileSystem => {
                 if status.st_mode & libc::S_IFMT != libc::S_IFDIR {
                     throw_exception_with_error_code(
@@ -1757,8 +1812,16 @@ fn with_original_file_stat(
                     return Ok(None);
                 }
                 let fs = unsafe { fs.assume_init() };
-                fs.f_type as jlong
+                [identity[0], identity[1], fs.f_type as jlong]
             }
+            #[cfg(target_os = "linux")]
+            OriginalFileQuery::CgroupMount => match cgroup_mount::observe(fd, &status) {
+                Ok(observed) => observed.map(|value| value as jlong),
+                Err((operation, error)) => {
+                    throw_exception_with_error_code(env, operation, error);
+                    return Ok(None);
+                }
+            },
         };
         let final_fd = env
             .get_field_unchecked(&descriptor, fd_field, ReturnType::Primitive(Primitive::Int))?
@@ -1787,11 +1850,7 @@ fn with_original_file_stat(
             );
             return Ok(None);
         }
-        Ok(Some([
-            status.st_dev as jlong,
-            status.st_ino as jlong,
-            filesystem_type,
-        ]))
+        Ok(Some(values))
     })();
     // MonitorExit is permitted with a pending exception; never strand a descriptor on any failure branch.
     let exited = unsafe { ((**raw).MonitorExit.unwrap())(raw, descriptor.as_raw()) };

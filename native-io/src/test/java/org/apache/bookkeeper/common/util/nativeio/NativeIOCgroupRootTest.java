@@ -31,6 +31,8 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.apache.commons.lang3.SystemUtils;
 import org.junit.Rule;
@@ -132,6 +134,62 @@ public class NativeIOCgroupRootTest {
         }
     }
 
+    @Test
+    public void actualNonCgroupDirectoryCannotProduceAFixedMountObservation() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_LINUX || NativeIOLibraryPath.configuredLibraryPath() != null);
+        Path directory = temporary.newFolder().toPath();
+        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
+            var io = new NativeIOImpl();
+            var identity = io.fileIdentity(channel);
+            var failure = assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(channel));
+            if (!SystemUtils.IS_OS_LINUX) {
+                assertTrue(failure.getMessage(), failure.getMessage().contains("unsupported"));
+                if (SystemUtils.IS_OS_MAC) {
+                    assertEquals(45, failure.getErrno()); // Darwin ENOTSUP.
+                }
+                System.out.println("CGROUP_MOUNT_NATIVE_UNSUPPORTED errno=" + failure.getErrno());
+            }
+            assertEquals(identity, io.fileIdentity(channel));
+        }
+    }
+
+    @Test
+    public void actualLinuxFixedCgroupDirectoryMatchesItsMountRecordOrRejectsNestedNamespace() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_LINUX);
+        Path root = Path.of("/sys/fs/cgroup");
+        Path proc = Path.of("/proc/thread-self");
+        assumeTrue(Files.isDirectory(root, LinkOption.NOFOLLOW_LINKS)
+                && Files.isRegularFile(proc.resolve("mountinfo")));
+        var io = new NativeIOImpl();
+        try (FileChannel channel = FileChannel.open(root, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            assumeTrue(io.directoryFileSystem(channel).type() == 0x63677270L);
+            String cgroup = Files.readSymbolicLink(proc.resolve("ns/cgroup")).toString();
+            if (!cgroup.equals("cgroup:[4026531835]")) {
+                assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(channel));
+                return;
+            }
+            List<String[]> rows = Files.readAllLines(proc.resolve("mountinfo"), StandardCharsets.ISO_8859_1).stream()
+                    .map(line -> line.split(" "))
+                    .filter(row -> row.length >= 10 && row[4].equals(root.toString()))
+                    .toList();
+            assumeTrue("Single mount at the fixed path is required for the positive comparison", rows.size() == 1);
+            var expected = rows.get(0);
+            int separator = Arrays.asList(expected).indexOf("-");
+            assumeTrue("The cgroup2 hierarchy root must be at the fixed path", expected[3].equals("/")
+                    && separator == expected.length - 4 && expected[separator + 1].equals("cgroup2"));
+            String mnt = Files.readSymbolicLink(proc.resolve("ns/mnt")).toString();
+            assertTrue(mnt.startsWith("mnt:[") && mnt.endsWith("]"));
+            long namespace = Long.parseUnsignedLong(mnt.substring(5, mnt.length() - 1));
+            var observed = io.linuxCgroupMount(channel);
+            assertEquals(new NativeIO.LinuxCgroupMount(Long.parseLong(expected[0]), Long.parseLong(expected[1]),
+                    namespace), observed);
+            assertEquals(observed, io.linuxCgroupMount(channel));
+            channel.close();
+            assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(channel));
+            System.out.println("ACTUAL_LINUX_FIXED_CGROUP_MOUNT " + observed);
+        }
+    }
+
     private static void assertDirectoryFacts(Path binary, Path directory) throws Exception {
         String[] reference = command(binary.toString(), directory.toString()).split(" ");
         assertEquals(3, reference.length);
@@ -196,6 +254,20 @@ public class NativeIOCgroupRootTest {
                 assertEquals(original, io.fileIdentity(channel));
             }
             System.out.println("OLD_JNI_DIRECTORY_FILESYSTEM_UNSUPPORTED");
+        }
+    }
+
+    /** The exact preceding JNI still reports held-directory identity and type. */
+    public static final class OldMountLibraryProbe {
+        public static void main(String[] args) throws Exception {
+            var io = new NativeIOImpl();
+            try (FileChannel channel = FileChannel.open(Path.of(args[0]), StandardOpenOption.READ)) {
+                var directory = io.directoryFileSystem(channel);
+                var failure = assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(channel));
+                assertTrue(failure.getCause() instanceof UnsatisfiedLinkError);
+                assertEquals(directory, io.directoryFileSystem(channel));
+            }
+            System.out.println("OLD_JNI_CGROUP_MOUNT_UNSUPPORTED");
         }
     }
 }

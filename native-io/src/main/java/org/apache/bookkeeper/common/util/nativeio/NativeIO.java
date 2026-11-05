@@ -321,4 +321,12 @@ public interface NativeIO {
     default DirectoryFileSystem directoryFileSystem(java.nio.channels.FileChannel channel) throws NativeIOException {
         throw new NativeIOException("Original directory filesystem query is unsupported");
     }
+
+    /** Mount IDs from the current thread's mount table and the observed mount namespace inode. */
+    record LinuxCgroupMount(long mountId, long parentMountId, long mountNamespaceInode) { }
+
+    /** Observes the held directory at the fixed cgroup2 mount in the initial cgroup namespace. */
+    default LinuxCgroupMount linuxCgroupMount(java.nio.channels.FileChannel channel) throws NativeIOException {
+        throw new NativeIOException("Original Linux cgroup mount query is unsupported");
+    }
 }

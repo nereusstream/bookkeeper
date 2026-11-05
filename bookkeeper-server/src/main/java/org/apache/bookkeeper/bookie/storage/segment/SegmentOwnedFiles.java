@@ -128,6 +128,11 @@ final class SegmentOwnedFiles {
         return owned.entry.directoryFileSystem(owned, nativeIo);
     }
 
+    NativeIO.LinuxCgroupMount linuxCgroupMount(FileChannel channel, NativeIO nativeIo) throws IOException {
+        Channel owned = originalWrapper(channel, nativeIo);
+        return owned.entry.linuxCgroupMount(owned, nativeIo);
+    }
+
     private Channel originalWrapper(FileChannel channel, NativeIO nativeIo) throws IOException {
         if (nativeIo == null || !(channel instanceof SegmentOwnedFiles.Channel owned) || !owned.ownedBy(this)) {
             throw new IOException("Original file query requires this owner's channel wrapper");
@@ -319,6 +324,20 @@ final class SegmentOwnedFiles {
                 var observation = nativeIo.directoryFileSystem(original);
                 if (observation == null || observation.identity() == null) {
                     throw new IOException("Unknown original directory filesystem outcome");
+                }
+                requireIdentityQuery(caller, original);
+                return observation;
+            } finally {
+                queryingThread = null;
+            }
+        }
+
+        synchronized NativeIO.LinuxCgroupMount linuxCgroupMount(Channel caller, NativeIO nativeIo) throws IOException {
+            FileChannel original = beginIdentityQuery(caller);
+            try {
+                var observation = nativeIo.linuxCgroupMount(original);
+                if (observation == null) {
+                    throw new IOException("Unknown original cgroup mount outcome");
                 }
                 requireIdentityQuery(caller, original);
                 return observation;

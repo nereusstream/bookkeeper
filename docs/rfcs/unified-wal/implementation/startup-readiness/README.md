@@ -1450,6 +1450,16 @@ D2 present cache在原`observeLoaderConfiguration`路径上复用私有Entry及s
 
 证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-preload-evidence-c48530e7`，保留原源码/class/日志/XML及静态rtld.c原字节（88632 bytes，SHA-256 `03681f7c7cea6f542a6416e3478a8c6bfe6c3a7969d1bb081dbba4f18395ed49`）。正常D2消费点与先后顺序按实际直线代码静态确认；临时树动态测试不是原批准D2 typed阳性，实际Linux/vendor启动仍NOT_EXECUTED。检查仅表示此时系统preload路径的受保护缺失，不证明已运行父JVM的历史、helper的LD_PRELOAD/--preload、未来exec时不变或完整加载闭包。boot身份的可信procfs来源仍待设计，不能把普通路径UUID读数补成authority；原childCommand/diagnostics拒绝和整体parent/child/Main/G1/full-bytes/full16/生产Gate继续OPEN，默认OFF/SYSTEM/PARK、advanced disabled及持续目标active保持。
 
+## 正常 D2 launcher 绑定原 cgroup 挂载记录
+
+首次取得固定 cgroup 目录与后续复核时，原 trust owner 先完成目录类型、保护链和 dev/ino 检查，再从同一个原 fd 取得挂载观察。独立 JNI 在原 FileDescriptor monitor 内用 `statx(AT_EMPTY_PATH)` 要求目录类型、inode 和普通 `STATX_MNT_ID`，并和同 fd 的 `fstat` 对照设备与 inode。固定 `/sys/fs/cgroup` 在观察窗口前后各做一次 NOFOLLOW、NO_AUTOMOUNT 的路径 statx，必须与原 fd 的设备、inode 和 mount ID 一致。同 inode 的另一挂载不能替换原对象。 [Linux statx](https://man7.org/linux/man-pages/man2/statx.2.html)
+
+从同一个验证过的 procfs 根读取固定 `thread-self/ns/cgroup`、`thread-self/ns/mnt` 和 `thread-self/mountinfo`。要求初始 cgroup namespace inode `0xEFFFFFFB`，因为 cgroup 根字段由内核按调用线程的 cgroup namespace 计算。以普通 mount ID 选择唯一完整记录，核对设备号、类型 `cgroup2`、挂载点 `/sys/fs/cgroup` 和根 `/`。按字节扫描至实际 EOF，接受总量上限 1 MiB、单行上限 64 KiB，跳过未知 optional 字段。临时 fd 的首次关闭在返回前结算，末轮复核原挂载 ID、父挂载 ID 和观察到的 mount namespace inode。 [mountinfo 格式](https://man7.org/linux/man-pages/man5/proc_pid_mountinfo.5.html) [cgroup 根路径实现](https://raw.githubusercontent.com/torvalds/linux/v6.17/kernel/cgroup/cgroup.c)
+
+定向 JUnit 35 项，33 通过、2 项 Linux 实读跳过。宿主 Rust 的 7 项解析与值检查覆盖转义和非 UTF-8 无关路径、未知标签、重复或缺失记录、非根路径、截断与边界、同 inode 不同 mount 和嵌套 namespace 拒绝。宿主 JNI、旧库缺新符号拒绝和 Java 样式通过。Linux x86_64 交叉检查只编译。真实 Linux statx、固定 mountinfo、bind/namespace 故障场景及批准环境完整 D2 启动为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-d2-cgroup-mount-evidence-8008bd80`。
+
+检查结果限定于两轮观察时的 mount view。宿主 mount namespace 资格、其他挂载别名、systemd ControlGroup、episode 成员与退出、retirement 和 `populated=0` 仍待独立验证。D2 handoff 和生产 Gate 继续等待端到端证据。
+
 ## 正常 D2 launcher 持有并复核 cgroup 目录
 
 正常 D2 在原 provider、source 和期限校验后，沿用精确的 uname 比较，再取得固定 `/sys/fs/cgroup`。JNI 在原 bootstrap FileChannelImpl 的 FileDescriptor monitor 内，对同一 fd 调用 `fstat` 和 `fstatfs`，要求实际目录并报告 dev、ino 和完整 `f_type`。原 `fileIdentity` 仍只调用 `fstat`。旧路径级 ABI 保留，D2 从持有的 fd 取得类型。 [Linux statfs 手册](https://man7.org/linux/man-pages/man2/statfs.2.html)

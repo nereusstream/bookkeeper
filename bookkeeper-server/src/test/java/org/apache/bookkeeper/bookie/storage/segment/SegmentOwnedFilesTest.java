@@ -199,6 +199,26 @@ public class SegmentOwnedFilesTest {
     }
 
     @Test
+    public void failedMountObservationLeavesTheOriginalDirectoryWithItsOwnerUntilDrain() throws Exception {
+        Path path = temporary.newFolder().toPath();
+        var files = new SegmentOwnedFiles();
+        var channel = SegmentOwnedFiles.open(files, path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
+        var io = new NativeIOImpl();
+        try (var raw = FileChannel.open(path, StandardOpenOption.READ)) {
+            assertThrows(IOException.class, () -> files.linuxCgroupMount(raw, io));
+            var original = files.directoryFileSystem(channel, io);
+            assertThrows(IOException.class, () -> files.linuxCgroupMount(channel, io));
+            assertTrue(channel.isOpen());
+            assertEquals(original, files.directoryFileSystem(channel, io));
+            assertEquals(1, files.result().retained().size());
+        } finally {
+            assertTrue(files.drain().drained());
+        }
+        assertFalse(channel.isOpen());
+        assertThrows(IOException.class, () -> files.linuxCgroupMount(channel, io));
+    }
+
+    @Test
     public void atomicNewWritesWorkButReadOnlyCreateNewStillRejectsProtectedInodes() throws Exception {
         Path root = temporary.newFolder().toPath().toRealPath();
         Path path = Files.createFile(root.resolve("guard"));

@@ -93,8 +93,10 @@ public class NativeIOFileIdentityTest {
             var expected = io.fileIdentity(original);
             assertThrows(NativeIOException.class, () -> io.fileIdentity(wrapper));
             assertThrows(NativeIOException.class, () -> io.directoryFileSystem(wrapper));
+            assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(wrapper));
             var notDirectory = assertThrows(NativeIOException.class, () -> io.directoryFileSystem(original));
             assertTrue(notDirectory.getMessage().contains("not a directory"));
+            assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(original));
             assertTrue(wrapper.isOpen());
             assertEquals(expected, io.fileIdentity(original));
             original.close();

@@ -5902,6 +5902,9 @@ public class SegmentClassicLaunchTrustTest {
                         doAnswer(call -> {
                             throw new AssertionError("Unbound or expired D2 reached the original directory query");
                         }).when(mock).directoryFileSystem(any(FileChannel.class));
+                        doAnswer(call -> {
+                            throw new AssertionError("Unbound or expired D2 reached the original mount query");
+                        }).when(mock).linuxCgroupMount(any(FileChannel.class));
                     })) {
                 var owner = owner();
                 owner.initialize();
