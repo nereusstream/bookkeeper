@@ -2360,11 +2360,15 @@ final class SegmentClassicLaunchTrust {
             long deadline) throws IOException {
         requireTime(deadline);
         SegmentClassicLinuxGlob.requireLogicalText(interpreter);
-        if (elf.type() != 3 || elf.entry() == 0 || elf.interpreter() != null || !elf.needed().isEmpty()) {
+        if (!isLinuxSelfContainedLoader(elf)) {
             throw new IOException("Unsupported loader diagnostics requires an approved self-contained ET_DYN loader");
         }
         requireTime(deadline);
         return List.of(interpreter, "--list-diagnostics");
+    }
+
+    private static boolean isLinuxSelfContainedLoader(SegmentClassicLinuxElf.Image2 elf) {
+        return elf.type() == 3 && elf.entry() != 0 && elf.interpreter() == null && elf.needed().isEmpty();
     }
 
     /** Original pre/post data comparison only; caller observations cannot construct a bound diagnostic result. */
@@ -2629,6 +2633,9 @@ final class SegmentClassicLaunchTrust {
             throws IOException {
         var aliases = linuxContextAliases(loading, deadline);
         recheckLinuxJdkHelperMaterial(helper, interpreter, aliases, deadline);
+        if (interpreter != null && !isLinuxSelfContainedLoader(interpreter.content().elf())) {
+            throw new IOException("Unsupported JDK helper PT_INTERP requires an approved self-contained ET_DYN loader");
+        }
         var completedRules = new ArrayList<Integer>();
         for (int i = 0; i < loading.needed().size(); i++) {
             requireTime(deadline);

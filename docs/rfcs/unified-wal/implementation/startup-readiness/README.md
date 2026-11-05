@@ -1218,6 +1218,14 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的 helper 解释器前置检查
+
+正常 D2 的原 helper 组在首轮 helper 和解释器路径身份复核后，对实际 PT_INTERP 指向的、已由原 owner 绑定的 ELF 应用与 diagnostics 共用的四项条件。解释器必须为 ET_DYN、入口非零、无自身 PT_INTERP、无 DT_NEEDED。该检查直接消费原 logical→physical、批准摘要和 owned fd 对应的 ELF，失败先于首条 cache、tag 或默认目录目标读取。helper 自身无 PT_INTERP 时，以原上下文和 ordinal 继续核验其 DT_NEEDED。组末仍复核适用的路径和身份。
+
+在父 `83654c883b` 上沿用 acf9afec… native 库。macOS arm64 上 83 项回归和 Java 样式通过。真实临时 ELF 分别验证了解释器带 DT_NEEDED、带自身 PT_INTERP 时在候选读取前拒绝，首次失败随 owner 排空保留。通过用例验证了实际解释器满足条件后仍检查原重复 ordinal，以及 helper 缺 PT_INTERP 时会拒绝后续不支持的 NEEDED 名称。同字节解释器替换仍由组内身份复核拒绝。证据目录为 `/Users/liusinan/.codex/artifacts/unified-wal/classic-helper-interpreter-evidence-83654c88`。
+
+本节核验固定解释器的 ELF 形状。实际初始 namespace、符号和重定位、递归依赖、加载选择及执行期间 native 环境稳定性仍待验证。批准 Linux/vendor 启动记为 NOT_EXECUTED，原 childCommand 和 diagnostics 执行门继续拒绝。
+
 ## 正常 D2 launcher 的 helper 自身 RPATH/RUNPATH 候选核验
 
 正常 D2 仍只调用一次 `verifyLinuxJdkHelperNeededCandidates`。每条直接 `DT_NEEDED` 先完成 cache A/B，再以同一份实际 requester 核验自身 tag 和默认目录。tag 核验前后复核 requester 的原逻辑路径和身份，实际 context、member、ordinal、name 和两 tag 的 presence/value 与原声明逐项对应。组前后继续复核 helper 和 PT_INTERP，三阶段均通过才记录该条原规则索引。零直接请求时整组不选择或读取这些阶段的目标。

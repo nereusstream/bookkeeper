@@ -2422,10 +2422,26 @@ public class SegmentClassicLaunchTrustTest {
             List<SegmentClassicLinuxDeploymentV2.File> members, SegmentClassicLinuxDeploymentV2.Loading loading) { }
 
     private JdkHelperFixture jdkHelperFixture(boolean interpreter, boolean exact) throws Exception {
+        return jdkHelperFixture(interpreter, exact, true, true);
+    }
+
+    private JdkHelperFixture jdkHelperFixture(boolean interpreter, boolean exact, boolean loaderInterpreter,
+            boolean loaderNeeded) throws Exception {
         Path home = Files.createDirectories(root.resolve("jdk/lib")).getParent();
-        var loader = loadPathFile("a-loader.so", SegmentClassicLinuxDeployment.Role.LOADER);
+        Path loaderPath = root.resolve("a-loader.so");
+        byte[] loaderBytes = SegmentClassicLinuxDeploymentTest.vector("classic-linux-elf-v2");
+        if (!loaderInterpreter) {
+            ByteBuffer.wrap(loaderBytes).order(ByteOrder.LITTLE_ENDIAN).putInt(64, 0);
+        }
+        if (!loaderNeeded) {
+            removeHelperFixtureNeeded(loaderBytes);
+        }
+        write(loaderPath, loaderBytes);
+        var loader = new SegmentClassicLinuxDeploymentV2.File(loaderPath.toString(),
+                SegmentClassicLinuxDeployment.Role.LOADER, loaderBytes.length,
+                SegmentClassicHandoff.digest(loaderBytes));
         Path view = Files.createSymbolicLink(root.resolve("a-loader-view"), Path.of("a-loader.so"));
-        Files.setPosixFilePermissions(Path.of(loader.path()), PosixFilePermissions.fromString("rwxr-xr-x"));
+        Files.setPosixFilePermissions(loaderPath, PosixFilePermissions.fromString("rwxr-xr-x"));
         byte[] bytes = SegmentClassicLinuxDeploymentTest.vector("classic-linux-elf-v2");
         var buffer = ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN);
         if (interpreter) {
@@ -2454,13 +2470,13 @@ public class SegmentClassicLaunchTrustTest {
                 new SegmentClassicLinuxDeploymentV2.Context(1, alias.toString()),
                 new SegmentClassicLinuxDeploymentV2.Context(1, path.toString()));
         var expected = SegmentClassicLinuxContentTest.expected();
-        var metadata = List.of(new SegmentClassicLinuxDeploymentV2.Elf(0, expected.needed(), expected.rpath(),
-                        expected.runpath(), expected.flags(), expected.flags1()),
+        var metadata = List.of(new SegmentClassicLinuxDeploymentV2.Elf(0, loaderNeeded ? expected.needed() : List.of(),
+                        expected.rpath(), expected.runpath(), expected.flags(), expected.flags1()),
                 new SegmentClassicLinuxDeploymentV2.Elf(1, expected.needed(), expected.rpath(), expected.runpath(),
                         expected.flags(), expected.flags1()));
         var needed = new java.util.ArrayList<SegmentClassicLinuxDeploymentV2.NeededRule>();
         for (int context = 0; context < contexts.size(); context++) {
-            for (int ordinal = 0; ordinal < expected.needed().size(); ordinal++) {
+            for (int ordinal = 0; ordinal < metadata.get(contexts.get(context).file()).needed().size(); ordinal++) {
                 needed.add(new SegmentClassicLinuxDeploymentV2.NeededRule(context, ordinal, List.of(0)));
             }
         }
@@ -2472,8 +2488,14 @@ public class SegmentClassicLaunchTrustTest {
         return new JdkHelperFixture(home.toString(), program, List.of(loader, helper), loading);
     }
 
+    private static void removeHelperFixtureNeeded(byte[] bytes) {
+        // Remove four DT_NEEDED tags from the fixed ELF2 vector, retaining the other dynamic tags.
+        System.arraycopy(bytes, 608, bytes, 544, 96);
+        Arrays.fill(bytes, 640, 704, (byte) 0);
+    }
+
     private CandidateFixture jdkHelperCacheFixture(boolean rejectRepeated, boolean noNeeded) throws Exception {
-        var f = jdkHelperFixture(true, true);
+        var f = jdkHelperFixture(true, true, false, false);
         var loading = f.loading();
         var loader = f.members().get(0);
         var members = new java.util.ArrayList<>(f.members());
@@ -2483,9 +2505,7 @@ public class SegmentClassicLaunchTrustTest {
         byte[] bytes = Files.readAllBytes(path);
         List<String> needed;
         if (noNeeded) {
-            // Remove the four DT_NEEDED tags from the fixed ELF2 fixture, retaining the other dynamic tags.
-            System.arraycopy(bytes, 608, bytes, 544, 96);
-            Arrays.fill(bytes, 640, 704, (byte) 0);
+            removeHelperFixtureNeeded(bytes);
             needed = List.of();
         } else {
             // Replace only the two slash/DST strings. Keep the repeated name and every original tag position.
@@ -2556,7 +2576,7 @@ public class SegmentClassicLaunchTrustTest {
         for (String directory : List.of("default-z", "default-a")) {
             Files.createDirectory(root.resolve(directory));
             var member = loadPathFile(directory + "/libz.so.1", SegmentClassicLinuxDeployment.Role.LIBRARY);
-            var original = l.elf().get(0);
+            var original = SegmentClassicLinuxContentTest.expected();
             int file = members.size();
             int context = contexts.size();
             members.add(member);
@@ -2567,8 +2587,8 @@ public class SegmentClassicLaunchTrustTest {
                 needed.add(new SegmentClassicLinuxDeploymentV2.NeededRule(context, ordinal, List.of(0)));
             }
         }
-        needed.set(12, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, 4, 5)));
-        needed.set(13, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1,
+        needed.set(4, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, 4, 5)));
+        needed.set(5, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1,
                 rejectLaterOrdinal ? List.of(0, 4) : List.of(0, 4, 5)));
         var loading = new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(), l.interpreter(),
                 l.aliases(), l.directories(), l.configuration(), l.policy(), metadata, contexts, needed, l.modules());
@@ -2625,7 +2645,7 @@ public class SegmentClassicLaunchTrustTest {
         for (Path path : List.of(earlier, later)) {
             Files.createDirectory(path);
             var member = loadPathFile(path.getFileName() + "/libz.so.1", SegmentClassicLinuxDeployment.Role.LIBRARY);
-            var declaration = l.elf().get(0);
+            var declaration = SegmentClassicLinuxContentTest.expected();
             int file = members.size();
             int context = contexts.size();
             members.add(member);
@@ -2638,8 +2658,8 @@ public class SegmentClassicLaunchTrustTest {
             }
         }
         dirs.sort(Comparator.comparing(SegmentClassicLinuxDeploymentV2.Directory::path));
-        needed.set(12, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, 6, 7)));
-        needed.set(13, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1,
+        needed.set(4, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 0, List.of(0, 6, 7)));
+        needed.set(5, new SegmentClassicLinuxDeploymentV2.NeededRule(3, 1,
                 rejectLaterOrdinal ? List.of(0, 6) : List.of(0, 6, 7)));
         return new CandidateFixture(members, new SegmentClassicLinuxDeploymentV2.Loading(l.systemctl(), l.loader(),
                 l.interpreter(), l.aliases(), dirs, l.configuration(), l.policy(), metadata, contexts, needed,
@@ -2668,7 +2688,7 @@ public class SegmentClassicLaunchTrustTest {
             }
             return invocation.callRealMethod();
         })) {
-            assertEquals(List.of(12, 13, 14, 15), owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(),
+            assertEquals(List.of(4, 5, 6, 7), owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(),
                     3, 0, SegmentClassicLinuxElfTest.deadline()));
             assertEquals(5, helperOpens.get());
             assertEquals(List.of(cache, cache, earlier, later, cache, cache, earlier, later,
@@ -2737,7 +2757,7 @@ public class SegmentClassicLaunchTrustTest {
             }
             return invocation.callRealMethod();
         })) {
-            assertEquals(List.of(12, 13, 14, 15), owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(),
+            assertEquals(List.of(4, 5, 6, 7), owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(),
                     3, 0, SegmentClassicLinuxElfTest.deadline()));
             assertEquals(5, helperOpens.get()); // Initial root and four per-request cache bindings.
             assertEquals(8, cacheOpens.get()); // A/B for each request.
@@ -2769,7 +2789,7 @@ public class SegmentClassicLaunchTrustTest {
             }
             return invocation.callRealMethod();
         })) {
-            assertEquals(List.of(12, 13, 14, 15), owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(),
+            assertEquals(List.of(4, 5, 6, 7), owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(),
                     3, 0, SegmentClassicLinuxElfTest.deadline()));
             assertEquals(8, cacheOpens.get());
         } finally {
@@ -2851,7 +2871,7 @@ public class SegmentClassicLaunchTrustTest {
         try {
             var result = owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(), 3, 0,
                     SegmentClassicLinuxElfTest.deadline());
-            assertEquals(List.of(12, 13, 14, 15), result);
+            assertEquals(List.of(4, 5, 6, 7), result);
             assertThrows(UnsupportedOperationException.class, result::clear);
             assertThrows(IOException.class, owner::installed);
         } finally {
@@ -2873,6 +2893,51 @@ public class SegmentClassicLaunchTrustTest {
         })) {
             assertTrue(owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(), 3, -1,
                     SegmentClassicLinuxElfTest.deadline()).isEmpty());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void jdkHelperInterpreterWithNeededRejectsBeforeCandidateReads() throws Exception {
+        assertJdkHelperInterpreterShapeRejects(false, true);
+    }
+
+    @Test
+    public void jdkHelperInterpreterWithItsOwnInterpreterRejectsBeforeCandidateReads() throws Exception {
+        assertJdkHelperInterpreterShapeRejects(true, false);
+    }
+
+    private void assertJdkHelperInterpreterShapeRejects(boolean loaderInterpreter, boolean loaderNeeded)
+            throws Exception {
+        var helper = jdkHelperFixture(true, true, loaderInterpreter, loaderNeeded);
+        var f = withUnusedHelperDefault(withLookupCache(new CandidateFixture(helper.members(), helper.loading()),
+                cacheLookupBytes(new String[0], new byte[0][], new int[0], new long[0])));
+        var owner = owner();
+        owner.initialize();
+        Path cache = Path.of(f.loading().configuration().get(0).path());
+        Path loader = Path.of(f.files().get(0).path());
+        var loaderOpens = new AtomicInteger();
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && invocation.getMethod().getParameterCount() == 3) {
+                Path path = invocation.getArgument(0);
+                if (cache.equals(path)) {
+                    throw new AssertionError("Unsupported PT_INTERP loader reached the first candidate stage");
+                }
+                if (loader.equals(path)) {
+                    loaderOpens.incrementAndGet();
+                }
+            }
+            return invocation.callRealMethod();
+        })) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(), 2, 0,
+                            SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("JDK helper PT_INTERP requires"));
+            assertEquals(1, loaderOpens.get());
+            var drained = owner.closeAndDrain();
+            assertTrue(drained.drained());
+            assertSame(failure, drained.launcherFailure());
         } finally {
             assertTrue(owner.closeAndDrain().drained());
         }
@@ -2938,12 +3003,18 @@ public class SegmentClassicLaunchTrustTest {
 
     @Test
     public void jdkHelperCacheCannotSkipAnUnsupportedLaterNeededName() throws Exception {
-        var helper = jdkHelperFixture(true, true);
+        var helper = jdkHelperFixture(false, true);
         var f = withUnusedHelperDefault(withLookupCache(new CandidateFixture(helper.members(), helper.loading()),
                 null));
         var owner = owner();
         owner.initialize();
-        try {
+        Path loader = Path.of(f.files().get(0).path());
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && loader.equals(invocation.getArgument(0))) {
+                throw new AssertionError("Absent helper PT_INTERP opened the fixed loader");
+            }
+            return invocation.callRealMethod();
+        })) {
             var failure = assertThrows(IOException.class,
                     () -> owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(), 2, 0,
                             SegmentClassicLinuxElfTest.deadline()));
