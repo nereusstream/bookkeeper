@@ -56,6 +56,8 @@ class NativeIOJni {
 
     static native long[] currentLinuxThreadCredentials() throws NativeIOException;
 
+    static native long[] currentLinuxThreadFilesystemIds() throws NativeIOException;
+
     static native String[] currentKernelIdentity() throws NativeIOException;
 
     static native long currentCgroupRootFileSystemType() throws NativeIOException;

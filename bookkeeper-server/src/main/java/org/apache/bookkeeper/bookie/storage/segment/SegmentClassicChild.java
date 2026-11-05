@@ -667,6 +667,7 @@ public final class SegmentClassicChild {
         var io = new NativeIOImpl();
         if (program.os().equals("linux")) {
             requireLinuxCredentials(recipe, io.currentLinuxThreadCredentials());
+            requireLinuxFilesystemIds(recipe, io.currentLinuxThreadFilesystemIds());
         } else {
             requireRecipeCredentials(recipe, io.currentProcessCredentials());
         }
@@ -678,6 +679,14 @@ public final class SegmentClassicChild {
         requireRecipeCredentials(recipe, actual.credentials());
         if (actual.savedUid() != recipe.oldUid() || actual.savedGid() != recipe.primaryGid()) {
             throw new IOException("Actual Classic saved credentials differ from the fixed recipe");
+        }
+    }
+
+    /** Value check only. The original child reads the calling thread's filesystem IDs from procfs. */
+    static void requireLinuxFilesystemIds(SegmentClassicLaunchTrust.Recipe recipe,
+                                          NativeIO.LinuxThreadFilesystemIds actual) throws IOException {
+        if (actual.fsUid() != recipe.oldUid() || actual.fsGid() != recipe.primaryGid()) {
+            throw new IOException("Actual Classic filesystem IDs differ from the fixed recipe");
         }
     }
 

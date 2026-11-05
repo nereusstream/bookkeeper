@@ -181,6 +181,28 @@ public class NativeIOImpl implements NativeIO {
     }
 
     @Override
+    public LinuxThreadFilesystemIds currentLinuxThreadFilesystemIds() throws NativeIOException {
+        try {
+            long[] actual = NativeIOJni.currentLinuxThreadFilesystemIds();
+            if (actual == null || actual.length != 2) {
+                throw new NativeIOException("Unknown current Linux thread filesystem ID query outcome");
+            }
+            try {
+                return new LinuxThreadFilesystemIds(actual[0], actual[1]);
+            } catch (IllegalArgumentException invalid) {
+                var failure = new NativeIOException("Invalid native current Linux thread filesystem IDs");
+                failure.initCause(invalid);
+                throw failure;
+            }
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException(
+                    "Current Linux thread filesystem IDs are unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
     public KernelIdentity currentKernelIdentity() throws NativeIOException {
         try {
             String[] actual = NativeIOJni.currentKernelIdentity();

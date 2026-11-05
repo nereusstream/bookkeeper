@@ -54,7 +54,7 @@ public class SegmentClassicChildTest {
     public final TemporaryFolder temporary = new TemporaryFolder();
 
     @Test
-    public void linuxChildRequiresTheOriginalSavedIdsAsWellAsAllLegacyCredentials() throws Exception {
+    public void linuxChildRequiresSavedAndFilesystemIdsAsWellAsAllLegacyCredentials() throws Exception {
         var digest = new SegmentClassicHandoff.Digest(new byte[32]);
         long uid = 0x8000_0001L;
         long gid = 0xffff_fffeL;
@@ -63,12 +63,17 @@ public class SegmentClassicChildTest {
                 digest, digest, digest, digest, uid, gid, groups);
         var exact = new NativeIO.ProcessCredentials(uid, uid, gid, gid, List.of(9L, 3L, 9L));
         SegmentClassicChild.requireLinuxCredentials(recipe, new NativeIO.LinuxThreadCredentials(exact, uid, gid));
+        SegmentClassicChild.requireLinuxFilesystemIds(recipe, new NativeIO.LinuxThreadFilesystemIds(uid, gid));
 
         for (long other : List.of(0L, 17L)) {
             assertThrows(IOException.class, () -> SegmentClassicChild.requireLinuxCredentials(
                     recipe, new NativeIO.LinuxThreadCredentials(exact, other, gid)));
             assertThrows(IOException.class, () -> SegmentClassicChild.requireLinuxCredentials(
                     recipe, new NativeIO.LinuxThreadCredentials(exact, uid, other)));
+            assertThrows(IOException.class, () -> SegmentClassicChild.requireLinuxFilesystemIds(
+                    recipe, new NativeIO.LinuxThreadFilesystemIds(other, gid)));
+            assertThrows(IOException.class, () -> SegmentClassicChild.requireLinuxFilesystemIds(
+                    recipe, new NativeIO.LinuxThreadFilesystemIds(uid, other)));
         }
         for (var mismatch : List.of(new NativeIO.ProcessCredentials(17, uid, gid, gid, groups),
                 new NativeIO.ProcessCredentials(uid, 17, gid, gid, groups),

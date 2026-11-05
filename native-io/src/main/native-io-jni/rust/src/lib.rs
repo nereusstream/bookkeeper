@@ -540,6 +540,228 @@ fn proc_unsigned_decimal(token: &[u8]) -> Result<u64, libc::c_int> {
         .map_err(|_| libc::EINVAL)
 }
 
+#[cfg(any(target_os = "linux", test))]
+const PROC_CREDENTIAL_STATUS_MAX_BYTES: usize = 64 * 1024;
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_filesystem_ids(bytes: &[u8]) -> Result<[u32; 2], libc::c_int> {
+    if bytes.len() > PROC_CREDENTIAL_STATUS_MAX_BYTES {
+        return Err(libc::EOVERFLOW);
+    }
+    if bytes.last() != Some(&b'\n') {
+        return Err(libc::EINVAL);
+    }
+    let (mut uid, mut gid) = (None, None);
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let (id, fields) = if let Some(fields) = line.strip_prefix(b"Uid:") {
+            (&mut uid, fields)
+        } else if let Some(fields) = line.strip_prefix(b"Gid:") {
+            (&mut gid, fields)
+        } else {
+            continue;
+        };
+        if id.is_some() || !matches!(fields.first(), Some(b' ' | b'\t')) {
+            return Err(libc::EINVAL);
+        }
+        let mut fields = fields
+            .split(|byte| matches!(byte, b' ' | b'\t'))
+            .filter(|field| !field.is_empty());
+        let mut filesystem_id = 0;
+        for _ in 0..4 {
+            let field = fields.next().ok_or(libc::EINVAL)?;
+            filesystem_id =
+                u32::try_from(proc_unsigned_decimal(field)?).map_err(|_| libc::EINVAL)?;
+        }
+        if fields.next().is_some() {
+            return Err(libc::EINVAL);
+        }
+        *id = Some(filesystem_id);
+    }
+    Ok([uid.ok_or(libc::EINVAL)?, gid.ok_or(libc::EINVAL)?])
+}
+
+#[cfg(test)]
+mod filesystem_id_status_tests {
+    use super::{parse_proc_filesystem_ids, PROC_CREDENTIAL_STATUS_MAX_BYTES};
+
+    const IDS: &[u8] = b"Uid:\t11\t22\t33\t44\nGid:\t55\t66\t77\t88\n";
+
+    #[test]
+    fn fourth_fields_are_preserved_and_unrelated_bytes_are_ignored() {
+        assert_eq!(parse_proc_filesystem_ids(IDS), Ok([44, 88]));
+        assert_eq!(
+            parse_proc_filesystem_ids(
+                b"Name:\t\xff\nGid:\t2 3 4 2147483648\nUid:\t0\t1\t2\t4294967295\n"
+            ),
+            Ok([u32::MAX, 1 << 31])
+        );
+    }
+
+    #[test]
+    fn each_field_is_required_once_including_after_both_valid_rows() {
+        for bytes in [
+            b"Uid:\t1 2 3 4\n".as_slice(),
+            b"Gid:\t1 2 3 4\n".as_slice(),
+            b"Uid:\t1 2 3 4\nName:\tthread\nGid:\t4 5 6 7\nVmRSS:\t512 kB\nUid:\t1 2 3 4\n"
+                .as_slice(),
+            b"Uid:\t1 2 3 4\nGid:\t4 5 6 7\nVmRSS:\t512 kB\nGid:\t4 5 6 7\n".as_slice(),
+        ] {
+            assert_eq!(parse_proc_filesystem_ids(bytes), Err(libc::EINVAL));
+        }
+    }
+
+    #[test]
+    fn all_four_values_must_be_unsigned_u32_decimal() {
+        for row in [
+            "1 2 3",
+            "1 2 3 4 5",
+            "1 2 3 -1",
+            "1 2 3 +4",
+            "4294967296 2 3 4",
+            "1 2 3 18446744073709551616",
+            "1 2 3 0x4",
+        ] {
+            let bytes = format!("Uid:\t{row}\nGid:\t1 2 3 4\n");
+            assert_eq!(
+                parse_proc_filesystem_ids(bytes.as_bytes()),
+                Err(libc::EINVAL)
+            );
+        }
+    }
+
+    #[test]
+    fn completed_status_requires_a_final_newline_and_stays_within_the_read_bound() {
+        let mut bytes = IDS.to_vec();
+        bytes.extend_from_slice(b"Name:\t");
+        bytes.resize(PROC_CREDENTIAL_STATUS_MAX_BYTES - 1, b'x');
+        assert_eq!(parse_proc_filesystem_ids(&bytes), Err(libc::EINVAL));
+        bytes.push(b'\n');
+        assert_eq!(parse_proc_filesystem_ids(&bytes), Ok([44, 88]));
+        bytes.push(b'\n');
+        assert_eq!(parse_proc_filesystem_ids(&bytes), Err(libc::EOVERFLOW));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_thread_filesystem_ids() -> ProcIdentityResult<[u32; 2]> {
+    let root = unsafe {
+        libc::open(
+            b"/proc\0".as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root < 0 {
+        return Err(proc_identity_errno(
+            "thread status fixed proc root open failed",
+        ));
+    }
+    let outcome = (|| {
+        let root_stat = proc_identity_root(root)?;
+        // thread-self is an ordinary relative kernel link. Do not follow magic links or the final component.
+        let how = [
+            (libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) as u64,
+            0,
+            0x08 | 0x01 | 0x02, // BENEATH | NO_XDEV | NO_MAGICLINKS
+        ];
+        let leaf = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                root,
+                b"thread-self/status\0".as_ptr().cast::<libc::c_char>(),
+                how.as_ptr(),
+                std::mem::size_of_val(&how),
+            )
+        };
+        if leaf < 0 {
+            return Err(proc_identity_errno("thread status fixed openat2 failed"));
+        }
+        let leaf = leaf as libc::c_int;
+        let outcome = (|| {
+            let before = proc_identity_stat(leaf)?;
+            if before.st_mode & libc::S_IFMT != libc::S_IFREG || before.st_dev != root_stat.st_dev {
+                return Err((
+                    "thread status leaf differs from its held procfs",
+                    libc::EINVAL,
+                ));
+            }
+            let mut bytes = [0_u8; PROC_CREDENTIAL_STATUS_MAX_BYTES + 1];
+            let mut used = 0;
+            loop {
+                let count = unsafe {
+                    libc::read(leaf, bytes[used..].as_mut_ptr().cast(), bytes.len() - used)
+                };
+                if count < 0 {
+                    return Err(proc_identity_errno("thread status bounded read failed"));
+                }
+                if count == 0 {
+                    break;
+                }
+                used += count as usize;
+                if used > PROC_CREDENTIAL_STATUS_MAX_BYTES {
+                    return Err(("thread status output exceeds its bound", libc::EOVERFLOW));
+                }
+            }
+            let value = parse_proc_filesystem_ids(&bytes[..used])
+                .map_err(|error| ("Invalid Linux thread status credentials", error))?;
+            let after = proc_identity_stat(leaf)?;
+            let root_after = proc_identity_root(root)?;
+            if before.st_dev != after.st_dev
+                || before.st_ino != after.st_ino
+                || before.st_mode != after.st_mode
+                || root_stat.st_dev != root_after.st_dev
+                || root_stat.st_ino != root_after.st_ino
+            {
+                return Err((
+                    "thread status held source changed during read",
+                    libc::EAGAIN,
+                ));
+            }
+            Ok(value)
+        })();
+        close_proc_identity_fd(leaf, outcome)
+    })();
+    close_proc_identity_fd(root, outcome)
+}
+
+/// Read only the calling Linux thread's fsuid and fsgid, after settling both original procfs descriptors.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxThreadFilesystemIds(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jlongArray {
+    #[cfg(target_os = "linux")]
+    {
+        match linux_thread_filesystem_ids() {
+            Ok(ids) => {
+                let array = match env.new_long_array(2) {
+                    Ok(array) => array,
+                    Err(_) => return ptr::null_mut(),
+                };
+                if env
+                    .set_long_array_region(&array, 0, &ids.map(jlong::from))
+                    .is_err()
+                {
+                    return ptr::null_mut();
+                }
+                array.into_raw()
+            }
+            Err((operation, error)) => {
+                throw_exception_with_error_code(&mut env, operation, error);
+                ptr::null_mut()
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Current Linux thread filesystem ID query unsupported",
+            libc::ENOSYS,
+        );
+        ptr::null_mut()
+    }
+}
+
 // The complete bounded file is read first. Only the prefix through field 22 is interpreted.
 #[cfg(any(target_os = "linux", test))]
 fn parse_proc_start_ticks(bytes: &[u8], expected_pid: libc::pid_t) -> Result<u64, libc::c_int> {

@@ -158,6 +158,15 @@ public interface NativeIO {
         }
     }
 
+    /** Filesystem IDs of the calling Linux thread, observed independently from its other credentials. */
+    record LinuxThreadFilesystemIds(long fsUid, long fsGid) {
+        public LinuxThreadFilesystemIds {
+            if (fsUid < 0 || fsUid > 0xffff_ffffL || fsGid < 0 || fsGid > 0xffff_ffffL) {
+                throw new IllegalArgumentException("Invalid Linux thread filesystem ID");
+            }
+        }
+    }
+
     // These constants are different per each OS, so the correct values are defined in JNI code
     int O_CREAT = 0x01;
     int O_RDONLY = 0x02;
@@ -236,6 +245,11 @@ public interface NativeIO {
     /** Read the calling Linux thread's real, effective and saved IDs and supplementary groups. */
     default LinuxThreadCredentials currentLinuxThreadCredentials() throws NativeIOException {
         throw new NativeIOException("Current Linux thread credential query is unsupported");
+    }
+
+    /** Read the calling Linux thread's filesystem IDs from its fixed procfs status. */
+    default LinuxThreadFilesystemIds currentLinuxThreadFilesystemIds() throws NativeIOException {
+        throw new NativeIOException("Current Linux thread filesystem ID query is unsupported");
     }
 
     /** One libc uname call, no property, procfs, command or deployment-qualification fallback. */

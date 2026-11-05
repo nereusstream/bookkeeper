@@ -103,6 +103,18 @@ public class NativeIOCredentialsTest {
     }
 
     @Test
+    public void linuxFilesystemIdsMatchTheFourthFieldsOfTheCallingThreadsKernelStatus() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_LINUX);
+        var actual = new NativeIOImpl().currentLinuxThreadFilesystemIds();
+        var status = Files.readAllLines(Path.of("/proc/thread-self/status"), StandardCharsets.UTF_8);
+        var uids = statusIds(status, "Uid:");
+        var gids = statusIds(status, "Gid:");
+        assertEquals(4, uids.size());
+        assertEquals(4, gids.size());
+        assertEquals(new NativeIO.LinuxThreadFilesystemIds(uids.get(3), gids.get(3)), actual);
+    }
+
+    @Test
     public void macOsRejectsTheLinuxReadAndPreservesTheLegacyRead() throws Exception {
         assumeTrue(SystemUtils.IS_OS_MAC);
         var io = new NativeIOImpl();
@@ -110,6 +122,9 @@ public class NativeIOCredentialsTest {
         var failure = assertThrows(NativeIOException.class, io::currentLinuxThreadCredentials);
         assertTrue(failure.getMessage().contains("unsupported"));
         assertTrue(failure.getErrno() > 0);
+        var filesystemFailure = assertThrows(NativeIOException.class, io::currentLinuxThreadFilesystemIds);
+        assertTrue(filesystemFailure.getMessage().contains("unsupported"));
+        assertEquals(failure.getErrno(), filesystemFailure.getErrno());
         assertEquals(original, io.currentProcessCredentials());
     }
 
@@ -132,6 +147,20 @@ public class NativeIOCredentialsTest {
         var legacy = mock(NativeIO.class, CALLS_REAL_METHODS);
         var failure = assertThrows(NativeIOException.class, legacy::currentLinuxThreadCredentials);
         assertTrue(failure.getMessage().contains("unsupported"));
+        var filesystemFailure = assertThrows(NativeIOException.class, legacy::currentLinuxThreadFilesystemIds);
+        assertTrue(filesystemFailure.getMessage().contains("unsupported"));
+    }
+
+    @Test
+    public void filesystemIdsPreserveTheUnsignedRange() {
+        var actual = new NativeIO.LinuxThreadFilesystemIds(0xffff_ffffL, 0x8000_0000L);
+        assertEquals(0xffff_ffffL, actual.fsUid());
+        assertEquals(0x8000_0000L, actual.fsGid());
+        assertEquals(0, new NativeIO.LinuxThreadFilesystemIds(0, 0).fsUid());
+        for (long invalid : new long[]{-1, 0x1_0000_0000L}) {
+            assertThrows(IllegalArgumentException.class, () -> new NativeIO.LinuxThreadFilesystemIds(invalid, 1));
+            assertThrows(IllegalArgumentException.class, () -> new NativeIO.LinuxThreadFilesystemIds(1, invalid));
+        }
     }
 
     private static List<Long> statusIds(List<String> status, String label) {
@@ -184,6 +213,22 @@ public class NativeIOCredentialsTest {
             assertTrue(failure.getCause() instanceof UnsatisfiedLinkError);
             assertEquals(original, io.currentProcessCredentials());
             System.out.println("OLD_JNI_THREAD_CREDENTIALS_UNSUPPORTED");
+        }
+    }
+
+    /** Separate Darwin JVM with the library that has saved IDs but predates filesystem IDs. */
+    public static final class OldFilesystemIdsLibraryProbe {
+        public static void main(String[] args) throws Exception {
+            var io = new NativeIOImpl();
+            var original = io.currentProcessCredentials();
+            var saved = assertThrows(NativeIOException.class, io::currentLinuxThreadCredentials);
+            assertTrue(saved.getErrno() > 0);
+            var failure = assertThrows(NativeIOException.class, io::currentLinuxThreadFilesystemIds);
+            assertTrue(failure.getCause() instanceof UnsatisfiedLinkError);
+            assertEquals(original, io.currentProcessCredentials());
+            assertEquals(saved.getErrno(), assertThrows(NativeIOException.class,
+                    io::currentLinuxThreadCredentials).getErrno());
+            System.out.println("OLD_JNI_THREAD_FILESYSTEM_IDS_UNSUPPORTED");
         }
     }
 }

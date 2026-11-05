@@ -1620,6 +1620,14 @@ Linux 入口无路径或 PID 参数，调用 `getresuid`、`getresgid` 和有界
 
 在 Darwin arm64 上构建新 JNI 库，native 六项为五通过、一项仅 Linux 的真实线程状态比对跳过；child 八项及 launcher 五项通过。新库的 `-Xcheck:jni` 复验和原 acf9afec… 库的独立缺符号 probe 均通过，后者前后可用原四字段读取。编译产物核对了三个调用位置及 Linux 分支只用新 JNI。Java Spotless、Checkstyle、新 Rust 片段格式及 Linux x86_64 交叉 `cargo check --tests` 均通过。Linux JNI 实读、合格 dropper 与系统验收为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-child-credentials-evidence-dfae6053`。
 
+## 受控 Linux Classic child 的 filesystem ID 检查
+
+在父 `47ac7bdb5f` 上，已核验的 Linux program 在三个原凭据检查点先核对原 real/effective/saved ID 及补充组，再通过独立 JNI 读取 fsuid、fsgid，并与同一 recipe 的 oldUid、primaryGid 精确比较。读失败或身份不匹配沿对应的原检查点拒绝。新 JNI 只接收无参数调用，返回两个 unsigned u32，沿用原两种凭据 JNI 的独立 ABI。
+
+JNI 持有经类型与 inode 核验的原 `/proc` 根，经 `openat2` 的 BENEATH、NO_XDEV、NO_MAGICLINKS 和最终 NOFOLLOW 打开固定 `thread-self/status`。它检查同一 procfs 的普通叶子，读取至 EOF，上限 64 KiB 并用额外一字节检查超限。原始字节中要求唯一 `Uid:` 和 `Gid:` 行，各四个无符号十进制字段，只交付各自第四项。已开描述符的首次关闭及原身份前后复核成功后才返回。结果只反映调用线程的该次读取，与 getresuid/getresgid/getgroups 分次取得。完整线程组和持续 Unix 隔离仍需独立证据。[Linux status 字段](https://man7.org/linux/man-pages/man5/proc_pid_status.5.html) · [Linux thread-self 源码](https://raw.githubusercontent.com/torvalds/linux/v6.17/fs/proc/thread_self.c)
+
+Darwin arm64 的 JNI 构建、Linux x86_64 交叉检查和 Java Spotless、Checkstyle 通过。Native 八项为六通过、两个 Linux 实读跳过，child 八项和 launcher 五项通过。新库的 `-Xcheck:jni` 复验与原 eca5cf65… 库的独立缺符号 probe 通过。Darwin 的 Cargo 测试进程因现有 `-install_name` 链接参数退出，单独用 rustc 编译源文件中逐字提取的解析函数及测试，四项全部通过。编译产物核对了三个检查点和 Linux 分支的调用顺序。Linux procfs JNI 实读及批准 dropper 的全链路均为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-child-filesystem-credentials-evidence-47ac7bdb`。
+
 ## 受控历史 Classic child：历史资源图实施中
 
 2026-11-01父launcher包继续在本地`192e8c674129dc240f4b0ddf83504d10ba11f071`上实施；此前凭据及child生产消费者分别已本地提交`9652b1a0393f8855419bf01d38da486d4cdf9704`、`192e8c674129dc240f4b0ddf83504d10ba11f071`，未push。原entry部分证据已封存2708文件、42,878,138逻辑字节，manifest SHA256 `d54f337ef5322e9702c43247d95476d203fde196a9a45fa2981783c58d8ab5c5`，新consumer checkpoint `dd873bc2b2c957590b370e1c217465901c566605fbddd2f60f2ee3754278dfc8`；原native-only checkpoint未覆盖，旧阶段不移绑后续源码。
