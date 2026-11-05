@@ -2308,4 +2308,14 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 真实独立 index 根上的五项新增用例覆盖 .idx 和 .idx.rloc 字节及 inode 保留、重复 ledger 的晚项坏 header、关闭时同字节换 inode、文件首次关闭失败及 visitor 与目录关闭双失败。首轮因目录夹具的泛型推断在 testCompile 失败。修正夹具并保留原恢复后迟到 .rloc 拒绝后，历史 index/entry-log、Journal 和子资源三组共 25 项通过，Java Spotless 与 Checkstyle 通过。沿用原 acf9afec… native 库，证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-index-inventory-evidence-af8d9e41`。
 
-本项交付 index 文件数据来源。Journal suffix、持久 CLASSIC claim、受控重放与 flush、BOOTSTRAP_COMPLETE、PREPARED 到 ENABLED 及运行期 route 接线仍待完成。批准 Linux 运行和生产 Gate 仍待验收。
+本项交付 index 文件数据来源。后续补齐 [Journal suffix 的只读来源](#离线-bootstrap-的-journal-suffix-只读清单)，两者供待接入的共同导入使用。
+
+## 离线 bootstrap 的 Journal suffix 只读清单
+
+在父 `f5ccf9829f` 上，包内 `ClassicJournalRecovery` 由外层提供原配置顺序的全部 Journal current 根和 ledger current 根。单 Journal 使用 lastMark，多 Journal 使用 lastMark.<index>。逐 Journal 读取最大有效 mark，正 mark 对应文件缺失时整次失败。标记文件按原 offset 读取，后续文件从 V6 header 后读取。文件 ID 可以跳号，各 Journal 独立选择 cut。
+
+只读入口使用原 V6 记录扫描器，并与历史重放共享 payload 校验。完整、合法的 key、fence、explicit LAC 和 normal 记录各交付一个 ledger ID，保留重复。原 padding、零长度及残缺尾部沿扫描器语义处理，较早文件的残缺尾部之后仍扫描后续 required 文件。正常返回要求全部 Journal 完成并实际关闭临时文件及目录。晚文件、visitor 或首次关闭失败会保留原错误，已交付的前缀不代表完成。扫描期间的外部排空等待实际操作终止。
+
+原文件和 lastMark 在真实多 Journal 用例中保持原路径和字节。另测缺失标记文件、后 Journal 坏 mark 或完整 payload、visitor 与首次 native close 双失败，以及跨 Journal 排空。新增五项通过，最终历史 Journal 13、历史 index 14、普通 Classic Journal 16、历史子图 3 共 46 项通过，Java Spotless 与 Checkstyle 通过。沿用原 acf9afec… native 库，归档位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-journal-inventory-evidence-f5ccf982`。
+
+ledger ID 按记录流式交付，每个 Journal 仍沿用随实际文件数增长的排序清单。整个 bootstrap 的内存上界、外层根排他、持久 CLASSIC claim、受控重放与 flush、BOOTSTRAP_COMPLETE、PREPARED 到 ENABLED、运行期 route 和批准 Linux 运行仍待验收。

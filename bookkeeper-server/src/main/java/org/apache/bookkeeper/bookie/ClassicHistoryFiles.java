@@ -34,6 +34,11 @@ import org.apache.bookkeeper.util.BookKeeperConstants;
 
 /** Startup readers shared by the owned Classic Journal, index and entry logger. Never startup authority. */
 final class ClassicHistoryFiles {
+    @FunctionalInterface
+    interface LedgerVisitor {
+        void visit(long ledgerId) throws IOException;
+    }
+
     record Drain(boolean drained, int retainedResources, Throwable closeFailure) { }
     record Prefix(ByteBuffer bytes, BasicFileAttributes identity) { }
 

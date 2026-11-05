@@ -563,7 +563,7 @@ public class BookieImpl implements Bookie {
             @Override
             public void process(int journalVersion, long offset, ByteBuffer recBuff) throws IOException {
                 if (fresh != null && fresh.historical) {
-                    validateHistoricalJournalRecord(recBuff);
+                    ClassicJournalRecovery.validateRecord(recBuff);
                 }
                 long ledgerId = recBuff.getLong();
                 long entryId = recBuff.getLong();
@@ -680,31 +680,6 @@ public class BookieImpl implements Bookie {
         log.info().attr("elapsedMs", elapsedTs).log("Finished replaying journal");
     }
 
-    /** V6 owned-history payloads are checked before allocating a key/LAC or changing a handle/cache. */
-    private static void validateHistoricalJournalRecord(ByteBuffer record) throws IOException {
-        int start = record.position();
-        int size = record.remaining();
-        if (size < 16 || record.getLong(start) < 0) {
-            throw new IOException("Historical Journal record lacks its bounded ledger/entry header");
-        }
-        long entry = record.getLong(start + 8);
-        if (entry == METAENTRY_ID_LEDGER_KEY || entry == METAENTRY_ID_LEDGER_EXPLICITLAC) {
-            if (size < 20) {
-                throw new IOException("Historical Journal metadata lacks its length field");
-            }
-            int length = record.getInt(start + 16);
-            if (length < 0 || length != size - 20 || entry == METAENTRY_ID_LEDGER_EXPLICITLAC && length < 16) {
-                throw new IOException("Historical Journal metadata length differs from its bounded payload");
-            }
-        } else if (entry == METAENTRY_ID_FENCE_KEY) {
-            if (size != 16) {
-                throw new IOException("Historical Journal fence has an unexpected payload");
-            }
-        } else if (entry < 0 || size < 24) {
-            throw new IOException("Unknown or incomplete historical Journal entry payload");
-        }
-    }
-
     /**
      * Replay journal files and updates journal's in-memory lastLogMark object.
      *
@@ -715,14 +690,8 @@ public class BookieImpl implements Bookie {
     private void replay(Journal journal, JournalScanner scanner) throws IOException {
         final LogMark markedLog = journal.getLastLogMark().getCurMark();
         List<Long> logs = journal.journalIdsForRecovery(markedLog.getLogFileId());
-        // last log mark may be missed due to no sync up before
-        // validate filtered log ids only when we have markedLogId
-        if (markedLog.getLogFileId() > 0) {
-            if (logs.size() == 0 || logs.get(0) != markedLog.getLogFileId()) {
-                String path = journal.getJournalDirectory().getAbsolutePath();
-                throw new IOException("Recovery log " + markedLog.getLogFileId() + " is missing at " + path);
-            }
-        }
+        ClassicJournalRecovery.requireMarkedJournal(markedLog.getLogFileId(), logs,
+                journal.getJournalDirectory().toPath());
 
         // TODO: When reading in the journal logs that need to be synced, we
         // should use BufferedChannels instead to minimize the amount of

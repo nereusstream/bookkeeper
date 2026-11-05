@@ -1072,11 +1072,7 @@ public class Journal implements CheckpointSource {
 
         this.removePagesFromCache = conf.getJournalRemovePagesFromCache();
         // read last log mark
-        if (conf.getJournalDirs().length == 1) {
-            lastMarkFileName = LAST_MARK_DEFAULT_NAME;
-        } else {
-            lastMarkFileName = LAST_MARK_DEFAULT_NAME + "." + journalIndex;
-        }
+        lastMarkFileName = lastMarkFileName(journalIndex, conf.getJournalDirs().length);
         history = historicalLifecycle ? new ClassicJournalRecovery(journalDirectory.toPath(),
                 ledgerDirsManager.getAllLedgerDirs().stream().map(File::toPath).toList(), lastMarkFileName,
                 conf.getNettyMaxFrameSizeBytes(), journalAlignmentSize) : null;
@@ -1100,6 +1096,10 @@ public class Journal implements CheckpointSource {
         // Expose Stats
         this.journalStats = new JournalStats(journalStatsLogger, journalMaxMemory,
                 () -> memoryLimitController.currentUsage());
+    }
+
+    static String lastMarkFileName(int journalIndex, int journalCount) {
+        return journalCount == 1 ? LAST_MARK_DEFAULT_NAME : LAST_MARK_DEFAULT_NAME + "." + journalIndex;
     }
 
     void initializeForFresh() throws IOException {

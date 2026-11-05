@@ -39,6 +39,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -160,6 +161,168 @@ public class ClassicJournalRecoveryTest {
             assertEquals(List.of(2L), records);
             assertTrue(reader.closeAndDrain().drained());
             assertArrayEquals(bytes.array(), Files.readAllBytes(file));
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void journalInventoryStreamsAllRequiredSuffixesInOrderWithoutChangingFiles() throws Exception {
+        try (var f = new Fixture()) {
+            byte[] before = entryRecord(99, 0, 0, 0);
+            byte[] padding = ByteBuffer.allocate(12).putInt(Journal.PADDING_MASK).putInt(4).putInt(0).array();
+            byte[] partial = ByteBuffer.allocate(12).putInt(24).putLong(98).array();
+            var inputs = Map.of(
+                    f.ledgers.get(0).resolve("lastMark.0"), mark(7, JournalChannel.HEADER_SIZE),
+                    f.ledgers.get(1).resolve("lastMark.0"), mark(7, JournalChannel.HEADER_SIZE + before.length),
+                    f.ledgers.get(0).resolve("lastMark.1"), mark(3, JournalChannel.HEADER_SIZE + before.length),
+                    f.journal.resolve("2.txn"), suffixImage(entryRecord(97, 0, 0, 0)),
+                    f.journal.resolve("7.txn"), suffixImage(before,
+                            entryRecord(44, BookieImpl.METAENTRY_ID_LEDGER_KEY, 4, 17),
+                            entryRecord(44, BookieImpl.METAENTRY_ID_FENCE_KEY), padding, partial),
+                    f.journal.resolve("9.txn"), suffixImage(
+                            entryRecord(55, BookieImpl.METAENTRY_ID_LEDGER_EXPLICITLAC, 16, 0, 0, 0, 0),
+                            entryRecord(44, 1, 0, 0)),
+                    f.secondJournal.resolve("3.txn"), suffixImage(before, entryRecord(77, 2, 0, 0)));
+            for (var input : inputs.entrySet()) {
+                Files.write(input.getKey(), input.getValue());
+            }
+            var reader = f.inventory();
+            var ledgerIds = new ArrayList<Long>();
+            try {
+                reader.readLedgerIds(ledgerIds::add);
+                assertEquals(List.of(44L, 44L, 55L, 44L, 77L), ledgerIds);
+                assertFalse(Files.exists(f.ledgers.get(1).resolve("lastMark.1")));
+                for (var input : inputs.entrySet()) {
+                    assertArrayEquals(input.getValue(), Files.readAllBytes(input.getKey()));
+                }
+            } finally {
+                assertTrue(reader.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void journalInventoryRejectsMissingMarkedFileEvenWithANewerFile() throws Exception {
+        try (var f = new Fixture()) {
+            Files.write(f.ledgers.get(0).resolve("lastMark"), mark(2, JournalChannel.HEADER_SIZE));
+            Files.write(f.journal.resolve("3.txn"), suffixImage(entryRecord(44, 0, 0, 0)));
+            var reader = ClassicJournalRecovery.forInventory(List.of(f.journal), f.ledgers, 1024, 512);
+            var ledgerIds = new ArrayList<Long>();
+            try {
+                var failure = assertThrows(IOException.class, () -> reader.readLedgerIds(ledgerIds::add));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("Recovery log 2 is missing"));
+                assertTrue(ledgerIds.isEmpty());
+                assertSame(failure, reader.closeAndDrain().readFailure());
+            } finally {
+                assertTrue(reader.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void journalInventoryFailsTheWholeReadOnALaterBadMarkOrCompletePayload() throws Exception {
+        for (boolean badMark : List.of(false, true)) {
+            try (var f = new Fixture()) {
+                Files.write(f.journal.resolve("1.txn"), suffixImage(entryRecord(44, 0, 0, 0)));
+                Files.write(f.ledgers.get(0).resolve("lastMark.1"),
+                        badMark ? new byte[15] : mark(2, JournalChannel.HEADER_SIZE));
+                Files.write(f.secondJournal.resolve("2.txn"),
+                        suffixImage(entryRecord(55, BookieImpl.METAENTRY_ID_LEDGER_KEY, 8, 0)));
+                var reader = f.inventory();
+                var ledgerIds = new ArrayList<Long>();
+                try {
+                    var failure = assertThrows(IOException.class, () -> reader.readLedgerIds(ledgerIds::add));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains(badMark
+                            ? "lastMark must contain exactly two longs" : "metadata length differs"));
+                    assertEquals(List.of(44L), ledgerIds);
+                    assertSame(failure, assertThrows(IOException.class, () -> reader.readLedgerIds(ledgerIds::add))
+                            .getCause());
+                    assertSame(failure, reader.closeAndDrain().readFailure());
+                } finally {
+                    assertTrue(reader.closeAndDrain().drained());
+                }
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void journalInventoryRetainsBothVisitorFailureAndTheFirstNativeCloseFailure() throws Exception {
+        try (var f = new Fixture()) {
+            Path file = f.journal.resolve("1.txn");
+            Files.write(file, suffixImage(entryRecord(44, 0, 0, 0), entryRecord(55, 0, 0, 0)));
+            var channel = new ControlledFileChannel(FileChannel.open(file, StandardOpenOption.READ));
+            channel.closeFailure = new IOException("inventory first native close");
+            var visitorFailure = new IOException("inventory visitor failed");
+            var reader = f.inventory();
+            try (var opens = mockStatic(FileChannel.class, CALLS_REAL_METHODS)) {
+                opens.when(() -> FileChannel.open(file, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))
+                        .thenReturn(channel);
+                assertSame(visitorFailure, assertThrows(IOException.class, () -> reader.readLedgerIds(ledger -> {
+                    assertEquals(44, ledger);
+                    throw visitorFailure;
+                })));
+                assertArrayEquals(new Throwable[]{channel.closeFailure}, visitorFailure.getSuppressed());
+            } finally {
+                var drain = reader.closeAndDrain();
+                assertFalse(drain.drained());
+                assertEquals(1, drain.retainedResources());
+                assertSame(visitorFailure, drain.readFailure());
+                assertSame(channel.closeFailure, drain.closeFailure());
+                assertEquals(drain, reader.closeAndDrain());
+                assertEquals(1, channel.closeAttempts.get());
+                assertTrue(channel.delegate.isOpen());
+                channel.delegate.close();
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void journalInventoryDrainsOnlyAfterTheActualVisitorAndAllSourcesFinish() throws Exception {
+        try (var f = new Fixture()) {
+            Files.write(f.journal.resolve("1.txn"), suffixImage(entryRecord(44, 0, 0, 0)));
+            Files.write(f.secondJournal.resolve("1.txn"), suffixImage(entryRecord(55, 0, 0, 0)));
+            var reader = f.inventory();
+            var ledgerIds = new ArrayList<Long>();
+            var entered = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var closingStarted = new CountDownLatch(1);
+            var reading = new FutureTask<Void>(() -> {
+                reader.readLedgerIds(ledger -> {
+                    ledgerIds.add(ledger);
+                    if (ledger == 44) {
+                        assertThrows(IllegalStateException.class, reader::closeAndDrain);
+                        entered.countDown();
+                        try {
+                            assertTrue(release.await(5, TimeUnit.SECONDS));
+                        } catch (InterruptedException failure) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException(failure);
+                        }
+                    }
+                });
+                return null;
+            });
+            var draining = new FutureTask<>(() -> {
+                closingStarted.countDown();
+                return reader.closeAndDrain();
+            });
+            var scanning = new Thread(reading, "journal-inventory-test-reader");
+            var closing = new Thread(draining, "journal-inventory-test-drain");
+            scanning.start();
+            try {
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                closing.start();
+                assertTrue(closingStarted.await(5, TimeUnit.SECONDS));
+                assertThrows(TimeoutException.class, () -> draining.get(150, TimeUnit.MILLISECONDS));
+            } finally {
+                release.countDown();
+                scanning.join(5000);
+                closing.join(5000);
+            }
+            reading.get(5, TimeUnit.SECONDS);
+            assertEquals(List.of(44L, 55L), ledgerIds);
+            assertTrue(draining.get(5, TimeUnit.SECONDS).drained());
+            assertFalse(scanning.isAlive());
+            assertFalse(closing.isAlive());
         }
     }
 
@@ -297,6 +460,28 @@ public class ClassicJournalRecoveryTest {
         return ByteBuffer.allocate(16).putLong(id).putLong(offset).array();
     }
 
+    private static byte[] entryRecord(long ledger, long entry, int... words) {
+        int length = 16 + 4 * words.length;
+        var bytes = ByteBuffer.allocate(4 + length).putInt(length).putLong(ledger).putLong(entry);
+        for (int word : words) {
+            bytes.putInt(word);
+        }
+        return bytes.array();
+    }
+
+    private static byte[] suffixImage(byte[]... records) {
+        int length = JournalChannel.HEADER_SIZE;
+        for (byte[] record : records) {
+            length += record.length;
+        }
+        var bytes = ByteBuffer.allocate(length).putInt(0x424b4c47).putInt(JournalChannel.V6);
+        bytes.position(JournalChannel.HEADER_SIZE);
+        for (byte[] record : records) {
+            bytes.put(record);
+        }
+        return bytes.array();
+    }
+
     private static byte[] image(int version, int... words) {
         ByteBuffer bytes = ByteBuffer.allocate(512 + 4 * words.length).putInt(0x424b4c47).putInt(version);
         bytes.position(512);
@@ -308,6 +493,7 @@ public class ClassicJournalRecoveryTest {
 
     private final class Fixture implements AutoCloseable {
         private final Path journal;
+        private final Path secondJournal;
         private final List<Path> ledgers = new ArrayList<>();
         private final List<Journal> journals = new ArrayList<>();
         private final ServerConfiguration conf;
@@ -317,7 +503,7 @@ public class ClassicJournalRecoveryTest {
             Path first = temporary.newFolder().toPath();
             Path second = temporary.newFolder().toPath();
             journal = Files.createDirectory(first.resolve("current"));
-            Files.createDirectory(second.resolve("current"));
+            secondJournal = Files.createDirectory(second.resolve("current"));
             List<String> roots = new ArrayList<>();
             for (int i = 0; i < 2; i++) {
                 Path root = temporary.newFolder().toPath();
@@ -350,6 +536,10 @@ public class ClassicJournalRecoveryTest {
 
         private ClassicJournalRecovery reader() {
             return new ClassicJournalRecovery(journal, ledgers, "lastMark.0", 1024, 512);
+        }
+
+        private ClassicJournalRecovery inventory() {
+            return ClassicJournalRecovery.forInventory(List.of(journal, secondJournal), ledgers, 1024, 512);
         }
 
         private void append(Journal journal, long id) throws Exception {

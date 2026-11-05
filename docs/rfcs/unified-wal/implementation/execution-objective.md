@@ -2,7 +2,9 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
-共同 route 离线导入已有包内历史 index 清单读取能力。它从有效 index 根逐个交付校验过的 ledger ID，完整成功取决于全部候选与实际关闭结果。原历史初始化复用校验，全部通过后才处理 .rloc。25 项定向回归和 Java 样式通过。Journal suffix、持久 claim、封口和共同运行入口仍待接线。详见 [local-storage](local-storage/README.md#离线-bootstrap-的历史-index-只读清单)。
+共同 route 离线导入已补齐 Journal suffix 的只读 ledger 流。每个 Journal 沿用自身最大有效 lastMark、实际 required 文件和 V6 重放的 payload 校验，逐条交付完整记录的 ledger ID。五项新增用例、最终 46 项定向回归和 Java 样式通过。每个 Journal 的文件清单仍随文件数增长，持久 claim、封口和共同运行入口仍待接线。详见 [local-storage](local-storage/README.md#离线-bootstrap-的-journal-suffix-只读清单)。
+
+共同 route 离线导入已有包内历史 index 清单读取能力。它从有效 index 根逐个交付校验过的 ledger ID，完整成功取决于全部候选与实际关闭结果。原历史初始化复用校验，全部通过后才处理 .rloc。25 项定向回归和 Java 样式通过。详见 [local-storage](local-storage/README.md#离线-bootstrap-的历史-index-只读清单)。
 
 步骤 14/16 新增 OPEN 账本在单台服务健康重开后的整合验收。三台 Bookie 以 3/3/3 正常写入两条数据，停止本地 writer 后保留 OPEN。一台服务以相同 storage incarnation 重开，旧注册观察被拒绝，原池重新取得 generation 2 的 CTRL/DATA 连接后完成恢复。标准 metadata 匹配 CLOSED(1, 35)，原 SDK 公开只读读回全部字节。最终四项定向回归和 Java 样式通过。故障重启、跨版本、完整步骤 14/16 和生产 Gate 仍待验收。详见 [profile-wire](profile-wire/README.md#单台服务健康重开后的-open-账本恢复)。
 

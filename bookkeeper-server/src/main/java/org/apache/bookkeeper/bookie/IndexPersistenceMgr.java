@@ -459,11 +459,6 @@ public class IndexPersistenceMgr {
         }
     }
 
-    @FunctionalInterface
-    interface HistoricalLedgerVisitor {
-        void visit(long ledgerId) throws IOException;
-    }
-
     /** Owns only the read resources for an offline inventory of the effective index current directories. */
     static final class HistoricalIndexReader {
         record Drain(boolean drained, int retainedResources, Throwable readFailure, Throwable closeFailure) { }
@@ -484,7 +479,7 @@ public class IndexPersistenceMgr {
          * Visits each validated file, so a ledger can occur more than once. Only normal return after the
          * traversal and all closes proves a complete inventory. The outer owner supplies root exclusion.
          */
-        synchronized void readLedgerIds(HistoricalLedgerVisitor visitor) throws IOException {
+        synchronized void readLedgerIds(ClassicHistoryFiles.LedgerVisitor visitor) throws IOException {
             Objects.requireNonNull(visitor, "visitor");
             if (reading != null || readFailure != null || !files.healthy()) {
                 throw new IOException("Historical index inventory is active, closing or failed", readFailure);
@@ -518,7 +513,7 @@ public class IndexPersistenceMgr {
     }
 
     private static void scanHistoricalIndexes(List<File> roots, ClassicHistoryFiles history, boolean recover,
-            HistoricalLedgerVisitor visitor) throws IOException {
+            ClassicHistoryFiles.LedgerVisitor visitor) throws IOException {
         for (File root : roots) {
             Path rootPath = root.toPath();
             try (var grandparents = history.openDirectory(rootPath)) {
@@ -555,7 +550,7 @@ public class IndexPersistenceMgr {
     }
 
     private static void recoverHistoricalParent(List<File> roots, ClassicHistoryFiles history, Path root,
-            Path parent, HistoricalLedgerVisitor visitor) throws IOException {
+            Path parent, ClassicHistoryFiles.LedgerVisitor visitor) throws IOException {
         while (true) {
             Path candidate = null;
             try (var indexes = history.openDirectory(parent)) {
