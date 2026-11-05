@@ -1218,6 +1218,16 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的 systemd private socket 对端核验
+
+schema2 launcher 先核验原生父凭据，在末轮 boot ID、process birth 与初始 PID/user namespace 检查后，调用只接收原 deadline 的 `verifyLinuxSystemdPeer`。原 trust owner 先核验 D2 source/provider，再用已绑定的 provider 构造固定 `/run/systemd/private`。父目录和祖先沿用原物理路径、owner、ACL 与保护检查。对 leaf 用 `NOFOLLOW_LINKS` 取得原始 Unix 身份，要求 UID 0、socket 类型及精确 mode 0700。systemd v255 的系统 manager 在 PID 1 时以 umask 0077 绑定该固定路径。[systemd v255 listener 源码](https://github.com/systemd/systemd/blob/v255/src/core/dbus.c#L850-L898)
+
+owner 复用一次非阻塞 Unix connect 和原绝对 deadline，从同一实际 channel 调用原 JNI `SO_PEERCRED`。此连接只取连接时凭据，要求 PID 1、UID 0，GID 由内核返回。channel 和专用 selector 分别登记，先关闭 selector 以解除注册，再尝试关闭 channel。任一关闭失败保留首个失败和未结算资源，已有操作异常仍为主错误。完成关闭后复核 leaf 与受保护父链、owner 健康和期限。路径、连接、凭据或关闭失败沿原 launcher failure 阻止进入 dropper、childCommand 和私钥读取。D1 与无 Linux 部署的路径保持原行为。[Linux Unix socket 凭据语义](https://man7.org/linux/man-pages/man7/unix.7.html)
+
+本次连接在对端核验后关闭，期间没有发送认证、D-Bus 或应用字节。后续 `systemctl` 自己的连接及响应、有效 unit 属性和 manager episode 仍需独立绑定。既有 D1/D2 childCommand 与 diagnostics 拒绝继续生效。[systemd v255 CLI 连接与回退源码](https://github.com/systemd/systemd/blob/v255/src/shared/bus-util.c#L187-L213)
+
+在父 `08c87d108c` 上使用原 4e0a6d2e… native 库，最终 server 59 项全通过，native 4 项中 3 项通过、1 项 Linux 描述符重分配用例跳过，Java style 通过。临时 socket 的 EOF、leaf 替换和 selector 关闭故障覆盖原连接的资源结算。替换用例注入 peer 结果，实际跨进程 native 用例在 Darwin 验证平台拒绝和连接可用性。首次 server 59 项中 1 项因夹具期望的异常类与实际 connect 拒绝不符而失败，修正断言后的运行保留独立输入与结果。批准的 Linux 固定端点、Linux peer 阳性及完整启动均未执行，生产 Gate 仍 OPEN。
+
 ## 正常 D2 launcher 的初始 PID 与 user namespace
 
 正常 schema2 launcher 在两次原 process-birth 核验之后各调用一次 `verifyLinuxInitialNamespaces`，仍在独立 dropper 核验、`childCommand` 和私钥读取之前。原 source/provider 与 deadline 先行；实际读取后复查 deadline 和 owner 健康，再把两个原始值分别与初始 PID inode `0xeffffffc`、user inode `0xeffffffd` 比较，并复查 deadline。缺值、任一不匹配或读取失败沿用原 sticky failure 和排空。没有首值缓存、外部数据入口或新资格对象。D1 和无 Linux 部署路径不调用新 ABI。

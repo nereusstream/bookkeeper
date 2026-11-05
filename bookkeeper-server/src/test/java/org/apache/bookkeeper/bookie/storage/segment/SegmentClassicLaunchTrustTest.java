@@ -30,17 +30,26 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.withSettings;
 
 import com.sun.security.auth.module.UnixSystem;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.StandardProtocolFamily;
+import java.net.UnixDomainSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.nio.channels.spi.AbstractSelector;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.DirectoryStream;
@@ -5128,6 +5137,161 @@ public class SegmentClassicLaunchTrustTest {
                     assertTrue(owner.closeAndDrain().drained());
                 }
             }
+        }
+    }
+
+    @Test
+    public void systemdPeerRequiresOriginalSourceAndDeadlineAndComparesPidAndUidIndependently() throws Exception {
+        SegmentClassicLaunchTrust.requireLinuxSystemdPeer(new NativeIO.UnixPeerCredentials(1, 0, 123));
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireLinuxSystemdPeer(
+                new NativeIO.UnixPeerCredentials(2, 0, 123)));
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireLinuxSystemdPeer(
+                new NativeIO.UnixPeerCredentials(1, 1, 123)));
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireLinuxSystemdPeer(null));
+        for (boolean expired : List.of(false, true)) {
+            var owner = owner();
+            owner.initialize();
+            long deadline = expired ? System.nanoTime() : SegmentClassicLinuxElfTest.deadline();
+            var failure = assertThrows(IOException.class, () -> owner.verifyLinuxSystemdPeer(deadline));
+            assertTrue(failure.getMessage(), failure.getMessage().contains(
+                    expired ? "deadline elapsed" : "original provider/source binding"));
+            var drained = owner.closeAndDrain();
+            assertTrue(drained.drained());
+            assertSame(failure, drained.launcherFailure());
+        }
+    }
+
+    @Test(timeout = 10000)
+    public void systemdPeerObservesOneRealConnectionAndClosesItWithoutSendingBytes() throws Exception {
+        Path socket = root.resolve("s");
+        try (var listener = bindPrivateSocket(socket)) {
+            var owner = owner();
+            owner.initialize();
+            try {
+                if (SystemUtils.IS_OS_LINUX) {
+                    var peer = owner.readLinuxSystemdSocket(socket, SegmentClassicLinuxElfTest.deadline());
+                    assertEquals(ProcessHandle.current().pid(), peer.pid());
+                    assertEquals(new NativeIOImpl().currentProcessCredentials().effectiveUid(), peer.uid());
+                } else {
+                    assertThrows(NativeIOException.class,
+                            () -> owner.readLinuxSystemdSocket(socket, SegmentClassicLinuxElfTest.deadline()));
+                }
+                assertPrivateSocketEof(listener);
+                assertNull(listener.accept());
+                assertTrue(Files.exists(socket));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test(timeout = 10000)
+    public void systemdPeerRejectsAliasAndNonPrivateLeafBeforeConnect() throws Exception {
+        Path socket = root.resolve("s");
+        try (var listener = bindPrivateSocket(socket)) {
+            Path alias = Files.createSymbolicLink(root.resolve("a"), socket.getFileName());
+            for (Path path : List.of(alias, socket)) {
+                if (path.equals(socket)) {
+                    Files.setPosixFilePermissions(socket, PosixFilePermissions.fromString("rwx-----x"));
+                }
+                var owner = owner();
+                owner.initialize();
+                try {
+                    var failure = assertThrows(IOException.class,
+                            () -> owner.readLinuxSystemdSocket(path, SegmentClassicLinuxElfTest.deadline()));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains("mode 0700 socket"));
+                    assertNull(listener.accept());
+                } finally {
+                    assertTrue(owner.closeAndDrain().drained());
+                }
+            }
+        }
+    }
+
+    @Test(timeout = 10000)
+    public void systemdPeerRejectsReplacementAfterTheOriginalConnectionAndClosesIt() throws Exception {
+        Path socket = root.resolve("s");
+        Path moved = root.resolve("m");
+        try (var listener = bindPrivateSocket(socket); var replacement = ServerSocketChannel.open(
+                StandardProtocolFamily.UNIX)) {
+            SegmentClassicLaunchTrust owner;
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> {
+                        Files.move(socket, moved);
+                        replacement.bind(UnixDomainSocketAddress.of(socket));
+                        Files.setPosixFilePermissions(socket, PosixFilePermissions.fromString("rwx------"));
+                        return new NativeIO.UnixPeerCredentials(ProcessHandle.current().pid(), uid, uid);
+                    }).when(mock).unixPeerCredentials(any(SocketChannel.class)))) {
+                owner = owner();
+            }
+            owner.initialize();
+            try {
+                var failure = assertThrows(IOException.class,
+                        () -> owner.readLinuxSystemdSocket(socket, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("protected parent chain changed"));
+                assertPrivateSocketEof(listener);
+                replacement.configureBlocking(false);
+                assertNull(replacement.accept());
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test(timeout = 10000)
+    public void systemdPeerSelectorCloseFailureStillClosesOriginalChannelAndIsRetained() throws Exception {
+        Path socket = root.resolve("s");
+        try (var listener = bindPrivateSocket(socket); var channel = SocketChannel.open(StandardProtocolFamily.UNIX)) {
+            // The selector appears closed to connect and fails its first close. The channel is real.
+            var selector = mock(AbstractSelector.class);
+            var close = new IOException("Original systemd selector first close failed");
+            doThrow(close).when(selector).close();
+            var owner = owner();
+            owner.initialize();
+            try (var selectors = mockStatic(Selector.class, CALLS_REAL_METHODS);
+                 var channels = mockStatic(SocketChannel.class, CALLS_REAL_METHODS)) {
+                selectors.when(Selector::open).thenReturn(selector);
+                channels.when(() -> SocketChannel.open(StandardProtocolFamily.UNIX)).thenReturn(channel);
+                var failure = assertThrows(IOException.class,
+                        () -> owner.readLinuxSystemdSocket(socket, SegmentClassicLinuxElfTest.deadline()));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("selector must remain open"));
+                assertArrayEquals(new Throwable[]{close}, failure.getSuppressed());
+                assertFalse(channel.isOpen());
+                assertNull(listener.accept());
+                for (int attempt = 0; attempt < 2; attempt++) {
+                    var drained = owner.closeAndDrain();
+                    assertFalse(drained.drained());
+                    assertEquals(1, drained.retainedAuxiliaryReads());
+                    assertSame(close, drained.auxiliaryCloseFailure());
+                    assertSame(failure, drained.launcherFailure());
+                }
+                verify(selector).close();
+            }
+        }
+    }
+
+    private static ServerSocketChannel bindPrivateSocket(Path socket) throws IOException {
+        var listener = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
+        try {
+            listener.bind(UnixDomainSocketAddress.of(socket));
+            Files.setPosixFilePermissions(socket, PosixFilePermissions.fromString("rwx------"));
+            listener.configureBlocking(false);
+            return listener;
+        } catch (IOException | RuntimeException | Error failure) {
+            try {
+                listener.close();
+            } catch (IOException close) {
+                failure.addSuppressed(close);
+            }
+            throw failure;
+        }
+    }
+
+    private static void assertPrivateSocketEof(ServerSocketChannel listener) throws IOException {
+        try (var accepted = listener.accept()) {
+            assertNotNull("Original socket was never connected", accepted);
+            accepted.configureBlocking(false);
+            assertEquals(-1, accepted.read(ByteBuffer.allocate(1)));
         }
     }
 

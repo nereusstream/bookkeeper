@@ -20,11 +20,15 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.StandardProtocolFamily;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.UnixDomainSocketAddress;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.channels.Selector;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
@@ -74,6 +78,7 @@ final class SegmentClassicLaunchTrust {
     private static final List<String> BUILTIN_HWCAP_SUFFIXES = List.of("glibc-hwcaps/x86-64-v4/",
             "glibc-hwcaps/x86-64-v3/", "glibc-hwcaps/x86-64-v2/", "");
     private static final long DF_1_NODEFLIB = 0x800L;
+    private static final String SYSTEMD_PRIVATE_SOCKET = "/run/systemd/private";
 
     record Recipe(String recipeId, String deployment, String keyName, SegmentClassicHandoff.Digest signerKeyId,
                   SegmentClassicHandoff.Digest program, SegmentClassicHandoff.Digest configuration,
@@ -999,6 +1004,122 @@ final class SegmentClassicLaunchTrust {
     static void requireInitialLinuxNamespaces(NativeIO.LinuxThreadNamespaces actual) throws IOException {
         if (actual == null || actual.pidInode() != 0xefff_fffcL || actual.userInode() != 0xefff_fffdL) {
             throw new IOException("Current launcher thread must be in the initial Linux PID and user namespaces");
+        }
+    }
+
+    /** Called after the final D2 namespace check, while the original launcher still owns startup. */
+    synchronized void verifyLinuxSystemdPeer(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            originalLinuxDeployment(deadline);
+            requireLinuxSystemdPeer(observeLinuxSystemdSocket(linuxPhysicalPath(SYSTEMD_PRIVATE_SOCKET, deadline),
+                    deadline));
+            requireTime(deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Isolated socket observation for material fixtures. Production always uses the fixed endpoint. */
+    synchronized NativeIO.UnixPeerCredentials readLinuxSystemdSocket(Path path, long deadline) throws IOException {
+        if (production) {
+            throw new IOException("Data-only socket observations cannot select a production systemd endpoint");
+        }
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            requireBoundDeadline(deadline);
+            return observeLinuxSystemdSocket(path, deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    static void requireLinuxSystemdPeer(NativeIO.UnixPeerCredentials actual) throws IOException {
+        if (actual == null || actual.pid() != 1 || actual.uid() != 0) {
+            throw new IOException("Original systemd private socket peer must be PID 1 and UID 0");
+        }
+    }
+
+    private NativeIO.UnixPeerCredentials observeLinuxSystemdSocket(Path path, long deadline) throws IOException {
+        requireTime(deadline);
+        Path parent = path.getParent();
+        if (!path.isAbsolute() || parent == null || !path.equals(path.normalize())) {
+            throw new IOException("Original systemd private socket must have an absolute physical path");
+        }
+        requireLoadingPathBytes(path, deadline);
+        Identity parentBefore = systemdSocketParent(parent);
+        var parents = chain(parent);
+        Identity before = systemdSocketIdentity(path);
+        var peer = readSystemdSocketPeer(UnixDomainSocketAddress.of(path), deadline);
+        requireTime(deadline);
+        if (!parentBefore.equals(systemdSocketParent(parent)) || !parents.equals(chain(parent))
+                || !before.equals(systemdSocketIdentity(path))) {
+            throw new IOException("Original systemd private socket or protected parent chain changed");
+        }
+        files.requireHealthy();
+        requireTime(deadline);
+        return peer;
+    }
+
+    private Identity systemdSocketParent(Path parent) throws IOException {
+        Identity identity = checked(parent);
+        if (!identity.directory() || (identity.mode() & 022) != 0) {
+            throw new IOException("Original systemd private socket parent must be a protected directory");
+        }
+        return identity.parent();
+    }
+
+    private Identity systemdSocketIdentity(Path path) throws IOException {
+        // The protected parent chain and the connected peer are checked separately. Do not open the socket as a file.
+        Identity identity = SegmentClassicHandoffPaths.loadingIdentity(path);
+        if ((identity.mode() & 0177777) != 0140700 || identity.uid() != ownerUid) {
+            throw new IOException("Original systemd private endpoint must be a trusted owner's mode 0700 socket");
+        }
+        return identity;
+    }
+
+    private NativeIO.UnixPeerCredentials readSystemdSocketPeer(UnixDomainSocketAddress address, long deadline)
+            throws IOException {
+        var channelRead = new AuxiliaryRead();
+        var selectorRead = new AuxiliaryRead();
+        auxiliaryReads.add(channelRead);
+        auxiliaryReads.add(selectorRead);
+        Throwable failure = null;
+        try {
+            requireTime(deadline);
+            channelRead.openStarted = true;
+            SocketChannel channel = SocketChannel.open(StandardProtocolFamily.UNIX);
+            channelRead.resource = channel;
+            channelRead.openReturned = true;
+            requireTime(deadline);
+            selectorRead.openStarted = true;
+            Selector selector = Selector.open();
+            selectorRead.resource = selector;
+            selectorRead.openReturned = true;
+            channel.configureBlocking(false).register(selector, 0);
+            SegmentClassicLauncherOperationIo.connect(channel, selector, address, deadline);
+            return nativeIo.unixPeerCredentials(channel);
+        } catch (IOException | RuntimeException | Error problem) {
+            failure = problem;
+            throw problem;
+        } finally {
+            // Deregister first so the original channel can close without waiting for a selector.
+            try {
+                finishAuxiliary(selectorRead, failure);
+            } catch (IOException | RuntimeException | Error closeFailure) {
+                failure = closeFailure;
+                throw closeFailure;
+            } finally {
+                finishAuxiliary(channelRead, failure);
+            }
         }
     }
 
