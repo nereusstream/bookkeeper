@@ -1218,6 +1218,14 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的整张加载目录表观察
+
+2026-11-05在父`6f747aa7d07adc6f050f2cc5bec8834ef0acc0c7`上，正常schema2启动在固定conf图之后、dropper之前调用一次原`verifyLinuxSearchDirectories(deadline)`，成功返回才继续。不逐项调用、不遍历policy.defaultDirectories、不缓存或转发返回值，D1及无Linux部署分支按原路径执行。原观察器没有改写：来源/provider/期限门后从原loading.directories取整表，保留原index/raw logical/present与alias；A/B各自共用原固定成员/名称预算，同resolved每遍复用前核身份，比较全部路径、父链与成员，保持受保护缺失、实际空目录、首次close及sticky/drain。
+
+只运行既有Trust相关8＋Inputs6＋DeploymentV2 13＋Launcher3共30项，全通过、0失败/错误/跳过；无新增测试、入口或native接口。覆盖真实临时目录完整成员/alias/absent/empty、两遍变化、跨目录预算和两个iterator关闭、旧首次close失败及原来源不符拒绝；Java Spotless/Checkstyle退出0。单测试阶段1450原输入与父Git blob/快照一致，唯一改动code与test/style对应，沿用9406191e…受控库不重建。
+
+证据在工作区外`/Users/liusinan/.codex/artifacts/unified-wal/classic-launcher-directories-evidence-6f747aa7`，保留原source/class/日志/XML。正常入口唯一调用及先后顺序按实际代码静态核对，动态用例走已有data/shared observer，不能补认原批准D2来源；Linux/vendor正式阳性仍NOT_EXECUTED。这是两次路径与完整成员枚举，不证明directory stream fd、后续稳定性、实际搜索顺序、候选批准或loader winner。原childCommand/diagnostics拒绝及parent/child/Main/G1/full-bytes/full16/生产Gate OPEN，默认OFF/SYSTEM/PARK、advanced disabled及完整目标active保持。
+
 ## 正常 D2 launcher 的固定 conf 与实际 include 图
 
 2026-11-05在父`64bc49c1918065a0c78325505699e604f026d062`上，正常D2 launcher在cache之后、dropper/childCommand/私钥之前，从同一原表按exact `/etc/ld.so.conf`、LDCONFIG、format 1选出原index，调用既有typed配置观察器。不选第一个LDCONFIG或固定下标，保留明确file -1与present空文件的区别；向量前插另一LDCONFIG仍选择原固定根。原source/provider门成功后，才进入provider-aware路径及完整include扫描。
