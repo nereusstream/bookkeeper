@@ -112,15 +112,17 @@ Bookie局部FENCE记录的body固定为60字节ledger context；header使用wire
 
 当前ALLOC/ALLOC_POOL body为48字节：file index u32、owner shard u32、owner shard generation u64、allocation ID u64、绝对文件offset u64、whole block数u32、保留零u32、stream首个物理sequence u64。allocation ID为正数，同一Arena内不能重复授给另一范围；同一shard/generation后续分配必须声明相同首序号，否则按条件失败且不授予空间。当前仅接受expected generation=0，成功分配的allocation generation为1；ALLOC要求1块，ALLOC_POOL可覆盖连续多块，每块1 MiB且从DATA身份块后的4096开始。控制header的operation UUID/generation绑定命令重试，文件身份块绑定Arena与storage incarnation。局部日志按batch完整写入并同步，然后按sequence逐条判断/apply；失败no-op仍消耗sequence。只有已同步且成功apply的grant及stream起点可查询；每文件已授权block的最高结束位置可由重放状态计算，并随只读DATA恢复候选报告。零填充的已授权block仍包含在内；这个水位不证明pool中的DATA位置已用或未用，也不授权普通Add或可写重开。完整记录在重开时验证并同步后重放，未知/损坏尾部拒绝可写恢复；未执行下述显式Arena rotation时容量满额停止；尚不支持FREE与复用。此前40字节语义记录不被新解释器接纳；此文件格式仍为可丢弃实验，不承诺跨修订版本重开。
 
-Arena `DEVICE_STATE`当前接受16-byte body的三种action。文件隔离使用version u32=1、action u32=1、DATA file index u32、reserved u32=0；expected generation固定0，operation UUID/generation绑定重试。writer会话使用version u32=1、action u32=2（OPEN）或3（CLOSE）、epoch u64；epoch必须为正且等于header的operation generation。OPEN的expected generation为epoch-1，CLOSE为epoch。未知版本/action、越界文件、非零reserved、epoch/header不符或其他长度拒绝重放，没有文件隔离clear/reset操作。
+Arena `DEVICE_STATE` v1 有四种 16 字节 body。文件隔离依次编码 version u32=1、action u32=1、DATA file index u32、reserved u32=0，expected generation 固定为 0。会话记录依次编码 version u32=1、action u32、epoch u64。action 2 为 OPEN，action 3 为健康 CLOSE，action 4 为 `RESOLVE_NEVER_ALLOCATED_SESSION`。正 epoch 必须等于外层 operation generation。OPEN 的 expected generation 为 epoch-1，CLOSE 与 action 4 均为 epoch。未知版本、action、长度或身份绑定拒绝重放。旧 reader 遇 action 4 拒绝打开该历史。
 
-批次force后按序apply；重复相同操作返回ALREADY_DURABLE，同operation身份改body返回INCOMPATIBLE。OPEN要求前一个epoch已关闭、predecessor吻合且没有持久文件隔离；首个epoch另要求没有已有allocation，不为legacy补认健康历史。CLOSE要求同一epoch仍OPEN且无持久隔离；它不删除文件隔离或使unknown范围可复用。未匹配CLOSE的会话重放在恢复DATA sync前拒绝物理重开。仅持有同一writer目录锁的生命周期入口才授予运行时会话所有权；OPEN成功后文件writer才可接收DATA。关闭入口先关DATA准入、排空实际I/O/预留并关闭descriptor，保留目录锁至CLOSE I/O终结及结果处理，且要求Arena控制/故障通知已排空、无运行时文件错误。完整但force未知的OPEN重放仍保持不可写；完整但force未知的CLOSE只在验证控制记录并恢复同步后可解析为已关闭，不将原关闭调用的失败改成成功。OPEN前逻辑预留160字节CLOSE容量；不预分配实际文件系统空间，无逐entry会话记录。
+批次 force 后按序 apply。同一 UUID 和命令沿用原幂等结果，改 body 发生冲突。OPEN 要求前一个 epoch 已结束、predecessor 匹配且无持久文件隔离，首个 epoch 还拒绝接管 legacy allocation。健康 CLOSE 由持同一 DATA 锁的实际 writer 提交。它先关闭新 DATA 准入、排空 I/O 和预留并关闭描述符，确认 Arena 控制和故障通知均已终结、没有文件故障，再持锁完成 CLOSE 的 I/O 和 apply。完整但 force 未知的 CLOSE 经新 owner 验证并恢复同步后可解析为已关闭，原调用仍失败。OPEN 前逻辑预留至少 160 字节 CLOSE 容量。
 
-文件隔离后续ALLOC条件失败，原grant/stream起点保留为所有权事实，隔离不是FREE。实际故障可先设置易失准入gate；该gate不改变较早持久ALLOC的结果，只有日志中的DEVICE_STATE改变重放状态。完整隔离或未关闭会话在控制恢复同步后仍阻止DATA物理重开；后次DATA sync成功不解除。无隔离记录不证明旧I/O错误不存在；未启用会话的legacy手动原型仍不承担该检测保证。实际driver与生命周期的验证边界见[本地状态](README.md)。
+action 4 仅由既有 graph restart 在持原作用域 DATA 锁、完整 Arena 重放后提交。前驱须为同一仍 OPEN 的 epoch，无运行时 writer、控制未决或文件隔离，并且完整业务历史从未成功应用 ALLOC 或 ALLOC_POOL。已发 grant 后全部 FREE 仍不满足条件。apply 和 replay 都核对该条件。记录结束旧 epoch，保留 epoch 数值与幂等身份，checkpoint 和 rotation 保留该业务记录。原重开验证通过后以普通 OPEN 开启下一 epoch。该记录表达从未授权 DATA 写入的证明。已有授权历史的 OPEN 会话仍拒绝物理重开。
+
+文件隔离后续 ALLOC 条件失败，原 grant 和 stream 起点仍保留。实际故障可先设置易失准入 gate，只有日志中的 DEVICE_STATE 改变重放状态。持久隔离和无法解析的 OPEN 在控制重放后阻止物理重开。缺少隔离记录或后续 DATA sync 成功均无法解除该限制。实际 driver 和生命周期验证见[本地状态](README.md)。
 
 实际绑定的DATA合批路径在I/O前为该记录共享预留每文件160字节逻辑控制日志容量（128-byte header、16-byte body、16-byte footer）及原owner通知完成槽。普通控制追加不能占用这份容量，未知结果不释放实际I/O资源；成功DATA不写故障记录，只在I/O/owner终结后归还预留。控制忙时每文件保留一条通知并按原序执行，停收仍使用原ticket排空；预留不足先背压，Arena关闭/物理重开拒绝未终结通知。这不预分配实际文件系统空间，也不证明记录落盘前退出、实际控制I/O或owner失败已可跨重启解析。
 
-正常关闭会话的`openForLocalResults`不增加新字节类型或逐entry成功日志。CLOSE及正session epoch只提供正常关闭依据；local result还要求同一排他锁内的完整DATA验证/恢复sync、Bookie route选择和稳定applied cut、每shard唯一未退役stream及原owner的有界前缀/定位bootstrap。连续through来自同次完整扫描，下一DATA batch接续原stream generation/sequence；writer session epoch独立递增，不是新stream或allocation generation。旧授权范围仍全部跳过，由既有ALLOC_POOL提供fresh范围。普通物理扫描/恢复候选保持原资格；legacy、未关闭会话、多未退役stream或任何验证/sync/cut失败不据此返回本地持久结果。范围限无MOVE/FREE且正常关闭的管理会话，不证明一般selector、未正常关闭恢复或生产ACK。
+`openForLocalResults` 要求已结束的正 session epoch。graph 已验证并应用 action 4 后也进入该路径。同一排他锁覆盖 DATA 验证与恢复同步、Bookie route 选择和稳定 applied cut、每 shard 唯一未退役 stream 及原 owner 的有界前缀和定位 bootstrap。下一批 DATA 接续原 stream generation 和 sequence，writer session epoch 独立递增。legacy、仍 OPEN 的会话、多个未退役 stream 或任一验证、同步、cut 失败均拒绝。普通物理扫描和恢复候选仍只提供物理观察结果。
 
 隔离文件的`writeAuthorized`在真实DATA写入前核对同一目录和storage/Arena身份、文件可用状态、冻结batch的完整物理范围、allocation ID/generation、shard及其stream generation与已apply的Arena grant；当前固定shard原型把stream generation作为owner shard generation。跨两个1 MiB块的batch必须拥有同一pool grant。原始`write`仍只供底层framing/I/O实验，不提供授权检查。该路径没有DATA used/unused恢复；Bookie票据与逐entry local result由上层隔离driver提供，不证明生产ACK。
 
@@ -134,7 +136,7 @@ Arena `DEVICE_STATE`当前接受16-byte body的三种action。文件隔离使用
 
 隔离`SegmentPointRead`从已解析batch生成record位置，读取时先验证DATA文件身份、Arena grant和batch header，再按4096字节边界读取目标record header与内容；长度在分配前受格式上限和batch record区域约束，最终由独立parser核验record/BK CRC与locator身份。该原语不授予locator发布、read pin或DATA durability，调用方仍须先证明这些上层前提。当前Arena没有FREE/复用。
 
-隔离资源owner `IsolatedSegmentStorage`启动和关闭复用以上OPEN/CLOSE、恢复扫描及原owner bootstrap顺序，不增加新的持久字节类型。全部shard bootstrap完成后才开放本地请求；关闭先停收并等待实际I/O、owner及消费方buffer lease，随后在目录锁内关闭DATA/记录健康CLOSE，再关闭控制日志。超时不生成CLOSE或提前释放锁，启动失败按相同顺序清理；完整Bookie readiness、未正常关闭恢复和生产ACK仍未接通。
+隔离资源 owner `IsolatedSegmentStorage` 在持原 DATA 锁完成 Arena 重放后处理 action 4 的窄范围，再按原顺序启动 Bookie 控制 owner、派生索引、DATA 恢复与 shard bootstrap。全部 bootstrap 完成才开放本地请求。关闭先停收并等待实际 I/O、owner 和消费方 buffer lease，随后在目录锁内关闭 DATA、记录健康 CLOSE，再关闭控制日志。超时保留在途资源和排他锁，启动失败走同一清理路径。已授权 DATA 的异常退出恢复、完整 Bookie readiness 和生产 ACK 仍待验收。
 
 ## Arena checkpoint与发布页
 
@@ -291,7 +293,7 @@ Arena DEVICE_STATE type=7 的健康 CLOSED v2 body 为 `24 + 24*N` bytes，外�
 | 16 / 20 | tail count u32=N / reserved u32=0 |
 | 24+24*i / 32+24*i / 40+24*i | allocation id u64 / current generation u64 / exclusive used end u64 |
 
-列表按 allocation id 递增，精确覆盖所有当前 reused grants，不能缺失、重复、增加或更换 generation。end 在 allocation start..end 内且4096对齐；无当前 DATA 时 end=start。运行期证据由实际健康关闭的 writer 在 I/O/reservation/read lease 全部终结后提供，外部 decoded command 不能直接提交该见证。控制预算为当前及本批潜在新增 reused grants 预留完整关闭记录，N 最大2723；容量不足则拒绝扩大授权。当前 OPEN 仍拒绝 restart，不用此末端为未关闭 writer 掩盖写入失败。
+列表按 allocation id 递增，精确覆盖所有当前 reused grants，不能缺失、重复、增加或更换 generation。end 在 allocation start..end 内且4096对齐；无当前 DATA 时 end=start。运行期证据由实际健康关闭的 writer 在 I/O/reservation/read lease 全部终结后提供，外部 decoded command 不能直接提交该见证。控制预算为当前及本批潜在新增 reused grants 预留完整关闭记录，N 最大2723；容量不足则拒绝扩大授权。有 reused grant 历史的 OPEN 会话继续拒绝 restart。
 
 恢复仅解析末端内当前必要 DATA，禁止零页、错误 grant/generation、跨末端批次及 CRC 损坏；跳过末端后的旧残留。再次 FREE 可在健康排空 gate 下使用运行期实际 reservation end/已恢复 CLOSED end，完整 extent hash 仍包含被逻辑排除的旧 suffix 原始字节；SHA 不是独立删除或定位 authority。
 

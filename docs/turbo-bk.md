@@ -318,6 +318,8 @@ Cluster Lifecycle
 
 2026-10-02 步骤5～7已接通[正常关闭会话的隔离local-result restart](rfcs/unified-wal/implementation/local-storage/README.md)：持久CLOSE、完整DATA验证/sync及Bookie route选择后，由原owner在稳定cut下恢复连续前缀与持久候选。旧entry重试/冲突和新entry同stream接续已在正常关闭的新JVM及两轮重开真实验证，旧授权块仍跳过，未用新stream绕过旧前缀。legacy、未关闭会话、多未退役stream、恢复sync失败或cut变化拒绝开放相同结果资格；plain物理扫描保持原边界。完整服务readiness/MetadataStore、未正常关闭恢复、一般selector与可持续空间回收仍未完成，当前Gate不提升。
 
+2026-11-05 步骤 7 接入[从未授权 DATA 的 OPEN 会话重开](rfcs/unified-wal/implementation/local-storage/README.md#从未授权-data-的-open-会话重开)。在原 DATA 排他下重放完整 Arena，确认从未发放 grant 后以独立持久记录结束旧 epoch，再走原重开检查。曾发 grant 的历史即使全部 FREE，仍拒绝同身份异常重开。
+
 | 阶段 | 步骤与主线 | 完成边界 |
 | --- | --- | --- |
 | 基础与执行模型 | 1 基线/测试入口；2 CLIENT-1/2；3 实验格式与文件I/O；4 固定owner、安全binding与NUMA池 | 可复用的隔离入口；OFF/SYSTEM/PARK基线；基础ownership和预算 |

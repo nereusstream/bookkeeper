@@ -927,6 +927,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 }
                 arena = SegmentArenaControlLog.open(config, identity, limits.controlLogBytes());
                 if (existing) {
+                    if (arena.hasUnclosedDataSession()) {
+                        arena.resolveNeverAllocatedSession(startupLock);
+                    }
                     // Reject a known unsafe Arena before opening the Bookie control owner or derived index.
                     arena.requireQuiescentRecovery(config, identity);
                 }

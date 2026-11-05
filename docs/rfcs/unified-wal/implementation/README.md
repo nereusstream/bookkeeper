@@ -218,6 +218,8 @@ Bookie控制文件新增隔离 `RECOVERY_GRANT` 持久记录和重放：public p
 
 2026-10-03 [Spike C有限模型切片](models/README.md)取得匹配官方checksum的TLC 1.7.4并实际运行：共享/独立文件正向配置均完整探索PASS（44,007/50,859 distinct states），三个候选规则均得到指定性质的反例；回执`unified-wal-model-jqvpwfsw`绑定15个实际输入及完整输出。模型覆盖管理会话、控制/DATA barrier、连续前缀和旧错误隔离，仍不是完整Model C、A+C或Block G通过。OPEN仅靠重放和后次同步取得恢复资格会丢失旧故障历史；其故障解析证据/合同仍待确认，现有Java隔离行为未改变。
 
+2026-11-05，步骤 7 的既有 graph restart 增加独立 Arena 记录，解析[从未授权 DATA 的 OPEN 会话](local-storage/README.md#从未授权-data-的-open-会话重开)。完整重放须证明该 Arena 生命周期内从未发过 grant。已有 grant 历史的同身份异常退出仍拒绝。
+
 **第一里程碑：真实写入—点读—重启恢复。** 步骤5～7完成后，已有真实文件I/O和可重复的基础恢复测试，可出第一份局部性能报告。无真实网络的结果不称端到端提升，无长期索引/回收的结果不称可持续吞吐；按Spike切片声明实际覆盖范围。
 
 ### 第三阶段：索引、回收与长期运行

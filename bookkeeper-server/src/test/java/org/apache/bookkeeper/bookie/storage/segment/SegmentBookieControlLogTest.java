@@ -12272,6 +12272,80 @@ public class SegmentBookieControlLogTest {
     }
 
     @Test
+    public void graphRestartsUnclosedSessionThatNeverIssuedDataGrant() throws Exception {
+        IsolatedSegmentConfig config = config();
+        runAbruptWriter("session-open-unused", config.directory(), 86, "SESSION_OPEN_WITHOUT_GRANT");
+        SegmentArenaControlLog.Inspection before =
+                SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+        assertEquals(1, before.sessionEpoch());
+        assertTrue(before.sessionOpen());
+        assertEquals(0, before.currentAllocations());
+
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4)) {
+            storage.restart();
+            storageWrite(storage, context(), 1);
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(1, read.result().record().entryId());
+            }
+        }
+        SegmentArenaControlLog.Inspection after =
+                SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+        assertEquals(2, after.sessionEpoch());
+        assertFalse(after.sessionOpen());
+        assertEquals(1, after.currentAllocations());
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4)) {
+            storage.restart();
+            try (SegmentPointRead.LeasedResult read = storageRead(storage, context(), 1).result()) {
+                assertEquals(1, read.result().record().entryId());
+            }
+        }
+    }
+
+    @Test
+    public void resolvedSessionSurvivesProcessExitAndRotationBeforeAnotherUnusedEpoch() throws Exception {
+        IsolatedSegmentConfig config = config();
+        runAbruptWriter("session-open-unused", config.directory(), 86, "SESSION_OPEN_WITHOUT_GRANT");
+        runAbruptWriter("session-resolved-before-reopen", config.directory(), 86, "SESSION_RESOLUTION_APPLIED");
+        try (SegmentDataFileLock lock = SegmentDataFileLock.open(config.directory());
+                SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(1, arena.dataSessionEpoch());
+            assertFalse(arena.hasUnclosedDataSession());
+            assertEquals(1, arena.appliedThrough()); // One OPEN and exactly one resolution.
+            arena.rotate();
+        }
+        runAbruptWriter("session-reopen-unused", config.directory(), 86, "SESSION_OPEN_WITHOUT_GRANT");
+        var second = SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+        assertEquals(2, second.sessionEpoch());
+        assertTrue(second.sessionOpen());
+        assertEquals(2, second.physicalGeneration());
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4)) {
+            storage.restart();
+            storageWrite(storage, context(), 1);
+        }
+        var third = SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+        assertEquals(3, third.sessionEpoch());
+        assertFalse(third.sessionOpen());
+    }
+
+    @Test
+    public void graphRejectsUnclosedSessionWithOnlyFreedGrantsAfterCheckpoint() throws Exception {
+        IsolatedSegmentConfig config = config();
+        runAbruptWriter("session-freed-unused", config.directory(), 86, "SESSION_WITH_FREED_GRANT");
+        var observation = SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+        assertTrue(observation.sessionOpen());
+        assertEquals(0, observation.currentAllocations());
+        assertEquals(1, observation.retiredSlots());
+        assertEquals(1, observation.checkpointGeneration());
+        assertFalse(Files.exists(SegmentDerivedIndex.directory(config)));
+        Map<String, byte[]> before = inspectionImage(config.directory());
+        try (IsolatedSegmentStorage storage = storage(config, 1, 6, 4)) {
+            IOException failure = assertThrows(IOException.class, storage::restart);
+            assertTrue(failure.getMessage(), failure.getMessage().contains("Unclosed DATA writer session"));
+        }
+        assertInspectionImage(before, config.directory());
+    }
+
+    @Test
     public void unclosedSessionRejectsGraphRestartBeforeBookieAndIndexOpen() throws Exception {
         IsolatedSegmentConfig config = config();
         runAbruptWriter("session-force-error", config.directory(), 86, "DATA_FORCE_FAILED");
@@ -12523,13 +12597,58 @@ public class SegmentBookieControlLogTest {
         if (args.length != 2 || (!"after-force".equals(args[0]) && !"before-force".equals(args[0])
                 && !"normal-after-force".equals(args[0]) && !"normal-before-force".equals(args[0])
                 && !"append-after-restart".equals(args[0]) && !"session-force-error".equals(args[0])
-                && !"normal-clean-close".equals(args[0]))) {
+                && !"normal-clean-close".equals(args[0]) && !"session-open-unused".equals(args[0])
+                && !"session-reopen-unused".equals(args[0]) && !"session-resolved-before-reopen".equals(args[0])
+                && !"session-freed-unused".equals(args[0]))) {
             throw new IllegalArgumentException("Expected abrupt writer phase and directory");
         }
         IsolatedSegmentConfig config = new IsolatedSegmentConfig(Path.of(args[1]), 1, 4, 1,
                 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
         SegmentFileHeader identity = new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 7)),
                 new UUID(0, 9), BookieId.parse("isolated:3181"));
+        if ("session-open-unused".equals(args[0]) || "session-reopen-unused".equals(args[0])) {
+            SegmentBookieControlLogTest test = new SegmentBookieControlLogTest();
+            try (IsolatedSegmentStorage storage = test.storage(config, 1, 6, 4)) {
+                if ("session-open-unused".equals(args[0])) {
+                    storage.startNew();
+                    installStorage(storage, install(44, 1, (byte) 5), activate(44, 2));
+                } else {
+                    storage.restart();
+                }
+                System.out.println("SESSION_OPEN_WITHOUT_GRANT");
+                System.out.flush();
+                Runtime.getRuntime().halt(86);
+            }
+        }
+        if ("session-resolved-before-reopen".equals(args[0])) {
+            try (SegmentDataFileLock lock = SegmentDataFileLock.open(config.directory());
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
+                arena.resolveNeverAllocatedSession(lock);
+                System.out.println("SESSION_RESOLUTION_APPLIED");
+                System.out.flush();
+                Runtime.getRuntime().halt(86);
+            }
+        }
+        if ("session-freed-unused".equals(args[0])) {
+            try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
+                    SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
+                    SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
+                            1024 * 1024, key((byte) 3), VALIDATOR)) {
+                files.startSession(arena);
+                assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                        arena.submitBatch(List.of(reclaimableAllocation(101, 4096))).get(0).status());
+                try (SegmentArenaControlLog.Free free = arena.prepareFree(new UUID(0, 301), 101,
+                        files, bookie, ByteBuffer.allocate(4096))) {
+                    assertEquals(0, free.facts().records());
+                    assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                            arena.submitBatch(List.of(free)).get(0).status());
+                }
+                arena.checkpoint();
+                System.out.println("SESSION_WITH_FREED_GRANT");
+                System.out.flush();
+                Runtime.getRuntime().halt(86);
+            }
+        }
         if ("session-force-error".equals(args[0])) {
             try (IsolatedSegmentFiles files = IsolatedSegmentFiles.create(config, identity);
                     SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {

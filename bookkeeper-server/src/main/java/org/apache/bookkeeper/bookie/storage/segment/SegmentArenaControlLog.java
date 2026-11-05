@@ -49,7 +49,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private static final Generation LOG_GENERATION = new Generation(1);
     private static final int QUARANTINE_RECORD_BYTES = 128 + 16 + 16;
 
-    sealed interface Command permits Allocation, Free, FileQuarantine, DataSession, CheckpointCommit, SegmentArenaMove {
+    sealed interface Command permits Allocation, Free, FileQuarantine, DataSession, ResolveNeverAllocatedSession,
+            CheckpointCommit, SegmentArenaMove {
         SegmentControlFormat.Type type();
         UUID operationId();
         Generation operationGeneration();
@@ -142,6 +143,29 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     .putLong(operationGeneration.value()).putInt(tails.size()).putInt(0);
             tails.forEach(tail -> body.putLong(tail.allocationId()).putLong(tail.generation()).putLong(tail.end()));
             return body.flip();
+        }
+    }
+
+    private record ResolveNeverAllocatedSession(UUID operationId, Generation operationGeneration) implements Command {
+        ResolveNeverAllocatedSession {
+            if (operationId.equals(new UUID(0, 0)) || operationGeneration.value() <= 0) {
+                throw new IllegalArgumentException("Invalid never-allocated DATA session");
+            }
+        }
+
+        @Override
+        public SegmentControlFormat.Type type() {
+            return SegmentControlFormat.Type.DEVICE_STATE;
+        }
+
+        @Override
+        public long expectedGeneration() {
+            return operationGeneration.value();
+        }
+
+        @Override
+        public ByteBuffer body() {
+            return ByteBuffer.allocate(16).putInt(1).putInt(4).putLong(operationGeneration.value()).flip();
         }
     }
 
@@ -419,7 +443,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private boolean sessionCloseReserved;
     private final boolean[] spacePressure;
     private IsolatedSegmentFiles sessionOwner;
-    private DataSession preparedClose;
+    private Command preparedSessionEnd;
     private long nextOffset = FIRST_RECORD;
     private boolean rotationRequested;
     private long durableThrough = -1;
@@ -482,6 +506,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 // addRetirement can retain old/new ranges and lists while merging and sorting.
                 SegmentControlCapacity.times(2, layout.object(RetiredRange.class)), 8 * 8);
         long session = SegmentControlCapacity.sum(history, layout.object(DataSession.class), layout.list());
+        long resolution = SegmentControlCapacity.sum(history, layout.object(ResolveNeverAllocatedSession.class));
         long tail = SegmentControlCapacity.sum(layout.object(AllocationTail.class), 8);
         long moveGraph = SegmentControlCapacity.sum(layout.object(SegmentArenaMove.class), layout.list());
         long moveRowGraph = SegmentControlCapacity.sum(layout.object(SegmentArenaMove.Entry.class),
@@ -501,6 +526,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         long perWire = SegmentControlCapacity.slope(allocation, 192);
         perWire = Math.max(perWire, SegmentControlCapacity.slope(free, 272));
         perWire = Math.max(perWire, SegmentControlCapacity.slope(session, 160));
+        perWire = Math.max(perWire, SegmentControlCapacity.slope(resolution, 160));
         perWire = Math.max(perWire, SegmentControlCapacity.slope(tail, 24));
         perWire = Math.max(perWire, SegmentControlCapacity.slope(
                 SegmentControlCapacity.sum(history, moveGraph), 160));
@@ -524,6 +550,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         long maxSession = SegmentControlCapacity.sum(layout.object(DataSession.class), layout.list(),
                 SegmentControlCapacity.times(maxTails, tail));
         long maxCommand = Math.max(Math.max(maxMove, maxSession), Math.max(freeGraph, allocationGraph));
+        maxCommand = Math.max(maxCommand, layout.object(ResolveNeverAllocatedSession.class));
         long pendingCommands = SegmentControlCapacity.times(pendingEntries,
                 SegmentControlCapacity.sum(maxCommand, layout.object(UUID.class), layout.object(Generation.class),
                         layout.object(Result.class), 8 * 8));
@@ -680,8 +707,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     move.requireClaimed(this);
                 }
                 if (command instanceof DataSession session && !session.tails().isEmpty()
-                        && command != preparedClose) {
+                        && command != preparedSessionEnd) {
                     throw new IOException("Reused allocation tails require the actual healthy writer close");
+                }
+                if (command instanceof ResolveNeverAllocatedSession && command != preparedSessionEnd) {
+                    throw new IOException("Never-allocated DATA session resolution requires the original DATA lock");
                 }
                 bytes = Math.addExact(bytes, SegmentControlFormat.encodedLength(
                         command.type(), physicalGeneration, sequence++,
@@ -753,12 +783,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 appliedOffset += recordBytes(command);
                 long generation = status == Status.APPLIED_DURABLE || status == Status.ALREADY_DURABLE
                         ? command instanceof Allocation allocation ? allocation.generation()
-                                : command instanceof SegmentArenaMove move ? move.operationGeneration().value()
+                                : command instanceof SegmentArenaMove || command instanceof ResolveNeverAllocatedSession
+                                        ? command.operationGeneration().value()
                                         : command.expectedGeneration() + 1 : 0;
                 results.add(new Result(status, command.operationId(), sequence, generation,
                         durableThrough, appliedThrough));
             }
-        } catch (RuntimeException | Error failure) {
+        } catch (IOException | RuntimeException | Error failure) {
             failed = true;
             throw failure;
         }
@@ -1518,7 +1549,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 }
                 requireQuiescentControl(writer.config(), writer.identity());
                 command = new DataSession(UUID.randomUUID(), new Generation(sessionEpoch), sessionEpoch, false, tails);
-                preparedClose = command;
+                preparedSessionEnd = command;
             }
             List<Result> results = submitBatch(List.of(command));
             if (results.get(0).status() != Status.APPLIED_DURABLE) {
@@ -1529,7 +1560,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 if (sessionOwner == writer) {
                     sessionOwner = null;
                     sessionCloseReserved = false;
-                    preparedClose = null;
+                    preparedSessionEnd = null;
                 }
             }
         }
@@ -1541,6 +1572,42 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     synchronized boolean hasUnclosedDataSession() {
         return sessionOpen;
+    }
+
+    /** Only the existing storage startup may settle an OPEN epoch that could never write DATA. */
+    synchronized void resolveNeverAllocatedSession(SegmentDataFileLock dataLock) throws IOException {
+        requireQuiescentControl(config, identity);
+        if (checkpointing || durableThrough != appliedThrough || !canResolveNeverAllocatedSession()) {
+            throw new IOException("Unclosed DATA writer session prevents physical reopen");
+        }
+        synchronized (dataLock) {
+            dataLock.requireHeld(config.directory().toRealPath().resolve("isolated.lock"));
+            var command = new ResolveNeverAllocatedSession(UUID.randomUUID(), new Generation(sessionEpoch));
+            preparedSessionEnd = command;
+            try {
+                if (submitBatch(List.of(command)).get(0).status() != Status.APPLIED_DURABLE) {
+                    throw new IOException("Never-allocated DATA session was not resolved");
+                }
+            } finally {
+                preparedSessionEnd = null;
+            }
+        }
+    }
+
+    private boolean canResolveNeverAllocatedSession() {
+        if (sessionEpoch <= 0 || !sessionOpen || sessionOwner != null
+                || allocationHighWatermark != 0 || !issuedAllocationIds.isEmpty() || !allocations.isEmpty()
+                || !currentAllocations.isEmpty() || !streamStarts.isEmpty() || !retiredRanges.isEmpty()
+                || retiredBookieCut != -1 || !retiredSlots.isEmpty() || !selectedMoves.isEmpty()
+                || !committedCopies.isEmpty() || !sealedTails.isEmpty()) {
+            return false;
+        }
+        for (int file = 0; file < config.dataFiles(); file++) {
+            if (dataBlocked[file] || durableQuarantine[file] || quarantineReserved[file]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     synchronized boolean permitsDataWriter(IsolatedSegmentFiles writer) {
@@ -2281,6 +2348,17 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     throw new IOException("Invalid Arena DATA session", invalid);
                 }
             }
+            if (action == 4) {
+                long epoch = body.getLong();
+                if (epoch != parsed.expectedGeneration() || epoch != parsed.operationGeneration().value()) {
+                    throw new IOException("Never-allocated DATA session epoch differs from its header");
+                }
+                try {
+                    return new ResolveNeverAllocatedSession(parsed.operationId(), parsed.operationGeneration());
+                } catch (IllegalArgumentException invalid) {
+                    throw new IOException("Invalid never-allocated DATA session resolution", invalid);
+                }
+            }
             if (action != 1 || parsed.expectedGeneration() != 0) {
                 throw new IOException("Unsupported Arena DEVICE_STATE action");
             }
@@ -2402,7 +2480,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
-    private Status apply(Command command) {
+    private Status apply(Command command) throws IOException {
         AppliedOperation prior = appliedOperations.get(command.operationId());
         if (prior != null) {
             if (!prior.command().equals(command)) {
@@ -2442,6 +2520,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
             durableQuarantine[file] = true;
             appliedOperations.put(command.operationId(), new AppliedOperation(command, status, appliedThrough));
             return status;
+        }
+        if (command instanceof ResolveNeverAllocatedSession resolution) {
+            if (sessionEpoch != resolution.expectedGeneration() || !canResolveNeverAllocatedSession()) {
+                throw new IOException("Invalid resolution of an unclosed DATA writer session");
+            }
+            sessionOpen = false;
+            appliedOperations.put(command.operationId(),
+                    new AppliedOperation(command, Status.APPLIED_DURABLE, appliedThrough));
+            return Status.APPLIED_DURABLE;
         }
         if (command instanceof DataSession session) {
             boolean allowed = session.expectedGeneration() == sessionEpoch
@@ -2724,7 +2811,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         selectedMoves = new HashMap<>();
         committedCopies = new HashMap<>();
         pending = null;
-        preparedClose = null;
+        preparedSessionEnd = null;
         if (first != null) {
             throw first;
         }

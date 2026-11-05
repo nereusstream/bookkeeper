@@ -159,6 +159,129 @@ public class SegmentArenaControlLogTest {
     }
 
     @Test
+    public void neverAllocatedResolutionVectorDoesNotConferRuntimeOrReplayAuthority() throws Exception {
+        byte[] vector = HexFormat.of().parseHex(
+                "555743544c303031000000010000000200000007000000a00000000000000001"
+                + "0000000000000000000000000000000400000000000000010000000000000001"
+                + "0000001000000080000000000000000100000000000000000000000000000000"
+                + "000000000000000000000000000000000000000000000000000000004b39779d"
+                + "0000000100000004000000000000000143544c455e06e3bf0000000000000001");
+        IsolatedSegmentConfig config = config();
+        createUnownedOpenSession(config);
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            var resolution = log.decodeCommand(ByteBuffer.wrap(vector), 1);
+            ByteBuffer encoded = SegmentControlFormat.encode(resolution.type(), new Generation(1), 1,
+                    resolution.operationId(), resolution.operationGeneration(), resolution.expectedGeneration(),
+                    resolution.body());
+            byte[] actual = new byte[encoded.remaining()];
+            encoded.get(actual);
+            assertArrayEquals(vector, actual);
+            assertThrows(IOException.class, () -> log.submitBatch(List.of(resolution)));
+            assertEquals(0, log.appliedThrough());
+            for (ByteBuffer invalid : List.of(resolution.body().putInt(0, 2), resolution.body().putLong(8, 2),
+                    resolution.body().limit(15))) {
+                ByteBuffer wrongBody = SegmentControlFormat.encode(resolution.type(), new Generation(1), 1,
+                        resolution.operationId(), resolution.operationGeneration(), resolution.expectedGeneration(),
+                        invalid);
+                assertThrows(IOException.class, () -> log.decodeCommand(wrongBody, 1));
+            }
+            ByteBuffer wrongExpected = SegmentControlFormat.encode(resolution.type(), new Generation(1), 1,
+                    resolution.operationId(), resolution.operationGeneration(), 0, resolution.body());
+            assertThrows(IOException.class, () -> log.decodeCommand(wrongExpected, 1));
+        }
+
+        // Put a valid frame after a durable grant. Even replay cannot settle this epoch.
+        try (SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                    log.submitBatch(List.of(alloc(2, 4096))).get(0).status());
+        }
+        var parsed = SegmentControlParser.parse(ByteBuffer.wrap(vector),
+                SegmentControlFormat.Owner.ARENA, new Generation(1), 1);
+        ByteBuffer forged = SegmentControlFormat.encode(parsed.type(), new Generation(1), 2, parsed.operationId(),
+                parsed.operationGeneration(), parsed.expectedGeneration(), parsed.body());
+        try (FileChannel file = FileChannel.open(config.directory().resolve("arena-control"),
+                StandardOpenOption.WRITE)) {
+            new SegmentFileIo().writeFully(file, forged, file.size());
+            file.force(true);
+        }
+        IOException failure = assertThrows(IOException.class,
+                () -> SegmentArenaControlLog.open(config, identity(), 32768));
+        assertTrue(failure.getMessage(), failure.getMessage().contains("Invalid resolution"));
+    }
+
+    @Test
+    public void neverAllocatedResolutionRequiresOriginalLockAndSettledControl() throws Exception {
+        IsolatedSegmentConfig config = config();
+        createUnownedOpenSession(config);
+        try (SegmentDataFileLock foreign = SegmentDataFileLock.create(temporary.newFolder("foreign-lock").toPath());
+                SegmentDataFileLock lock = SegmentDataFileLock.open(config.directory());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            assertThrows(IOException.class, () -> log.resolveNeverAllocatedSession(foreign));
+            var pending = log.appendDurably(List.of(
+                    new SegmentArenaControlLog.FileQuarantine(new UUID(0, 2), new Generation(1), 0)));
+            assertThrows(IOException.class, () -> log.resolveNeverAllocatedSession(lock));
+            assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, log.applyDurable(pending).get(0).status());
+            assertThrows(IOException.class, () -> log.resolveNeverAllocatedSession(lock));
+            assertTrue(log.hasUnclosedDataSession());
+            assertTrue(log.hasDurableQuarantine(0));
+            assertEquals(1, log.appliedThrough());
+        }
+    }
+
+    @Test
+    public void failedNeverAllocatedResolutionRequiresFreshReplay() throws Exception {
+        for (String failure : List.of("write", "partial", "force", "capacity")) {
+            IsolatedSegmentConfig config = checkpointConfig(temporary.newFolder(failure).toPath().resolve("arena"));
+            createUnownedOpenSession(config);
+            SegmentFileIo io = switch (failure) {
+                case "write" -> new SegmentFileIo(160, 1, -1, false);
+                case "partial" -> new SegmentFileIo(80, 2, -1, false);
+                case "force" -> new SegmentFileIo(160, -1, 1, false);
+                default -> new SegmentFileIo();
+            };
+            try (SegmentDataFileLock lock = SegmentDataFileLock.open(config.directory());
+                    SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(),
+                            failure.equals("capacity") ? 4288 : 32768, io)) {
+                assertThrows(IOException.class, () -> log.resolveNeverAllocatedSession(lock));
+                assertTrue(log.hasUnclosedDataSession());
+                assertEquals(0, log.appliedThrough());
+                assertThrows(IOException.class, () -> log.requireQuiescentRecovery(config, identity()));
+                assertEquals(failure.equals("force") ? 1 : 0, io.forces);
+                if (failure.equals("capacity")) {
+                    assertEquals(0, io.writes);
+                }
+            }
+            if (failure.equals("partial")) {
+                assertThrows(IOException.class, () -> SegmentArenaControlLog.open(config, identity(), 32768));
+                continue;
+            }
+            try (SegmentDataFileLock lock = SegmentDataFileLock.open(config.directory());
+                    SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+                if (failure.equals("force")) {
+                    assertFalse(log.hasUnclosedDataSession());
+                    assertEquals(1, log.appliedThrough());
+                } else {
+                    assertTrue(log.hasUnclosedDataSession());
+                    assertEquals(0, log.appliedThrough());
+                    log.resolveNeverAllocatedSession(lock);
+                }
+                log.requireQuiescentRecovery(config, identity());
+                assertEquals(1, log.dataSessionEpoch());
+                assertEquals(1, log.appliedThrough());
+            }
+        }
+    }
+
+    private static void createUnownedOpenSession(IsolatedSegmentConfig config) throws IOException {
+        try (IsolatedSegmentFiles ignored = IsolatedSegmentFiles.create(config, identity());
+                SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
+            assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE,
+                    log.submitBatch(List.of(new SegmentArenaControlLog.DataSession(new UUID(0, 1),
+                            new Generation(1), 0, true))).get(0).status());
+        }
+    }
+
+    @Test
     public void wholeAllocationFreeMatchesIndependentBytesAndCannotForgeARuntimeProof() throws Exception {
         byte[] vector = checkpointVector("arena-whole-free-v1.hex");
         IsolatedSegmentConfig config = config();

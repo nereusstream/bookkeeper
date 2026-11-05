@@ -2,7 +2,7 @@
 
 规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
 
-步骤 7/12/14 的重开路径在原 DATA 排他下重放 Arena 后，立即应用既有物理重开检查。已知不合格的 Arena 在打开 Bookie 控制 owner 或派生索引前拒绝。真实子进程反例先失败后通过，最终八项定向回归通过。未关闭会话的同身份重开仍待独立恢复协议。详见 [local-storage](local-storage/README.md#arena-重放后提前拒绝未关闭会话)。
+步骤 7/12/14 的既有 restart 可在原 DATA 排他锁下解析一种未关闭会话。完整 Arena 历史须证明从未成功授予 DATA allocation。独立 `DEVICE_STATE` action 4 force 并 apply 后，继续原重开检查并开启下一 epoch。真实子 JVM 覆盖首次重开、首次写读、健康再重开、恢复记录应用后退出与轮转接续。曾发 grant 的历史即使全部 FREE 并 checkpoint，仍在打开 Bookie owner 或索引前拒绝。一般已授权 DATA 的同身份异常重开仍待独立恢复协议。详见 [local-storage](local-storage/README.md#从未授权-data-的-open-会话重开)。
 
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 

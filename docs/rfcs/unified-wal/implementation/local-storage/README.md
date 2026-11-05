@@ -878,7 +878,17 @@ python3 scripts/unified-wal/run-storage-models.py --tool /tmp/unified-wal-tla2to
 
 真实子进程在注入 DATA force 失败后直接退出，留下 epoch 1 的 OPEN 会话和没有持久 quarantine 的 Arena。旧实现最终拒绝，却先创建了派生索引。修复后同一入口返回原 unclosed 诊断，派生索引和覆盖页保持缺失，Bookie 锁文件未创建，现存文件字节一致。随后实际重新取得 DATA 和 Arena 排他，复查原 OPEN、epoch 和 quarantine 状态。最终八项定向回归通过，包含未关闭会话的三个索引崩溃窗口、健康重开覆盖和缺失索引重建、启动排他及失败清理。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/unclosed-session-preflight-evidence-f0266191`。
 
-当前 OPEN 记录仍可能来自进程退出，或来自尚未来得及持久化隔离的 I/O 失败。可读扫描与重新同步无法补认健康 CLOSE 或复用区间的已封口尾部。同身份异常重开的接受语义和完整步骤验收仍待完成。
+OPEN 记录可能来自进程退出，或来自尚未来得及持久化隔离的 I/O 失败。可读扫描与重新同步无法补认健康 CLOSE 或复用区间的已封口尾部。对从未授权 DATA 的 Arena，后续接入下述窄范围。
+
+### 从未授权 DATA 的 OPEN 会话重开
+
+在 `10383dccb4` 上，隔离 graph 的既有 restart 持原 DATA 排他锁完成 Arena 重放。若同一 Arena 生命周期内从未成功发放 ALLOC 或 ALLOC_POOL，且控制、会话和故障通知均满足前提，才提交独立的 `DEVICE_STATE` action 4。Arena force 并 apply 后结束旧 epoch，保留原 epoch 数值。随后继续 Bookie、索引、DATA 验证与 shard bootstrap，按原 OPEN 规则开下一 epoch。读取到零页、索引为空或当前 grant 已全部 FREE 均无法证明从未授权 DATA。既有业务记录由 checkpoint 和 rotation 保留。[字节合同](format-v1.md)
+
+真实子 JVM 在 managed OPEN 和 Bookie install/activate 持久后、首个 grant 前直接退出。父进程按原入口重开，使用保留的 Bookie 状态完成首次普通写、点读、健康关闭和再次重开。第二个子进程在 action 4 已应用后、下一次 OPEN 前退出，完整重放只识别一条恢复记录。原 Arena 经轮转后仍可重开，第二个未授权 DATA 的 epoch 再次退出也能恢复。带 grant 的反例先成功申请再实际 FREE 和 checkpoint，重放时虽然没有当前 grant，graph 仍在下游打开前拒绝。
+
+真实 Arena 日志测试覆盖 action 4 独立字节向量、错误版本/长度/epoch、直接提交解码命令、已有 grant 后的伪造记录、错误作用域锁、未应用控制批次、持久隔离和容量不足。注入未写、部分写和 force 失败时，原尝试均无法开放。新 owner 对未写记录保留原 OPEN，对部分尾部拒绝重放，对完整且前驱满足的记录沿原规则恢复同步和 apply。已授权 DATA 的同身份异常重开、掉电和完整步骤验收仍待完成。
+
+修复前，首次 graph restart 在旧 unclosed 检查处失败。随后新增六项定向验证通过。五类回归 392 项通过，Arena 测试折行后重跑该整类，并补跑容量和 DATA 锁，共 59 项通过。两轮去重 405 项，零失败、错误或跳过。第二轮 1460 项输入与交付源码一致，第一轮唯一差异为该折行。Spotless 与 Checkstyle 通过。使用父提交的实际 Arena reader 重放独立向量，确认旧 reader 拒绝 action 4。命令、源码、字节码及原始回执保存在 `/Users/liusinan/.codex/artifacts/unified-wal/never-allocated-session-recovery-evidence-10383dcc`。
 
 ## Profile 普通 Add 的真实接线
 
