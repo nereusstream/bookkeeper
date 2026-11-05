@@ -42,6 +42,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import org.apache.bookkeeper.bookie.ClassicChildResources;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.server.ControlledClassicMain;
 import org.junit.Rule;
 import org.junit.Test;
@@ -51,6 +52,33 @@ import org.junit.rules.TemporaryFolder;
 public class SegmentClassicChildTest {
     @Rule
     public final TemporaryFolder temporary = new TemporaryFolder();
+
+    @Test
+    public void linuxChildRequiresTheOriginalSavedIdsAsWellAsAllLegacyCredentials() throws Exception {
+        var digest = new SegmentClassicHandoff.Digest(new byte[32]);
+        long uid = 0x8000_0001L;
+        long gid = 0xffff_fffeL;
+        var groups = List.of(3L, 9L);
+        var recipe = new SegmentClassicLaunchTrust.Recipe("recipe", "deployment", "signer",
+                digest, digest, digest, digest, uid, gid, groups);
+        var exact = new NativeIO.ProcessCredentials(uid, uid, gid, gid, List.of(9L, 3L, 9L));
+        SegmentClassicChild.requireLinuxCredentials(recipe, new NativeIO.LinuxThreadCredentials(exact, uid, gid));
+
+        for (long other : List.of(0L, 17L)) {
+            assertThrows(IOException.class, () -> SegmentClassicChild.requireLinuxCredentials(
+                    recipe, new NativeIO.LinuxThreadCredentials(exact, other, gid)));
+            assertThrows(IOException.class, () -> SegmentClassicChild.requireLinuxCredentials(
+                    recipe, new NativeIO.LinuxThreadCredentials(exact, uid, other)));
+        }
+        for (var mismatch : List.of(new NativeIO.ProcessCredentials(17, uid, gid, gid, groups),
+                new NativeIO.ProcessCredentials(uid, 17, gid, gid, groups),
+                new NativeIO.ProcessCredentials(uid, uid, 17, gid, groups),
+                new NativeIO.ProcessCredentials(uid, uid, gid, 17, groups),
+                new NativeIO.ProcessCredentials(uid, uid, gid, gid, List.of(3L, 9L, gid)))) {
+            assertThrows(IOException.class, () -> SegmentClassicChild.requireLinuxCredentials(
+                    recipe, new NativeIO.LinuxThreadCredentials(mismatch, uid, gid)));
+        }
+    }
 
     @Test
     public void passiveWaitAndInvalidDeadlinesDoNotStartOrCloseTheHeapOnlyOwner() throws Exception {

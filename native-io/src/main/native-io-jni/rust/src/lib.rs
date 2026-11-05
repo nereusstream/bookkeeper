@@ -236,18 +236,16 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     {
         let before = unsafe { [libc::getuid(), libc::geteuid(), libc::getgid(), libc::getegid()] };
         let mut groups = [0 as libc::gid_t; 64];
-        let count = unsafe { libc::getgroups(groups.len() as libc::c_int, groups.as_mut_ptr()) };
-        if count < 0 {
-            throw_exception_with_errno(&mut env, "Current process supplementary group query failed");
+        let Some(count) = credential_group_count(&mut env, &mut groups) else {
             return ptr::null_mut();
-        }
+        };
         let after = unsafe { [libc::getuid(), libc::geteuid(), libc::getgid(), libc::getegid()] };
-        if before != after || count as usize > groups.len() {
+        if before != after || count > groups.len() {
             throw_exception_with_error_code(&mut env, "Current process credentials changed", libc::EAGAIN);
             return ptr::null_mut();
         }
         let mut values: Vec<jlong> = before.iter().map(|value| *value as jlong).collect();
-        values.extend(groups[..count as usize].iter().map(|value| *value as jlong));
+        values.extend(groups[..count].iter().map(|value| *value as jlong));
         let array = match env.new_long_array(values.len() as jint) {
             Ok(array) => array,
             Err(_) => return ptr::null_mut(),
@@ -260,6 +258,83 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         throw_exception(&mut env, "Current process credential query is unsupported");
+        ptr::null_mut()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn credential_group_count(env: &mut JNIEnv, groups: &mut [libc::gid_t; 64]) -> Option<usize> {
+    let count = unsafe { libc::getgroups(groups.len() as libc::c_int, groups.as_mut_ptr()) };
+    if count < 0 {
+        throw_exception_with_errno(env, "Current process supplementary group query failed");
+        return None;
+    }
+    Some(count as usize)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_thread_ids(env: &mut JNIEnv) -> Option<[jlong; 6]> {
+    let (mut ruid, mut euid, mut suid) = (0, 0, 0);
+    if unsafe { libc::getresuid(&mut ruid, &mut euid, &mut suid) } != 0 {
+        throw_exception_with_errno(env, "Current Linux thread getresuid failed");
+        return None;
+    }
+    let (mut rgid, mut egid, mut sgid) = (0, 0, 0);
+    if unsafe { libc::getresgid(&mut rgid, &mut egid, &mut sgid) } != 0 {
+        throw_exception_with_errno(env, "Current Linux thread getresgid failed");
+        return None;
+    }
+    Some([ruid, euid, suid, rgid, egid, sgid].map(jlong::from))
+}
+
+/// Current Linux calling thread only. The separate ID/group calls do not form an atomic snapshot.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxThreadCredentials(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jlongArray {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(before) = linux_thread_ids(&mut env) else {
+            return ptr::null_mut();
+        };
+        let mut groups = [0 as libc::gid_t; 64];
+        let Some(count) = credential_group_count(&mut env, &mut groups) else {
+            return ptr::null_mut();
+        };
+        let Some(after) = linux_thread_ids(&mut env) else {
+            return ptr::null_mut();
+        };
+        if before != after || count > groups.len() {
+            throw_exception_with_error_code(
+                &mut env,
+                "Current Linux thread credentials changed",
+                libc::EAGAIN,
+            );
+            return ptr::null_mut();
+        }
+        let mut values = [0; 70];
+        values[..6].copy_from_slice(&before);
+        for (value, group) in values[6..].iter_mut().zip(&groups[..count]) {
+            *value = jlong::from(*group);
+        }
+        let values = &values[..6 + count];
+        let array = match env.new_long_array(values.len() as jint) {
+            Ok(array) => array,
+            Err(_) => return ptr::null_mut(),
+        };
+        if env.set_long_array_region(&array, 0, values).is_err() {
+            return ptr::null_mut();
+        }
+        array.into_raw()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Current Linux thread credential query unsupported",
+            libc::ENOSYS,
+        );
         ptr::null_mut()
     }
 }

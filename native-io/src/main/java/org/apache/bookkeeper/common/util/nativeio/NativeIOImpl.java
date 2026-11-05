@@ -135,12 +135,8 @@ public class NativeIOImpl implements NativeIO {
             if (actual == null || actual.length < 4 || actual.length > 68) {
                 throw new NativeIOException("Unknown current process credential query outcome");
             }
-            var groups = new ArrayList<Long>(actual.length - 4);
-            for (int i = 4; i < actual.length; i++) {
-                groups.add(actual[i]);
-            }
             try {
-                return new ProcessCredentials(actual[0], actual[1], actual[2], actual[3], groups);
+                return new ProcessCredentials(actual[0], actual[1], actual[2], actual[3], credentialGroups(actual, 4));
             } catch (IllegalArgumentException invalid) {
                 var failure = new NativeIOException("Invalid native current process credentials");
                 failure.initCause(invalid);
@@ -151,6 +147,37 @@ public class NativeIOImpl implements NativeIO {
             failure.initCause(unavailable);
             throw failure;
         }
+    }
+
+    @Override
+    public LinuxThreadCredentials currentLinuxThreadCredentials() throws NativeIOException {
+        try {
+            long[] actual = NativeIOJni.currentLinuxThreadCredentials();
+            if (actual == null || actual.length < 6 || actual.length > 70) {
+                throw new NativeIOException("Unknown current Linux thread credential query outcome");
+            }
+            try {
+                var credentials = new ProcessCredentials(actual[0], actual[1], actual[3], actual[4],
+                        credentialGroups(actual, 6));
+                return new LinuxThreadCredentials(credentials, actual[2], actual[5]);
+            } catch (IllegalArgumentException invalid) {
+                var failure = new NativeIOException("Invalid native current Linux thread credentials");
+                failure.initCause(invalid);
+                throw failure;
+            }
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Current Linux thread credentials are unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    private static ArrayList<Long> credentialGroups(long[] actual, int start) {
+        var groups = new ArrayList<Long>(actual.length - start);
+        for (int i = start; i < actual.length; i++) {
+            groups.add(actual[i]);
+        }
+        return groups;
     }
 
     @Override

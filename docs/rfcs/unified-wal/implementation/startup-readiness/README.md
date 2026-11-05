@@ -1612,6 +1612,14 @@ OperationIo只在原owner已登记的一个非阻塞Unix channel与专用selecto
 
 Java Spotless/Checkstyle退出0；整Rust文件rustfmt检查退出1，原HEAD独立检查也有既有漂移，因此只格式化新增函数，新增函数范围检查退出0，不顺带重排旧代码。最终host库与最终Linux交叉cargo check均退出0，最终11项回归仍为10通过/1 Linux skip，最终Java样式退出0；三次Java阶段各1399项输入逐项与原快照或父Git blob核对，无缺失/错配，最终源与实际native构建及最终样式一致。原失败/原编译绑定分别保留；RAT/TLA/性能本增量未运行，没有新的性能结论。完整父子qualified成功、Linux实际约束、retirement/权限交接/终态签发、Main/G1/full-bytes及完整16步与生产Gate保持OPEN，目标active，默认OFF/SYSTEM/PARK和disabled保持。 三个任务raw scope经两次独立lsof与原inode/哈希/归档硬链接核验后，仅移除六目录、21文件路径、859,407逻辑字节，原归档保留、regular-file数据块回收0；独立Cargo target按相同终态/源码/精确库检查清理，物理卷空间回收不作测量结论，共享Maven target与用户文件不清理。
 
+## 受控 Linux Classic child 的 saved UID/GID 检查
+
+在父 `dfae605310` 上，原 child 按已核验 program 的平台选择凭据读取。在 Linux 上，分别于 metadata 构建前、START 消费前和网络激活及 READY 前，通过已受控加载的 JNI 读取本次调用线程的 real、effective、saved UID/GID 与最多 64 个补充组。每次都要求六个 ID 与批准 recipe 对应相等，补充组为原精确集合。非 Linux child 与原 launcher 继续使用旧四字段 JNI ABI。
+
+Linux 入口无路径或 PID 参数，调用 `getresuid`、`getresgid` 和有界 `getgroups`，前后复核两组 ID。syscall 失败沿实际 errno 拒绝，旧库缺符号保留 LinkageError 原因。分次读取只观察该调用线程，其他线程、组合原子性、持续不变及实际 dropper 降权需要独立证据。fsuid/fsgid、capabilities、no_new_privs、seccomp、cgroup 和旧 UID 的进程与 fd 隔离仍待核验。[getresuid(2)](https://man7.org/linux/man-pages/man2/getresuid.2.html) · [getgroups(2)](https://man7.org/linux/man-pages/man2/getgroups.2.html)
+
+在 Darwin arm64 上构建新 JNI 库，native 六项为五通过、一项仅 Linux 的真实线程状态比对跳过；child 八项及 launcher 五项通过。新库的 `-Xcheck:jni` 复验和原 acf9afec… 库的独立缺符号 probe 均通过，后者前后可用原四字段读取。编译产物核对了三个调用位置及 Linux 分支只用新 JNI。Java Spotless、Checkstyle、新 Rust 片段格式及 Linux x86_64 交叉 `cargo check --tests` 均通过。Linux JNI 实读、合格 dropper 与系统验收为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-linux-child-credentials-evidence-dfae6053`。
+
 ## 受控历史 Classic child：历史资源图实施中
 
 2026-11-01父launcher包继续在本地`192e8c674129dc240f4b0ddf83504d10ba11f071`上实施；此前凭据及child生产消费者分别已本地提交`9652b1a0393f8855419bf01d38da486d4cdf9704`、`192e8c674129dc240f4b0ddf83504d10ba11f071`，未push。原entry部分证据已封存2708文件、42,878,138逻辑字节，manifest SHA256 `d54f337ef5322e9702c43247d95476d203fde196a9a45fa2981783c58d8ab5c5`，新consumer checkpoint `dd873bc2b2c957590b370e1c217465901c566605fbddd2f60f2ee3754278dfc8`；原native-only checkpoint未覆盖，旧阶段不移绑后续源码。

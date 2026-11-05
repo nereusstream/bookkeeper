@@ -42,6 +42,7 @@ import java.util.concurrent.TimeoutException;
 import org.apache.bookkeeper.bookie.Bookie;
 import org.apache.bookkeeper.bookie.BookieImpl;
 import org.apache.bookkeeper.bookie.ClassicChildResources;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.ZKRegistrationManager;
@@ -537,7 +538,7 @@ public final class SegmentClassicChild {
         }
         frozen = trust.verifyConfiguration(deadline);
         configuration = SegmentClassicLaunchConfiguration.materialize(frozen);
-        requireCredentials(material.recipe());
+        requireCredentials(material.recipe(), program);
         checkStarting();
         URI uri = URI.create(configuration.getMetadataServiceUri());
         String address = ZKMetadataDriverBase.getZKServersFromServiceUri(uri);
@@ -579,7 +580,7 @@ public final class SegmentClassicChild {
         }
         var verified = SegmentClassicLaunchCodec.verifyStart(packet, material.recipe().signerKeyId(),
                 material.publicKey(), hello);
-        requireCredentials(material.recipe());
+        requireCredentials(material.recipe(), program);
         if (!originalScope(configuration, sources.read()).identity().equals(hello.originalScope())) {
             throw new IOException("Classic source changed before START consumption");
         }
@@ -625,7 +626,7 @@ public final class SegmentClassicChild {
                 .identity().equals(hello.originalScope())) {
             throw new IOException("Original Classic source changed before READY");
         }
-        requireCredentials(material.recipe());
+        requireCredentials(material.recipe(), program);
         checkStarting();
         sourcesRevalidated = true;
         resources.activateNetwork();
@@ -661,8 +662,27 @@ public final class SegmentClassicChild {
                 snapshot.clusterBirthZxid(), snapshot.bookie(), snapshot.cookieIdentity(), all);
     }
 
-    private void requireCredentials(SegmentClassicLaunchTrust.Recipe recipe) throws IOException {
-        var actual = new NativeIOImpl().currentProcessCredentials();
+    private static void requireCredentials(SegmentClassicLaunchTrust.Recipe recipe, SegmentClassicLaunchProgram program)
+            throws IOException {
+        var io = new NativeIOImpl();
+        if (program.os().equals("linux")) {
+            requireLinuxCredentials(recipe, io.currentLinuxThreadCredentials());
+        } else {
+            requireRecipeCredentials(recipe, io.currentProcessCredentials());
+        }
+    }
+
+    /** Value check only. Only the fixed child path supplies the actual calling thread's JNI observations. */
+    static void requireLinuxCredentials(SegmentClassicLaunchTrust.Recipe recipe,
+                                        NativeIO.LinuxThreadCredentials actual) throws IOException {
+        requireRecipeCredentials(recipe, actual.credentials());
+        if (actual.savedUid() != recipe.oldUid() || actual.savedGid() != recipe.primaryGid()) {
+            throw new IOException("Actual Classic saved credentials differ from the fixed recipe");
+        }
+    }
+
+    private static void requireRecipeCredentials(SegmentClassicLaunchTrust.Recipe recipe,
+                                                 NativeIO.ProcessCredentials actual) throws IOException {
         if (actual.realUid() != recipe.oldUid() || actual.effectiveUid() != recipe.oldUid()
                 || actual.realGid() != recipe.primaryGid() || actual.effectiveGid() != recipe.primaryGid()
                 || !actual.supplementaryGroups().equals(recipe.groups())) {

@@ -22,6 +22,7 @@ package org.apache.bookkeeper.common.util.nativeio;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Objects;
 import java.util.TreeSet;
 import java.util.UUID;
 
@@ -147,6 +148,16 @@ public interface NativeIO {
         }
     }
 
+    /** One Linux calling thread's observed credentials, including the saved IDs. */
+    record LinuxThreadCredentials(ProcessCredentials credentials, long savedUid, long savedGid) {
+        public LinuxThreadCredentials {
+            Objects.requireNonNull(credentials, "credentials");
+            if (savedUid < 0 || savedUid > 0xffff_ffffL || savedGid < 0 || savedGid > 0xffff_ffffL) {
+                throw new IllegalArgumentException("Invalid Linux saved credential");
+            }
+        }
+    }
+
     // These constants are different per each OS, so the correct values are defined in JNI code
     int O_CREAT = 0x01;
     int O_RDONLY = 0x02;
@@ -220,6 +231,11 @@ public interface NativeIO {
     /** Direct getuid/geteuid/getgid/getegid/getgroups observations; no external PID or credential input. */
     default ProcessCredentials currentProcessCredentials() throws NativeIOException {
         throw new NativeIOException("Current process credential query is unsupported");
+    }
+
+    /** Read the calling Linux thread's real, effective and saved IDs and supplementary groups. */
+    default LinuxThreadCredentials currentLinuxThreadCredentials() throws NativeIOException {
+        throw new NativeIOException("Current Linux thread credential query is unsupported");
     }
 
     /** One libc uname call, no property, procfs, command or deployment-qualification fallback. */

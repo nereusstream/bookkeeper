@@ -22,9 +22,12 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.mock;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -33,7 +36,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
-/** Actual local credentials only; no exec/dropper, saved-credential or launch authority. */
+/** Actual local credential reads and unsigned value boundaries for the two distinct JNI calls. */
 public class NativeIOCredentialsTest {
     @Rule
     public final TemporaryFolder temporary = new TemporaryFolder();
@@ -85,6 +88,58 @@ public class NativeIOCredentialsTest {
                 () -> new NativeIO.ProcessCredentials(1, 2, 3, 4, List.of(0x1_0000_0000L)));
     }
 
+    @Test
+    public void linuxThreadCredentialsMatchTheCallingThreadsKernelStatus() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_LINUX);
+        var actual = new NativeIOImpl().currentLinuxThreadCredentials();
+        var status = Files.readAllLines(Path.of("/proc/thread-self/status"), StandardCharsets.UTF_8);
+        var uids = statusIds(status, "Uid:");
+        var gids = statusIds(status, "Gid:");
+        assertEquals(4, uids.size());
+        assertEquals(4, gids.size());
+        var expected = new NativeIO.ProcessCredentials(uids.get(0), uids.get(1), gids.get(0), gids.get(1),
+                statusIds(status, "Groups:"));
+        assertEquals(new NativeIO.LinuxThreadCredentials(expected, uids.get(2), gids.get(2)), actual);
+    }
+
+    @Test
+    public void macOsRejectsTheLinuxReadAndPreservesTheLegacyRead() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_MAC);
+        var io = new NativeIOImpl();
+        var original = io.currentProcessCredentials();
+        var failure = assertThrows(NativeIOException.class, io::currentLinuxThreadCredentials);
+        assertTrue(failure.getMessage().contains("unsupported"));
+        assertTrue(failure.getErrno() > 0);
+        assertEquals(original, io.currentProcessCredentials());
+    }
+
+    @Test
+    public void savedIdsPreserveUnsignedValuesAndTheOriginalImmutableGroupSet() {
+        var ids = new NativeIO.ProcessCredentials(1, 2, 3, 4, List.of(9L, 8L, 9L));
+        var actual = new NativeIO.LinuxThreadCredentials(ids, 0xffff_ffffL, 0x8000_0000L);
+        assertEquals(0xffff_ffffL, actual.savedUid());
+        assertEquals(0x8000_0000L, actual.savedGid());
+        assertEquals(List.of(8L, 9L), actual.credentials().supplementaryGroups());
+        assertThrows(UnsupportedOperationException.class, () -> actual.credentials().supplementaryGroups().clear());
+        for (long invalid : new long[]{-1, 0x1_0000_0000L}) {
+            assertThrows(IllegalArgumentException.class, () -> new NativeIO.LinuxThreadCredentials(ids, invalid, 1));
+            assertThrows(IllegalArgumentException.class, () -> new NativeIO.LinuxThreadCredentials(ids, 1, invalid));
+        }
+    }
+
+    @Test
+    public void legacyJavaImplementationsCannotSupplySavedCredentials() {
+        var legacy = mock(NativeIO.class, CALLS_REAL_METHODS);
+        var failure = assertThrows(NativeIOException.class, legacy::currentLinuxThreadCredentials);
+        assertTrue(failure.getMessage().contains("unsupported"));
+    }
+
+    private static List<Long> statusIds(List<String> status, String label) {
+        String value = status.stream().filter(line -> line.startsWith(label)).findFirst().orElseThrow()
+                .substring(label.length()).strip();
+        return value.isEmpty() ? List.of() : Arrays.stream(value.split("\\s+")).map(Long::parseLong).toList();
+    }
+
     private static String id(String option) throws Exception {
         return command("/usr/bin/id", option);
     }
@@ -117,6 +172,18 @@ public class NativeIOCredentialsTest {
             var failure = assertThrows(NativeIOException.class, io::currentProcessCredentials);
             assertTrue(failure.getCause() instanceof UnsatisfiedLinkError);
             System.out.println("OLD_JNI_CREDENTIALS_UNSUPPORTED");
+        }
+    }
+
+    /** The immediately preceding library still supports the original four-ID query. */
+    public static final class OldThreadCredentialsLibraryProbe {
+        public static void main(String[] args) throws Exception {
+            var io = new NativeIOImpl();
+            var original = io.currentProcessCredentials();
+            var failure = assertThrows(NativeIOException.class, io::currentLinuxThreadCredentials);
+            assertTrue(failure.getCause() instanceof UnsatisfiedLinkError);
+            assertEquals(original, io.currentProcessCredentials());
+            System.out.println("OLD_JNI_THREAD_CREDENTIALS_UNSUPPORTED");
         }
     }
 }
