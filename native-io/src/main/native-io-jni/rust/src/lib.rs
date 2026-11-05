@@ -455,7 +455,7 @@ fn linux_boot_id() -> ProcIdentityResult<String> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn proc_stat_unsigned(token: &[u8]) -> Result<u64, libc::c_int> {
+fn proc_unsigned_decimal(token: &[u8]) -> Result<u64, libc::c_int> {
     if token.is_empty() || !token.iter().all(u8::is_ascii_digit) {
         return Err(libc::EINVAL);
     }
@@ -473,7 +473,7 @@ fn parse_proc_start_ticks(bytes: &[u8], expected_pid: libc::pid_t) -> Result<u64
     }
     let pid_end = bytes.iter().position(|b| *b == b' ').ok_or(libc::EINVAL)?;
     if bytes.get(pid_end + 1) != Some(&b'(')
-        || proc_stat_unsigned(&bytes[..pid_end])? != expected_pid as u64
+        || proc_unsigned_decimal(&bytes[..pid_end])? != expected_pid as u64
     {
         return Err(libc::EINVAL);
     }
@@ -493,13 +493,13 @@ fn parse_proc_start_ticks(bytes: &[u8], expected_pid: libc::pid_t) -> Result<u64
         let token = fields.next().ok_or(libc::EINVAL)?;
         if (4..=8).contains(&number) || (16..=20).contains(&number) {
             let digits = token.strip_prefix(b"-").unwrap_or(token);
-            proc_stat_unsigned(digits)?;
+            proc_unsigned_decimal(digits)?;
             std::str::from_utf8(token)
                 .map_err(|_| libc::EINVAL)?
                 .parse::<i64>()
                 .map_err(|_| libc::EINVAL)?;
         } else {
-            let value = proc_stat_unsigned(token)?;
+            let value = proc_unsigned_decimal(token)?;
             if number == 22 {
                 return Ok(value);
             }
@@ -649,6 +649,163 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn parse_namespace_inode(target: &[u8], prefix: &[u8]) -> Result<u32, libc::c_int> {
+    if target.len() > 17 {
+        // user:[4294967295] is the longest canonical value.
+        return Err(libc::EINVAL);
+    }
+    let digits = target
+        .strip_prefix(prefix)
+        .and_then(|s| s.strip_suffix(b"]"))
+        .ok_or(libc::EINVAL)?;
+    if digits.first() == Some(&b'0') {
+        return Err(libc::EINVAL);
+    }
+    u32::try_from(proc_unsigned_decimal(digits)?).map_err(|_| libc::EINVAL)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_thread_namespaces() -> ProcIdentityResult<[u32; 2]> {
+    let root = unsafe {
+        libc::open(
+            b"/proc\0".as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root < 0 {
+        return Err(proc_identity_errno(
+            "thread namespaces fixed proc root open failed",
+        ));
+    }
+    let outcome = (|| {
+        let root_stat = proc_identity_root(root)?;
+        let mut inodes = [0_u32; 2];
+        for (index, (path, prefix)) in [
+            (b"thread-self/ns/pid\0".as_slice(), b"pid:[".as_slice()),
+            (b"thread-self/ns/user\0".as_slice(), b"user:[".as_slice()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // thread-self is the ordinary kernel link. O_PATH|O_NOFOLLOW holds the final magic link itself.
+            let how = [
+                (libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC) as u64,
+                0,
+                0x08 | 0x01 | 0x02,
+            ]; // BENEATH | NO_XDEV | NO_MAGICLINKS
+            let link = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    root,
+                    path.as_ptr().cast::<libc::c_char>(),
+                    how.as_ptr(),
+                    std::mem::size_of_val(&how),
+                )
+            };
+            if link < 0 {
+                return Err(proc_identity_errno(
+                    "thread namespaces fixed openat2 failed",
+                ));
+            }
+            let link = link as libc::c_int;
+            let outcome = (|| {
+                let before = proc_identity_stat(link)?;
+                if before.st_mode & libc::S_IFMT != libc::S_IFLNK
+                    || before.st_dev != root_stat.st_dev
+                {
+                    return Err((
+                        "thread namespace link differs from its held procfs",
+                        libc::EINVAL,
+                    ));
+                }
+                let mut bytes = [0_u8; 18];
+                // Use the syscall directly: an unavailable readlinkat must not fall back to a pathname.
+                let count = unsafe {
+                    libc::syscall(
+                        libc::SYS_readlinkat,
+                        link,
+                        b"\0".as_ptr().cast::<libc::c_char>(),
+                        bytes.as_mut_ptr().cast::<libc::c_char>(),
+                        bytes.len(),
+                    )
+                };
+                if count < 0 {
+                    return Err(proc_identity_errno(
+                        "thread namespace held readlinkat failed",
+                    ));
+                }
+                if count as usize >= bytes.len() {
+                    return Err((
+                        "thread namespace link output exceeds its bound",
+                        libc::EOVERFLOW,
+                    ));
+                }
+                let inode = parse_namespace_inode(&bytes[..count as usize], prefix)
+                    .map_err(|error| ("Invalid canonical thread namespace link target", error))?;
+                let after = proc_identity_stat(link)?;
+                if before.st_dev != after.st_dev
+                    || before.st_ino != after.st_ino
+                    || before.st_mode != after.st_mode
+                {
+                    return Err((
+                        "thread namespace held link changed during read",
+                        libc::EAGAIN,
+                    ));
+                }
+                Ok(inode)
+            })();
+            inodes[index] = close_proc_identity_fd(link, outcome)?;
+        }
+        let after = proc_identity_root(root)?;
+        if root_stat.st_dev != after.st_dev || root_stat.st_ino != after.st_ino {
+            return Err((
+                "thread namespaces held proc root changed during read",
+                libc::EAGAIN,
+            ));
+        }
+        Ok(inodes)
+    })();
+    close_proc_identity_fd(root, outcome)
+}
+
+/// Read the calling thread's two fixed proc link targets, never follow a magic link into nsfs.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxThreadNamespaces(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jlongArray {
+    #[cfg(target_os = "linux")]
+    {
+        match linux_thread_namespaces() {
+            Ok(values) => {
+                let array = match env.new_long_array(2) {
+                    Ok(array) => array,
+                    Err(_) => return ptr::null_mut(),
+                };
+                let unsigned = values.map(|value| value as jlong);
+                if env.set_long_array_region(&array, 0, &unsigned).is_err() {
+                    return ptr::null_mut();
+                }
+                array.into_raw()
+            }
+            Err((operation, error)) => {
+                throw_exception_with_error_code(&mut env, operation, error);
+                ptr::null_mut()
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Current Linux thread namespace query unsupported",
+            libc::ENOSYS,
+        );
+        ptr::null_mut()
+    }
+}
+
 /// Fixed Linux procfs boot identity only. No caller pathname/fd, cached value or namespace qualification.
 #[no_mangle]
 pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxBootId(
@@ -791,6 +948,51 @@ mod process_birth_tests {
         no_newline.pop();
         assert!(parse_proc_start_ticks(&no_newline, 42).is_err());
         assert!(parse_proc_start_ticks(&stat(42, &vec![b'x'; 4096], "123"), 42).is_err());
+    }
+}
+
+#[cfg(test)]
+mod thread_namespace_tests {
+    use super::parse_namespace_inode;
+
+    #[test]
+    fn canonical_pid_user_and_full_unsigned_inodes_keep_their_exact_values() {
+        assert_eq!(
+            parse_namespace_inode(b"pid:[4026531836]", b"pid:[").unwrap(),
+            0xefff_fffc
+        );
+        assert_eq!(
+            parse_namespace_inode(b"user:[4026531837]", b"user:[").unwrap(),
+            0xefff_fffd
+        );
+        assert_eq!(
+            parse_namespace_inode(b"user:[4294967295]", b"user:[").unwrap(),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn swapped_types_truncation_overflow_and_noncanonical_target_bytes_are_rejected() {
+        assert!(parse_namespace_inode(b"user:[4026531837]", b"pid:[").is_err());
+        assert!(parse_namespace_inode(b"pid:[4026531836]", b"user:[").is_err());
+        let valid = b"user:[4294967295]";
+        for length in 0..valid.len() {
+            assert!(parse_namespace_inode(&valid[..length], b"user:[").is_err());
+        }
+        for bad in [
+            b"user:[4294967296]".as_slice(),
+            b"user:[4294967295]X",
+            b"user:[1]\0",
+            b"user:[1]\n",
+            b"user:[0]",
+            b"user:[01]",
+            b"user:[+1]",
+            b"user:[-1]",
+            b"user:[ 1]",
+            b"user:[]",
+        ] {
+            assert!(parse_namespace_inode(bad, b"user:[").is_err());
+        }
     }
 }
 

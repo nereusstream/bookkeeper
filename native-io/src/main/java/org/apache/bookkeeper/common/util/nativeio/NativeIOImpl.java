@@ -230,6 +230,27 @@ public class NativeIOImpl implements NativeIO {
     }
 
     @Override
+    public LinuxThreadNamespaces currentLinuxThreadNamespaces() throws NativeIOException {
+        try {
+            long[] actual = NativeIOJni.currentLinuxThreadNamespaces();
+            if (actual == null || actual.length != 2) {
+                throw new NativeIOException("Unknown current Linux thread namespace query outcome");
+            }
+            try {
+                return new LinuxThreadNamespaces(actual[0], actual[1]);
+            } catch (IllegalArgumentException invalid) {
+                var failure = new NativeIOException("Invalid native current Linux thread namespaces");
+                failure.initCause(invalid);
+                throw failure;
+            }
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Current Linux thread namespaces are unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
     public JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException {
         try {
             var type = Class.forName("java.lang.ProcessImpl", false, null);

@@ -1218,6 +1218,16 @@ Corretto21.0.10+7-LTS/macOS aarch64真实fixture验证合法图保留索引7/19�
 
 可交付范围是逐规则D2 loader配置与完整ldconfig子图的数据观察，不是整个加载环境的统一快照或闭合证明。实际typed Linux阳性NOT_EXECUTED；原D2 search directories完整清单/每遍共享预算及A/B接线、候选闭包/选择、diagnostics、systemd2、完整parent/child/Main/G1/full-bytes/16步/生产Gate继续OPEN。未执行本块models/性能，默认OFF/SYSTEM/PARK及advanced disabled保持，持续目标active。下一块按规划裁决一次选择原D2目录清单，共用每遍成员/名称字节预算，保留原索引、logical路径和明确absence，不逐目录重置预算或发行qualification。
 
+## 正常 D2 launcher 的初始 PID 与 user namespace
+
+正常 schema2 launcher 在两次原 process-birth 核验之后各调用一次 `verifyLinuxInitialNamespaces`，仍在独立 dropper 核验、`childCommand` 和私钥读取之前。原 source/provider 与 deadline 先行；实际读取后复查 deadline 和 owner 健康，再把两个原始值分别与初始 PID inode `0xeffffffc`、user inode `0xeffffffd` 比较，并复查 deadline。缺值、任一不匹配或读取失败沿用原 sticky failure 和排空。没有首值缓存、外部数据入口或新资格对象。D1 和无 Linux 部署路径不调用新 ABI。
+
+native 每次从同一持有并核验的 `/proc` 根 fd 解析固定的 `thread-self/ns/pid`、`thread-self/ns/user`。根以 `O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC` 打开，核对 procfs magic、目录和 inode 1。两个 leaf 用 `openat2` 的 `BENEATH|NO_XDEV|NO_MAGICLINKS` 与 `O_PATH|O_NOFOLLOW|O_CLOEXEC` 持有链接本身，允许内核普通 `thread-self` 相对链接，禁止跟随最终 namespace magic link。直接 `SYS_readlinkat(fd, "", ...)` 读取，无 libc 路径回退。18 字节缓冲拒绝截断，仅接受完整 `pid:[N]`、`user:[N]` 和规范非零 u32 十进制；每个 leaf 及根前后核对身份、同一 proc 设备与链接类型，打开的 fd 各关闭一次，首错优先，全部退出结论后才返回两个原始值。
+
+固定 inode 取自 [Linux UAPI](https://github.com/torvalds/linux/blob/v6.17/include/uapi/linux/nsfs.h)；[thread-self 源码](https://github.com/torvalds/linux/blob/v6.17/fs/proc/thread_self.c)、[namespace 链接源码](https://github.com/torvalds/linux/blob/v6.17/fs/proc/namespaces.c)、[openat2(2)](https://man7.org/linux/man-pages/man2/openat2.2.html) 和 [readlinkat(2)](https://man7.org/linux/man-pages/man2/readlink.2.html) 分别说明普通中间链接、leaf 语义、持有 leaf 的 flags 与空路径读取。JNI 只报告调用线程 PID/user namespace 的原始 inode；只有 launcher 比较是否为初始 namespace。这不涵盖 mount/network/cgroup/time namespace、宿主 PID1、systemd manager、episode 或 Unix 隔离。
+
+最终宿主库 4e0a6d2e… 为 354352 字节。native 18 项（15 通过、3 项 Linux 实读跳过）和 server 50 项全通过；Checked JNI 重跑、旧 e3d11649… 库缺新符号拒绝及 Java style 通过。首次 style 的行长失败和首次库结果保留独立输入；最终结果来自 syscall 收紧及测试换行后的独立构建。原 7 项便携 parser 测试通过，最终 parser 和测试片段逐字节相同；Rustfmt 仍仅报告父版本已有差异。Linux x86_64 `cargo check --tests` 通过，仅编译检查。真实 Linux syscall、批准 Linux/vendor source 阳性和 D2 整体资格均未执行；原拒绝、OFF/SYSTEM/PARK 默认值与整体 Gate OPEN 保持。
+
 ## 正常 D2 launcher 与可见 PID1 的原始出生 ticks
 
 2026-11-05在父`94bad1e5fbedf9fd8719d66936ed392ecb70fd84`上，正常D2在第一次boot核验后冷读进程出生标记，unit/link检查后第二次boot核验之后再独立读取，均先于dropper/childCommand/私钥。typed入口先`originalLinuxDeployment`；实际native返回后依原绝对期限、资源健康、值与首record对应检查，全部通过才记录本owner首次值。每次均真正冷读，不把在途native认作已被timeout取消。data-only入口只接deadline且最先拒绝production owner，不能预置正式首次值，不造进程许可或改child的Process/Instant/HELLO。

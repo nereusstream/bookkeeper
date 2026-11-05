@@ -55,6 +55,15 @@ public interface NativeIO {
         }
     }
 
+    /** Namespace inode numbers observed for the calling thread, as nonzero unsigned u32 values. */
+    record LinuxThreadNamespaces(long pidInode, long userInode) {
+        public LinuxThreadNamespaces {
+            if (pidInode <= 0 || pidInode > 0xffff_ffffL || userInode <= 0 || userInode > 0xffff_ffffL) {
+                throw new IllegalArgumentException("Invalid Linux thread namespace inode number");
+            }
+        }
+    }
+
     /** Cached JDK data only, not backend approval. The copied helper bytes retain their one final NUL byte. */
     record JdkProcessLaunchObservation(String mechanism, int ordinal, byte[] helperPath) {
         public JdkProcessLaunchObservation {
@@ -231,6 +240,11 @@ public interface NativeIO {
     /** Cold self/stat and 1/stat from one held verified procfs root; no caller PID or host identity inference. */
     default LinuxProcessBirth currentLinuxProcessBirth() throws NativeIOException {
         throw new NativeIOException("Current Linux process birth query is unsupported");
+    }
+
+    /** Cold read of the calling thread's fixed PID/user proc links; no caller selector or namespace transition. */
+    default LinuxThreadNamespaces currentLinuxThreadNamespaces() throws NativeIOException {
+        throw new NativeIOException("Current Linux thread namespace query is unsupported");
     }
 
     /**

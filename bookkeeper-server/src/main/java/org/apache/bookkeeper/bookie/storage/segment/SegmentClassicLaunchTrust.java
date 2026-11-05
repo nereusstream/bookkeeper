@@ -975,6 +975,33 @@ final class SegmentClassicLaunchTrust {
         return actual;
     }
 
+    /** Each check reads this calling thread again; neither matching values nor UID zero prove mount/manager state. */
+    synchronized void verifyLinuxInitialNamespaces(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            originalLinuxDeployment(deadline);
+            requireTime(deadline);
+            var actual = nativeIo.currentLinuxThreadNamespaces();
+            requireTime(deadline);
+            files.requireHealthy();
+            requireInitialLinuxNamespaces(actual);
+            requireTime(deadline);
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    /** Linux UAPI PID_NS_INIT_INO and USER_NS_INIT_INO; comparison of values alone does not establish a source. */
+    static void requireInitialLinuxNamespaces(NativeIO.LinuxThreadNamespaces actual) throws IOException {
+        if (actual == null || actual.pidInode() != 0xefff_fffcL || actual.userInode() != 0xefff_fffdL) {
+            throw new IOException("Current launcher thread must be in the initial Linux PID and user namespaces");
+        }
+    }
+
     static void requireLinuxCgroupRootType(long actual) throws IOException {
         if (actual != 0x63677270L) { // Linux UAPI CGROUP2_SUPER_MAGIC, complete f_type value.
             throw new IOException("Current /sys/fs/cgroup/ filesystem type differs from required cgroup2");

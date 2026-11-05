@@ -5092,6 +5092,46 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void initialNamespacesRequireBothExactUnsignedKernelValuesWithoutSwapOrNestedAcceptance()
+            throws Exception {
+        long initialPid = 0xefff_fffcL;
+        long initialUser = 0xefff_fffdL;
+        SegmentClassicLaunchTrust.requireInitialLinuxNamespaces(
+                new NativeIO.LinuxThreadNamespaces(initialPid, initialUser));
+        for (var wrong : List.of(new NativeIO.LinuxThreadNamespaces(0xf000_0000L, initialUser),
+                new NativeIO.LinuxThreadNamespaces(initialPid, 0xffff_ffffL),
+                new NativeIO.LinuxThreadNamespaces(initialUser, initialPid))) {
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireInitialLinuxNamespaces(wrong));
+        }
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireInitialLinuxNamespaces(null));
+    }
+
+    @Test
+    public void initialNamespacesOriginalSourceAndDeadlineRejectBeforeNativeQueries() throws Exception {
+        for (int mode = 0; mode < 2; mode++) {
+            long deadline = mode == 0 ? SegmentClassicLinuxElfTest.deadline() : System.nanoTime();
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> {
+                        throw new AssertionError("Unbound or expired D2 reached native thread namespaces");
+                    }).when(mock).currentLinuxThreadNamespaces())) {
+                var owner = owner();
+                owner.initialize();
+                try {
+                    var failure = assertThrows(IOException.class, () -> owner.verifyLinuxInitialNamespaces(deadline));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains(mode == 0
+                            ? "original provider/source binding" : "deadline elapsed"));
+                    assertThrows(IOException.class, owner::parsed);
+                    var drained = owner.closeAndDrain();
+                    assertTrue(drained.drained());
+                    assertSame(failure, drained.launcherFailure());
+                } finally {
+                    assertTrue(owner.closeAndDrain().drained());
+                }
+            }
+        }
+    }
+
+    @Test
     public void kernelAndCgroupOriginalSourceAndDeadlineRejectBeforeNativeQueries() throws Exception {
         for (int mode = 0; mode < 2; mode++) {
             long deadline = mode == 0 ? SegmentClassicLinuxElfTest.deadline() : System.nanoTime();
