@@ -6360,6 +6360,7 @@ public class SegmentProfileInitialSocketClientTest {
         final CountDownLatch committed = new CountDownLatch(1);
         volatile boolean intercepted;
         volatile Runnable release;
+        volatile CountDownLatch resumeSubmission;
 
         PhysicalReceiptReplyClient(String connect, ZooKeeperWatcherBase watcher, boolean hold) throws Exception {
             super(connect, 10000, watcher);
@@ -6388,6 +6389,11 @@ public class SegmentProfileInitialSocketClientTest {
                     callback.processResult(code, path, context, results);
                 }
             }, context);
+            var resume = resumeSubmission;
+            if (physical && resume != null) {
+                // Pause the submitting thread even though ZooKeeper has already returned its actual callback.
+                await(resume);
+            }
         }
     }
 
@@ -6446,6 +6452,62 @@ public class SegmentProfileInitialSocketClientTest {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    @Test
+    public void physicalDeletionReceiptReadbackKeepsTheOriginalStoreDeadline() throws Exception {
+        try (Fixture fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var metadata = preparePhysicalDelete(fixture, sdk, false);
+            var manifest = fixture.reservations.readLogicalDeletion(metadata, 44, bytes(16, 101)).manifest();
+            var target = manifest.targets().get(0);
+            var watcher = new ZooKeeperWatcherBase(10000, false);
+            try (var client = new PhysicalReceiptReplyClient(fixture.cluster.getZooKeeperConnectString(),
+                    watcher, true)) {
+                var resume = new CountDownLatch(1);
+                client.resumeSubmission = resume;
+                var timeout = Duration.ofSeconds(2);
+                var store = new ZKProfileReservationStore(client, "/socket-initial",
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+                var scoped = new ProfileLedgerMetadataStore(client, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+                var attempt = new ProfileDeleteCoordinator(store, scoped, fixture.cold)
+                        .beginAwaitPhysicalDeletion(manifest, Map.of(target, fixture.clients.get(target.bookie())),
+                                sdk.getClientCtx(), 64, 8, Duration.ofSeconds(15));
+                ProfileDeletePhysicalReceipt original;
+                try {
+                    assertTrue(client.committed.await(5, TimeUnit.SECONDS));
+                    client.release.run();
+                    client.release = null;
+                    var durable = fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, target);
+                    assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.FOUND, durable.status());
+                    original = durable.receipt();
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> attempt.result().get(timeout.plusMillis(100).toMillis(), TimeUnit.MILLISECONDS));
+                    assertFalse(attempt.completion().isDone());
+                } finally {
+                    if (client.release != null) {
+                        client.release.run();
+                    }
+                    resume.countDown();
+                }
+                var expired = attempt.result().get(5, TimeUnit.SECONDS);
+                attempt.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileDeleteCoordinator.PhysicalStatus.PENDING, expired.status());
+                assertEquals(ProfilePhysicalDeleteCodec.Outcome.UNKNOWN, expired.targets().get(target).outcome());
+
+                String row = physicalReceiptPath(fixture, original);
+                long birth = fixture.zk.exists(row, false).getCzxid();
+                var replay = new ProfileDeleteCoordinator(store, scoped, fixture.cold)
+                        .beginAwaitPhysicalDeletion(manifest, Map.of(), sdk.getClientCtx(),
+                                64, 8, Duration.ofSeconds(10));
+                var resolved = replay.result().get(5, TimeUnit.SECONDS);
+                replay.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(ProfilePhysicalDeleteCodec.Outcome.REUSABLE, resolved.targets().get(target).outcome());
+                assertEquals(birth, fixture.zk.exists(row, false).getCzxid());
+                assertArrayEquals(original.encode(), store.readPhysicalDeleteReceipt(scoped, manifest, target)
+                        .receipt().encode());
             }
         }
     }

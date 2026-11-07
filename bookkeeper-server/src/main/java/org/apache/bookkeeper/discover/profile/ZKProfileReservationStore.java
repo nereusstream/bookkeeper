@@ -6102,7 +6102,8 @@ public final class ZKProfileReservationStore {
         long deadline = System.nanoTime() + timeoutNanos;
         boolean submitted = false;
         try {
-            var logical = readLogicalDeletion(metadata, manifest.ledger().ledgerId(), manifest.seal().requestId());
+            var logical = readLogicalDeletion(metadata, manifest.ledger().ledgerId(), manifest.seal().requestId(),
+                    deadline);
             var rootRead = read(manifest.ledger().ledgerId(), deadline);
             var member = metadata.readMembership(manifest.ledger().ledgerId(), deadline);
             if (logical.manifest() == null || rootRead.snapshot() == null || member.snapshot() == null) {
@@ -6121,12 +6122,13 @@ public final class ZKProfileReservationStore {
                     || !Arrays.equals(referenceBytes, receipt.event().tombstone().encode())) {
                 return physicalReceiptFailure(PhysicalReceiptStatus.QUARANTINED);
             }
-            var committed = readLedgerDeleteDelivery(metadata, manifest.ledger().ledgerId(), receipt.event().target());
+            var committed = readLedgerDeleteDelivery(metadata, manifest.ledger().ledgerId(), receipt.event().target(),
+                    deadline);
             if (committed.status() != DeliveryStatus.COMMITTED || !receipt.event().equals(committed.event())) {
                 return physicalReceiptFailure(committed.status() == DeliveryStatus.UNAVAILABLE
                         ? PhysicalReceiptStatus.UNAVAILABLE : PhysicalReceiptStatus.QUARANTINED);
             }
-            var prior = readPhysicalDeleteReceipt(metadata, manifest, receipt.event().target());
+            var prior = readPhysicalDeleteReceipt(metadata, manifest, receipt.event().target(), deadline);
             if (prior.status() != PhysicalReceiptStatus.ABSENT) {
                 return prior;
             }
@@ -6152,7 +6154,7 @@ public final class ZKProfileReservationStore {
             }
             submitted = true;
             multi(operations, deadline);
-            var stored = readPhysicalDeleteReceipt(metadata, manifest, receipt.event().target());
+            var stored = readPhysicalDeleteReceipt(metadata, manifest, receipt.event().target(), deadline);
             return stored.status() == PhysicalReceiptStatus.ABSENT
                     || stored.status() == PhysicalReceiptStatus.UNAVAILABLE
                     ? physicalReceiptFailure(PhysicalReceiptStatus.DURABILITY_UNKNOWN) : stored;

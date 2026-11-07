@@ -1665,6 +1665,8 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 
 证据 /Users/liusinan/.codex/artifacts/unified-wal/physical-receipt-evidence-aurhprzt 保留最终源码、105项阶段的原test文件、原命令/inputs/XML、模型与诊断阶段，旧PASS不移绑。最终Spotless/Checkstyle exit0；编译/测试终结后的独立RAT exit1，443 unapproved路径全部存在父HEAD，无新增，不称CI全绿。retention/offline/backup-restore policy、accepted terminal decommission/unrecoverable、stream/journal snapshot/handoff及history/page GC仍OPEN；本实现不清旧义务、删除stream event或压缩tombstone。Main/默认routing/外部authority/stock矩阵/full-bytes/正式性能/运维/全16步验收继续OPEN，步骤11/12/14/15与生产Gate不提升。默认OFF/SYSTEM/PARK和disabled能力不变；Linux NUMA、真实掉电、正式性能/canary本轮NOT_EXECUTED。
 
+2026-11-07，基线 `da58f7700d`。单条物理终结回执的逻辑删除、投递证据、先存回执、原生提交及提交后读回共用一个 store deadline。真实 ZooKeeper multi 已提交且回调已到，暂停提交线程跨越原期限后，旧代码在新期限内读回并报告该目标 `REUSABLE`。修复后首次观察保留 `PENDING`，目标结果为 `UNKNOWN`。新协调器凭同一原生回执的字节和 czxid 确认 `REUSABLE`。定向两类 16 项通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/physical-receipt-deadline-evidence-da58f770`。
+
 ## 删除流完整 snapshot 与真实启动追赶
 
 2026-10-12，父源码6bf92b4a3f之后新增ProfileDeleteSnapshot（UWDX root/UWDY page，schema1）：64 effects/page、最多64 pages，覆盖原stream最多4096个连续event；最多64个snapshot generations。root绑定完整target/incarnation、原stream/assignment generation、covered-through、snapshot generation/nonce及全部page SHA-256。每页保留原完整Event和original event/index creation zxid，顺序/数量/目标/stream/digest/CRC必须匹配；不能用digest-only root、缺page或cursor替代effect。该snapshot保存完整prefix，不在此阶段去重/裁剪历史或改变generation1的assignment。
