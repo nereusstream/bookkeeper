@@ -31,6 +31,9 @@ import time
 
 
 MATRIX = {
+    'c-closed-moved-image': None,
+    'ce-closed-moved-image-current': 'AdmittedHasCurrentCopy',
+    'ce-closed-moved-image-orphan': 'AdmittedExplainsAllCopies',
     'c-closed-reconstruction': None,
     'c-closed-reconstruction-mixed': None,
     'witness-closed-reconstruction-complete': 'NoCompleteRecovery',
@@ -1064,6 +1067,7 @@ def main():
                    else "ProfileJournalCompaction.tla" if "profile-journal-compaction" in name
                    else "ProfileRestoreDependencies.tla" if "profile-restore-dependencies" in name
                    else "ClosedReconstructionPublication.tla" if "closed-reconstruction" in name
+                   else "ClosedMovedImage.tla" if "closed-moved-image" in name
                    else "ProfileDeleteRetention.tla" if "profile-delete-retention" in name
                    else "ProfileDeleteEffective.tla" if "profile-delete-effective" in name
                    else "ProfileDeleteHandoffAck.tla" if "profile-handoff-ack" in name

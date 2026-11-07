@@ -1833,3 +1833,14 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" \
 最终 14 项符合预期。两个正向配置均穷尽搜索。覆盖日志中，原生认领与 READY、首次关闭、逐文件切换、action 6 force/replay、DELETE force/apply、启动门和新 grant 追加均有命中，`ResumeOldTail` 为零。四项见证及八项故障变体均返回指定性质的轨迹。启动门反例实际经过逻辑 DELETE 和健康重试，错误放行时本地 cursor 仍为空。既有 `a-startup-data-exclusion` 与 `a-registration-admission` 的 runner 检查也通过。最终回执核对 1,213 个源码输入和 952 个文件校验和，原始命令、覆盖和轨迹保存在 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-publication-model-evidence-8158ff83/exact`。
 
 投影限于上述有限状态和安全性质。TLC 使用官方 1.7.4、单 worker、固定 seed/fingerprint，无 state constraint 或对称归约。`CHECK_DEADLOCK FALSE` 允许有限终态。真实 fsync、掉电、Linux D2、full-bytes、一般 OPEN 恢复、完整 A/C/D 组合及生产资格仍由各自的验收证据负责。[真实双文件与删除测试](../profile-wire/README.md#不同-data-文件的-closed-成员恢复和删除)
+
+## MOVE 后 CLOSED 映像的选择检查
+
+`ClosedMovedImage.tla` 单独核对原完整扫描的两个准入条件。原 Arena 已重放成功 MOVE、没有 FREE 或复用，COPY 的位置与字节绑定由实际 replay 提供。模型保留一条原 ENTRY_DATA，可再应用一次 MOVE，并分别注入当前 COPY 缺失、COPY 绑定变化和内容相同的孤立 COPY。扫描须解释全部已见 COPY，还须看到精确当前 target。[真实文件与控制证据](../local-storage/README.md#move-已提交且尚未-free-的-closed-重建)
+
+TLC 1.7.4 的正向配置生成 629 个状态，372 个不同状态，队列 0，深度 12。可达终态含成功准入。省略当前 target 检查与误认孤立 COPY 分别命中 `AdmittedHasCurrentCopy` 和 `AdmittedExplainsAllCopies`。最终回执核对 1,217 个源码输入和 935 个文件校验和。实际命令、覆盖和轨迹位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-move-evidence-51f7f96a/model`。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" \
+  --config-prefix c-closed-moved-image --config-prefix ce-closed-moved-image
+```

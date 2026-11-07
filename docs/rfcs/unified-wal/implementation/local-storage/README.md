@@ -986,6 +986,18 @@ Native ADMITTED v2 按 ledger ID 严格递增编码完整 context、原 CLOSED �
 
 真实 JVM 在第二个候选部分写入后退出，续接重新生成两份候选。另注入第二个候选 force 失败，两个原 active 对象、原控制 cut 和 ADMITTED 保持，未产生 READY。错序的完整对象前缀拒绝续接。只校验 `data-0` 的故障变体会接受同字节但不同 inode 的 `data-1`，整组校验恢复后在首次 OPEN 拒绝。父版 `e315c7d389` 的原生读取入口拒绝实际 v4 ADMITTED，父版 READY 解码器拒绝同一操作的实际 READY v2 字节。[重开与删除证据](../profile-wire/README.md#不同-data-文件的-closed-成员恢复和删除)
 
+### MOVE 已提交且尚未 FREE 的 CLOSED 重建
+
+原三把锁下读取 Arena 顺序重放得到的最终 selector 和已提交 COPY。只接受 `APPLIED_DURABLE` 的 MOVE，原 Bookie 必须覆盖每个成功 MOVE 的所需 cut。失败条件命令不发行 COPY 权威。已成功 FREE、已有复用、隔离、本地 tombstone 或删除进度仍拒绝。已提交 COPY 和当前 selector 均计入原控制行上限，原完整控制历史摘要继续绑定两个 cut。
+
+完整 DATA 扫描同时核对历史与当前位置。每个 COPY 必须精确匹配原成功 MOVE 的位置、move ID、generation 和 entry 摘要。仍在原 grant 的普通字节和已被后继 MOVE 取代的 COPY 可以作为历史记录参与一致性核对。每个当前 selector 的精确 target 必须实际出现，旧源或派生索引位置不能补缺。随后按原 CLOSED 成员与两份来源比对条目和长度。ADMITTED v5 声明此模式，原文件逐字节重写保留所有 offset、origin 和 MOVE 事实，发布后仍以一个 action 6 结算原 epoch。[字节合同](format-v1.md#控制记录)
+
+真实 3/3/3 SDK 在健康重启两侧关闭 ledger 44 和 45，使两个稀疏源 allocation 可以通过原 compaction 合并。目标 Bookie JVM 在已 force 并应用 MOVE、首个 FREE 字节写入前退出。父版 `51f7f96a02` 拒绝该真实 scope，也在原生解码入口拒绝新版实际 v5。当前版两源审计后重写完整文件，action 6 前后对照原 grants、selector、COPY 事实和 Bookie cut。删除派生索引和 coverage 后，原身份从当前 COPY 读回两本账本。原维护随后按真实保护条件 FREE 两个旧源，原 destination 和 selector 保持。新账本使用截止后的 grant，健康冷启后旧 grant 追加截止和两本原账本的读回仍有效。
+
+另一真实 JVM 在 COPY force 后、首个 MOVE 字节写入前退出，孤立 COPY 使准入拒绝。将当前 COPY 末尾 batch 暂时置零而保留原 ENTRY_DATA 时，完整实现拒绝准入。仅移除当前 target 完整性判断的故障变体接受了同一输入。A→B→C 的实际控制测试在 checkpoint/rotation 后核对最终 selector、已提交历史 COPY 和控制行上限。[完整扫描的有限投影](../models/README.md#move-后-closed-映像的选择检查)
+
+最终六项编码、两项实际控制、五项 socket 回归全部通过，Spotless 和 Checkstyle 通过。实际重建范围为 macOS 单 Arena、单 DATA 文件、两个非空成员和 JVM 退出。已有 FREE 或复用历史、损坏恢复、批准 Linux 和真实掉电仍待各自验收，生产 Gate 保持 OPEN。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-move-evidence-51f7f96a`。
+
 ## Profile 普通 Add 的真实接线
 
 2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。

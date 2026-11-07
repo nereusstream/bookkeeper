@@ -42,6 +42,8 @@
 
 步骤 16 增加上述重建协议的有限组合验证。两个 DATA 文件和两个 ledger 的投影覆盖原生 shadow/READY 竞争、整组发布、action 6 重放、首次 OPEN 与 owned DELETE 启动门，以及旧 grant 的追加截止。全非空和原生 EMPTY 混合的两项正向搜索均穷尽，另有四条可达见证和八个指定故障反例。完整步骤 16 验收仍待各自证据。详见 [CLOSED 重建发布与启动的有限组合模型](models/README.md#closed-重建发布与启动的有限组合模型)。
 
+步骤 9→7/12 接通已有成功 MOVE、尚无成功 FREE 或复用的 CLOSED 重建。v5 ADMITTED 声明该模式，原完整扫描要求解释每条 COPY 且找到每个精确当前 target。真实维护进程在 MOVE 应用后、FREE 前退出，原身份重写完整文件并在重建索引后读回原数据。已有 FREE/复用、孤立 COPY、损坏数据及一般异常恢复仍待各自验收。详见 [MOVE 已提交且尚未 FREE 的 CLOSED 重建](local-storage/README.md#move-已提交且尚未-free-的-closed-重建)。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。

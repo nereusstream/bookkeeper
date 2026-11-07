@@ -710,16 +710,60 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     record ObservedStream(int shard, long generation, long firstSequence) { }
 
-    record ObservedSelection(UUID moveId, Generation moveGeneration, long bookieCut, SegmentPointRead.Location target,
-                             String entrySha256, long controlSequence) { }
-
     record ObservedRetirement(UUID operationId, Generation generation, FreeFacts facts) { }
 
+    record ReconstructionHistory(boolean committedMoves, boolean freedOrReused, long requiredBookieCut) {
+        void requireMode(boolean moveMode, long bookieCut, boolean hasSelectors) throws IOException {
+            if (freedOrReused || committedMoves != moveMode || hasSelectors != moveMode
+                    || bookieCut < requiredBookieCut) {
+                throw new IOException("CLOSED reconstruction MOVE mode or original control history differs");
+            }
+        }
+    }
+
     record RecoveryDependencies(Inspection cut, long allocationHighWatermark, long retiredBookieCut,
-                                boolean relocationOrReuseHistory, boolean reconstructionCapacity, String historyDigest,
+                                ReconstructionHistory history, boolean reconstructionCapacity, String historyDigest,
                                 List<ObservedGrant> grants, List<ObservedStream> streams,
-                                List<ObservedSelection> selections,
-                                List<ObservedRetirement> retiredSlots, List<RetiredRange> retiredRanges) { }
+                                Map<EntryKey, SelectedMove> selections, Map<Long, Map<CopyKey, String>> copies,
+                                List<ObservedRetirement> retiredSlots, List<RetiredRange> retiredRanges) {
+        int committedCopyCount() {
+            return copies.values().stream().mapToInt(Map::size).sum();
+        }
+
+        Set<SegmentPointRead.Location> selectedLocations() {
+            return selections.values().stream().map(SelectedMove::target)
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        }
+
+        boolean isSelectedRecord(SegmentPointRead.Location location, SegmentBatchParser.Record record, String digest)
+                throws IOException {
+            return SegmentArenaControlLog.isSelectedRecord(
+                    selections.get(new EntryKey(location.context(), location.entryId())), location, record, digest);
+        }
+
+        boolean wasCommittedCopy(SegmentPointRead.Location location, SegmentBatchParser.Record record, String digest) {
+            return digest.equals(committedCopyDigest(copies, location, record));
+        }
+    }
+
+    synchronized ReconstructionHistory reconstructionHistory() {
+        boolean moves = false;
+        boolean freedOrReused = false;
+        long bookieCut = -1;
+        for (var operation : appliedOperations.values()) {
+            if (operation.status() != Status.APPLIED_DURABLE) {
+                continue;
+            }
+            if (operation.command() instanceof SegmentArenaMove move) {
+                moves = true;
+                bookieCut = Math.max(bookieCut, move.bookieCut());
+            } else if (operation.command() instanceof Free
+                    || operation.command() instanceof Allocation allocation && allocation.expectedGeneration() > 0) {
+                freedOrReused = true;
+            }
+        }
+        return new ReconstructionHistory(moves, freedOrReused, bookieCut);
+    }
 
     /** Only the caller's existing lock scope and owned readers participate in this observation. */
     static RecoveryDependencies inspectRecoveryDependencies(IsolatedSegmentConfig config, SegmentFileHeader identity,
@@ -732,19 +776,19 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 original, null, true, files);
         observed.validateStorageFiles(identity, readyDataPaths);
         observed.recover(identity);
+        long copyRows = observed.committedCopies.values().stream().mapToLong(Map::size).sum();
         if ((long) observed.currentAllocations.size() + observed.streamStarts.size() + observed.selectedMoves.size()
-                + observed.retiredSlots.size() + observed.retiredRanges.size() > maximumRows) {
+                + observed.retiredSlots.size() + observed.retiredRanges.size() + copyRows > maximumRows) {
             throw new IOException("Arena recovery dependency observation exceeds its row limit");
         }
-        boolean relocationOrReuse = observed.appliedOperations.values().stream().anyMatch(operation ->
-                operation.command() instanceof SegmentArenaMove || operation.command() instanceof Free
-                        || operation.command() instanceof Allocation allocation && allocation.expectedGeneration() > 0);
+        var copies = new HashMap<Long, Map<CopyKey, String>>();
+        observed.committedCopies.forEach((allocation, rows) -> copies.put(allocation, Map.copyOf(rows)));
         var history = new SegmentControlCheckpoint.Snapshot(observed.appliedThrough, observed.appliedOffset,
                 observed.appliedOperations.values().stream()
                         .sorted(Comparator.comparingLong(AppliedOperation::sequence))
                         .map(CheckpointOperation::new).toList());
         var result = new RecoveryDependencies(observed.inspection(), observed.allocationHighWatermark,
-                observed.retiredBookieCut, relocationOrReuse,
+                observed.retiredBookieCut, observed.reconstructionHistory(),
                 maxLogBytes - observed.nextOffset - observed.rotationReserveBytes()
                         >= 144 + ResolveClosedReconstruction.BYTES,
                 SegmentControlCheckpoint.reference(1, 0, history, maxLogBytes).digest(),
@@ -755,11 +799,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                         entry.getKey().generation(), entry.getValue()))
                         .sorted(Comparator.comparingInt(ObservedStream::shard)
                                 .thenComparingLong(ObservedStream::generation)).toList(),
-                observed.selectedMoves.values().stream().map(move -> new ObservedSelection(move.moveId(),
-                        move.moveGeneration(), move.bookieCut(), move.target(), move.entrySha256(), move.sequence()))
-                        .sorted(Comparator.comparingLong(ObservedSelection::controlSequence)
-                                .thenComparingInt(selection -> selection.target().address().fileIndex())
-                                .thenComparingLong(selection -> selection.target().recordOffset())).toList(),
+                Map.copyOf(observed.selectedMoves), Map.copyOf(copies),
                 observed.retiredSlots.values().stream().map(free -> new ObservedRetirement(free.operationId(),
                         free.operationGeneration(), free.facts())).toList(), List.copyOf(observed.retiredRanges));
         if (observed.channel != original) {
@@ -1079,16 +1119,25 @@ final class SegmentArenaControlLog implements AutoCloseable {
     /** Successful copies remain proven while their allocation is current, including superseded selectors. */
     synchronized boolean wasCommittedCopy(SegmentPointRead.Location location, SegmentBatchParser.Record record) {
         requireOpenHistory();
-        Map<CopyKey, String> copies = committedCopies.get(location.address().allocation());
-        String digest = copies == null ? null : copies.get(new CopyKey(location, record.moveId(),
-                record.moveGeneration()));
+        String digest = committedCopyDigest(committedCopies, location, record);
         return digest != null && digest.equals(SegmentArenaMove.digest(record.entry()));
+    }
+
+    private static String committedCopyDigest(Map<Long, Map<CopyKey, String>> committed,
+            SegmentPointRead.Location location, SegmentBatchParser.Record record) {
+        Map<CopyKey, String> copies = committed.get(location.address().allocation());
+        return copies == null ? null : copies.get(new CopyKey(location, record.moveId(), record.moveGeneration()));
     }
 
     synchronized boolean isSelectedRecord(SegmentPointRead.Location location, SegmentBatchParser.Record record)
             throws IOException {
         requireOpenHistory();
         SelectedMove selected = selectedMoves.get(new EntryKey(location.context(), location.entryId()));
+        return isSelectedRecord(selected, location, record, null);
+    }
+
+    private static boolean isSelectedRecord(SelectedMove selected, SegmentPointRead.Location location,
+            SegmentBatchParser.Record record, String digest) throws IOException {
         if (selected == null) {
             return record.origin() == SegmentBatchFormat.ENTRY_DATA;
         }
@@ -1098,7 +1147,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (record.origin() != SegmentBatchFormat.RELOCATION_COPY
                 || !record.moveId().equals(selected.moveId())
                 || record.moveGeneration() != selected.moveGeneration().value()
-                || !selected.entrySha256().equals(SegmentArenaMove.digest(record.entry()))) {
+                || !selected.entrySha256().equals(digest == null ? SegmentArenaMove.digest(record.entry()) : digest)) {
             throw new IOException("Current MOVE target does not match its durable identity and digest");
         }
         return true;

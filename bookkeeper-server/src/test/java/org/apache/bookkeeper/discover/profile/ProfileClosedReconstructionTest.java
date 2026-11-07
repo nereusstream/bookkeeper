@@ -167,6 +167,29 @@ public class ProfileClosedReconstructionTest {
         assertThrows(IllegalArgumentException.class, () -> ready(List.of(fresh0, file(1, 5, 12))));
     }
 
+    @Test
+    public void committedMoveAdmissionUsesTheTypedFileVectorEvenForOneFileAndMember() throws Exception {
+        var original = file(0, 3, 11);
+        var member = member(44);
+        var base = admission(List.of(new ProfileClosedReconstruction.Member(44, null,
+                member.closed(), member.sources())));
+        var moved = new ProfileClosedReconstruction.Admission(base.scope(), base.operation(), base.arenaCut(),
+                base.bookieCut(), base.publisherPid(), base.publisherStartMillis(), base.publisherSession(),
+                base.directory(), base.directoryObject(), base.stagingObject(), List.of(original),
+                base.dependencies(), List.of(member), true);
+        byte[] encoded = moved.encode();
+        assertEquals(5, ByteBuffer.wrap(encoded).getInt(4));
+        assertEquals(moved, ProfileClosedReconstruction.Admission.decode(encoded));
+        int vectorCount = legacyBytes().length - 64 - 32 - 56 - Long.BYTES;
+        assertEquals(1, ByteBuffer.wrap(encoded).getInt(vectorCount));
+        assertEquals(0, ByteBuffer.wrap(encoded).getInt(vectorCount + Integer.BYTES));
+        assertEquals(1, ByteBuffer.wrap(encoded).getInt(vectorCount + 2 * Integer.BYTES + 56 + 32));
+        byte[] downgrade = encoded.clone();
+        ByteBuffer.wrap(downgrade).putInt(4, 4);
+        assertThrows(IOException.class, () -> ProfileClosedReconstruction.Admission.decode(downgrade));
+        assertTrue(moved.matchesCandidates(ready(List.of(file(0, 4, 11))).candidates()));
+    }
+
     private static ProfileClosedReconstruction.Ready ready(List<ProfileClosedReconstruction.FileImage> files) {
         return new ProfileClosedReconstruction.Ready(new UUID(0, 2), 16, "09".repeat(32),
                 new UUID(0, 3), 16, 1, files);

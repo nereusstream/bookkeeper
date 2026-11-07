@@ -35,6 +35,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
@@ -661,7 +662,9 @@ final class SegmentDataRecovery {
     static final class ClosedImageAudit {
         private final IsolatedSegmentConfig config;
         private final SegmentFileHeader identity;
+        private final SegmentArenaControlLog.RecoveryDependencies arena;
         private final List<ClosedImageMember> members;
+        private final Set<SegmentPointRead.Location> missingTargets;
         private final HashMap<ProfileLedgerContext, ClosedImageEntry[]> ledgers = new HashMap<>();
         private final HashMap<Long, SegmentArenaControlLog.Allocation> grants = new HashMap<>();
         private final HashMap<StreamKey, Long> nextSequence = new HashMap<>();
@@ -674,6 +677,7 @@ final class SegmentDataRecovery {
                 long maximumDataBytes, int maximumEntries) throws IOException {
             this.config = config;
             this.identity = identity;
+            this.arena = arena;
             this.members = List.copyOf(members);
             if (Math.multiplyExact(config.bytesPerFile(), config.dataFiles()) > maximumDataBytes
                     || members.isEmpty() || maximumEntries < 1 || maximumEntries > 65536) {
@@ -706,6 +710,7 @@ final class SegmentDataRecovery {
                 nextSequence.put(new StreamKey(stream.shard(), new Generation(stream.generation())),
                         stream.firstSequence());
             }
+            missingTargets = new HashSet<>(arena.selectedLocations());
             page = ByteBuffer.allocate(config.alignment());
         }
 
@@ -748,17 +753,29 @@ final class SegmentDataRecovery {
                 }
                 var batch = SegmentBatchParser.parse(content, address, bytes);
                 imageDigest.update(content);
-                for (var record : batch.records()) {
+                boolean moved = arena.history().committedMoves();
+                var locations = moved ? SegmentPointRead.locations(batch) : List.<SegmentPointRead.Location>of();
+                for (int index = 0; index < batch.records().size(); index++) {
+                    var record = batch.records().get(index);
                     long entry = record.entryId();
                     var ledger = record.context();
                     var entries = ledgers.get(ledger);
-                    if (entries == null || record.origin() != SegmentBatchFormat.ENTRY_DATA
+                    if (entries == null || (record.origin() != SegmentBatchFormat.ENTRY_DATA
+                            && record.origin() != SegmentBatchFormat.RELOCATION_COPY)
                             || SegmentOwnerLoop.shardFor(ledger.ledgerId(), config.logicalShards()) != address.shard()
                             || entry < 0 || entry >= entries.length) {
                         throw new IOException("CLOSED reconstruction DATA has a foreign coordinate");
                     }
                     entryDigest.update(record.entry());
                     String rawDigest = HexFormat.of().formatHex(entryDigest.digest());
+                    var location = moved ? locations.get(index) : null;
+                    if (record.origin() == SegmentBatchFormat.RELOCATION_COPY
+                            && (!moved || !arena.wasCommittedCopy(location, record, rawDigest))) {
+                        throw new IOException("CLOSED reconstruction COPY has no exact committed MOVE");
+                    }
+                    if (moved && arena.isSelectedRecord(location, record, rawDigest)) {
+                        missingTargets.remove(location);
+                    }
                     ByteBuffer payload = record.entry().position(SegmentBatchFormat.ENTRY_OVERHEAD);
                     int payloadBytes = payload.remaining();
                     entryDigest.update(payload);
@@ -781,6 +798,9 @@ final class SegmentDataRecovery {
         Map<ProfileLedgerContext, List<ClosedImageEntry>> finish() throws IOException {
             if (nextFile != config.dataFiles()) {
                 throw new IOException("CLOSED reconstruction did not scan the full required DATA set");
+            }
+            if (!missingTargets.isEmpty()) {
+                throw new IOException("CLOSED reconstruction is missing an exact current MOVE target");
             }
             var observed = new HashMap<ProfileLedgerContext, List<ClosedImageEntry>>();
             for (var member : members) {

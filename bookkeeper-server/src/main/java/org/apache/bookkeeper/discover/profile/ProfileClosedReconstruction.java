@@ -47,6 +47,7 @@ public final class ProfileClosedReconstruction {
     private static final int COHORT_VERSION = 2;
     private static final int MIXED_VERSION = 3;
     private static final int FILE_VECTOR_VERSION = 4;
+    private static final int COMMITTED_MOVE_VERSION = 5;
     private static final int READY_VECTOR_VERSION = 2;
     private static final int MAX_BYTES = 8192;
     public static final int MAX_MEMBERS = 16;
@@ -116,7 +117,15 @@ public final class ProfileClosedReconstruction {
     public record Admission(Scope scope, UUID operation, long arenaCut, long bookieCut,
                             long publisherPid, long publisherStartMillis, long publisherSession,
                             String directory, FileIdentity directoryObject, FileIdentity stagingObject,
-                            List<FileImage> originals, String dependencies, List<Member> members) {
+                            List<FileImage> originals, String dependencies, List<Member> members,
+                            boolean committedMoves) {
+        public Admission(Scope scope, UUID operation, long arenaCut, long bookieCut, long publisherPid,
+                long publisherStartMillis, long publisherSession, String directory, FileIdentity directoryObject,
+                FileIdentity stagingObject, List<FileImage> originals, String dependencies, List<Member> members) {
+            this(scope, operation, arenaCut, bookieCut, publisherPid, publisherStartMillis, publisherSession,
+                    directory, directoryObject, stagingObject, originals, dependencies, members, false);
+        }
+
         public Admission(Scope scope, UUID operation, long arenaCut, long bookieCut, long publisherPid,
                 long publisherStartMillis, long publisherSession, String directory, FileIdentity directoryObject,
                 FileIdentity stagingObject, Image original, String dependencies, List<Member> members) {
@@ -153,7 +162,7 @@ public final class ProfileClosedReconstruction {
             members = List.copyOf(members);
             long previous = -1;
             boolean nonempty = false;
-            boolean legacy = originals.size() == 1 && members.size() == 1;
+            boolean legacy = !committedMoves && originals.size() == 1 && members.size() == 1;
             for (var member : members) {
                 if (member.ledger() <= previous || (member.context() == null) != legacy) {
                     throw new IllegalArgumentException("CLOSED reconstruction members are not canonical");
@@ -195,10 +204,11 @@ public final class ProfileClosedReconstruction {
             var bytes = new ByteArrayOutputStream();
             try (var out = new DataOutputStream(bytes)) {
                 out.writeInt(ADMISSION);
-                boolean vector = originals.size() > 1;
+                boolean vector = committedMoves || originals.size() > 1;
                 boolean legacy = !vector && members.size() == 1;
                 boolean mixed = members.stream().anyMatch(member -> member.kind() == Kind.EMPTY_TERMINAL);
-                out.writeInt(vector ? FILE_VECTOR_VERSION : legacy ? VERSION : mixed ? MIXED_VERSION : COHORT_VERSION);
+                int version = vector ? FILE_VECTOR_VERSION : legacy ? VERSION : mixed ? MIXED_VERSION : COHORT_VERSION;
+                out.writeInt(committedMoves ? COMMITTED_MOVE_VERSION : version);
                 writeScope(out, scope);
                 writeId(out, operation);
                 if (legacy) {
@@ -243,7 +253,7 @@ public final class ProfileClosedReconstruction {
             try (var in = input(bytes, ADMISSION)) {
                 int version = in.readInt();
                 if (version != VERSION && version != COHORT_VERSION && version != MIXED_VERSION
-                        && version != FILE_VECTOR_VERSION) {
+                        && version != FILE_VECTOR_VERSION && version != COMMITTED_MOVE_VERSION) {
                     throw new IOException("Unknown reconstruction admission version");
                 }
                 var scope = new Scope(in.readUTF(), new StorageIncarnation(in.readNBytes(16)), readId(in),
@@ -258,8 +268,10 @@ public final class ProfileClosedReconstruction {
                 String directory = in.readUTF();
                 var directoryObject = readObject(in);
                 var stagingObject = readObject(in);
-                boolean vector = version == FILE_VECTOR_VERSION;
-                var originals = vector ? readFiles(in) : List.of(new FileImage(0, readImage(in)));
+                boolean committedMoves = version == COMMITTED_MOVE_VERSION;
+                boolean vector = committedMoves || version == FILE_VECTOR_VERSION;
+                var originals = vector ? readFiles(in, committedMoves ? 1 : 2)
+                        : List.of(new FileImage(0, readImage(in)));
                 String dependencies = readDigest(in);
                 List<Member> members;
                 if (version == VERSION) {
@@ -284,7 +296,7 @@ public final class ProfileClosedReconstruction {
                 }
                 requireEnd(in);
                 return new Admission(scope, operation, arenaCut, bookieCut, pid, start, session, directory,
-                        directoryObject, stagingObject, originals, dependencies, members);
+                        directoryObject, stagingObject, originals, dependencies, members, committedMoves);
             }
         }
 
@@ -352,7 +364,7 @@ public final class ProfileClosedReconstruction {
                 var shadow = readId(in);
                 long shadowBirth = in.readLong();
                 int shadowVersion = in.readInt();
-                var candidates = version == VERSION ? List.of(new FileImage(0, readImage(in))) : readFiles(in);
+                var candidates = version == VERSION ? List.of(new FileImage(0, readImage(in))) : readFiles(in, 2);
                 requireEnd(in);
                 return new Ready(operation, admissionBirth, admissionDigest, shadow, shadowBirth, shadowVersion,
                         candidates);
@@ -508,9 +520,9 @@ public final class ProfileClosedReconstruction {
         }
     }
 
-    private static List<FileImage> readFiles(DataInputStream in) throws IOException {
+    private static List<FileImage> readFiles(DataInputStream in, int minimum) throws IOException {
         int count = in.readInt();
-        if (count < 2 || count > MAX_FILES) {
+        if (count < minimum || count > MAX_FILES) {
             throw new IOException("Invalid reconstruction DATA file vector count");
         }
         var files = new ArrayList<FileImage>(count);

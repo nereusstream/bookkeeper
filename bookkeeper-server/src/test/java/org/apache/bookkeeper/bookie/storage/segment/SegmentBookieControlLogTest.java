@@ -18165,6 +18165,20 @@ public class SegmentBookieControlLogTest {
             assertEquals(targets, SegmentDataRecovery.recoverPhysicalInventory(
                     config, identity(), arena, new SegmentFileIo(), 2).entries());
         }
+        int recoveryRows = SegmentStorageInspector.withRecoveryDependencies(config, identity(), 1024 * 1024, 64,
+                key((byte) 3), VALIDATOR, observed -> {
+                    var arena = observed.arena();
+                    assertTrue(arena.history().committedMoves());
+                    assertFalse(arena.history().freedOrReused());
+                    assertEquals(Set.copyOf(targets), arena.selectedLocations());
+                    int copies = arena.committedCopyCount();
+                    assertEquals(4, copies);
+                    SegmentStorageInspector.requireReconstructionMoveMode(observed, true);
+                    return arena.grants().size() + arena.streams().size() + targets.size() + copies;
+                });
+        var rowLimit = assertThrows(IOException.class, () -> SegmentStorageInspector.withRecoveryDependencies(
+                config, identity(), 1024 * 1024, recoveryRows - 1, key((byte) 3), VALIDATOR, observed -> observed));
+        assertTrue(rowLimit.getMessage().contains("Arena recovery dependency observation exceeds its row limit"));
         try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0), StandardOpenOption.WRITE)) {
             new SegmentFileIo().writeFully(data, ByteBuffer.allocate(4096), targets.get(0).address().offset());
         }

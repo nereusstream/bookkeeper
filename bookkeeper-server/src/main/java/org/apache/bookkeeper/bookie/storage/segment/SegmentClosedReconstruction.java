@@ -248,6 +248,7 @@ public final class SegmentClosedReconstruction {
                         closed.getLength()));
             }
             SegmentStorageInspector.requireClosedReconstructionScope(deps, proofs);
+            boolean committedMoves = deps.arena().history().committedMoves();
             var files = new SegmentOwnedFiles(locks);
             try (AutoCloseable cleanup = () -> requireDrained(files, data)) {
                 var rootObject = observeDirectory(files, nativeIo, root);
@@ -283,7 +284,7 @@ public final class SegmentClosedReconstruction {
                         }
                         String sourceDigest = peers.revalidate();
                         members.add(new ProfileClosedReconstruction.Member(context.ledgerId(),
-                                cohort.size() == 1 && config.dataFiles() == 1 ? null : context,
+                                !committedMoves && cohort.size() == 1 && config.dataFiles() == 1 ? null : context,
                                 closedDigest, sourceDigest));
                         observations.put(peers, sourceDigest);
                     }
@@ -322,7 +323,8 @@ public final class SegmentClosedReconstruction {
                         existing == null ? stoppedPublisher.startMillis
                                 : existing.admission().publisherStartMillis(),
                         existing == null ? stoppedPublisher.session : existing.admission().publisherSession(),
-                        root.toString(), rootObject, stageObject, originals, dependencyDigest(deps), members);
+                        root.toString(), rootObject, stageObject, originals, dependencyDigest(deps), members,
+                        committedMoves);
                 files.requireHealthy();
                 verifySourceRegistrations(observations);
                 var admission = new PreparedAdmission(request, cohort);
@@ -624,6 +626,7 @@ public final class SegmentClosedReconstruction {
                 SegmentArenaControlLog.requireReconstructionApplied(config, identity, limits.controlBytes(),
                         arena, files, receipt);
                 if (epoch == admitted.scope().epoch()) {
+                    SegmentStorageInspector.requireReconstructionMoveMode(deps, admitted.committedMoves());
                     verifyActiveReadyImages(config, identity, files, nativeIo, root, candidates, buffer);
                 }
                 return;
@@ -733,6 +736,7 @@ public final class SegmentClosedReconstruction {
         if (deps.arena().cut().sessionEpoch() != admitted.scope().epoch()) {
             throw new IOException("READY lost the original managed epoch");
         }
+        SegmentStorageInspector.requireReconstructionMoveMode(deps, admitted.committedMoves());
         if (deps.arena().cut().sessionOpen() && (admitted.arenaCut() != deps.arena().cut().appliedSequence()
                 || admitted.bookieCut() != deps.bookie().observedSequence()
                 || !admitted.dependencies().equals(dependencyDigest(deps)))) {
@@ -759,6 +763,8 @@ public final class SegmentClosedReconstruction {
                 || !receipt.admission().operation().equals(pending.operation())) {
             throw new IOException("First reconstructed OPEN lost its original native READY");
         }
+        arena.reconstructionHistory().requireMode(receipt.admission().committedMoves(), bookie.appliedThrough(),
+                arena.hasMoves());
         Path root = config.directory().toRealPath();
         dataLock.requireHeld(root.resolve("isolated.lock"));
         var files = new SegmentOwnedFiles(List.of(root.resolve("isolated.lock"), root.resolve("arena-control.lock"),
