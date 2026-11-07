@@ -68,6 +68,10 @@ class NativeIOJni {
 
     static native long[] currentLinuxThreadNamespaces() throws NativeIOException;
 
+    static native long[] currentLinuxFilesystemView() throws NativeIOException;
+
+    static native long[] currentLinuxPid1FilesystemView() throws NativeIOException;
+
     static native int currentLinuxNativeEnvironment() throws NativeIOException;
 
     static native NativeIO.JdkProcessLaunchObservation jdkProcessLaunch() throws NativeIOException;

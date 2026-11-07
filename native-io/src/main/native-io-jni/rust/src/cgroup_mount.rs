@@ -189,7 +189,7 @@ fn statx_directory(stat: &libc::statx) -> ProcIdentityResult<MountDirectory> {
 }
 
 #[cfg(target_os = "linux")]
-fn require_mount_statx(stat: &libc::statx) -> ProcIdentityResult<()> {
+pub(super) fn require_mount_statx(stat: &libc::statx) -> ProcIdentityResult<()> {
     if stat.stx_mask & MOUNT_STATX_MASK != MOUNT_STATX_MASK {
         return Err(("statx is missing required mount fields", libc::EOPNOTSUPP));
     }
@@ -209,7 +209,7 @@ fn query_statx(
 }
 
 #[cfg(target_os = "linux")]
-fn mount_statx(
+pub(super) fn mount_statx(
     fd: libc::c_int,
     path: &[u8],
     flags: libc::c_int,

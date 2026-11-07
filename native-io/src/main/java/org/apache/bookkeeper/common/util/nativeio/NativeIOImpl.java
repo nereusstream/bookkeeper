@@ -301,6 +301,44 @@ public class NativeIOImpl implements NativeIO {
     }
 
     @Override
+    public LinuxFilesystemView currentLinuxFilesystemView() throws NativeIOException {
+        try {
+            return decodeFilesystemView(NativeIOJni.currentLinuxFilesystemView(), 4);
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Current Linux filesystem view is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
+    public LinuxPid1FilesystemView currentLinuxPid1FilesystemView() throws NativeIOException {
+        try {
+            long[] actual = NativeIOJni.currentLinuxPid1FilesystemView();
+            var view = decodeFilesystemView(actual, 5);
+            return new LinuxPid1FilesystemView(view, actual[4]);
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Linux PID 1 filesystem view is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    private static LinuxFilesystemView decodeFilesystemView(long[] values, int expectedLength)
+            throws NativeIOException {
+        if (values == null || values.length != expectedLength) {
+            throw new NativeIOException("Unknown current Linux filesystem view outcome");
+        }
+        try {
+            return new LinuxFilesystemView(values[0], new FileIdentity(values[1], values[2]), values[3]);
+        } catch (IllegalArgumentException invalid) {
+            var failure = new NativeIOException("Invalid native current Linux filesystem view");
+            failure.initCause(invalid);
+            throw failure;
+        }
+    }
+
+    @Override
     public NativeEnvironmentSample currentLinuxNativeEnvironment() throws NativeIOException {
         try {
             return switch (NativeIOJni.currentLinuxNativeEnvironment()) {

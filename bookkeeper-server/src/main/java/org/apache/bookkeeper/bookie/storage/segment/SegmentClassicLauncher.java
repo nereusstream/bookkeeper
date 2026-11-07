@@ -288,6 +288,7 @@ public final class SegmentClassicLauncher {
             trust.verifyLinuxBootId(deadline);
             trust.verifyLinuxProcessBirth(deadline);
             trust.verifyLinuxInitialNamespaces(deadline);
+            trust.verifyLinuxPid1FilesystemView(deadline);
             trust.verifyLinuxLoaderConfiguration(deployment.preloadAbsentConfigurationIndex(), deadline);
             trust.verifyLinuxLoaderConfiguration(SegmentClassicLaunchTrust.fixedLinuxCacheRule(deployment.loading()),
                     deadline);
@@ -297,11 +298,12 @@ public final class SegmentClassicLauncher {
             trust.verifyLinuxJdkHelper(deadline);
             trust.verifyLinuxUnitFiles(deadline);
             trust.verifyLinuxInstallLinks(deadline);
-            trust.verifyLinuxBootId(deadline);
-            trust.verifyLinuxProcessBirth(deadline);
             trust.verifyLinuxInitialNamespaces(deadline);
             trust.recheckLinuxCgroupRoot(deadline);
             trust.verifyLinuxSystemdPeer(deadline);
+            trust.verifyLinuxBootId(deadline);
+            trust.verifyLinuxProcessBirth(deadline);
+            trust.verifyLinuxPid1FilesystemView(deadline);
         }
         trust.verifyLauncherDropper(input, deadline);
         if (linuxD2) {

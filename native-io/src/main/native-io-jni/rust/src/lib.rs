@@ -33,6 +33,8 @@ use std::ptr;
 
 #[cfg(any(target_os = "linux", test))]
 mod cgroup_mount;
+#[cfg(any(target_os = "linux", test))]
+mod filesystem_view;
 
 // Java flags (from NativeIO.java)
 const O_CREAT: jint = 0x01;
@@ -818,6 +820,73 @@ fn parse_proc_start_ticks(bytes: &[u8], expected_pid: libc::pid_t) -> Result<u64
 }
 
 #[cfg(target_os = "linux")]
+fn read_proc_start_ticks(
+    root: libc::c_int,
+    root_stat: &libc::stat,
+    path: &[u8],
+    resolve: u64,
+    expected: libc::pid_t,
+) -> ProcIdentityResult<u64> {
+    let how = [
+        (libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) as u64,
+        0,
+        resolve,
+    ];
+    let leaf = unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            root,
+            path.as_ptr().cast::<libc::c_char>(),
+            how.as_ptr(),
+            std::mem::size_of_val(&how),
+        )
+    };
+    if leaf < 0 {
+        return Err(proc_identity_errno("process birth fixed openat2 failed"));
+    }
+    let leaf = leaf as libc::c_int;
+    let outcome = (|| {
+        let before = proc_identity_stat(leaf)?;
+        if before.st_mode & libc::S_IFMT != libc::S_IFREG || before.st_dev != root_stat.st_dev {
+            return Err((
+                "process birth leaf differs from its held procfs",
+                libc::EINVAL,
+            ));
+        }
+        let mut bytes = [0_u8; 4097];
+        let mut used = 0;
+        loop {
+            let count =
+                unsafe { libc::read(leaf, bytes[used..].as_mut_ptr().cast(), bytes.len() - used) };
+            if count < 0 {
+                return Err(proc_identity_errno("process birth bounded read failed"));
+            }
+            if count == 0 {
+                break;
+            }
+            used += count as usize;
+            if used > 4096 {
+                return Err((
+                    "process birth stat exceeds its fixed bound",
+                    libc::EOVERFLOW,
+                ));
+            }
+        }
+        let ticks = parse_proc_start_ticks(&bytes[..used], expected)
+            .map_err(|error| ("Invalid process birth stat or mismatched PID view", error))?;
+        let after = proc_identity_stat(leaf)?;
+        if before.st_dev != after.st_dev
+            || before.st_ino != after.st_ino
+            || before.st_mode != after.st_mode
+        {
+            return Err(("process birth held leaf changed during read", libc::EAGAIN));
+        }
+        Ok(ticks)
+    })();
+    close_proc_identity_fd(leaf, outcome)
+}
+
+#[cfg(target_os = "linux")]
 fn linux_process_birth() -> ProcIdentityResult<[u64; 3]> {
     let pid = unsafe { libc::getpid() };
     if pid <= 0 {
@@ -846,67 +915,7 @@ fn linux_process_birth() -> ProcIdentityResult<[u64; 3]> {
         .into_iter()
         .enumerate()
         {
-            let how = [
-                (libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) as u64,
-                0,
-                resolve,
-            ];
-            let leaf = unsafe {
-                libc::syscall(
-                    libc::SYS_openat2,
-                    root,
-                    path.as_ptr().cast::<libc::c_char>(),
-                    how.as_ptr(),
-                    std::mem::size_of_val(&how),
-                )
-            };
-            if leaf < 0 {
-                return Err(proc_identity_errno("process birth fixed openat2 failed"));
-            }
-            let leaf = leaf as libc::c_int;
-            let outcome = (|| {
-                let before = proc_identity_stat(leaf)?;
-                if before.st_mode & libc::S_IFMT != libc::S_IFREG
-                    || before.st_dev != root_stat.st_dev
-                {
-                    return Err((
-                        "process birth leaf differs from its held procfs",
-                        libc::EINVAL,
-                    ));
-                }
-                let mut bytes = [0_u8; 4097];
-                let mut used = 0;
-                loop {
-                    let count = unsafe {
-                        libc::read(leaf, bytes[used..].as_mut_ptr().cast(), bytes.len() - used)
-                    };
-                    if count < 0 {
-                        return Err(proc_identity_errno("process birth bounded read failed"));
-                    }
-                    if count == 0 {
-                        break;
-                    }
-                    used += count as usize;
-                    if used > 4096 {
-                        return Err((
-                            "process birth stat exceeds its fixed bound",
-                            libc::EOVERFLOW,
-                        ));
-                    }
-                }
-                let ticks = parse_proc_start_ticks(&bytes[..used], expected).map_err(|error| {
-                    ("Invalid process birth stat or mismatched PID view", error)
-                })?;
-                let after = proc_identity_stat(leaf)?;
-                if before.st_dev != after.st_dev
-                    || before.st_ino != after.st_ino
-                    || before.st_mode != after.st_mode
-                {
-                    return Err(("process birth held leaf changed during read", libc::EAGAIN));
-                }
-                Ok(ticks)
-            })();
-            starts[index] = close_proc_identity_fd(leaf, outcome)?;
+            starts[index] = read_proc_start_ticks(root, &root_stat, path, resolve, expected)?;
         }
         let after = proc_identity_root(root)?;
         if root_stat.st_dev != after.st_dev || root_stat.st_ino != after.st_ino {
@@ -1121,6 +1130,72 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
         );
         ptr::null_mut()
     }
+}
+
+/// Cold calling-thread namespace and actual root only.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxFilesystemView(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jlongArray {
+    #[cfg(target_os = "linux")]
+    {
+        filesystem_view_array(&mut env, filesystem_view::current_view())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Current Linux filesystem view query is unsupported",
+            libc::ENOSYS,
+        );
+        ptr::null_mut()
+    }
+}
+
+/// Match the calling thread's filesystem view against the fixed PID 1 in the verified procfs.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_currentLinuxPid1FilesystemView(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jlongArray {
+    #[cfg(target_os = "linux")]
+    {
+        filesystem_view_array(&mut env, filesystem_view::pid1_view())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Current Linux PID 1 filesystem view query is unsupported",
+            libc::ENOSYS,
+        );
+        ptr::null_mut()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn filesystem_view_array<const N: usize>(
+    env: &mut JNIEnv,
+    observed: ProcIdentityResult<[u64; N]>,
+) -> jlongArray {
+    let values = match observed {
+        Ok(values) => values,
+        Err((operation, error)) => {
+            throw_exception_with_error_code(env, operation, error);
+            return ptr::null_mut();
+        }
+    };
+    let Ok(array) = env.new_long_array(N as jint) else {
+        return ptr::null_mut();
+    };
+    if env
+        .set_long_array_region(&array, 0, &values.map(|value| value as jlong))
+        .is_err()
+    {
+        return ptr::null_mut();
+    }
+    array.into_raw()
 }
 
 #[cfg(any(target_os = "linux", test))]

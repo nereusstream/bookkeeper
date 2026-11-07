@@ -6292,6 +6292,52 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
+    public void pid1FilesystemViewMustMatchTheOriginalBirthAndEveryPartOfTheFirstView() throws Exception {
+        var birth = new NativeIO.LinuxProcessBirth(37, 0, Long.MIN_VALUE);
+        var root = new NativeIO.FileIdentity(31, 0);
+        var view = new NativeIO.LinuxFilesystemView(25, root, 17);
+        var first = new NativeIO.LinuxPid1FilesystemView(view, birth.pid1StartTicks());
+        SegmentClassicLaunchTrust.requireLinuxPid1FilesystemView(birth, null, first);
+        SegmentClassicLaunchTrust.requireLinuxPid1FilesystemView(birth, first, first);
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireLinuxPid1FilesystemView(
+                birth, null, new NativeIO.LinuxPid1FilesystemView(view, birth.startTicks())));
+        for (var wrong : List.of(new NativeIO.LinuxFilesystemView(26, root, 17),
+                new NativeIO.LinuxFilesystemView(25, root, 18),
+                new NativeIO.LinuxFilesystemView(25, new NativeIO.FileIdentity(31, 2), 17),
+                new NativeIO.LinuxFilesystemView(25, new NativeIO.FileIdentity(32, 0), 17))) {
+            assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireLinuxPid1FilesystemView(
+                    birth, first, new NativeIO.LinuxPid1FilesystemView(wrong, birth.pid1StartTicks())));
+        }
+        assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireLinuxPid1FilesystemView(
+                birth, first, null));
+    }
+
+    @Test
+    public void pid1FilesystemViewRequiresTheOriginalSourceAndDeadlineBeforeTheNativeCall() throws Exception {
+        for (boolean expired : List.of(false, true)) {
+            try (var operators = mockConstruction(NativeIOImpl.class, withSettings().defaultAnswer(CALLS_REAL_METHODS),
+                    (mock, context) -> doAnswer(call -> {
+                        throw new AssertionError("Unbound or expired D2 reached the fixed PID 1 filesystem view");
+                    }).when(mock).currentLinuxPid1FilesystemView())) {
+                var owner = owner();
+                owner.initialize();
+                long deadline = expired ? System.nanoTime() : SegmentClassicLinuxElfTest.deadline();
+                try {
+                    var failure = assertThrows(IOException.class, () -> owner.verifyLinuxPid1FilesystemView(deadline));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains(expired
+                            ? "deadline elapsed" : "original provider/source binding"));
+                    assertThrows(IOException.class, owner::parsed);
+                    var drained = owner.closeAndDrain();
+                    assertTrue(drained.drained());
+                    assertSame(failure, drained.launcherFailure());
+                } finally {
+                    assertTrue(owner.closeAndDrain().drained());
+                }
+            }
+        }
+    }
+
+    @Test
     public void systemdPeerRequiresOriginalSourceAndDeadlineAndComparesPidAndUidIndependently() throws Exception {
         SegmentClassicLaunchTrust.requireLinuxSystemdPeer(new NativeIO.UnixPeerCredentials(1, 0, 123));
         assertThrows(IOException.class, () -> SegmentClassicLaunchTrust.requireLinuxSystemdPeer(

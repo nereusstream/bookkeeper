@@ -65,6 +65,23 @@ public interface NativeIO {
         }
     }
 
+    /** Current mount namespace and the actual filesystem root of the calling thread. */
+    record LinuxFilesystemView(long mountNamespaceInode, FileIdentity root, long rootMountId) {
+        public LinuxFilesystemView {
+            if (mountNamespaceInode <= 0 || mountNamespaceInode > 0xffff_ffffL || root == null
+                    || rootMountId <= 0 || rootMountId > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("Invalid current Linux filesystem view");
+            }
+        }
+    }
+
+    /** Common filesystem view observed for the caller and fixed PID 1, with raw unsigned PID 1 start ticks. */
+    record LinuxPid1FilesystemView(LinuxFilesystemView view, long pid1StartTicks) {
+        public LinuxPid1FilesystemView {
+            Objects.requireNonNull(view, "PID 1 filesystem view");
+        }
+    }
+
     /** Cached JDK data only, not backend approval. The copied helper bytes retain their one final NUL byte. */
     record JdkProcessLaunchObservation(String mechanism, int ordinal, byte[] helperPath) {
         public JdkProcessLaunchObservation {
@@ -275,6 +292,16 @@ public interface NativeIO {
     /** Cold read of the calling thread's fixed PID/user proc links; no caller selector or namespace transition. */
     default LinuxThreadNamespaces currentLinuxThreadNamespaces() throws NativeIOException {
         throw new NativeIOException("Current Linux thread namespace query is unsupported");
+    }
+
+    /** Cold self-only observation. Neither mount IDs nor namespace inode numbers are durable identities. */
+    default LinuxFilesystemView currentLinuxFilesystemView() throws NativeIOException {
+        throw new NativeIOException("Current Linux filesystem view query is unsupported");
+    }
+
+    /** Fixed Linux PID 1 comparison for a root caller. This observation conveys no manager or isolation authority. */
+    default LinuxPid1FilesystemView currentLinuxPid1FilesystemView() throws NativeIOException {
+        throw new NativeIOException("Current Linux PID 1 filesystem view query is unsupported");
     }
 
     /** Only the sampled libc table and its first slot, without reading any environment strings. */

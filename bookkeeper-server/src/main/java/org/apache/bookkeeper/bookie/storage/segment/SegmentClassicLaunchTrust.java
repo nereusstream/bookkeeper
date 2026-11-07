@@ -464,6 +464,7 @@ final class SegmentClassicLaunchTrust {
     private HeldCgroupRoot linuxCgroupRoot;
     private UUID linuxBootId;
     private NativeIO.LinuxProcessBirth linuxProcessBirth;
+    private NativeIO.LinuxPid1FilesystemView linuxPid1FilesystemView;
     private boolean configurationAttempted;
     private Throwable configurationFailure;
     private boolean launcherDescriptorAttempted;
@@ -1203,6 +1204,38 @@ final class SegmentClassicLaunchTrust {
     static void requireInitialLinuxNamespaces(NativeIO.LinuxThreadNamespaces actual) throws IOException {
         if (actual == null || actual.pidInode() != 0xefff_fffcL || actual.userInode() != 0xefff_fffdL) {
             throw new IOException("Current launcher thread must be in the initial Linux PID and user namespaces");
+        }
+    }
+
+    /** First after the original namespace checks, then again after the original systemd peer check. */
+    synchronized void verifyLinuxPid1FilesystemView(long deadline) throws IOException {
+        requireReady();
+        initializingThread = Thread.currentThread();
+        try {
+            originalLinuxDeployment(deadline);
+            if (linuxBootId == null || linuxProcessBirth == null) {
+                throw new IOException("PID 1 filesystem view requires the original boot and process births");
+            }
+            requireTime(deadline);
+            var actual = nativeIo.currentLinuxPid1FilesystemView();
+            requireTime(deadline);
+            files.requireHealthy();
+            requireLinuxPid1FilesystemView(linuxProcessBirth, linuxPid1FilesystemView, actual);
+            requireTime(deadline);
+            linuxPid1FilesystemView = actual;
+        } catch (IOException | RuntimeException | Error failure) {
+            launcherFailure = failure;
+            throw failure;
+        } finally {
+            initializingThread = null;
+        }
+    }
+
+    static void requireLinuxPid1FilesystemView(NativeIO.LinuxProcessBirth birth,
+            NativeIO.LinuxPid1FilesystemView previous, NativeIO.LinuxPid1FilesystemView actual) throws IOException {
+        if (birth == null || actual == null || birth.pid1StartTicks() != actual.pid1StartTicks()
+                || previous != null && !previous.equals(actual)) {
+            throw new IOException("Original Linux PID 1 filesystem view or birth is missing or changed");
         }
     }
 

@@ -1364,6 +1364,14 @@ owner 复用一次非阻塞 Unix connect 和原绝对 deadline，从同一实际
 
 在父 `08c87d108c` 上使用原 4e0a6d2e… native 库，最终 server 59 项全通过，native 4 项中 3 项通过、1 项 Linux 描述符重分配用例跳过，Java style 通过。临时 socket 的 EOF、leaf 替换和 selector 关闭故障覆盖原连接的资源结算。替换用例注入 peer 结果，实际跨进程 native 用例在 Darwin 验证平台拒绝和连接可用性。首次 server 59 项中 1 项因夹具期望的异常类与实际 connect 拒绝不符而失败，修正断言后的运行保留独立输入与结果。批准的 Linux 固定端点、Linux peer 阳性及完整启动均未执行，生产 Gate 仍 OPEN。
 
+## 正常 D2 launcher 的固定 PID 1 文件系统视图
+
+2026-11-08，基线 `14e3c4848c`。两个固定无参 JNI 入口分别读取调用线程自身视图，以及核对它与可见 PID 1 的视图。两者从实际持有的根目录 fd 取得 dev、inode 和普通 mount ID，从经验证的 procfs 读取实际 mount namespace。PID 1 路径在原 procfs 下持有固定 `1` 目录，并对固定 `root` 叶先做无跟随身份检查，再有意跟随该内核 magic link 获取实际根。PID 1 出生以原始 ticks 读两次，临时 fd 在返回结果前结算实际首次关闭。根和 namespace 在同一观察中复验。采样之间的变更仍须由持续管理面约束覆盖。[Linux proc PID root](https://man7.org/linux/man-pages/man5/proc_pid_root.5.html) · [Linux openat2](https://man7.org/linux/man-pages/man2/openat2.2.html)
+
+原 D2 owner 在首轮初始 PID/user namespace 检查后保存视图，并与已取得的 PID 1 出生核对。末轮固定 systemd 对端检查后再次冷读 boot、进程出生和根视图，匹配原记录后才进入 dropper 检查。非 root 目标之后将用自身视图核对新版本签名材料，其中包含同 boot 的原 PID 1 出生和根视图，并继续冷验退休和当前隔离条件。该签名版本、目标消费、持续管理面约束和批准 Linux 阳性仍待完成。
+
+Darwin arm64 原生库构建、231 项定向 JUnit、31 项宿主 Rust 测试和 Java 样式通过。9 项 JUnit Linux 条件用例跳过。独立 JVM 使用父 JNI 库验证两个缺失符号明确拒绝，Linux x86_64 `cargo check --tests` 通过。实际 PID 1 root 跟随、同 namespace 的 chroot 和其他 mount namespace 拒绝用例为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-pid1-filesystem-view-evidence-14e3c484`。
+
 ## 正常 D2 launcher 的初始 PID 与 user namespace
 
 正常 schema2 launcher 在两次原 process-birth 核验之后各调用一次 `verifyLinuxInitialNamespaces`，仍在独立 dropper 核验、`childCommand` 和私钥读取之前。原 source/provider 与 deadline 先行；实际读取后复查 deadline 和 owner 健康，再把两个原始值分别与初始 PID inode `0xeffffffc`、user inode `0xeffffffd` 比较，并复查 deadline。缺值、任一不匹配或读取失败沿用原 sticky failure 和排空。没有首值缓存、外部数据入口或新资格对象。D1 和无 Linux 部署路径不调用新 ABI。
