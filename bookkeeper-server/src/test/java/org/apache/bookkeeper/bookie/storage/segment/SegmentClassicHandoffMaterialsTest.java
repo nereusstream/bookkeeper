@@ -40,6 +40,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
@@ -55,6 +56,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -64,6 +66,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.bookkeeper.bookie.ClassicClaimTestHistory;
@@ -561,6 +564,104 @@ public class SegmentClassicHandoffMaterialsTest {
             assertFalse(preparation.inputsBound());
         } finally {
             assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void preparationRejectsAnUnusedEntryLogWithAnExternalHardLink() throws Exception {
+        var scope = preparedScope(16);
+        Path log = manifest.classicRoots().get(1).directory().resolve("current/99.log");
+        byte[] original = {1, 2, 3};
+        privateFile(log, original);
+        Path alias = log.resolveSibling("../../outside.log").normalize();
+        Files.createLink(alias, log);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            var failure = assertThrows(IOException.class, preparation::initialize);
+            assertTrue(failure.getMessage(), failure.getMessage().contains("single-link"));
+            assertFalse(preparation.inputsBound());
+            assertTrue(Files.isSameFile(log, alias));
+            assertArrayEquals(original, Files.readAllBytes(alias));
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void preparedImportRejectsAnExtendedAclOnAnUnusedEntryLog() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_MAC_OSX);
+        var scope = preparedScope(16);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                Path log = manifest.classicRoots().get(1).directory().resolve("current/99.log");
+                byte[] original = {1, 2, 3};
+                privateFile(log, original);
+                addMacAcl(log, "everyone allow read");
+                var bookie = control.log();
+                withClaimDriver(bookie, driver -> {
+                    var failure = assertThrows(IOException.class,
+                            () -> preparation.importPrepared(roots, arenas, control, driver));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains("ACL"));
+                    assertEquals(-1, bookie.unsealedBootstrapCut());
+                    assertEquals(0, io.writes);
+                });
+                assertArrayEquals(original, Files.readAllBytes(log));
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void retainedTreeKeepsTheSupervisorWhenTheFirstDirectoryCloseFails() throws Exception {
+        var scope = preparedScope(16);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        Path current = manifest.classicRoots().get(1).directory().resolve("current");
+        var firstClose = new IOException("Retained Classic directory first close failed");
+        var captured = new AtomicReference<DirectoryStream<Path>>();
+        var closes = new AtomicInteger();
+        try (var opens = mockStatic(Files.class, invocation -> {
+            Object result = invocation.callRealMethod();
+            if (invocation.getMethod().getName().equals("newDirectoryStream")
+                    && invocation.getMethod().getParameterCount() == 1 && current.equals(invocation.getArgument(0))) {
+                @SuppressWarnings("unchecked")
+                var original = (DirectoryStream<Path>) result;
+                captured.set(original);
+                return new DirectoryStream<Path>() {
+                    @Override
+                    public Iterator<Path> iterator() {
+                        return original.iterator();
+                    }
+
+                    @Override
+                    public void close() throws IOException {
+                        closes.incrementAndGet();
+                        throw firstClose;
+                    }
+                };
+            }
+            return result;
+        })) {
+            assertSame(firstClose, assertThrows(IOException.class, preparation::initialize));
+        }
+        try {
+            var result = preparation.closeAndDrain();
+            assertFalse(result.drained());
+            assertSame(firstClose, result.initializationFailure());
+            assertSame(firstClose, result.materials().files().closeFailure());
+            assertSame(result, preparation.closeAndDrain());
+            assertEquals(1, closes.get());
+            probe("HELD");
+        } finally {
+            captured.get().close();
+            var field = SegmentClassicBootstrap.class.getDeclaredField("materials");
+            field.setAccessible(true);
+            guard((SegmentClassicHandoffMaterials) field.get(preparation)).close();
         }
         probe("AVAILABLE");
     }

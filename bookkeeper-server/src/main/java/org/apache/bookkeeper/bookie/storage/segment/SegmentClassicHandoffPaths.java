@@ -94,6 +94,17 @@ final class SegmentClassicHandoffPaths {
         return before;
     }
 
+    Identity retainedStorageIdentity(Path path, long device) throws IOException {
+        var identity = protectedIdentity(path);
+        if (!trustedOwner(identity.uid()) || identity.device() != device) {
+            throw new IOException("Retained storage member has an untrusted owner or device: " + path);
+        }
+        if (!identity.directory() && identity.links() != 1) {
+            throw new IOException("Retained storage requires single-link files: " + path);
+        }
+        return identity;
+    }
+
     static Identity fileIdentity(Path path) throws IOException {
         if (!path.equals(path.toRealPath())) {
             throw new IOException("Handoff path must contain no symbolic aliases");

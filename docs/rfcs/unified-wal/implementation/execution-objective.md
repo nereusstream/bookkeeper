@@ -60,7 +60,7 @@
 
 包内 `PREPARED` 恢复已绑定原导入 applied cut，通过同一控制日志在 `.rloc` 写入和 V6 replay 副作用前核对原 CLASSIC 回执。严格 flush、目录同步、lastMark 和 Bookie 实际排空后，原 driver 才提交首个本地封口。冷开以该原回执续接同一原生出生并核验 `ENABLED`。公开资源装配、实时 Unix 采用、实际崩溃与掉电恢复及批准 Linux 验收仍 OPEN。详见 [PREPARED 恢复后的首次本地封口](local-storage/README.md#prepared-恢复后的首次本地封口)。
 
-交接材料读取、发布及包内 Classic preparation 已接入实时 ACL 复核。实际附加 ACL 会阻止接受交接材料或提交导入 claim。旧 UID 进程与 fd 排除、既有数据权限和批准 Linux 交接仍 OPEN。[Classic 交接路径的实时 ACL 复核](startup-readiness/README.md#classic-交接路径的实时-acl-复核)
+交接材料读取、发布及包内 Classic preparation 已接入实时 ACL 复核。绑定输入、导入 claim 和实际 replay 前，逐项核验签名根下的保留树，包括未参与 replay 的旧 entry log。旧 UID 进程与 fd 排除、目标实际访问权限、挂载别名隔离和批准 Linux 交接仍 OPEN。[Classic 交接保留树的逐项核验](startup-readiness/README.md#classic-交接保留树的逐项核验)
 
 共同 route 离线导入的 Journal ID 清单已按固定页大小枚举，保留各 Journal 的原数字顺序及最大有效 lastMark。真实跨页、目录替换和 claim 续接回归已归档。受控历史 Bookie 的实际 V6 replay 随后接入同一分页，按文件实际关闭推进内存 lastMark。95 项定向回归通过。共同 scope 的受保护装配、重放 gate、flush 与封口仍待接线。详见 [Journal suffix 的只读清单](local-storage/README.md#离线-bootstrap-的-journal-suffix-只读清单)。
 

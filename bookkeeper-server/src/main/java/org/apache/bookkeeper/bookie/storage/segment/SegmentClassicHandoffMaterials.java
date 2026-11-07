@@ -80,6 +80,11 @@ final class SegmentClassicHandoffMaterials {
     record Result(boolean drained, Throwable initializationFailure, SegmentOwnedFiles.Result files,
                   SegmentDataFileLock.DrainResult guard) { }
 
+    @FunctionalInterface
+    interface OpenCheck {
+        void requireOpen() throws IOException;
+    }
+
     private record ClassicGuard(Path current, Identity rootIdentity, Identity currentIdentity, Object fileKey) { }
 
     private record ProtectedFile(Identity identity, List<Identity> parents) { }
@@ -355,11 +360,44 @@ final class SegmentClassicHandoffMaterials {
 
     synchronized Identity protectedMember(Path root) throws IOException {
         var before = directoryIdentity(root);
-        paths.parents(root);
+        var parents = paths.parents(root);
+        if ((before.mode() & 077) != 0 && parents.stream().noneMatch(parent -> (parent.mode() & 077) == 0)) {
+            throw new IOException("Retained storage requires a private directory boundary: " + root);
+        }
         if (!before.equals(directoryIdentity(root))) {
             throw new IOException("Handoff member or its path protection changed: " + root);
         }
         return before;
+    }
+
+    synchronized void verifyStorageTree(Path root, Identity expected, OpenCheck check) throws IOException {
+        guard.requireHeld(guardPath);
+        var before = paths.retainedStorageIdentity(root, expected.device());
+        if (!expected.equals(before.parent())) {
+            throw new IOException("Retained storage root changed before enumeration: " + root);
+        }
+        verifyStorageDirectory(root, before, 0, check);
+    }
+
+    private void verifyStorageDirectory(Path directory, Identity before, int depth, OpenCheck check)
+            throws IOException {
+        check.requireOpen();
+        try (var children = files.openDirectory(directory)) {
+            for (Path child : children) {
+                check.requireOpen();
+                var identity = paths.retainedStorageIdentity(child, before.device());
+                if (identity.directory()) {
+                    // The deepest supported path is a Classic index beneath current and its two hash directories.
+                    if (depth == 3) {
+                        throw new IOException("Retained storage exceeds the supported directory depth: " + child);
+                    }
+                    verifyStorageDirectory(child, identity, depth + 1, check);
+                }
+            }
+        }
+        if (!before.equals(paths.retainedStorageIdentity(directory, before.device()))) {
+            throw new IOException("Retained storage directory changed during enumeration: " + directory);
+        }
     }
 
     /** Outer native/Unix checks and all actual users must terminate before releasing this child. */

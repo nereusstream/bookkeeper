@@ -179,7 +179,7 @@ public final class SegmentClassicBootstrap {
             materials = new SegmentClassicHandoffMaterials(references, expected, manifest);
             requireOpen();
             materials.initialize();
-            requireCurrentSources(first);
+            requireCurrentSources(first, true);
             synchronized (this) {
                 requireOpen();
                 bound = first;
@@ -235,7 +235,7 @@ public final class SegmentClassicBootstrap {
             var binding = original.nativeBinding();
             roots.verifyPreparedOwner(manager, binding, bookie);
             arenas.requireVerified(binding.binding().manifest());
-            requireCurrentSources(original);
+            requireCurrentSources(original, true);
             inventory.initialize(new InventorySession(this, roots.inventoryConfiguration()));
             claims.importClaims(visitor -> {
                 inventory.scan(visitor::visit);
@@ -274,7 +274,7 @@ public final class SegmentClassicBootstrap {
             var bookie = prepared.control().log();
             prepared.roots().verifyPreparedOwner(manager, binding, bookie);
             prepared.arenas().requireVerified(binding.binding().manifest());
-            requireCurrentSources(original);
+            requireCurrentSources(original, true);
             requireImportedCut(bookie, prepared);
             inventory.recover(new RecoverySession(this, prepared, prepared.roots().inventoryConfiguration()));
             requireCurrentSources(original);
@@ -343,13 +343,13 @@ public final class SegmentClassicBootstrap {
                     () -> new IOException("Native completion requires the retained Classic bootstrap seal"));
             long before = bookie.requireSealedBootstrapCut(seal);
             var proof = materials.parsed().proof();
-            requireMembers(proof);
+            requireMembers(proof, false);
             materials.recheckProtection();
             requireOpen();
             var enabled = sources.completePrepared(original, seal);
             roots.verifyPreparedRootsForCompletion(manager, binding, bookie);
             arenas.requireVerified(binding.binding().manifest());
-            requireMembers(proof);
+            requireMembers(proof, false);
             materials.recheckProtection();
             if (before != bookie.requireSealedBootstrapCut(seal)) {
                 throw new IOException("Bookie control changed during native bootstrap completion");
@@ -397,13 +397,18 @@ public final class SegmentClassicBootstrap {
     }
 
     private void requireCurrentSources(ClassicBootstrapSnapshot original) throws IOException {
+        requireCurrentSources(original, false);
+    }
+
+    private void requireCurrentSources(ClassicBootstrapSnapshot original, boolean verifyStorageTree)
+            throws IOException {
         var proof = materials.parsed().proof();
-        requireMembers(proof);
+        requireMembers(proof, verifyStorageTree);
         requireOpen();
         if (!original.equals(sources.read())) {
             throw new IOException("Classic bootstrap sources changed under the supervisor guard");
         }
-        requireMembers(proof);
+        requireMembers(proof, false);
         materials.recheckProtection();
     }
 
@@ -416,7 +421,7 @@ public final class SegmentClassicBootstrap {
         }
     }
 
-    private void requireMembers(SegmentClassicHandoff.Proof proof) throws IOException {
+    private void requireMembers(SegmentClassicHandoff.Proof proof, boolean verifyStorageTree) throws IOException {
         // The material owner has already verified the exact, ordered kind/index set against this manifest.
         for (var member : proof.members()) {
             requireOpen();
@@ -432,6 +437,9 @@ public final class SegmentClassicBootstrap {
                     || actual.uid() != member.uid() || actual.gid() != member.gid()
                     || (actual.mode() & 07777) != member.mode()) {
                 throw new IOException("Classic bootstrap physical member differs from the signed scope: " + root);
+            }
+            if (verifyStorageTree) {
+                materials.verifyStorageTree(root, actual, this::requireOpen);
             }
         }
     }

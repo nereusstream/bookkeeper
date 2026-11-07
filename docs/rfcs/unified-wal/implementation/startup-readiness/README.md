@@ -722,7 +722,17 @@ supervisor文件名按clusterId、原cluster birth和Bookie固定，绑定UUID�
 
 在 macOS 上用实际附加 ACL 保留相同 POSIX mode。父源码错误接受 AES 文件，并在 supervisor guard 或 Classic `current` 的权限变化后完成导入。修复后三项通过，签名 Arena 根也在绑定前拒绝。原生 ACL 4 项和服务端 99 项定向回归零失败、错误或跳过。初次 Checkstyle 发现测试 import 排序，修正后 Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-handoff-live-acl-evidence-cc403f8b`。
 
-此阶段检查实时路径保护。完整 Unix 采用仍需专用旧 UID 的其他进程与已打开 fd 排除、全部既有数据权限和凭据验证，以及批准 Linux 上的实际交接。公开启动装配继续待完成。
+既有数据的逐项检查见下节。
+
+## Classic 交接保留树的逐项核验
+
+2026-11-07，基线 `837755165d`。准备阶段在发布输入关联前，以及 `PREPARED` 导入 claim 和实际 replay 前，逐个流式核验已签名的 Classic、control 和 Arena 根。根或其受保护父链必须有一个对其他 UID 封闭的目录边界。树内各成员必须属于可信 UID 和根设备，拒绝符号链接、附加 ACL、非普通文件及多链接文件。目录深度按 Classic `current` 和两级索引目录的实际布局封顶，超出时整次拒绝。文件数不按 ledger 数截断，也不因旧 entry log 不参与 replay 而省略。
+
+检查读取目录及 Unix 元数据。每层枚举通过原材料文件 owner 持有目录描述符，首次实际关闭成功并复核目录身份后才能推进。关闭异常保留原结果与 supervisor guard。
+
+真实文件和 ZooKeeper 用例复现父源码接受指向闲置 entry log 的外部硬链接，以及在带附加 ACL 的闲置 entry log 存在时提交 claim。修复后两项均拒绝，保留原文件字节。另包装实际目录流注入首次关闭失败，独立进程确认 supervisor guard 持有，后续排空保持原错误。macOS 上原生 ACL 4 项和服务端 149 项定向回归零失败、错误或跳过。修正一处行长后，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-handoff-retained-tree-evidence-83775516`。
+
+完整 Unix 采用仍需专用旧 UID 的其他进程和已打开 fd 排除、目标实际访问权限、挂载别名隔离和批准 Linux 上的交接证据。公开启动装配继续待完成。
 
 ## 固定交接的原子不覆盖改名
 

@@ -25,6 +25,7 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.OpenOption;
@@ -35,6 +36,7 @@ import java.nio.file.attribute.FileAttribute;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -127,6 +129,34 @@ final class SegmentOwnedFiles {
         }
     }
 
+    DirectoryStream<Path> openDirectory(Path path) throws IOException {
+        Entry entry = begin(path);
+        try {
+            DirectoryStream<Path> original = Files.newDirectoryStream(path);
+            entry.directory = original;
+            return new DirectoryStream<>() {
+                @Override
+                public Iterator<Path> iterator() {
+                    return original.iterator();
+                }
+
+                @Override
+                public void close() throws IOException {
+                    entry.close();
+                }
+            };
+        } catch (IOException | RuntimeException | Error problem) {
+            if (entry.directory == null) {
+                // Preserve an acquisition that did not return its actual listing.
+                entry.failure = problem;
+                failed(problem);
+            }
+            throw problem;
+        } finally {
+            end(entry);
+        }
+    }
+
     /** Only this owner's exact original wrapper can query its private resource; no raw channel is exposed. */
     NativeIO.FileIdentity fileIdentity(FileChannel channel, NativeIO nativeIo) throws IOException {
         Channel owned = originalWrapper(channel, nativeIo);
@@ -175,7 +205,7 @@ final class SegmentOwnedFiles {
 
     private void end(Entry entry) {
         synchronized (gate) {
-            if (entry.resource == null) {
+            if (!entry.acquired() && entry.failure == null) {
                 entries.remove(entry);
             }
             opening--;
@@ -273,7 +303,7 @@ final class SegmentOwnedFiles {
         synchronized (gate) {
             List<FileResult> retained = new ArrayList<>(entries.size());
             for (Entry entry : entries) {
-                retained.add(new FileResult(entry.path, entry.resource != null, entry.closeStarted,
+                retained.add(new FileResult(entry.path, entry.acquired(), entry.closeStarted,
                         entry.closeReturned, entry.failure));
             }
             return new Result(closing && opening == 0 && entries.isEmpty() && closeFailure == null,
@@ -284,6 +314,7 @@ final class SegmentOwnedFiles {
     private final class Entry {
         final Path path;
         volatile FileChannel resource;
+        volatile DirectoryStream<Path> directory;
         volatile Channel wrapper;
         volatile boolean closeStarted;
         volatile boolean closeReturned;
@@ -293,6 +324,10 @@ final class SegmentOwnedFiles {
 
         Entry(Path path) {
             this.path = path;
+        }
+
+        boolean acquired() {
+            return resource != null || directory != null;
         }
 
         private void requireIdentityQuery(Channel caller, FileChannel expected) throws IOException {
@@ -378,14 +413,22 @@ final class SegmentOwnedFiles {
                 rethrow(failure);
                 return;
             }
+            if (!acquired() && failure != null) {
+                rethrow(failure);
+            }
             closeStarted = true;
             closingThread = Thread.currentThread();
             try {
-                if (!resource.isOpen()) {
-                    throw new IOException("Control file closed without an observed native result: " + path);
+                if (directory != null) {
+                    directory.close();
+                    directory = null;
+                } else {
+                    if (!resource.isOpen()) {
+                        throw new IOException("Control file closed without an observed native result: " + path);
+                    }
+                    resource.close();
+                    resource = null;
                 }
-                resource.close();
-                resource = null;
                 retired(this);
             } catch (Throwable nativeFailure) {
                 failure = nativeFailure;
