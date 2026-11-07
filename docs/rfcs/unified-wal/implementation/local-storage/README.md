@@ -2427,4 +2427,14 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 真实 ZooKeeper、独立 index、双 Journal 和单槽 control driver 夹具覆盖坏 Journal 后的持久前缀及重开补齐，以及实际 force 挂起期间关闭。检查原 UUID 和回执、未提交后续 claim、原数据文件字节与 `PREPARED` 状态。本地已封口而原生仍为 `PREPARED` 时，在读取前拒绝导入。首轮 120 项通过，样式发现一处测试行长问题。修正并补齐封口用例后，八类 121 项全部通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-prepared-import-evidence-b86b54cd`。
 
-当前交付首次导入的 claim 阶段。后续仍需接入保护范围的公开装配、重放及索引写入前的逐项 gate、严格 flush 到封口、已封口 `PREPARED` 的原生续接和批准 Linux 验收。
+当前交付首次导入的 claim 阶段。已封口的 `PREPARED` 见[原生续接](#已封口-prepared-的原生续接)。公开装配、重放及索引写入前的逐项 gate、严格 flush 到封口和批准 Linux 验收继续待完成。
+
+## 已封口 PREPARED 的原生续接
+
+2026-11-07，基线 `14e4293018`。包内完成阶段从实际重开的同一 Bookie control 取保留的 `BOOTSTRAP_COMPLETE`，复核签名成员、持锁根、Cookie、标记及 Arena。真实原生写入继续使用既有条件 multi，绑定原 PREPARED 出生、版本、Cookie 和同一封口。未封口 control 即使已完成 claim 也不能进入原生完成。
+
+一次原生完成使用同一 deadline。前读、multi 和确认读均登记在原借用 ZooKeeper callback owner，复核 commissioned requirements、设备和两类注册缺失。超时或迟到回复保留实际操作与 supervisor guard，原调用保持未决。取得成功结果后封闭本次 PREPARED 操作，后续冷重开通过原 `ENABLED` 核验路径复验同一封口和原 claim。
+
+真实 ZooKeeper 与文件夹具覆盖原生出生保留、原控制日志字节不变、缺本地封口拒绝，以及实际提交后延迟回复。延迟期间独立进程观察到 supervisor guard 仍持有。原回复返回后，新的 owner 用原签名及回执完成 `ENABLED` 冷读。另验证同字节重建的 requirements 在条件写之前被拒绝。最终七类 107 项全部通过，Spotless 和 Checkstyle 通过。首轮 106 项通过及两处行长诊断独立归档。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-native-seal-resume-evidence-14e42930`。
+
+此阶段消费已有本地封口。首次 Classic 写入门控、严格 flush 与本地封口的生产接线、公开资源装配、实时 Unix 采用及批准 Linux 验收仍待完成。

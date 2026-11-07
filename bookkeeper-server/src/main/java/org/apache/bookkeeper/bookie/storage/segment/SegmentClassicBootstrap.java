@@ -146,7 +146,7 @@ public final class SegmentClassicBootstrap {
     /** The caller retains the verified Arena, root and control owners until this scope actually drains. */
     void verifyEnabled(SegmentClassicRootBindings roots, SegmentClassicArenaBindings arenas,
             SegmentBookieControlLog.Owned control) throws IOException {
-        var original = beginInventory(BookieRouteBinding.Phase.ENABLED);
+        var original = beginScopeOperation(BookieRouteBinding.Phase.ENABLED);
         try {
             var bookie = control.log();
             var seal = original.nativeBinding().binding().seal().orElseThrow();
@@ -179,7 +179,7 @@ public final class SegmentClassicBootstrap {
         var claims = new SegmentClassicBootstrapClaims(control, driver);
         ClassicBootstrapSnapshot original;
         synchronized (this) {
-            original = beginInventory(BookieRouteBinding.Phase.PREPARED);
+            original = beginScopeOperation(BookieRouteBinding.Phase.PREPARED);
             importer = claims;
         }
         try {
@@ -202,9 +202,46 @@ public final class SegmentClassicBootstrap {
         }
     }
 
-    private synchronized ClassicBootstrapSnapshot beginInventory(BookieRouteBinding.Phase phase) throws IOException {
+    /** The caller holds the old-writer fence and all original local owners through actual drain. */
+    BookieRouteBinding.Observation completePrepared(SegmentClassicRootBindings roots,
+            SegmentClassicArenaBindings arenas, SegmentBookieControlLog.Owned control) throws IOException {
+        var original = beginScopeOperation(BookieRouteBinding.Phase.PREPARED);
+        try {
+            var bookie = control.log();
+            var binding = original.nativeBinding();
+            roots.verifyPreparedRootsForCompletion(manager, binding, bookie);
+            arenas.requireVerified(binding.binding().manifest());
+            var seal = bookie.bootstrapSeal().orElseThrow(
+                    () -> new IOException("Native completion requires the retained Classic bootstrap seal"));
+            long before = bookie.requireSealedBootstrapCut(seal);
+            var proof = materials.parsed().proof();
+            requireMembers(proof);
+            materials.recheckClassicGuards();
+            requireOpen();
+            var enabled = sources.completePrepared(original, seal);
+            roots.verifyPreparedRootsForCompletion(manager, binding, bookie);
+            arenas.requireVerified(binding.binding().manifest());
+            requireMembers(proof);
+            materials.recheckClassicGuards();
+            if (before != bookie.requireSealedBootstrapCut(seal)) {
+                throw new IOException("Bookie control changed during native bootstrap completion");
+            }
+            synchronized (this) {
+                requireOpen();
+                bound = null;
+                checking = null;
+            }
+            return enabled.nativeBinding();
+        } catch (IOException | RuntimeException | Error failure) {
+            fail(failure);
+            throw failure;
+        }
+    }
+
+    private synchronized ClassicBootstrapSnapshot beginScopeOperation(BookieRouteBinding.Phase phase)
+            throws IOException {
         if (boundNative().binding().phase() != phase || checking != null) {
-            throw new IOException("Classic bootstrap inventory requires a bound " + phase + " scope");
+            throw new IOException("Classic bootstrap operation requires a bound " + phase + " scope");
         }
         checking = Thread.currentThread();
         return bound;

@@ -56,6 +56,8 @@
 
 包内 `PREPARED` 首次导入已将实际持锁清单接到同一 Bookie control driver，使用原回执续接已持久前缀。关闭保留原已接纳批次直到实际终态。首次导入的 Classic 写入门控、封口与原生状态续接仍待接线。详见 [PREPARED 的清单与控制批次接线](local-storage/README.md#prepared-的-classic-清单与控制批次接线)。
 
+本地已有封口的 `PREPARED` 现可在包内完成原生续接。条件 multi 和确认读随同一 supervisor 与 callback owner 排空。真实 ZooKeeper 丢回复后，新的 scope 可用同一出生与封口进行 `ENABLED` 冷读核验。首次写入门控、严格 flush 到本地封口及完整公开装配仍待接线。详见 [已封口 PREPARED 的原生续接](local-storage/README.md#已封口-prepared-的原生续接)。
+
 共同 route 离线导入的 Journal ID 清单已按固定页大小枚举，保留各 Journal 的原数字顺序及最大有效 lastMark。真实跨页、目录替换和 claim 续接回归已归档。受控历史 Bookie 的实际 V6 replay 随后接入同一分页，按文件实际关闭推进内存 lastMark。95 项定向回归通过。共同 scope 的受保护装配、重放 gate、flush 与封口仍待接线。详见 [Journal suffix 的只读清单](local-storage/README.md#离线-bootstrap-的-journal-suffix-只读清单)。
 
 受控历史 Bookie 现等待原 SyncThread 完成 replay flush 与全部 Journal lastMark checkpoint 后才启动写者。轮转期间的 entry-log flush 保留，源 Journal 的 mark 推进与裁剪等待相应边界。实际 lastMark 路径冲突已复现旧启动误报成功，修复后拒绝启动并保留原 I/O 错误。共同离线 bootstrap 的受保护接线与封口仍待完成。详见 [受控历史 Bookie 的启动 flush](local-storage/README.md#受控历史-bookie-的启动-flush)。

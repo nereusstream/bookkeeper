@@ -56,7 +56,7 @@ import org.apache.zookeeper.data.Stat;
 import org.junit.Before;
 import org.junit.Test;
 
-/** Actual borrowed native reads only; not a launcher, Unix isolation proof or bootstrap session. */
+/** Borrowed ZooKeeper source reads and conditional completion against the actual native store. */
 public class ZKClassicBootstrapSourcesTest extends ProfileZKTestBase {
     private static final BookieId TARGET = BookieId.parse(BOOKIE);
     private static final String CLUSTER = "bootstrap-cold-cluster";
@@ -213,6 +213,27 @@ public class ZKClassicBootstrapSourcesTest extends ProfileZKTestBase {
         assertTrue(assertThrows(IOException.class, absent::read).getMessage().contains("ABSENT"));
         drained(absent);
         assertEquals(null, first.exists(path, false));
+    }
+
+    @Test
+    public void borrowedCompletionRejectsRecreatedRequirementsBeforeChangingTheNativeBinding() throws Exception {
+        var owner = owner(Duration.ofSeconds(5));
+        var prepared = owner.read();
+        var source = prepared.requirementsSource();
+        String marker = source.nodePath() + "/birth-" + source.birthId();
+        byte[] original = first.getData(source.nodePath(), false, null);
+        first.multi(List.of(Op.delete(marker, 0), Op.delete(source.nodePath(), 0),
+                Op.create(source.nodePath(), original, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+                Op.create(marker, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT)));
+        assertNotEquals(source.birthZxid(), first.exists(source.nodePath(), false).getCzxid());
+        var seal = new BookieRouteBinding.BootstrapSeal(new UUID(0, 20), 4, 3);
+        try {
+            var failure = assertThrows(IOException.class, () -> owner.completePrepared(prepared, seal));
+            assertTrue(failure.getMessage().contains("changed before native completion"));
+            assertEquals(prepared.nativeBinding(), manager.readBookieRouteBinding(TARGET).observation().orElseThrow());
+        } finally {
+            drained(owner);
+        }
     }
 
     @Test

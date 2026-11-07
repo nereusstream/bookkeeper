@@ -203,6 +203,14 @@ final class SegmentClassicRootBindings implements AutoCloseable {
         verifyExisting();
     }
 
+    /** Only local checks here. The enclosing completion owns the native reads and write callbacks. */
+    synchronized void verifyPreparedRootsForCompletion(ZKRegistrationManager sourceManager,
+            BookieRouteBinding.Observation source, SegmentBookieControlLog bookie) throws IOException {
+        requireOwner(sourceManager, source, BookieRouteBinding.Phase.PREPARED, bookie);
+        verifySources();
+        verifyMarkers();
+    }
+
     private void requireOwner(ZKRegistrationManager sourceManager, BookieRouteBinding.Observation source,
             BookieRouteBinding.Phase phase, SegmentBookieControlLog bookie) throws IOException {
         requireLive();

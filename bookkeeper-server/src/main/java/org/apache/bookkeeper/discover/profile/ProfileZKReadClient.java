@@ -21,10 +21,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import org.apache.zookeeper.Op;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.data.Stat;
 
-/** Shared bounded cold reads of a borrowed ZooKeeper client; no retry, cache, watcher or client ownership. */
+/** Bounded cold operations on a borrowed ZooKeeper client, with optional callback ownership. */
 final class ProfileZKReadClient {
     record Node(int code, byte[] bytes, Stat stat) { }
     record Existence(int code, Stat stat) { }
@@ -115,6 +116,20 @@ final class ProfileZKReadClient {
             }
         }, null);
         return await(reply, deadline);
+    }
+
+    /** The caller owns the deadline and the outcome of an ambiguously submitted multi. */
+    CompletableFuture<Integer> submitMulti(Iterable<Op> operations) {
+        CompletableFuture<Integer> reply = new CompletableFuture<>();
+        submitted();
+        zk.multi(operations, (code, ignored, context, results) -> {
+            try {
+                reply.complete(code);
+            } finally {
+                returned();
+            }
+        }, null);
+        return reply;
     }
 
     static void requireTime(long deadline) throws TimeoutException {

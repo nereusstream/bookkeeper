@@ -58,6 +58,11 @@ public final class ZKProfileStartupRequirementsStore {
 
     /** Borrowed sources for one explicit offline owner. Never closes the client or the requirements store. */
     public final class ClassicBootstrapSources {
+        @FunctionalInterface
+        private interface SourceOperation {
+            ClassicBootstrapSnapshot run(long deadline) throws IOException, InterruptedException, TimeoutException;
+        }
+
         private final ZKBookieRouteBindingStore nativeBindings;
         private final BookieId bookie;
         private final String writablePath;
@@ -67,6 +72,7 @@ public final class ZKProfileStartupRequirementsStore {
         private final ProfileZKReadClient reader = new ProfileZKReadClient(zk, pending);
         private Thread readingThread;
         private boolean closing;
+        private boolean completionAttempted;
         private Throwable firstReadFailure;
 
         private ClassicBootstrapSources(ZKBookieRouteBindingStore nativeBindings, String ledgersRoot,
@@ -86,39 +92,49 @@ public final class ZKProfileStartupRequirementsStore {
             readTimeoutNanos = timeout.toNanos();
         }
 
-        /** Each use rereads the original native sources. There is no cached qualification or write operation. */
+        /** Each use rereads the original native sources. */
         public synchronized ClassicBootstrapSnapshot read() throws IOException {
+            return observe(this::readSnapshot);
+        }
+
+        /** One conditional native completion. The enclosing owner supplies its actual retained local seal. */
+        public synchronized ClassicBootstrapSnapshot completePrepared(ClassicBootstrapSnapshot prepared,
+                BookieRouteBinding.BootstrapSeal seal) throws IOException {
+            Objects.requireNonNull(prepared, "verified PREPARED source");
+            Objects.requireNonNull(seal, "actual control seal");
+            var expected = prepared.nativeBinding();
+            if (completionAttempted || expected.binding().phase() != BookieRouteBinding.Phase.PREPARED
+                    || !expected.binding().bookieId().equals(bookie)) {
+                throw new IOException("Native completion requires one original PREPARED source");
+            }
+            return observe(deadline -> {
+                completionAttempted = true;
+                if (!prepared.equals(readSnapshot(deadline))) {
+                    throw new IOException("Classic bootstrap sources changed before native completion");
+                }
+                var completed = nativeBindings.complete(expected, seal, deadline, reader);
+                if (completed.status() != BookieRouteBinding.WriteStatus.APPLIED
+                        && completed.status() != BookieRouteBinding.WriteStatus.ALREADY_APPLIED) {
+                    throw new IOException("Classic bootstrap native completion: " + completed.status()
+                            + ": " + completed.detail());
+                }
+                var confirmed = readSnapshot(deadline);
+                if (!confirmed.equals(new ClassicBootstrapSnapshot(completed.observation().orElseThrow(),
+                        prepared.commissionedCompatibility(), prepared.requiredDevices(),
+                        prepared.requirementsSource()))) {
+                    throw new IOException("Classic bootstrap sources changed during native completion");
+                }
+                return confirmed;
+            });
+        }
+
+        private ClassicBootstrapSnapshot observe(SourceOperation operation) throws IOException {
             if (closing || firstReadFailure != null || readingThread != null) {
                 throw new IOException("Classic bootstrap sources are closing or failed", firstReadFailure);
             }
             readingThread = Thread.currentThread();
             try {
-                long deadline = System.nanoTime() + readTimeoutNanos;
-                var nativeRead = nativeBindings.read(bookie, deadline, reader);
-                if (nativeRead.status() != BookieRouteBinding.ReadStatus.FOUND) {
-                    throw new IOException("Classic bootstrap native source: " + nativeRead.status()
-                            + ": " + nativeRead.detail());
-                }
-                var original = snapshot(bookie.toString(), deadline, reader, false);
-                if (original == null) {
-                    throw new IOException("Commissioned Classic bootstrap requirements are missing");
-                }
-                var binding = nativeRead.observation().orElseThrow().binding();
-                var commissioned = original.commissionedCompatibility();
-                if (!commissioned.storageIncarnation().equals(binding.incarnation())
-                        || !commissioned.deviceManifestIdentity().equals(binding.manifest())) {
-                    throw new IOException("Commissioned requirements differ from the native bootstrap scope");
-                }
-                for (String registration : List.of(writablePath, readonlyPath)) {
-                    var observed = reader.exists(registration, deadline);
-                    if (observed.code() != Code.NONODE.intValue()) {
-                        throw new IOException(observed.code() == Code.OK.intValue()
-                                ? "Classic bootstrap still has a Bookie registration"
-                                : "Classic bootstrap registration absence is unavailable");
-                    }
-                }
-                return new ClassicBootstrapSnapshot(nativeRead.observation().orElseThrow(),
-                        original.commissionedCompatibility(), original.requiredDevices(), original.sourceIdentity());
+                return operation.run(System.nanoTime() + readTimeoutNanos);
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 var failure = new IOException("Classic bootstrap requirements read interrupted", interrupted);
@@ -134,6 +150,36 @@ public final class ZKProfileStartupRequirementsStore {
             } finally {
                 readingThread = null;
             }
+        }
+
+        private ClassicBootstrapSnapshot readSnapshot(long deadline)
+                throws IOException, InterruptedException, TimeoutException {
+            var nativeRead = nativeBindings.read(bookie, deadline, reader);
+            if (nativeRead.status() != BookieRouteBinding.ReadStatus.FOUND) {
+                throw new IOException("Classic bootstrap native source: " + nativeRead.status()
+                        + ": " + nativeRead.detail());
+            }
+            var original = snapshot(bookie.toString(), deadline, reader, false);
+            if (original == null) {
+                throw new IOException("Commissioned Classic bootstrap requirements are missing");
+            }
+            var observation = nativeRead.observation().orElseThrow();
+            var binding = observation.binding();
+            var commissioned = original.commissionedCompatibility();
+            if (!commissioned.storageIncarnation().equals(binding.incarnation())
+                    || !commissioned.deviceManifestIdentity().equals(binding.manifest())) {
+                throw new IOException("Commissioned requirements differ from the native bootstrap scope");
+            }
+            for (String registration : List.of(writablePath, readonlyPath)) {
+                var observed = reader.exists(registration, deadline);
+                if (observed.code() != Code.NONODE.intValue()) {
+                    throw new IOException(observed.code() == Code.OK.intValue()
+                            ? "Classic bootstrap still has a Bookie registration"
+                            : "Classic bootstrap registration absence is unavailable");
+                }
+            }
+            return new ClassicBootstrapSnapshot(observation, commissioned, original.requiredDevices(),
+                    original.sourceIdentity());
         }
 
         /** Stop new reads after the actual reader returns; abandoned callbacks retain the borrowed sources. */

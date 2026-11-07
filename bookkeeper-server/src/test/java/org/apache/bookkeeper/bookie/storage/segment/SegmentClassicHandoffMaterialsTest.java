@@ -77,6 +77,7 @@ import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.test.ZooKeeperUtil;
 import org.apache.bookkeeper.versioning.Version;
 import org.apache.zookeeper.AsyncCallback.DataCallback;
+import org.apache.zookeeper.AsyncCallback.MultiCallback;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.Watcher;
@@ -539,6 +540,8 @@ public class SegmentClassicHandoffMaterialsTest {
                 assertEquals(1, log.prepareBootstrapClaim(13).applied().orElseThrow().sequence());
                 assertTrue(log.prepareBootstrapClaim(97).applied().isEmpty());
                 assertTrue(log.bootstrapSeal().isEmpty());
+                var failure = assertThrows(IOException.class, () -> reopened.completePrepared(roots, arenas, control));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("requires the retained"));
             });
         } finally {
             assertTrue(reopened.closeAndDrain().drained());
@@ -630,6 +633,80 @@ public class SegmentClassicHandoffMaterialsTest {
         assertFalse(Files.exists(journal));
         assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
                 .observation().orElseThrow());
+    }
+
+    @Test(timeout = 30000)
+    public void sealedPreparedCompletesTheSameNativeBirthWithoutReimport() throws Exception {
+        var scope = preparedScope(16);
+        var seal = sealControl(scope);
+        Path controlFile = manifest.controlDirectory().resolve("bookie-control");
+        byte[] bytes = Files.readAllBytes(controlFile);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                var enabled = preparation.completePrepared(roots, arenas, control);
+                assertEquals(nativeScope.binding().enabled(seal), enabled.binding());
+                assertEquals(nativeScope.birthId(), enabled.birthId());
+                assertEquals(nativeScope.birthZxid(), enabled.birthZxid());
+                assertEquals(1, enabled.version());
+                assertFalse(preparation.inputsBound());
+                assertEquals(0, io.writes);
+                assertEquals(enabled, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                        .observation().orElseThrow());
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        assertArrayEquals(bytes, Files.readAllBytes(controlFile));
+    }
+
+    @Test(timeout = 30000)
+    public void sealedPreparedWithALateNativeCompletionRetainsTheSupervisorAndColdReopens() throws Exception {
+        var scope = preparedScope(16);
+        var seal = sealControl(scope);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(2));
+        var observed = new AtomicReference<BookieRouteBinding.Observation>();
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                client.holdNextMulti.set(true);
+                var failure = assertThrows(IOException.class, () -> preparation.completePrepared(roots, arenas,
+                        control));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("RESPONSE_LOST"));
+                try {
+                    var pending = preparation.closeAndDrain();
+                    assertFalse(pending.drained());
+                    assertSame(failure, pending.initializationFailure());
+                    assertEquals(1, pending.sources().pendingCallbacks());
+                    assertNull(pending.materials());
+                    assertFalse(preparation.inputsBound());
+                    probe("HELD");
+                    var enabled = scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                            .observation().orElseThrow();
+                    assertEquals(nativeScope.binding().enabled(seal), enabled.binding());
+                    assertEquals(nativeScope.birthId(), enabled.birthId());
+                    assertEquals(nativeScope.birthZxid(), enabled.birthZxid());
+                    assertEquals(0, io.writes);
+                    observed.set(enabled);
+                } finally {
+                    var reply = client.lateMulti.getAndSet(null);
+                    assertNotNull(reply);
+                    reply.run();
+                }
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+        var reopened = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            reopened.initialize();
+            assertEquals(observed.get(), reopened.boundNative());
+            verifyColdEnabled(new SealedScope(scope, seal, observed.get()), reopened);
+        } finally {
+            assertTrue(reopened.closeAndDrain().drained());
+        }
     }
 
     @Test(timeout = 30000)
@@ -1272,6 +1349,8 @@ public class SegmentClassicHandoffMaterialsTest {
         final AtomicBoolean holdNextRead = new AtomicBoolean();
         final AtomicReference<Runnable> lateReply = new AtomicReference<>();
         final CountDownLatch replyHeld = new CountDownLatch(1);
+        final AtomicBoolean holdNextMulti = new AtomicBoolean();
+        final AtomicReference<Runnable> lateMulti = new AtomicReference<>();
 
         HeldReadClient(String connect, CountDownLatch connected) throws IOException {
             super(connect, 10000, event -> {
@@ -1290,6 +1369,18 @@ public class SegmentClassicHandoffMaterialsTest {
                     replyHeld.countDown();
                 } else {
                     callback.processResult(code, returnedPath, original, bytes, stat);
+                }
+            }, context);
+        }
+
+        @Override
+        public void multi(Iterable<Op> operations, MultiCallback callback, Object context) {
+            boolean hold = holdNextMulti.getAndSet(false);
+            super.multi(operations, (code, path, original, results) -> {
+                if (hold) {
+                    lateMulti.set(() -> callback.processResult(code, path, original, results));
+                } else {
+                    callback.processResult(code, path, original, results);
                 }
             }, context);
         }

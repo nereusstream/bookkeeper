@@ -337,12 +337,16 @@ public final class ZKBookieRouteBindingStore {
     }
 
     public WriteResult complete(Observation expected, BookieRouteBinding.BootstrapSeal seal) {
+        return complete(expected, seal, System.nanoTime() + timeoutNanos, reads);
+    }
+
+    WriteResult complete(Observation expected, BookieRouteBinding.BootstrapSeal seal, long deadline,
+            ProfileZKReadClient reader) {
         Objects.requireNonNull(expected, "expected native binding");
         Objects.requireNonNull(seal, "actual control seal");
-        long deadline = System.nanoTime() + timeoutNanos;
         boolean submitted = false;
         try {
-            ReadResult read = snapshot(expected.binding().bookieId(), deadline);
+            ReadResult read = snapshot(expected.binding().bookieId(), deadline, reader);
             if (read.status() != ReadStatus.FOUND) {
                 return unreadable(read);
             }
@@ -360,23 +364,21 @@ public final class ZKBookieRouteBindingStore {
             if (current.version() != expected.version() || current.modifiedZxid() != expected.modifiedZxid()) {
                 return WriteResult.status(WriteStatus.CONFLICT, "Native common binding version changed");
             }
-            SourceCheck source = sourceChecks(enabled, deadline);
+            SourceCheck source = sourceChecks(enabled, deadline, reader);
             if (source.failure() != null) {
                 return source.failure();
             }
             var operations = new ArrayList<>(source.operations());
             operations.add(Op.check(marker(enabled.bookieId(), current.birthId()), 0));
             operations.add(Op.setData(path(enabled.bookieId()), encode(current.birthId(), enabled), current.version()));
-            var reply = new CompletableFuture<Integer>();
             ProfileZKReadClient.requireTime(deadline);
             submitted = true;
-            zk.multi(operations, (code, ignored, context, results) -> reply.complete(code), null);
-            int code = ProfileZKReadClient.await(reply, deadline);
+            int code = ProfileZKReadClient.await(reader.submitMulti(operations), deadline);
             if (code != Code.OK.intValue()) {
                 return rejected(code);
             }
             return confirmed(enabled, current.birthId(), current.birthZxid(),
-                    snapshot(enabled.bookieId(), deadline), WriteStatus.APPLIED);
+                    snapshot(enabled.bookieId(), deadline, reader), WriteStatus.APPLIED);
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             return WriteResult.status(submitted ? WriteStatus.RESPONSE_LOST : WriteStatus.UNAVAILABLE,
