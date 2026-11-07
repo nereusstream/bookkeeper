@@ -1503,6 +1503,14 @@ TLC1.7.4、Corretto21.0.10、单worker、heap512MiB/direct64MiB、seed1/fp0、�
 
 同源码Java43类整轮866项的原结果为2失败/0错误/5个Linux条件跳过；两个失败的契约核对及独立补验由[实现验证记录](../profile-wire/README.md#声明模型目录与现有-java-测试整轮验证)拥有，后续测试修正不移绑本次模型回执。此轮完成当前声明的有限配置目录验证；完整A+C+D组合、native持久化/掉电、全部字节、混合滚动版本、正式性能/运维与全16步综合验收继续OPEN，生产Gate不提升。
 
+### 803 项声明矩阵
+
+2026-11-07，冻结源码 `57cfe72cd67ab429dd9284df4c2d26d6bc21ccdf`。原 runner 未指定配置过滤，`unified-wal-model-20zrx114` 的 803 项全部终结，退出码为 0。131 项正向完整搜索均为 PASS，末尾队列为 0。672 项负向均命中各自指定的 invariant，并保留反例轨迹。正向分别探索，合计生成 54,841,095 个状态、9,763,545 个不同状态。
+
+TLC 1.7.4、Corretto 21.0.10、macOS arm64、单 worker、512 MiB heap、64 MiB direct、seed 1、fp 0，每配置上限 3,600 秒。逐项复核 manifest、状态和原 checker 输出，核对 2,386 个归档文件校验和与冻结提交中的 1,193 个源码输入和 7 个设计输入。命令、原输出、配置、轨迹和审计结果位于 `/Users/liusinan/.codex/artifacts/unified-wal/declared-model-matrix-evidence-57cfe72c`。
+
+这次结果绑定原有限模型目录。manifest 继续列出完整 A/D、超出已有有界场景的 A+C 和 C+D、完整 MOVE/FREE 与重用恢复、在线控制轮转、quorum 和 liveness 等延后范围。真实 Linux、native 持久化和综合验收使用各自的证据。
+
 
 ## C+D 的 logical 到共享 allocation FREE 组合
 

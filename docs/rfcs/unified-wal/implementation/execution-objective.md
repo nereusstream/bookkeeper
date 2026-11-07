@@ -62,6 +62,8 @@
 
 交接材料读取、发布及包内 Classic preparation 已接入实时 ACL 复核。绑定输入、导入 claim 和实际 replay 前，逐项核验签名根下的保留树，包括未参与 replay 的旧 entry log。旧 UID 进程与 fd 排除、目标实际访问权限、挂载别名隔离和批准 Linux 交接仍 OPEN。[Classic 交接保留树的逐项核验](startup-readiness/README.md#classic-交接保留树的逐项核验)
 
+冻结源码 `57cfe72cd6` 的 803 项 TLC 声明矩阵已全部结束，131 项完整正向通过、672 项命中各自预期反例。原始回执绑定该次源码及配置。完整模型组合、真实 native 行为和综合验收仍按原证据要求执行。[803 项声明矩阵](models/README.md#803-项声明矩阵)
+
 共同 route 离线导入的 Journal ID 清单已按固定页大小枚举，保留各 Journal 的原数字顺序及最大有效 lastMark。真实跨页、目录替换和 claim 续接回归已归档。受控历史 Bookie 的实际 V6 replay 随后接入同一分页，按文件实际关闭推进内存 lastMark。95 项定向回归通过。共同 scope 的受保护装配、重放 gate、flush 与封口仍待接线。详见 [Journal suffix 的只读清单](local-storage/README.md#离线-bootstrap-的-journal-suffix-只读清单)。
 
 受控历史 Bookie 现等待原 SyncThread 完成 replay flush 与全部 Journal lastMark checkpoint 后才启动写者。轮转期间的 entry-log flush 保留，源 Journal 的 mark 推进与裁剪等待相应边界。实际 lastMark 路径冲突已复现旧启动误报成功，修复后拒绝启动并保留原 I/O 错误。共同离线 bootstrap 的受保护接线与封口仍待完成。详见 [受控历史 Bookie 的启动 flush](local-storage/README.md#受控历史-bookie-的启动-flush)。
