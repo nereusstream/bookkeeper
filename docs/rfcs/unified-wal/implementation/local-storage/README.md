@@ -972,6 +972,8 @@ Native ADMITTED v2 按 ledger ID 严格递增编码完整 context、原 CLOSED �
 
 真实 SDK 关闭 `CLOSED(-1,0)` 后，父版准入在旧 SELF 条件拒绝。当前版本确认混合集合 v3 ADMITTED。原生 EMPTY 的逻辑 DELETE 在 READY multi 之前获准时，ZooKeeper 实际拒绝原 READY，active 对象和原 OPEN 保留。父版类文件运行原重建入口，读取 v3 ADMITTED 即拒绝，原回执、文件和控制 cut 保持。三项编码和四项定向 socket 回归通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-empty-evidence-1d746350`。
 
+父版真实重建入口在 READY 已移动旧 active、以及 action 6 已持久两个切点均在读 admission 时拒绝。action 6 后的父版 storage 首次 OPEN 也拒绝。对照比较原 native 回执、名称、inode 和控制字节，均保持。当前版完成原物理续接、同身份重开及混合集合的 EMPTY 删除。[重开与删除证据](../profile-wire/README.md#empty-closed-成员恢复和删除)
+
 ## Profile 普通 Add 的真实接线
 
 2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。

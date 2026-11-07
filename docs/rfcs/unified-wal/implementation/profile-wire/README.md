@@ -2886,3 +2886,11 @@ Spotless/Checkstyle实际exit0；独立RAT实际exit1，仍为父982a18dad9既�
 另一场景在 READY 后只删除排序第二个成员。实际 `DELETE_APPLY` force 被扣住时，未删成员的 mTLS 点读也受 owned startup 门约束。应用原 tombstone 和 cursor 后新 session 注册，删除成员拒绝，未删成员读回原字节。既有物理路径将未删记录搬到原截止之后的新 allocation，实际 FREE 共享旧源，并保留旧 allocation 的追加截止。健康关闭、冷启后仍读回未删数据，独立 session 可冷读原删除回执。其他目标仍待物理终结，全局状态为 `PENDING`。
 
 最终两项编码与八项 socket 回归全部通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-cohort-evidence-e3cc8074`。实际验收限同版本进程退出、单 Arena、单文件与两个非空 CLOSED 成员。空 CLOSED、多文件、多 Arena、损坏数据、批准 Linux 和真实掉电保持未验收，生产 Gate 保持 OPEN。
+
+### EMPTY CLOSED 成员恢复和删除
+
+真实 3/3/3 SDK 正常关闭排序第一的 EMPTY 成员和有两条 entry 的非空成员。原 Bookie JVM 退出后，两个成员以同一 v3 ADMITTED/READY 发布新文件，action 6 使用 EMPTY 的 ledger ID 作为原标量锚点。原身份重开后，公开只读 SDK 对 EMPTY 读出 `P=-1`、`L=0`，非空成员的两条 payload 保持。
+
+另一场景在 READY 后只删除 EMPTY。原目标有真实 manifest 义务及已提交投递。其本地 `DELETE_APPLY` force 被扣住时，非空成员的直接 mTLS READ 和 FENCE 也被启动门拒绝。追赶后才发布新 writable，EMPTY 持续拒绝。原物理控制返回 `REUSABLE`，实际 MOVE、FREE、退休字节均为零，非空 allocation 和 DATA 摘要保持。原目标回执可由独立 ZooKeeper session 冷读，健康冷启后仍读回非空数据。其他目标保持未结算，全局为 `PENDING`。
+
+最终三项编码、四项 Bookie 控制和六项 socket 回归全部通过，Spotless 和 Checkstyle 通过。旧 reader 使用 `1d7463508b` 的实际类文件，原入口拒绝后对象和控制 cut 保持。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-empty-evidence-1d746350`。实际验收限单 Arena、单文件和原生整账本 EMPTY 与非空 CLOSED 的混合。纯 EMPTY、非空历史的 empty-last、替换后 EMPTY、多文件、多 Arena、损坏数据、批准 Linux 和掉电仍待各自验收。
