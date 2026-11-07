@@ -357,6 +357,8 @@ v2保留所有现有业务状态表记录与原sequence/首次条件结果，包
 
 ## 受控 Classic 交接材料 v1
 
+本节记录归档兼容的 `UWCHOF01`。Linux 目标要求带签名宿主视图的 `UWCHOF02`，其字段布局和采用边界见[Linux 签名宿主视图与采用前拒绝](../startup-readiness/README.md#linux-签名宿主视图与采用前拒绝)。
+
 本节只冻结离线bootstrap的输入字节，不改变既有Segment文件/ROUTE/seal/native binding格式。codec为包内SegmentClassicHandoff，固定用途OFFLINE_CLASSIC_BOOTSTRAP=1，不提供私钥或通用sign-facts入口。验签返回数据；受控launcher的实际关闭/正常退出/UID隔离、固定retirement记录、材料文件保护和当前native状态仍由完整issuer/loader核验，当前接线及验收OPEN。
 
 所有整数为big-endian；u32 Unix UID/GID按无符号读取。UUID为原16字节；摘要固定32字节。文本为u32字节长度＋严格UTF-8，不含NUL，不作Unicode或路径重写。未知schema/flags/purpose/role、重复/缺失必需组、超界长度、非规范字段和尾随字节拒绝。

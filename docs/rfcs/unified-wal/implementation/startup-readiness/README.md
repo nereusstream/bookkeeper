@@ -623,7 +623,7 @@ issuer UID、受保护输入目录及metadata信任根由外部部署指定，�
 
 后续固定交接协议已由规划会话冻结，当前实现仍OPEN：固定受控launcher只管理其实际启动的受保护Classic child；先持久写入按cluster＋Bookie固定的retirement intent，再停止准入/实际排空/关闭metadata与服务/确认正常进程退出及registration消失，并完成两UID持续权限隔离后，才发布不可覆盖的证明。旧UID其他进程或已有fd、未知自动重启、异常退出和关闭未决均拒绝。loader每次取得同一supervisor guard并冷读原intent、native/Cookie/requirements、物理身份与Unix隔离；同操作重试和ENABLED重开复用原完整证明，不补造episode，不使用时钟租约。
 
-证明固定使用JCA Ed25519（外部固定公钥、launcher独占私钥），签名覆盖`BookKeeper/CommonClassicHandoff/v1\0`与完整header/payload，总长度不超过64KiB；封套依次为`UWCHOF01`、u16 schema=1、u16 flags=0、u32 payloadLength、32-byte signerKeyId、固定顺序/严格UTF-8/有界payload、64-byte signature。payload绑定唯一OFFLINE_CLASSIC_BOOTSTRAP/native bindingId、部署/程序清单、原cluster/Bookie/Cookie/native出生与PREPARED语义、requirements原记录/birth/generations、共同incarnation/manifest/control根、按manifest角色/索引对应的完整物理成员、真实episode/退出/UID、独立32-byte AES材料identity、精确scope policy及retirement digest；未知/重复/溢出/尾随或错scope均拒绝。私有codec/loader/session不提供通用sign(ProofRecord)，完整两UID真实进程及bootstrap验收不能由codec单测或本节来源指纹替代。
+首版证明固定使用JCA Ed25519（外部固定公钥、launcher独占私钥），签名覆盖`BookKeeper/CommonClassicHandoff/v1\0`与完整header/payload，总长度不超过64KiB；封套依次为`UWCHOF01`、u16 schema=1、u16 flags=0、u32 payloadLength、32-byte signerKeyId、固定顺序/严格UTF-8/有界payload、64-byte signature。payload绑定唯一OFFLINE_CLASSIC_BOOTSTRAP/native bindingId、部署/程序清单、原cluster/Bookie/Cookie/native出生与PREPARED语义、requirements原记录/birth/generations、共同incarnation/manifest/control根、按manifest角色/索引对应的完整物理成员、真实episode/退出/UID、独立32-byte AES材料identity、精确scope policy及retirement digest；未知/重复/溢出/尾随或错scope均拒绝。私有codec/loader/session不提供通用sign(ProofRecord)，完整两UID真实进程及bootstrap验收不能由codec单测或本节来源指纹替代。 Linux 目标消费的新版本见[Linux 签名宿主视图与采用前拒绝](#linux-签名宿主视图与采用前拒绝)。
 
 
 证据目录`/Users/liusinan/.codex/artifacts/unified-wal/requirements-source-evidence-1d8b9256`分别保留首组十项和最终33项的原源码/日志/XML/class，style退出0。RAT实际退出1，431项未批准路径集合及各项字节与父提交和前次封存一致，无新增或解决，受保护PDF在扫描前排除。当前声明1321项源码和十项文档输入，native runner实际记录1294项，相关class快照14项；其他输入逐项对应父Git blob，不将早期getter结果移绑新增namespace字段后的源码。完成实际终态与两次独立lsof检查后，仅移除本次两个raw scope的四个目录、十个文件路径，共1,479,573逻辑字节；归档硬链接完整保留，regular-file数据块回收为0。用户PDF、默认目录和其他任务产物未触碰。本增量只交付来源身份值，不关闭完整交接证明或bootstrap验收。
@@ -646,6 +646,16 @@ packet复用原PREPARED native binding及SourceIdentity，绑定原cluster/Booki
 
 提交前审计首轮因本次审计脚本参数替换把已保存的清理字节数误写为6,779,573而退出1；依据原cleanup-result中的实际1,647,820修正参数，保留原脚本/日志/退出码后重新核对最终index、源码/文档/class及精确patch。该审计错误未修改产品源码或测试断言，不作为产品RED；最终提交以成功审计结果为准。
 
+
+## Linux 签名宿主视图与采用前拒绝
+
+2026-11-08，基线 `bdfea43986`。`UWCHOF02` 使用 schema 2、flags 0 及签名域 `BookKeeper/CommonClassicHandoff/v2\0`。在原有操作、物理成员、退出结果、Unix 回执和 retirement digest 之后追加 48 字节大端字段，依次为 boot UUID、PID 1 原始 u64 出生 ticks、u32 mount namespace inode、根的原始 u64 dev 与 u64 inode、u32 普通 mount ID。原信任锚、64 KiB 上限、签名后规范解析及退休内容绑定继续使用。`UWCHOF01` 原字节、签名域和归档验证保持兼容。Linux 材料读取要求 `UWCHOF02`。
+
+材料 owner 在原操作和退休绑定检查后、AES 读取前冷验 boot、初始 PID/user namespace、目标进程与 PID 1 出生及调用线程自己的实际根视图。保留树挂载与同一个签名 mount namespace 关联。原 native 来源重读前后重新核验视图和材料保护，沿原读预算拒绝迟到结果。非 root 目标读取自己的视图和可见 PID 1 出生，权限失败沿原读取错误返回。
+
+包内 Linux `SegmentClassicBootstrap` 可运行完整只读材料、保留树和来源观察。当前连续隔离资格缺失，最终在发布 `bound` 前明确拒绝。原失败保留给后续调用，原 supervisor guard 和文件继续由原 owner 排空。claim、replay、封口与 `PREPARED → ENABLED` 均须通过该边界。生产签发、实际连续管理面约束、批准 Linux 交接和生产 Gate 保持 OPEN。
+
+Darwin arm64 共 348 项不同的定向回归通过，2 项 Linux 条件用例跳过。独立 Python 布局和 OpenSSL 验签与 Java 的 1021 字节向量一致，原 v1 向量也通过。真实文件发布和冷恢复保留同一 v2 字节，拒绝替换为 v1。首次 Checkstyle 发现一处测试行长，修正后材料测试复验及 Spotless、Checkstyle 均通过。实际 Linux 的 v1 和错 boot 早拒绝、匹配 v2 后的最终资格拒绝及原状态复核为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-handoff-host-view-evidence-bdfea439`。
 
 ## 交接材料 I/O owner 与 supervisor 终态
 
@@ -1368,7 +1378,7 @@ owner 复用一次非阻塞 Unix connect 和原绝对 deadline，从同一实际
 
 2026-11-08，基线 `14e3c4848c`。两个固定无参 JNI 入口分别读取调用线程自身视图，以及核对它与可见 PID 1 的视图。两者从实际持有的根目录 fd 取得 dev、inode 和普通 mount ID，从经验证的 procfs 读取实际 mount namespace。PID 1 路径在原 procfs 下持有固定 `1` 目录，并对固定 `root` 叶先做无跟随身份检查，再有意跟随该内核 magic link 获取实际根。PID 1 出生以原始 ticks 读两次，临时 fd 在返回结果前结算实际首次关闭。根和 namespace 在同一观察中复验。采样之间的变更仍须由持续管理面约束覆盖。[Linux proc PID root](https://man7.org/linux/man-pages/man5/proc_pid_root.5.html) · [Linux openat2](https://man7.org/linux/man-pages/man2/openat2.2.html)
 
-原 D2 owner 在首轮初始 PID/user namespace 检查后保存视图，并与已取得的 PID 1 出生核对。末轮固定 systemd 对端检查后再次冷读 boot、进程出生和根视图，匹配原记录后才进入 dropper 检查。非 root 目标之后将用自身视图核对新版本签名材料，其中包含同 boot 的原 PID 1 出生和根视图，并继续冷验退休和当前隔离条件。该签名版本、目标消费、持续管理面约束和批准 Linux 阳性仍待完成。
+原 D2 owner 在首轮初始 PID/user namespace 检查后保存视图，并与已取得的 PID 1 出生核对。末轮固定 systemd 对端检查后再次冷读 boot、进程出生和根视图，匹配原记录后才进入 dropper 检查。目标侧签名视图比较见[Linux 签名宿主视图与采用前拒绝](#linux-签名宿主视图与采用前拒绝)。持续管理面约束和批准 Linux 阳性仍待完成。
 
 Darwin arm64 原生库构建、231 项定向 JUnit、31 项宿主 Rust 测试和 Java 样式通过。9 项 JUnit Linux 条件用例跳过。独立 JVM 使用父 JNI 库验证两个缺失符号明确拒绝，Linux x86_64 `cargo check --tests` 通过。实际 PID 1 root 跟随、同 namespace 的 chroot 和其他 mount namespace 拒绝用例为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-pid1-filesystem-view-evidence-14e3c484`。
 

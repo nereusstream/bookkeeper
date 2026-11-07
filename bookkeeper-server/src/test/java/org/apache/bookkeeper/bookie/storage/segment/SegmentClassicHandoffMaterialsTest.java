@@ -81,6 +81,8 @@ import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.BookieRouteBinding;
 import org.apache.bookkeeper.discover.ZKRegistrationManager;
@@ -222,14 +224,27 @@ public class SegmentClassicHandoffMaterialsTest {
         byte[] intent = SegmentClassicHandoff.encodeRetirement(retirement);
         var proof = new SegmentClassicHandoff.Proof(operation, members,
                 new SegmentClassicHandoff.Terminal(12, Instant.ofEpochSecond(1001), digest(11)), digest(12),
-                SegmentClassicHandoff.digest(intent));
+                SegmentClassicHandoff.digest(intent), fixtureHostView());
+        writeProof(proof);
+        privateFile(references.policy(), SegmentClassicHandoff.encodePolicy(policy));
+        privateFile(references.aesKey(), filled(32, 10));
+        privateFile(intentPath, intent);
+    }
+
+    private static Optional<SegmentClassicHandoff.HostViewBinding> fixtureHostView() throws IOException {
+        if (!SystemUtils.IS_OS_LINUX) {
+            return Optional.empty();
+        }
+        var io = new NativeIOImpl();
+        return Optional.of(new SegmentClassicHandoff.HostViewBinding(io.currentLinuxBootId(),
+                io.currentLinuxProcessBirth().pid1StartTicks(), io.currentLinuxFilesystemView()));
+    }
+
+    private void writeProof(SegmentClassicHandoff.Proof proof) throws Exception {
         Signature signer = Signature.getInstance("Ed25519");
         signer.initSign(signing.getPrivate());
         signer.update(SegmentClassicHandoff.signingMessage(proof));
         privateFile(references.proof(), SegmentClassicHandoff.envelope(proof, signer.sign()));
-        privateFile(references.policy(), SegmentClassicHandoff.encodePolicy(policy));
-        privateFile(references.aesKey(), filled(32, 10));
-        privateFile(intentPath, intent);
     }
 
     private SegmentClassicHandoff.Member signedMember(Path path, int kind, int index) throws IOException {
@@ -324,6 +339,136 @@ public class SegmentClassicHandoffMaterialsTest {
                 manifest, references, trust, timeout);
     }
 
+    private static IOException assertLinuxQualificationRejected(SegmentClassicBootstrap preparation) {
+        var failure = assertThrows(IOException.class, preparation::initialize);
+        assertEquals("Linux Classic bootstrap requires continuous isolation qualification", failure.getMessage());
+        assertFalse(preparation.inputsBound());
+        assertSame(failure, assertThrows(IOException.class, preparation::boundNative).getCause());
+        return failure;
+    }
+
+    /** Linux exercises its new pre-adoption rejection. The original local scenario remains active elsewhere. */
+    private static boolean initializeAdoptionFixture(SegmentClassicBootstrap preparation) throws IOException {
+        if (SystemUtils.IS_OS_LINUX) {
+            assertLinuxQualificationRejected(preparation);
+            return false;
+        }
+        preparation.initialize();
+        return true;
+    }
+
+    @Test(timeout = 30000)
+    public void matchingLinuxSignedViewOnlyAllowsObservationAndCannotAdvanceThePreparedScope() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_LINUX);
+        var scope = preparedScope(16);
+        var observation = owner();
+        try {
+            observation.initialize();
+            assertEquals(fixtureHostView(), observation.parsed().proof().hostView());
+            observation.recheckHostView();
+            probe("HELD");
+        } finally {
+            assertTrue(observation.closeAndDrain().drained());
+        }
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
+        var files = List.of(manifest.controlDirectory().resolve("bookie-control"),
+                manifest.classicRoots().get(0).directory().resolve("current/1.txn"),
+                manifest.classicRoots().get(2).directory().resolve("current")
+                        .resolve(IndexPersistenceMgr.getLedgerName(11)), ledger.resolve("lastMark.1"));
+        var original = new ArrayList<byte[]>();
+        for (Path file : files) {
+            original.add(Files.readAllBytes(file));
+        }
+        IOException unavailable;
+        probe("AVAILABLE");
+        try {
+            unavailable = assertLinuxQualificationRejected(preparation);
+            probe("HELD");
+            var io = new SegmentFileIo();
+            var control = coldControl(scope, io);
+            try {
+                control.initialize();
+                var log = control.log();
+                long cut = log.appliedThrough();
+                assertEquals(-1, log.unsealedBootstrapCut());
+                withClaimDriver(log, driver -> assertSame(unavailable, assertThrows(IOException.class,
+                        () -> preparation.importPrepared(null, null, control, driver)).getCause()));
+                assertThrows(IOException.class, preparation::recoverPrepared);
+                assertSame(unavailable, assertThrows(IOException.class,
+                        () -> preparation.completePrepared(null, null, control)).getCause());
+                assertTrue(log.bootstrapSeal().isEmpty());
+                assertEquals(cut, log.appliedThrough());
+                assertEquals(0, io.writes);
+            } finally {
+                assertTrue(control.closeAndDrain().drained());
+            }
+            assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                    .observation().orElseThrow());
+            assertFalse(Files.exists(ledger.resolve("lastMark.0")));
+            for (int index = 0; index < files.size(); index++) {
+                assertArrayEquals(original.get(index), Files.readAllBytes(files.get(index)));
+            }
+            var drained = preparation.closeAndDrain();
+            assertTrue(drained.drained());
+            assertSame(unavailable, drained.initializationFailure());
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test
+    public void linuxRejectsLegacyOrWrongBootBeforeAnyBootstrapQualification() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_LINUX);
+        var original = verifiedProof();
+        var host = original.hostView().orElseThrow();
+        var other = new SegmentClassicHandoff.HostViewBinding(
+                new UUID(host.bootId().getMostSignificantBits() ^ 1, host.bootId().getLeastSignificantBits()),
+                host.pid1StartTicks(), host.view());
+        writeHostProof(original, Optional.empty());
+        assertMaterialRejection("requires a signed host view in UWCHOF02");
+        writeHostProof(original, Optional.of(other));
+        assertMaterialRejection("differs from the signed boot, PID 1 birth or root view");
+    }
+
+    @Test
+    public void hostBoundProofStillRequiresTheOriginalExpectedOperation() throws Exception {
+        var original = verifiedProof();
+        var host = original.hostView().orElseGet(() -> new SegmentClassicHandoff.HostViewBinding(new UUID(0, 17),
+                11, new NativeIO.LinuxFilesystemView(23, new NativeIO.FileIdentity(31, 0), 37)));
+        writeHostProof(original, Optional.of(host));
+        if (!SystemUtils.IS_OS_LINUX) {
+            assertMaterialRejection("Host-bound Classic handoff requires a Linux target");
+        }
+        expected = new SegmentClassicHandoffMaterials.Expected(expected.deployment(), digest(17),
+                expected.signerKeyId(), expected.trustedSigner(), expected.nativeScope(), expected.requirements(),
+                oldUid, uid, uid);
+        assertMaterialRejection("differs from the supplied expected source and deployment");
+    }
+
+    private SegmentClassicHandoff.Proof verifiedProof() throws IOException {
+        return SegmentClassicHandoff.verify(Files.readAllBytes(references.proof()), expected.signerKeyId(),
+                expected.trustedSigner());
+    }
+
+    private void writeHostProof(SegmentClassicHandoff.Proof original,
+            Optional<SegmentClassicHandoff.HostViewBinding> host) throws Exception {
+        writeProof(new SegmentClassicHandoff.Proof(original.operation(), original.members(), original.terminal(),
+                original.unixIsolationReceipt(), original.retirement(), host));
+    }
+
+    private void assertMaterialRejection(String expectedMessage) throws Exception {
+        var owner = owner();
+        try {
+            var failure = assertThrows(IOException.class, owner::initialize);
+            assertTrue(failure.getMessage(), failure.getMessage().contains(expectedMessage));
+            assertSame(failure, assertThrows(IOException.class, owner::parsed).getCause());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
     @Test(timeout = 30000)
     public void preparationBindsRealNativeInputsAndHoldsTheOriginalGuardWithoutStorageWrites() throws Exception {
         var nativeSources = realSources();
@@ -338,8 +483,8 @@ public class SegmentClassicHandoffMaterialsTest {
         assertFalse(preparation.inputsBound());
         probe("AVAILABLE");
         try {
-            preparation.initialize();
-            assertTrue(preparation.inputsBound());
+            assertEquals(!SystemUtils.IS_OS_LINUX, initializeAdoptionFixture(preparation));
+            assertEquals(!SystemUtils.IS_OS_LINUX, preparation.inputsBound());
             probe("HELD");
             assertThrows(IOException.class, preparation::initialize);
             assertArrayEquals(journalBytes, Files.readAllBytes(journal));
@@ -535,7 +680,7 @@ public class SegmentClassicHandoffMaterialsTest {
     public void privateModeDoesNotHideAnExtendedAclOnTheAesKey() throws Exception {
         assumeTrue(SystemUtils.IS_OS_MAC_OSX);
         addMacAcl(references.aesKey(), "everyone allow read");
-        var materials = new SegmentClassicHandoffMaterials(references, expected, manifest);
+        var materials = new SegmentClassicHandoffMaterials(references, expected, manifest, TimeUnit.SECONDS.toNanos(5));
         try {
             var failure = assertThrows(IOException.class, materials::initialize);
             assertTrue(failure.getMessage(), failure.getMessage().contains("ACL"));
@@ -622,7 +767,9 @@ public class SegmentClassicHandoffMaterialsTest {
                 .resolve(IndexPersistenceMgr.getLedgerName(11));
         byte[] original = Files.readAllBytes(index);
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 Files.setPosixFilePermissions(index, PosixFilePermissions.fromString("r--------"));
                 var log = control.log();
@@ -647,7 +794,9 @@ public class SegmentClassicHandoffMaterialsTest {
         var scope = preparedScope(16);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 Path log = manifest.classicRoots().get(1).directory().resolve("current/99.log");
                 byte[] original = {1, 2, 3};
@@ -732,7 +881,9 @@ public class SegmentClassicHandoffMaterialsTest {
         var scope = preparedScope(16);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 Path current = manifest.classicRoots().get(1).directory().resolve("current");
                 addMacAcl(supervisor ? guardPath : current,
@@ -769,7 +920,9 @@ public class SegmentClassicHandoffMaterialsTest {
         ClassicClaimTestHistory.writeJournalKey(keyOnlyJournal, 276, key);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 assertThrows(IOException.class, preparation::recoverPrepared);
                 var log = control.log();
@@ -823,7 +976,9 @@ public class SegmentClassicHandoffMaterialsTest {
         var injected = new AtomicBoolean();
         var first = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            first.initialize();
+            if (!initializeAdoptionFixture(first)) {
+                return;
+            }
             withColdScope(scope, nativeScope, first, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 var log = control.log();
                 withClaimDriver(log, driver -> {
@@ -925,7 +1080,9 @@ public class SegmentClassicHandoffMaterialsTest {
             }
         });
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, io, (roots, arenas, control, ignored) -> {
                 var log = control.log();
                 withClaimDriver(log, driver -> {
@@ -1004,7 +1161,9 @@ public class SegmentClassicHandoffMaterialsTest {
             return call.callRealMethod();
         }).when(io).force(any(FileChannel.class), eq(true));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, io, (roots, arenas, control, ignored) -> {
                 var log = control.log();
                 withClaimDriver(log, driver -> {
@@ -1047,7 +1206,9 @@ public class SegmentClassicHandoffMaterialsTest {
         var failedChannel = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 withClaimDriver(control.log(), driver -> preparation.importPrepared(roots, arenas, control, driver));
                 try (var ignored = mockStatic(FileChannel.class, invocation -> {
@@ -1092,7 +1253,9 @@ public class SegmentClassicHandoffMaterialsTest {
         var scope = preparedScope(16);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 var log = control.log();
                 withClaimDriver(log, driver -> preparation.importPrepared(roots, arenas, control, driver));
@@ -1117,7 +1280,9 @@ public class SegmentClassicHandoffMaterialsTest {
         Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
         Path unclaimed = index.resolve(IndexPersistenceMgr.getLedgerName(19));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 withClaimDriver(control.log(), driver -> preparation.importPrepared(roots, arenas, control, driver));
                 Path source = relocation ? Path.of(unclaimed + ".rloc")
@@ -1161,7 +1326,9 @@ public class SegmentClassicHandoffMaterialsTest {
         var first = prepare(scope.sources(), Duration.ofSeconds(5));
         var prefix = new AtomicReference<SegmentBookieControlLog.BootstrapClaim>();
         try {
-            first.initialize();
+            if (!initializeAdoptionFixture(first)) {
+                return;
+            }
             withColdScope(scope, nativeScope, first, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 var log = control.log();
                 withClaimDriver(log, driver -> {
@@ -1222,7 +1389,9 @@ public class SegmentClassicHandoffMaterialsTest {
             }
         });
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, io, (roots, arenas, control, ignored) -> {
                 var log = control.log();
                 withClaimDriver(log, driver -> {
@@ -1265,7 +1434,9 @@ public class SegmentClassicHandoffMaterialsTest {
         Files.delete(journal);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 var log = control.log();
                 withClaimDriver(log, driver -> {
@@ -1293,7 +1464,9 @@ public class SegmentClassicHandoffMaterialsTest {
         byte[] bytes = Files.readAllBytes(controlFile);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 var enabled = preparation.completePrepared(roots, arenas, control);
                 assertEquals(nativeScope.binding().enabled(seal), enabled.binding());
@@ -1318,7 +1491,9 @@ public class SegmentClassicHandoffMaterialsTest {
         var preparation = prepare(scope.sources(), Duration.ofSeconds(2));
         var observed = new AtomicReference<BookieRouteBinding.Observation>();
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 client.holdNextMulti.set(true);
                 var failure = assertThrows(IOException.class, () -> preparation.completePrepared(roots, arenas,
@@ -1366,7 +1541,9 @@ public class SegmentClassicHandoffMaterialsTest {
         Path index = manifest.classicRoots().get(2).directory().resolve("current")
                 .resolve(IndexPersistenceMgr.getLedgerName(11));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdEnabled(scope, preparation, (roots, arenas, control, io) -> {
                 var entered = new CountDownLatch(1);
                 var release = new CountDownLatch(1);
@@ -1424,7 +1601,9 @@ public class SegmentClassicHandoffMaterialsTest {
         var firstClose = new IOException("Classic bootstrap first index close failed");
         var opened = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             withColdEnabled(scope, preparation, (roots, arenas, control, io) -> {
                 try (var opens = mockStatic(FileChannel.class, invocation -> {
                     Object actual = invocation.callRealMethod();
@@ -1481,7 +1660,9 @@ public class SegmentClassicHandoffMaterialsTest {
         byte[] controlBytes = Files.readAllBytes(controlFile);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             assertTrue(preparation.inputsBound());
             probe("HELD");
             verifyColdEnabled(scope, preparation);
@@ -1504,7 +1685,9 @@ public class SegmentClassicHandoffMaterialsTest {
         var scope = sealScope(false);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             var failure = assertThrows(IOException.class, () -> verifyColdEnabled(scope, preparation));
             assertTrue(failure.getMessage(), failure.getMessage().contains("retained control seal differ"));
             assertFalse(preparation.inputsBound());
@@ -1526,7 +1709,9 @@ public class SegmentClassicHandoffMaterialsTest {
         byte[] original = Files.readAllBytes(unclaimed);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             var failure = assertThrows(IOException.class, () -> verifyColdEnabled(scope, preparation));
             assertTrue(failure.getMessage(), failure.getMessage().contains("ledger 19"));
             assertFalse(preparation.inputsBound());
@@ -1544,7 +1729,9 @@ public class SegmentClassicHandoffMaterialsTest {
         byte[] original = Files.readAllBytes(unclaimed);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             var failure = assertThrows(IOException.class, () -> verifyColdEnabled(scope, preparation));
             assertTrue(failure.getMessage(), failure.getMessage().contains("ledger 19"));
             assertFalse(preparation.inputsBound());
@@ -1573,7 +1760,9 @@ public class SegmentClassicHandoffMaterialsTest {
         ClassicClaimTestHistory.writeIndex(index, 19);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             var failure = assertThrows(IOException.class, () -> verifyColdEnabled(scope, preparation));
             assertEquals("Original bootstrap cut does not include the claim for ledger 19", failure.getMessage());
             assertFalse(preparation.inputsBound());
@@ -1587,7 +1776,9 @@ public class SegmentClassicHandoffMaterialsTest {
         var scope = sealScope(true);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            preparation.initialize();
+            if (!initializeAdoptionFixture(preparation)) {
+                return;
+            }
             String registration = "/ledgers/available/readonly/" + manifest.bookieId();
             client.create(registration, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
             var failure = assertThrows(IOException.class, () -> verifyColdEnabled(scope, preparation));
@@ -1610,8 +1801,8 @@ public class SegmentClassicHandoffMaterialsTest {
         }
         var preparation = prepare(nativeSources, Duration.ofSeconds(5));
         try {
-            preparation.initialize();
-            assertTrue(preparation.inputsBound());
+            assertEquals(!SystemUtils.IS_OS_LINUX, initializeAdoptionFixture(preparation));
+            assertEquals(!SystemUtils.IS_OS_LINUX, preparation.inputsBound());
             probe("HELD");
             for (Path path : classicGuards) {
                 assertTrue(Files.notExists(path, LinkOption.NOFOLLOW_LINKS));
@@ -2037,7 +2228,7 @@ public class SegmentClassicHandoffMaterialsTest {
     }
 
     private SegmentClassicHandoffMaterials owner() {
-        return new SegmentClassicHandoffMaterials(references, expected, manifest);
+        return new SegmentClassicHandoffMaterials(references, expected, manifest, TimeUnit.SECONDS.toNanos(5));
     }
 
     private void rejected() throws Exception {

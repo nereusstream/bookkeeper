@@ -43,6 +43,7 @@ import java.util.Set;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.discover.BookieRouteBinding;
 import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 import org.apache.bookkeeper.net.BookieId;
@@ -153,15 +154,96 @@ public class SegmentClassicHandoffTest {
 
     /** The test signs explicit bytes. Production codec has no sign-facts API or private key input. */
     private static byte[] resign(byte[] encoded) throws Exception {
+        return resign(encoded, 1);
+    }
+
+    private static byte[] resign(byte[] encoded, int schema) throws Exception {
         byte[] result = encoded.clone();
         int length = result.length - 64;
         Signature signer = Signature.getInstance("Ed25519");
         signer.initSign(privateKey());
-        signer.update("BookKeeper/CommonClassicHandoff/v1\0".getBytes(StandardCharsets.US_ASCII));
+        signer.update(("BookKeeper/CommonClassicHandoff/v" + schema + "\0").getBytes(StandardCharsets.US_ASCII));
         signer.update(result, 0, length);
         byte[] signature = signer.sign();
         System.arraycopy(signature, 0, result, length, signature.length);
         return result;
+    }
+
+    private static SegmentClassicHandoff.HostViewBinding hostBinding() {
+        return new SegmentClassicHandoff.HostViewBinding(UUID.fromString("01234567-89ab-cdef-0123-456789abcdef"),
+                0xf123456789abcdefL, new NativeIO.LinuxFilesystemView(0xf0000017L,
+                        new NativeIO.FileIdentity(0x0123456789abcdefL, 0xfedcba9876543210L), 77));
+    }
+
+    @Test
+    public void hostBoundProofMatchesIndependentFixedBytesAndUsesItsOwnSignatureDomain() throws Exception {
+        var original = proof();
+        var bound = new SegmentClassicHandoff.Proof(original.operation(), original.members(), original.terminal(),
+                original.unixIsolationReceipt(), original.retirement(), Optional.of(hostBinding()));
+        byte[] legacy = vector("classic-handoff-proof-v1.hex");
+        byte[] fields = HexFormat.of().parseHex("0123456789abcdef0123456789abcdeff123456789abcdeff0000017"
+                + "0123456789abcdeffedcba98765432100000004d");
+        // Fixed Ed25519 signature generated independently with OpenSSL over the v2 domain and explicit byte layout.
+        byte[] signature = HexFormat.of().parseHex("b1a15ee0fcda5cc7ec248426caecf1f6e60a1aa277d8e9e4c613d3f2bf17eeba7"
+                + "5633494c3052fa0f66efa108b4b8f24ab1077910790e0b289da807efa40ce0f");
+        int oldUnsigned = legacy.length - SegmentClassicHandoff.SIGNATURE_BYTES;
+        int newUnsigned = oldUnsigned + fields.length;
+        byte[] expected = ByteBuffer.allocate(newUnsigned + signature.length).put(legacy, 0, oldUnsigned)
+                .put(fields).put(signature).putLong(0, 0x555743484f463032L).putShort(8, (short) 2)
+                .putInt(12, newUnsigned - SegmentClassicHandoff.HEADER_BYTES).array();
+        assertArrayEquals(expected, SegmentClassicHandoff.envelope(bound, signature));
+        assertArrayEquals(expected, resign(expected, 2));
+        Signature signer = Signature.getInstance("Ed25519");
+        signer.initSign(privateKey());
+        signer.update(SegmentClassicHandoff.signingMessage(bound));
+        assertArrayEquals(signature, signer.sign());
+        var key = publicKey();
+        assertEquals(bound, SegmentClassicHandoff.verify(expected, digest(9), key));
+        assertEquals(original, SegmentClassicHandoff.verify(legacy, digest(9), key));
+        assertThrows(IOException.class, () -> SegmentClassicHandoff.verify(resign(expected), digest(9), key));
+        for (int offset = oldUnsigned; offset < newUnsigned; offset++) {
+            byte[] changed = expected.clone();
+            changed[offset] ^= 1;
+            assertThrows(IOException.class, () -> SegmentClassicHandoff.verify(changed, digest(9), key));
+        }
+        for (int offset : new int[]{8, 10}) {
+            byte[] changed = expected.clone();
+            changed[offset + 1] ^= 1;
+            assertThrows(IOException.class, () -> SegmentClassicHandoff.verify(resign(changed, 2), digest(9), key));
+        }
+        byte[] missing = Arrays.copyOf(expected, legacy.length);
+        ByteBuffer.wrap(missing).putInt(12, oldUnsigned - SegmentClassicHandoff.HEADER_BYTES);
+        assertThrows(IOException.class, () -> SegmentClassicHandoff.verify(resign(missing, 2), digest(9), key));
+        for (int[] invalid : List.of(new int[]{0, 16}, new int[]{24, 4}, new int[]{44, 4})) {
+            byte[] changed = expected.clone();
+            Arrays.fill(changed, oldUnsigned + invalid[0], oldUnsigned + invalid[0] + invalid[1], (byte) 0);
+            assertThrows(IOException.class, () -> SegmentClassicHandoff.verify(resign(changed, 2), digest(9), key));
+        }
+    }
+
+    @Test
+    public void linuxColdViewComparisonRejectsBootBirthNamespaceAndRootMismatches() throws Exception {
+        var host = hostBinding();
+        var namespaces = new NativeIO.LinuxThreadNamespaces(0xefff_fffcL, 0xefff_fffdL);
+        var birth = new NativeIO.LinuxProcessBirth(81, 0, host.pid1StartTicks());
+        var view = host.view();
+        SegmentClassicHandoffMaterials.requireMatchingHostView(host, host.bootId(), namespaces, birth, view);
+        assertThrows(IOException.class, () -> SegmentClassicHandoffMaterials.requireMatchingHostView(
+                host, new UUID(0, 91), namespaces, birth, view));
+        assertThrows(IOException.class, () -> SegmentClassicHandoffMaterials.requireMatchingHostView(
+                host, host.bootId(), namespaces, new NativeIO.LinuxProcessBirth(81, 0, 0), view));
+        for (var wrong : List.of(new NativeIO.LinuxThreadNamespaces(0xf000_0001L, namespaces.userInode()),
+                new NativeIO.LinuxThreadNamespaces(namespaces.pidInode(), 0xf000_0002L))) {
+            assertThrows(IOException.class, () -> SegmentClassicHandoffMaterials.requireMatchingHostView(
+                    host, host.bootId(), wrong, birth, view));
+        }
+        for (var wrong : List.of(new NativeIO.LinuxFilesystemView(1, view.root(), view.rootMountId()),
+                new NativeIO.LinuxFilesystemView(view.mountNamespaceInode(), view.root(), 5),
+                new NativeIO.LinuxFilesystemView(view.mountNamespaceInode(), new NativeIO.FileIdentity(1, 2),
+                        view.rootMountId()))) {
+            assertThrows(IOException.class, () -> SegmentClassicHandoffMaterials.requireMatchingHostView(
+                    host, host.bootId(), namespaces, birth, wrong));
+        }
     }
 
     @Test

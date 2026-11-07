@@ -44,6 +44,8 @@ import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
@@ -51,6 +53,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOException;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.junit.Rule;
@@ -66,6 +69,42 @@ public class SegmentClassicHandoffPublicationTest {
         byte[] bytes = new byte[32];
         java.util.Arrays.fill(bytes, (byte) value);
         return bytes;
+    }
+
+    @Test
+    public void coldPublisherReusesExactHostBoundProofForTheOriginalRetirement() throws Exception {
+        Path root = temporary.newFolder().toPath().toRealPath();
+        SegmentClassicHandoff.Proof hostBound;
+        byte[] packet;
+        try (var f = new Fixture(root, true, true)) {
+            var original = f.proof;
+            hostBound = new SegmentClassicHandoff.Proof(original.operation(), original.members(), original.terminal(),
+                    original.unixIsolationReceipt(), original.retirement(),
+                    Optional.of(new SegmentClassicHandoff.HostViewBinding(new UUID(0, 1), Long.MIN_VALUE,
+                            new NativeIO.LinuxFilesystemView(25, new NativeIO.FileIdentity(31, 0), 17))));
+            packet = sign(hostBound);
+            var owner = f.owner(new SegmentFileIo());
+            owner.initialize();
+            try {
+                owner.retire(f.retirement);
+                owner.publishProof(packet);
+                assertArrayEquals(packet, Files.readAllBytes(f.references.proof()));
+                assertThrows(IOException.class, () -> owner.publishProof(f.packet));
+                assertArrayEquals(packet, Files.readAllBytes(f.references.proof()));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
+        try (var successor = new Fixture(root, false, true)) {
+            var owner = successor.owner(new SegmentFileIo());
+            owner.initialize();
+            try {
+                assertEquals(hostBound, owner.recoverProof(successor.retirement));
+                assertArrayEquals(packet, Files.readAllBytes(successor.references.proof()));
+            } finally {
+                assertTrue(owner.closeAndDrain().drained());
+            }
+        }
     }
 
     private static byte[] sign(SegmentClassicHandoff.Proof proof) throws Exception {

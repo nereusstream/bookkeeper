@@ -34,10 +34,12 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.discover.BookieRouteBinding;
 import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 import org.apache.bookkeeper.net.BookieId;
@@ -59,10 +61,13 @@ final class SegmentClassicHandoff {
     static final int MAX_BYTES = 65536;
     static final int HEADER_BYTES = 48;
     static final int SIGNATURE_BYTES = 64;
-    private static final long PROOF_MAGIC = 0x555743484f463031L; // UWCHOF01
+    private static final long PROOF_MAGIC_V1 = 0x555743484f463031L; // UWCHOF01
+    private static final long PROOF_MAGIC_V2 = 0x555743484f463032L; // UWCHOF02
     private static final long POLICY_MAGIC = 0x55574342504f4c31L; // UWCBPOL1
     private static final long INTENT_MAGIC = 0x5557435245544931L; // UWCRETI1
-    private static final byte[] SIGNATURE_DOMAIN = "BookKeeper/CommonClassicHandoff/v1\0"
+    private static final byte[] SIGNATURE_DOMAIN_V1 = "BookKeeper/CommonClassicHandoff/v1\0"
+            .getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] SIGNATURE_DOMAIN_V2 = "BookKeeper/CommonClassicHandoff/v2\0"
             .getBytes(StandardCharsets.US_ASCII);
     private static final byte[] KEY_DOMAIN = "BookKeeper/CommonClassicAesKey/v1\0"
             .getBytes(StandardCharsets.US_ASCII);
@@ -201,14 +206,28 @@ final class SegmentClassicHandoff {
         }
     }
 
+    /** Boot-local PID 1 view carried inside the signature for the original retirement operation. */
+    record HostViewBinding(UUID bootId, long pid1StartTicks, NativeIO.LinuxFilesystemView view) {
+        HostViewBinding {
+            uuid(bootId);
+            Objects.requireNonNull(view, "host filesystem view");
+        }
+    }
+
     record Proof(Operation operation, List<Member> members, Terminal terminal,
-                 Digest unixIsolationReceipt, Digest retirement) {
+                 Digest unixIsolationReceipt, Digest retirement, Optional<HostViewBinding> hostView) {
+        Proof(Operation operation, List<Member> members, Terminal terminal,
+                Digest unixIsolationReceipt, Digest retirement) {
+            this(operation, members, terminal, unixIsolationReceipt, retirement, Optional.empty());
+        }
+
         Proof {
             Objects.requireNonNull(operation, "operation");
             members = List.copyOf(members);
             Objects.requireNonNull(terminal, "terminal");
             Objects.requireNonNull(unixIsolationReceipt, "unixIsolationReceipt");
             Objects.requireNonNull(retirement, "retirement");
+            Objects.requireNonNull(hostView, "host view");
             physicalMembers(members.stream().map(Member::physical).toList());
             if (!retirement.equals(digest(encodeRetirement(new Retirement(operation,
                     members.stream().map(Member::physical).toList()))))) {
@@ -290,8 +309,8 @@ final class SegmentClassicHandoff {
     /** No signing API: only the actual launcher owns a private key and can establish the facts it signs. */
     static byte[] signingMessage(Proof proof) {
         byte[] unsigned = unsigned(proof);
-        return ByteBuffer.allocate(SIGNATURE_DOMAIN.length + unsigned.length)
-                .put(SIGNATURE_DOMAIN).put(unsigned).array();
+        byte[] domain = proof.hostView().isPresent() ? SIGNATURE_DOMAIN_V2 : SIGNATURE_DOMAIN_V1;
+        return ByteBuffer.allocate(domain.length + unsigned.length).put(domain).put(unsigned).array();
     }
 
     static byte[] envelope(Proof proof, byte[] signature) {
@@ -309,7 +328,13 @@ final class SegmentClassicHandoff {
         }
         byte[] stable = encoded.clone();
         try {
-            ByteBuffer b = input(stable, MAX_BYTES, PROOF_MAGIC);
+            ByteBuffer b = ByteBuffer.wrap(stable);
+            long magic = b.getLong();
+            int schema = Short.toUnsignedInt(b.getShort());
+            boolean hostBound = magic == PROOF_MAGIC_V2 && schema == 2;
+            if ((!hostBound && (magic != PROOF_MAGIC_V1 || schema != 1)) || b.getShort() != 0) {
+                throw new IllegalArgumentException("Unknown fixed handoff proof schema or flags");
+            }
             int length = b.getInt();
             if (length < 0 || length != stable.length - HEADER_BYTES - SIGNATURE_BYTES
                     || !expectedSigner.equals(new Digest(fixed(b, 32)))) {
@@ -318,7 +343,7 @@ final class SegmentClassicHandoff {
             int unsignedLength = HEADER_BYTES + length;
             Signature verifier = Signature.getInstance("Ed25519");
             verifier.initVerify(trustedKey);
-            verifier.update(SIGNATURE_DOMAIN);
+            verifier.update(hostBound ? SIGNATURE_DOMAIN_V2 : SIGNATURE_DOMAIN_V1);
             verifier.update(stable, 0, unsignedLength);
             if (!verifier.verify(stable, unsignedLength, SIGNATURE_BYTES)) {
                 throw new IOException("Handoff Ed25519 signature rejected");
@@ -334,7 +359,10 @@ final class SegmentClassicHandoff {
             constant(b.getInt(), 0); // Normal successful process exit, never killed/unknown.
             Terminal terminal = new Terminal(b.getLong(), getInstant(b), getDigest(b));
             constant(b.getInt(), 1); // Complete old-denied/new-required-access result, attested by the launcher.
-            Proof proof = new Proof(operation, members, terminal, getDigest(b), getDigest(b));
+            var isolation = getDigest(b);
+            var retirement = getDigest(b);
+            var hostView = hostBound ? Optional.of(getHostView(b)) : Optional.<HostViewBinding>empty();
+            Proof proof = new Proof(operation, members, terminal, isolation, retirement, hostView);
             canonical(b, Arrays.copyOf(stable, unsignedLength), unsigned(proof));
             return proof;
         } catch (IllegalArgumentException | BufferUnderflowException | DateTimeException
@@ -375,7 +403,10 @@ final class SegmentClassicHandoff {
     }
 
     private static byte[] unsigned(Proof proof) {
-        ByteBuffer b = header(ByteBuffer.allocate(MAX_BYTES - SIGNATURE_BYTES), PROOF_MAGIC);
+        boolean hostBound = proof.hostView().isPresent();
+        ByteBuffer b = ByteBuffer.allocate(MAX_BYTES - SIGNATURE_BYTES)
+                .putLong(hostBound ? PROOF_MAGIC_V2 : PROOF_MAGIC_V1)
+                .putShort((short) (hostBound ? 2 : 1)).putShort((short) 0);
         b.putInt(0).put(proof.operation().signerKeyId().value);
         putOperation(b, proof.operation());
         b.putShort((short) proof.members().size());
@@ -387,8 +418,25 @@ final class SegmentClassicHandoff {
         putInstant(b, proof.terminal().exited());
         b.put(proof.terminal().actualDrainReceipt().value).putInt(1)
                 .put(proof.unixIsolationReceipt().value).put(proof.retirement().value);
+        proof.hostView().ifPresent(host -> putHostView(b, host));
         b.putInt(12, b.position() - HEADER_BYTES);
         return bytes(b);
+    }
+
+    private static void putHostView(ByteBuffer b, HostViewBinding host) {
+        putUuid(b, host.bootId());
+        var view = host.view();
+        b.putLong(host.pid1StartTicks()).putInt((int) view.mountNamespaceInode())
+                .putLong(view.root().device()).putLong(view.root().inode()).putInt((int) view.rootMountId());
+    }
+
+    private static HostViewBinding getHostView(ByteBuffer b) {
+        UUID boot = getUuid(b);
+        long ticks = b.getLong();
+        long namespace = Integer.toUnsignedLong(b.getInt());
+        var root = new NativeIO.FileIdentity(b.getLong(), b.getLong());
+        return new HostViewBinding(boot, ticks,
+                new NativeIO.LinuxFilesystemView(namespace, root, Integer.toUnsignedLong(b.getInt())));
     }
 
     private static void putOperation(ByteBuffer b, Operation operation) {

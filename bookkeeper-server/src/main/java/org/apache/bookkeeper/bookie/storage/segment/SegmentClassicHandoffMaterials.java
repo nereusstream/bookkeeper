@@ -40,6 +40,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicHandoffPaths.Identity;
@@ -106,10 +107,12 @@ final class SegmentClassicHandoffMaterials {
     private final SegmentDataFileLock guard;
     private final SegmentOwnedFiles files;
     private final SegmentClassicHandoffPaths paths;
+    private final long readBudgetNanos;
     private final NativeIO nativeIo = new NativeIOImpl();
     private final Map<Path, ProtectedFile> protectedFiles = new LinkedHashMap<>();
     private final Map<Path, RetainedRoot> retainedRoots = new LinkedHashMap<>();
     private NativeIO.ProcessCredentials targetCredentials;
+    private NativeIO.LinuxProcessBirth targetBirth;
     private boolean linux;
     private boolean attempted;
     private boolean closing;
@@ -120,10 +123,15 @@ final class SegmentClassicHandoffMaterials {
     private List<ClassicGuard> classicGuards;
 
     /** Heap-only preparation. Materials, metadata, directories and locks open after the caller retains this owner. */
-    SegmentClassicHandoffMaterials(References references, Expected expected, SegmentArenaManifest manifest) {
+    SegmentClassicHandoffMaterials(References references, Expected expected, SegmentArenaManifest manifest,
+            long readBudgetNanos) {
         this.references = Objects.requireNonNull(references, "references");
         this.expected = Objects.requireNonNull(expected, "expected");
         this.manifest = Objects.requireNonNull(manifest, "manifest");
+        if (readBudgetNanos <= 0) {
+            throw new IllegalArgumentException("Positive Classic handoff observation budget required");
+        }
+        this.readBudgetNanos = readBudgetNanos;
         String stem = scopeName(expected.nativeScope().binding());
         guardPath = references.directory().resolve(stem + ".lock");
         intentPath = references.directory().resolve(stem + ".retirement");
@@ -181,10 +189,12 @@ final class SegmentClassicHandoffMaterials {
                 throw new IOException("Original handoff retirement record differs from the signed proof");
             }
             requireExpected(proof.operation());
+            verifyHostView(proof);
             rawKey = read(references.aesKey(), 32, 32);
             SegmentClassicHandoff.requireMaterials(proof, policy, rawKey, manifest);
             recheckFiles();
             checkClassicGuards(allMaterialPaths());
+            verifyHostView(proof);
             files.requireHealthy();
             parsed = new Parsed(proof, policy, new SecretKeySpec(rawKey, "AES"));
         } catch (IOException | RuntimeException | Error failure) {
@@ -272,6 +282,51 @@ final class SegmentClassicHandoffMaterials {
             }
         }
         return observed;
+    }
+
+    private void verifyHostView(SegmentClassicHandoff.Proof proof) throws IOException {
+        if (!linux) {
+            if (proof.hostView().isPresent()) {
+                throw new IOException("Host-bound Classic handoff requires a Linux target");
+            }
+            return;
+        }
+        var signed = proof.hostView().orElseThrow(
+                () -> new IOException("Linux Classic handoff requires a signed host view in UWCHOF02"));
+        long deadline = System.nanoTime() + readBudgetNanos;
+        requireTargetCredentials();
+        requireHostViewTime(deadline);
+        UUID boot = nativeIo.currentLinuxBootId();
+        requireHostViewTime(deadline);
+        var namespaces = nativeIo.currentLinuxThreadNamespaces();
+        requireHostViewTime(deadline);
+        var birth = nativeIo.currentLinuxProcessBirth();
+        requireHostViewTime(deadline);
+        var view = nativeIo.currentLinuxFilesystemView();
+        requireHostViewTime(deadline);
+        requireMatchingHostView(signed, boot, namespaces, birth, view);
+        if (targetBirth != null && !targetBirth.equals(birth)) {
+            throw new IOException("Linux handoff target process birth changed during verification");
+        }
+        requireTargetCredentials();
+        requireHostViewTime(deadline);
+        targetBirth = birth;
+    }
+
+    static void requireMatchingHostView(SegmentClassicHandoff.HostViewBinding signed, UUID boot,
+            NativeIO.LinuxThreadNamespaces namespaces, NativeIO.LinuxProcessBirth birth,
+            NativeIO.LinuxFilesystemView view) throws IOException {
+        SegmentClassicLaunchTrust.requireInitialLinuxNamespaces(namespaces);
+        if (!signed.bootId().equals(boot) || birth == null || birth.pid1StartTicks() != signed.pid1StartTicks()
+                || !signed.view().equals(view)) {
+            throw new IOException("Linux handoff target view differs from the signed boot, PID 1 birth or root view");
+        }
+    }
+
+    private static void requireHostViewTime(long deadline) throws IOException {
+        if (deadline - System.nanoTime() <= 0) {
+            throw new IOException("Linux handoff host view observation deadline elapsed");
+        }
     }
 
     private List<Path> allMaterialPaths() {
@@ -384,9 +439,22 @@ final class SegmentClassicHandoffMaterials {
 
     /** Recheck the original files and observed Classic guards before advancing the bound preparation. */
     synchronized void recheckProtection() throws IOException {
-        parsed();
+        var proof = parsed().proof();
         recheckFiles();
         checkClassicGuards(allMaterialPaths());
+        verifyHostView(proof);
+    }
+
+    synchronized void recheckHostView() throws IOException {
+        verifyHostView(parsed().proof());
+    }
+
+    /** A matched host view does not establish continuous control of the old writer or the host management plane. */
+    synchronized void requireBootstrapQualification() throws IOException {
+        parsed();
+        if (linux) {
+            throw new IOException("Linux Classic bootstrap requires continuous isolation qualification");
+        }
     }
 
     synchronized Identity protectedMember(Path root) throws IOException {
@@ -422,6 +490,10 @@ final class SegmentClassicHandoffMaterials {
             var directory = SegmentOwnedFiles.open(files, root, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
             var observed = files.linuxExt4Mount(directory, nativeIo, System.nanoTime() + readBudgetNanos);
             requireStorageIdentity(root, expected, observed.identity());
+            if (observed.mountNamespaceInode() != parsed().proof().hostView().orElseThrow()
+                    .view().mountNamespaceInode()) {
+                throw new IOException("Retained Linux root differs from the signed mount namespace: " + root);
+            }
             retained = new RetainedRoot(directory, observed);
             retainedRoots.put(root, retained);
         } else {

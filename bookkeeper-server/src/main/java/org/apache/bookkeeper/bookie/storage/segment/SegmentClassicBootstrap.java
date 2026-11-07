@@ -176,10 +176,11 @@ public final class SegmentClassicBootstrap {
             var expected = new SegmentClassicHandoffMaterials.Expected(trust.deployment(),
                     trust.programConfiguration(), trust.signerKeyId(), trust.signer(), first.nativeBinding(),
                     commissioned, trust.oldUid(), trust.targetUid(), trust.materialOwnerUid());
-            materials = new SegmentClassicHandoffMaterials(references, expected, manifest);
+            materials = new SegmentClassicHandoffMaterials(references, expected, manifest, readTimeout.toNanos());
             requireOpen();
             materials.initialize();
             requireCurrentSources(first, true);
+            materials.requireBootstrapQualification();
             synchronized (this) {
                 requireOpen();
                 bound = first;
@@ -403,6 +404,7 @@ public final class SegmentClassicBootstrap {
     private void requireCurrentSources(ClassicBootstrapSnapshot original, boolean verifyStorageTree)
             throws IOException {
         var proof = materials.parsed().proof();
+        materials.recheckHostView();
         requireMembers(proof, verifyStorageTree);
         requireOpen();
         if (!original.equals(sources.read())) {

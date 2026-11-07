@@ -1203,7 +1203,7 @@ final class SegmentClassicLaunchTrust {
     /** Linux UAPI PID_NS_INIT_INO and USER_NS_INIT_INO; comparison of values alone does not establish a source. */
     static void requireInitialLinuxNamespaces(NativeIO.LinuxThreadNamespaces actual) throws IOException {
         if (actual == null || actual.pidInode() != 0xefff_fffcL || actual.userInode() != 0xefff_fffdL) {
-            throw new IOException("Current launcher thread must be in the initial Linux PID and user namespaces");
+            throw new IOException("Current thread must be in the initial Linux PID and user namespaces");
         }
     }
 
