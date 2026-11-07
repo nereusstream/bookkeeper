@@ -344,13 +344,13 @@ public final class SegmentClassicBootstrap {
             long before = bookie.requireSealedBootstrapCut(seal);
             var proof = materials.parsed().proof();
             requireMembers(proof);
-            materials.recheckClassicGuards();
+            materials.recheckProtection();
             requireOpen();
             var enabled = sources.completePrepared(original, seal);
             roots.verifyPreparedRootsForCompletion(manager, binding, bookie);
             arenas.requireVerified(binding.binding().manifest());
             requireMembers(proof);
-            materials.recheckClassicGuards();
+            materials.recheckProtection();
             if (before != bookie.requireSealedBootstrapCut(seal)) {
                 throw new IOException("Bookie control changed during native bootstrap completion");
             }
@@ -404,7 +404,7 @@ public final class SegmentClassicBootstrap {
             throw new IOException("Classic bootstrap sources changed under the supervisor guard");
         }
         requireMembers(proof);
-        materials.recheckClassicGuards();
+        materials.recheckProtection();
     }
 
     private void requireScope(BookieRouteBinding binding) throws IOException {
@@ -427,8 +427,8 @@ public final class SegmentClassicBootstrap {
                 case SegmentClassicHandoff.ARENA -> manifest.arenas().get(physical.member()).directory();
                 default -> throw new IOException("Unrecognized Classic bootstrap physical member");
             };
-            var actual = SegmentClassicHandoffPaths.fileIdentity(root);
-            if (!actual.directory() || actual.device() != physical.device() || actual.inode() != physical.inode()
+            var actual = materials.protectedMember(root);
+            if (actual.device() != physical.device() || actual.inode() != physical.inode()
                     || actual.uid() != member.uid() || actual.gid() != member.gid()
                     || (actual.mode() & 07777) != member.mode()) {
                 throw new IOException("Classic bootstrap physical member differs from the signed scope: " + root);

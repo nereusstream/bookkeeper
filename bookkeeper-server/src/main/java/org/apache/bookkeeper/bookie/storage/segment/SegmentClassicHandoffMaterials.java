@@ -32,7 +32,9 @@ import java.security.PublicKey;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
@@ -80,6 +82,8 @@ final class SegmentClassicHandoffMaterials {
 
     private record ClassicGuard(Path current, Identity rootIdentity, Identity currentIdentity, Object fileKey) { }
 
+    private record ProtectedFile(Identity identity, List<Identity> parents) { }
+
     private final References references;
     private final Expected expected;
     private final SegmentArenaManifest manifest;
@@ -88,6 +92,7 @@ final class SegmentClassicHandoffMaterials {
     private final SegmentDataFileLock guard;
     private final SegmentOwnedFiles files;
     private final SegmentClassicHandoffPaths paths;
+    private final Map<Path, ProtectedFile> protectedFiles = new LinkedHashMap<>();
     private boolean attempted;
     private boolean closing;
     private Thread initializingThread;
@@ -144,13 +149,9 @@ final class SegmentClassicHandoffMaterials {
                 throw new IOException("Handoff material reader is not the expected actual target UID");
             }
             paths.requireDirectory(references.directory());
-            Identity guardIdentity = paths.privateFile(guardPath, 0, SegmentClassicHandoff.MAX_BYTES);
-            var guardParents = paths.parents(guardPath);
+            protectedFiles.put(guardPath, fileProtection(guardPath, 0, SegmentClassicHandoff.MAX_BYTES));
             guard.initialize();
-            if (!guardIdentity.equals(paths.privateFile(guardPath, 0, SegmentClassicHandoff.MAX_BYTES))
-                    || !guardParents.equals(paths.parents(guardPath))) {
-                throw new IOException("Handoff supervisor identity changed during acquisition");
-            }
+            recheckFiles();
             var proof = SegmentClassicHandoff.verify(read(references.proof(), 112, SegmentClassicHandoff.MAX_BYTES),
                     expected.signerKeyId(), expected.trustedSigner());
             var policy = SegmentClassicHandoff.decodePolicy(read(references.policy(), 12, 512));
@@ -165,6 +166,7 @@ final class SegmentClassicHandoffMaterials {
             requireExpected(proof.operation());
             rawKey = read(references.aesKey(), 32, 32);
             SegmentClassicHandoff.requireMaterials(proof, policy, rawKey, manifest);
+            recheckFiles();
             checkClassicGuards(allMaterialPaths());
             files.requireHealthy();
             parsed = new Parsed(proof, policy, new SecretKeySpec(rawKey, "AES"));
@@ -195,13 +197,12 @@ final class SegmentClassicHandoffMaterials {
     private byte[] read(Path path, int minimum, int maximum) throws IOException {
         byte[] bytes = null;
         try {
-            Identity before = paths.privateFile(path, minimum, maximum);
-            var beforeParents = paths.parents(path);
+            var before = fileProtection(path, minimum, maximum);
             checkClassicGuards(List.of(path));
             try (FileChannel channel = SegmentOwnedFiles.open(files, path, StandardOpenOption.READ,
                     LinkOption.NOFOLLOW_LINKS)) {
                 long length = channel.size();
-                if (length != before.size() || length < minimum || length > maximum) {
+                if (length != before.identity().size() || length < minimum || length > maximum) {
                     throw new IOException("Handoff material length changed during open");
                 }
                 bytes = new byte[(int) length];
@@ -210,17 +211,30 @@ final class SegmentClassicHandoffMaterials {
                     throw new IOException("Handoff material length changed during read");
                 }
             }
-            if (!before.equals(paths.privateFile(path, minimum, maximum))
-                    || !beforeParents.equals(paths.parents(path))) {
+            if (!before.equals(fileProtection(path, minimum, maximum))) {
                 throw new IOException("Handoff material identity or parent chain changed during read");
             }
             files.requireHealthy();
+            protectedFiles.put(path, before);
             return bytes;
         } catch (IOException | RuntimeException | Error failure) {
             if (bytes != null) {
                 Arrays.fill(bytes, (byte) 0);
             }
             throw failure;
+        }
+    }
+
+    private ProtectedFile fileProtection(Path path, int minimum, int maximum) throws IOException {
+        return new ProtectedFile(paths.privateFile(path, minimum, maximum), paths.parents(path));
+    }
+
+    private void recheckFiles() throws IOException {
+        guard.requireHeld(guardPath);
+        for (var original : protectedFiles.entrySet()) {
+            if (!original.getValue().equals(fileProtection(original.getKey(), 0, SegmentClassicHandoff.MAX_BYTES))) {
+                throw new IOException("Handoff material or supervisor protection changed: " + original.getKey());
+            }
         }
     }
 
@@ -277,7 +291,7 @@ final class SegmentClassicHandoffMaterials {
         classicGuards = List.copyOf(observed);
     }
 
-    private static Object guardKey(Path lock) throws IOException {
+    private Object guardKey(Path lock) throws IOException {
         var attributes = leaf(lock);
         if (attributes == null) {
             return null;
@@ -286,11 +300,12 @@ final class SegmentClassicHandoffMaterials {
         if (!attributes.isRegularFile() || fileKey == null) {
             throw new IOException("Existing Classic guard must be an identifiable regular file: " + lock);
         }
+        paths.protectedIdentity(lock);
         return fileKey;
     }
 
-    private static Identity directoryIdentity(Path directory) throws IOException {
-        Identity identity = SegmentClassicHandoffPaths.fileIdentity(directory);
+    private Identity directoryIdentity(Path directory) throws IOException {
+        Identity identity = paths.protectedIdentity(directory);
         if (!identity.directory()) {
             throw new IOException(
                     "Classic guard or marker parent must be an existing canonical directory: " + directory);
@@ -298,7 +313,7 @@ final class SegmentClassicHandoffMaterials {
         return identity.parent();
     }
 
-    private static void requireAbsentMarker(Path directory, Identity original) throws IOException {
+    private void requireAbsentMarker(Path directory, Identity original) throws IOException {
         Path marker = directory.resolve(SegmentClassicRootBindings.FILE_NAME);
         if (leaf(marker) != null || !original.equals(directoryIdentity(directory))) {
             throw new IOException("Missing Classic guard requires an unchanged, unmarked root: " + marker);
@@ -331,10 +346,20 @@ final class SegmentClassicHandoffMaterials {
         return parsed;
     }
 
-    /** The same preparation owner calls this after its second cold read, before publishing input association. */
-    synchronized void recheckClassicGuards() throws IOException {
+    /** Recheck the original files and observed Classic guards before advancing the bound preparation. */
+    synchronized void recheckProtection() throws IOException {
         parsed();
+        recheckFiles();
         checkClassicGuards(allMaterialPaths());
+    }
+
+    synchronized Identity protectedMember(Path root) throws IOException {
+        var before = directoryIdentity(root);
+        paths.parents(root);
+        if (!before.equals(directoryIdentity(root))) {
+            throw new IOException("Handoff member or its path protection changed: " + root);
+        }
+        return before;
     }
 
     /** Outer native/Unix checks and all actual users must terminate before releasing this child. */

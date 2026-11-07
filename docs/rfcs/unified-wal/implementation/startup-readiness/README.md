@@ -714,6 +714,16 @@ supervisor文件名按clusterId、原cluster birth和Bookie固定，绑定UUID�
 
 此项覆盖包内的签名、原生来源与本地封口核验。后续在同一冷重开路径增加了[既有 Classic claim 清单核验](../local-storage/README.md#离线-enabled-的既有-classic-claim-核验)。完整受保护 owner、Arena 组合、实时 Unix 采用和批准 Linux 运行继续待验收。
 
+## Classic 交接路径的实时 ACL 复核
+
+2026-11-07，基线 `cc403f8b42`。交接材料读取器、发布器和 launcher 复用原 JNI 的 ACL presence 查询。文件及其可信父链在查询前后比对实际 Unix 身份。检测到附加 ACL、路径变化或查询错误时拒绝。保留既有规范路径、材料单链接、可信 UID、POSIX mode 和 sticky 父目录约束。
+
+读取器保留 supervisor guard 及 proof、policy、retirement intent、AES 文件的原身份和父链，在准备阶段发布输入关联前及后续导入、恢复和封口复核时重查。包内 preparation 对签名的 Classic、control 和 Arena 根及其父链查询 ACL，对已观察的 Classic `current` 与 guard 也重查。检测到变化时，原 owner 仍负责持有并排空 supervisor guard 和实际 I/O。
+
+在 macOS 上用实际附加 ACL 保留相同 POSIX mode。父源码错误接受 AES 文件，并在 supervisor guard 或 Classic `current` 的权限变化后完成导入。修复后三项通过，签名 Arena 根也在绑定前拒绝。原生 ACL 4 项和服务端 99 项定向回归零失败、错误或跳过。初次 Checkstyle 发现测试 import 排序，修正后 Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-handoff-live-acl-evidence-cc403f8b`。
+
+此阶段检查实时路径保护。完整 Unix 采用仍需专用旧 UID 的其他进程与已打开 fd 排除、全部既有数据权限和凭据验证，以及批准 Linux 上的实际交接。公开启动装配继续待完成。
+
 ## 固定交接的原子不覆盖改名
 
 2026-10-31在父源码`facda20fcc9ef6ce31202fee1ddcdc02a1d53648`上，接续规划裁决，为固定retirement/proof发布增加既有native-io的窄renameNoReplace依赖。NativeIO新增默认拒绝，旧方法集合的Java实现无需增加实现即可明确拒绝新能力；NativeIOImpl/NativeIOJni及原Rust库增加一次原子改名。Linux走libc架构常量与syscall(RENAME_NOREPLACE)，不直接链接较新的glibc renameat2符号；macOS走renamex_np(RENAME_EXCL)。不增加通用flags、I/O后端、客户端线程或自动重试，不复制/删除源、fsync或打开业务fd；只有原生明确返回0才成功，其余保留真实errno或明确报能力不可用。旧库缺符号/装载失败不回退到Java move或hardlink。JNI直接读取UTF-16并严格转换，NUL、null或未配对surrogate拒绝，不经lossy转换改名另一路径；有效非BMP/非ASCII路径保持。

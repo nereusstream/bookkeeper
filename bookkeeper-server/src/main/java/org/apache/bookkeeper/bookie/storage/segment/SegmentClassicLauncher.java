@@ -451,13 +451,6 @@ public final class SegmentClassicLauncher {
                 || !supervisorParents.equals(supervisorPaths.parents(guardPath))) {
             throw new IOException("Original supervisor guard or parent chain changed");
         }
-        for (Path path = guardPath; path != null; path = path.getParent()) {
-            var before = SegmentClassicHandoffPaths.fileIdentity(path);
-            if (new NativeIOImpl().hasExtendedAcl(path.toString())
-                    || !before.equals(SegmentClassicHandoffPaths.fileIdentity(path))) {
-                throw new IOException("Supervisor path ACL is unsupported or its identity changed");
-            }
-        }
     }
 
     private void requireNotRetired() throws IOException {

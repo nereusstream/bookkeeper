@@ -26,6 +26,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -81,6 +82,7 @@ import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.test.ZooKeeperUtil;
 import org.apache.bookkeeper.versioning.Version;
+import org.apache.commons.lang3.SystemUtils;
 import org.apache.zookeeper.AsyncCallback.DataCallback;
 import org.apache.zookeeper.AsyncCallback.MultiCallback;
 import org.apache.zookeeper.CreateMode;
@@ -129,6 +131,23 @@ public class SegmentClassicHandoffMaterialsTest {
     private static Path directory(Path path) throws IOException {
         return Files.createDirectory(path, PosixFilePermissions.asFileAttribute(
                 PosixFilePermissions.fromString("rwx------")));
+    }
+
+    private static void addMacAcl(Path path, String entry) throws Exception {
+        var mode = Files.getPosixFilePermissions(path);
+        var command = new ProcessBuilder("/bin/chmod", "+a", entry, path.toString())
+                .redirectErrorStream(true).start();
+        try (var output = command.getInputStream()) {
+            assertTrue(command.waitFor(5, TimeUnit.SECONDS));
+            assertEquals(new String(output.readAllBytes(), StandardCharsets.UTF_8), 0, command.exitValue());
+        } finally {
+            if (command.isAlive()) {
+                command.destroyForcibly();
+                assertTrue(command.waitFor(5, TimeUnit.SECONDS));
+            }
+            command.getOutputStream().close();
+        }
+        assertEquals(mode, Files.getPosixFilePermissions(path));
     }
 
     @Before
@@ -504,6 +523,72 @@ public class SegmentClassicHandoffMaterialsTest {
             assertTrue(loop.awaitTermination(Duration.ofSeconds(5)));
             assertNull(loop.failure());
         }
+    }
+
+    @Test(timeout = 30000)
+    public void privateModeDoesNotHideAnExtendedAclOnTheAesKey() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_MAC_OSX);
+        addMacAcl(references.aesKey(), "everyone allow read");
+        var materials = new SegmentClassicHandoffMaterials(references, expected, manifest);
+        try {
+            var failure = assertThrows(IOException.class, materials::initialize);
+            assertTrue(failure.getMessage(), failure.getMessage().contains("ACL"));
+            assertThrows(IOException.class, materials::parsed);
+        } finally {
+            assertTrue(materials.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void preparedImportRechecksAnExtendedAclAddedToTheSupervisorGuard() throws Exception {
+        rejectExtendedAclBeforePreparedImport(true);
+    }
+
+    @Test(timeout = 30000)
+    public void preparedImportRechecksAnExtendedAclAddedToAClassicCurrentDirectory() throws Exception {
+        rejectExtendedAclBeforePreparedImport(false);
+    }
+
+    @Test(timeout = 30000)
+    public void preparationRejectsAnExtendedAclOnTheSignedArenaRoot() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_MAC_OSX);
+        var scope = preparedScope(16);
+        addMacAcl(manifest.arenas().get(0).directory(), "everyone allow delete_child");
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            var failure = assertThrows(IOException.class, preparation::initialize);
+            assertTrue(failure.getMessage(), failure.getMessage().contains("ACL"));
+            assertFalse(preparation.inputsBound());
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    private void rejectExtendedAclBeforePreparedImport(boolean supervisor) throws Exception {
+        assumeTrue(SystemUtils.IS_OS_MAC_OSX);
+        var scope = preparedScope(16);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                Path current = manifest.classicRoots().get(1).directory().resolve("current");
+                addMacAcl(supervisor ? guardPath : current,
+                        supervisor ? "everyone allow read" : "everyone allow delete_child");
+                var log = control.log();
+                withClaimDriver(log, driver -> {
+                    var failure = assertThrows(IOException.class,
+                            () -> preparation.importPrepared(roots, arenas, control, driver));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains("ACL"));
+                    assertEquals(-1, log.unsealedBootstrapCut());
+                    assertEquals(0, io.writes);
+                });
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                .observation().orElseThrow());
     }
 
     @Test(timeout = 30000)

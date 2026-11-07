@@ -25,6 +25,7 @@ import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 
 /** Shared native path checks for the fixed handoff reader and publisher. Not complete Unix/ACL authority. */
 final class SegmentClassicHandoffPaths {
@@ -38,6 +39,7 @@ final class SegmentClassicHandoffPaths {
     private final long oldUid;
     private final long targetUid;
     private final long materialOwnerUid;
+    private final NativeIOImpl nativeIo = new NativeIOImpl();
 
     SegmentClassicHandoffPaths(long oldUid, long targetUid, long materialOwnerUid) {
         this.oldUid = oldUid;
@@ -46,7 +48,7 @@ final class SegmentClassicHandoffPaths {
     }
 
     Identity privateFile(Path path, int minimum, int maximum) throws IOException {
-        Identity identity = identity(path);
+        Identity identity = protectedIdentity(path);
         if (identity.directory() || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
                 || identity.links() != 1 || (identity.mode() & 077) != 0 || (identity.mode() & 0400) == 0
                 || !trustedOwner(identity.uid()) || identity.size() < minimum || identity.size() > maximum) {
@@ -56,7 +58,7 @@ final class SegmentClassicHandoffPaths {
     }
 
     void requireDirectory(Path path) throws IOException {
-        Identity identity = identity(path);
+        Identity identity = protectedIdentity(path);
         if (!identity.directory() || !trustedOwner(identity.uid()) || (identity.mode() & 077) != 0) {
             throw new IOException("Handoff supervisor directory must be private to its trusted owner");
         }
@@ -65,13 +67,13 @@ final class SegmentClassicHandoffPaths {
 
     List<Identity> parents(Path file) throws IOException {
         var identities = new ArrayList<Identity>();
-        Identity child = Files.exists(file, LinkOption.NOFOLLOW_LINKS) ? identity(file) : null;
+        Identity child = protectedIdentity(file);
         for (Path parent = file.getParent(); parent != null; parent = parent.getParent()) {
-            Identity identity = identity(parent);
+            Identity identity = protectedIdentity(parent);
             if (!identity.directory() || !trustedOwner(identity.uid())) {
                 throw new IOException("Handoff parent chain is not an existing trusted directory");
             }
-            if ((identity.mode() & 022) != 0 && ((identity.mode() & 01000) == 0 || child == null
+            if ((identity.mode() & 022) != 0 && ((identity.mode() & 01000) == 0
                     || child.uid() == oldUid || identity.uid() == oldUid)) {
                 throw new IOException("Handoff parent permits replacing the protected path");
             }
@@ -81,8 +83,15 @@ final class SegmentClassicHandoffPaths {
         return List.copyOf(identities);
     }
 
-    Identity identity(Path path) throws IOException {
-        return fileIdentity(path);
+    Identity protectedIdentity(Path path) throws IOException {
+        Identity before = fileIdentity(path);
+        if (nativeIo.hasExtendedAcl(path.toString())) {
+            throw new IOException("Extended ACL on a protected Classic handoff path: " + path);
+        }
+        if (!before.equals(fileIdentity(path))) {
+            throw new IOException("Classic handoff path changed during its ACL query: " + path);
+        }
+        return before;
     }
 
     static Identity fileIdentity(Path path) throws IOException {

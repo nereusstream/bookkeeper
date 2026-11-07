@@ -136,7 +136,7 @@ final class SegmentClassicHandoffPublication {
             if (guardIdentity.uid() != access.targetUid()) {
                 throw new IOException("The pre-owned supervisor guard must belong to the target identity");
             }
-            directory = paths.identity(references.directory()).parent();
+            directory = paths.protectedIdentity(references.directory()).parent();
             parents = paths.parents(references.directory());
             initialized = true;
             check();
@@ -362,7 +362,7 @@ final class SegmentClassicHandoffPublication {
         }
         files.requireHealthy();
         guard.requireHeld(guardPath);
-        if (!directory.equals(paths.identity(references.directory()).parent())
+        if (!directory.equals(paths.protectedIdentity(references.directory()).parent())
                 || !parents.equals(paths.parents(references.directory()))
                 || !guardIdentity.equals(paths.privateFile(guardPath, 0, SegmentClassicHandoff.MAX_BYTES))) {
             throw new IOException("Protected publication directory, parent chain or supervisor identity changed");
