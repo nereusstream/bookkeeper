@@ -2447,4 +2447,14 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 真实独立 index、双 Journal 和 ZooKeeper 夹具验证 `.rloc` 保留原 inode 恢复、重放后索引偏移对应的完整 entry 字节和实际 `lastMark`。导入后引入无 claim 的有效 `.rloc` 或带 master key 的 Journal，验证拒绝发生在改名或建立新 index 前。反向验证仅临时绕过 claim 查询，实际观察到两个用例都未收到预期拒绝。恢复正式源码后验证了导入后 applied cut 变化时的拒绝。最终十二类 193 项回归、Spotless 和 Checkstyle 通过。首轮测试编译缺旧无参入口的诊断、三项聚焦与反向验证分别归档。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-guarded-recovery-evidence-afbc65fd`。
 
-当前交付离线写入门控与实际恢复排空。成功结果还需接入原 driver 的 `BOOTSTRAP_COMPLETE`。新建目录项的掉电耐久、公开资源装配、实时 Unix 采用和批准 Linux 验收继续待完成。
+当前交付离线写入门控与实际恢复排空。目录项的持久顺序见下节。成功结果还需接入原 driver 的 `BOOTSTRAP_COMPLETE`。
+
+## PREPARED 恢复的目录同步与持久 lastMark
+
+2026-11-07，基线 `0fdf635431`。离线恢复的轮转 checkpoint 仍在原 SyncThread 刷 entry log，最终 mark 由持有 Classic 根的离线 Bookie 关闭阶段写入。完整 V6 重放成功后，等待 SyncThread、索引及 entry log 的实际排空。索引关闭会完整写入并 force 仅含 master key 等元数据的 V1 header。随后从最内层逐级同步实际索引目录，并同步各 entry-log current 目录。
+
+上述步骤成功后，各 Journal 才写入自己的 `lastMark.N`。完整的 16 字节写入、文件 force、首次实际关闭和所属目录 force 依次完成，之后才更新内存中的持久 cut。数据目录同步失败时不开始写 mark。mark 所属目录同步失败时，原恢复返回失败，关闭只处理已经冻结的 mark 和原资源。重放失败后关闭也不推进 mark。
+
+真实 ZooKeeper、双 Journal 和独立 index 的回归从新索引读回只有 master key 的 ledger，并注入实际索引目录和 mark 目录的 force 失败。父源码缺失 key-only 索引，两个同步故障用例均误报恢复成功。修复后三项通过，13 类 205 项定向回归零失败、错误和跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-directory-durability-evidence-0fdf6354`。
+
+首次 `BOOTSTRAP_COMPLETE` 仍须通过原控制 driver 接入这一持久边界。实际掉电恢复、公开资源装配、实时 Unix 采用及批准 Linux 验收继续待完成。

@@ -47,6 +47,7 @@ class FileInfoBackingCache {
     private final Object freshCloseLock = new Object();
     private final Condition freshProgress = lock.writeLock().newCondition();
     private boolean freshClosing;
+    private boolean forceOnClose;
     private int freshLoads;
     private int freshRetirements;
     private Throwable freshOperationFailure;
@@ -138,7 +139,7 @@ class FileInfoBackingCache {
             lock.writeLock().lock();
             try {
                 retire = fileInfo.markDead();
-                force = !freshClosing;
+                force = !freshClosing || forceOnClose;
                 if (retire) {
                     Thread thread = Thread.currentThread();
                     freshRetirementThreads.put(thread, freshRetirementThreads.getOrDefault(thread, 0) + 1);
@@ -254,11 +255,12 @@ class FileInfoBackingCache {
         return file;
     }
 
-    void beginClosingForFresh() {
+    void beginClosingForFresh(boolean force) {
         List<CachedFileInfo> snapshot = new ArrayList<>();
         lock.writeLock().lock();
         try {
             freshClosing = true;
+            forceOnClose = force;
             fileInfos.forEach((id, file) -> snapshot.add(file));
         } finally {
             lock.writeLock().unlock();
@@ -303,11 +305,15 @@ class FileInfoBackingCache {
 
     /** Called after both front caches have released their own references. */
     FreshDrainResult closeForFresh() throws InterruptedException {
+        return closeForFresh(false);
+    }
+
+    FreshDrainResult closeForFresh(boolean force) throws InterruptedException {
         if (!freshLifecycle || isCurrentRetirementThread()) {
             throw new IllegalStateException("Not a fresh backing cache");
         }
         synchronized (freshCloseLock) {
-            beginClosingForFresh();
+            beginClosingForFresh(force);
             List<CachedFileInfo> snapshot = new ArrayList<>();
             lock.writeLock().lockInterruptibly();
             try {
@@ -325,7 +331,7 @@ class FileInfoBackingCache {
             Throwable flushFailure = null;
             Throwable closeFailure = null;
             for (CachedFileInfo file : snapshot) {
-                FileInfo.FreshCloseResult result = file.closeForFresh(false);
+                FileInfo.FreshCloseResult result = file.closeForFresh(force);
                 if (operationFailure == null) {
                     operationFailure = result.operationFailure();
                 }

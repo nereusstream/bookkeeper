@@ -97,6 +97,7 @@ public class Journal implements CheckpointSource {
         final Map<Thread, Integer> checkpointThreads = new IdentityHashMap<>();
         List<File> markDirectories;
         LastLogMark pendingMark;
+        ClassicHistoryFiles pendingMarkDirectoryOwner;
         int preparedMarkDirectories;
         boolean initAttempted;
         boolean initializing;
@@ -133,15 +134,17 @@ public class Journal implements CheckpointSource {
         final Path path;
         final ByteBuffer bytes;
         final boolean existingOwned;
+        final ClassicHistoryFiles directoryOwner;
         FileChannel channel;
         boolean forced;
         boolean closeAttempted;
         Throwable closeFailure;
 
-        FreshMarkWrite(Path path, ByteBuffer bytes, boolean existingOwned) {
+        FreshMarkWrite(Path path, ByteBuffer bytes, boolean existingOwned, ClassicHistoryFiles directoryOwner) {
             this.path = path;
             this.bytes = bytes.asReadOnlyBuffer();
             this.existingOwned = existingOwned;
+            this.directoryOwner = directoryOwner;
         }
 
         void complete(FreshState state) throws IOException {
@@ -171,6 +174,9 @@ public class Journal implements CheckpointSource {
                 forced = true;
             }
             close();
+            if (directoryOwner != null) {
+                directoryOwner.syncDirectory(path.getParent());
+            }
         }
 
         private void close() throws IOException {
@@ -1237,7 +1243,7 @@ public class Journal implements CheckpointSource {
     @Override
     public void checkpointComplete(Checkpoint checkpoint, boolean compact) throws IOException {
         if (fresh != null) {
-            checkpointCompleteForFresh(checkpoint, compact);
+            checkpointCompleteForFresh(checkpoint, compact, null);
             return;
         }
         if (!(checkpoint instanceof LogMarkCheckpoint)) {
@@ -1288,7 +1294,15 @@ public class Journal implements CheckpointSource {
         }
     }
 
-    private void checkpointCompleteForFresh(Checkpoint checkpoint, boolean compact) throws IOException {
+    void checkpointForClassicBootstrap(ClassicHistoryFiles directories) throws IOException {
+        if (history == null) {
+            throw new IllegalStateException("Offline bootstrap requires a historical Journal");
+        }
+        checkpointCompleteForFresh(newCheckpoint(), false, directories);
+    }
+
+    private void checkpointCompleteForFresh(Checkpoint checkpoint, boolean compact,
+            ClassicHistoryFiles directories) throws IOException {
         synchronized (fresh.gate) {
             if (!fresh.initialized || fresh.checkpointClosing) {
                 throw new IOException("Fresh Journal checkpoint entry is closed");
@@ -1313,6 +1327,7 @@ public class Journal implements CheckpointSource {
                 finishFreshMark();
                 if (selected.mark.getCurMark().compare(lastPersistedMark) > 0) {
                     fresh.pendingMark = selected.mark.markLog();
+                    fresh.pendingMarkDirectoryOwner = directories;
                     fresh.preparedMarkDirectories = 0;
                     finishFreshMark();
                 }
@@ -1346,7 +1361,8 @@ public class Journal implements CheckpointSource {
         bytes.rewind();
         while (fresh.preparedMarkDirectories < fresh.markDirectories.size()) {
             Path path = fresh.markDirectories.get(fresh.preparedMarkDirectories).toPath().resolve(lastMarkFileName);
-            FreshMarkWrite resource = new FreshMarkWrite(path, bytes, fresh.markFiles.contains(path));
+            FreshMarkWrite resource = new FreshMarkWrite(path, bytes, fresh.markFiles.contains(path),
+                    fresh.pendingMarkDirectoryOwner);
             fresh.markWrites.add(resource);
             fresh.preparedMarkDirectories++;
         }
@@ -1367,6 +1383,7 @@ public class Journal implements CheckpointSource {
         lastPersistedMark.setLogMark(fresh.pendingMark.getCurMark().getLogFileId(),
                 fresh.pendingMark.getCurMark().getLogFileOffset());
         fresh.pendingMark = null;
+        fresh.pendingMarkDirectoryOwner = null;
         fresh.preparedMarkDirectories = 0;
     }
 

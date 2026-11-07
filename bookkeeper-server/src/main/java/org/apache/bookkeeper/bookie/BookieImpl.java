@@ -1410,6 +1410,8 @@ public class BookieImpl implements Bookie {
         volatile Throwable operationFailure;
         volatile Throwable releaseFailure;
         volatile BookieStateManager historicalState;
+        ClassicHistoryFiles bootstrapDirectories;
+        boolean bootstrapReplayComplete;
         boolean initialized;
         volatile boolean drained;
         boolean running;
@@ -1527,8 +1529,10 @@ public class BookieImpl implements Bookie {
     void recoverForClassicBootstrap(ClassicBootstrapStorage owner, ClassicHistoryFiles.LedgerVisitor claims)
             throws IOException, InterruptedException, BookieException {
         owner.requireRecoveryBookie(this);
+        fresh.bootstrapDirectories = new ClassicHistoryFiles();
         initializeOwnedClassic(null, java.util.Objects.requireNonNull(claims, "claims"));
         readJournal(claims);
+        fresh.bootstrapReplayComplete = true;
     }
 
     private void initializeOwnedClassic(ClassicGcMetadata metadata, ClassicHistoryFiles.LedgerVisitor claims)
@@ -1618,7 +1622,9 @@ public class BookieImpl implements Bookie {
                 triggerBookieShutdown(ExitCode.BOOKIE_EXCEPTION);
             }
         };
-        syncThread = SyncThread.forFresh(conf, listener, ledgerStorage, checkpoints, statsLogger);
+        // Offline replay still flushes rotated entry logs. Only its closing owner can advance lastMark.
+        syncThread = SyncThread.forFresh(conf, listener, ledgerStorage,
+                claims == null ? checkpoints : CheckpointSource.DEFAULT, statsLogger);
         fresh.owner.checkStarting();
         ledgerStorage.setStateManager(stateManager);
         ledgerStorage.setCheckpointer(syncThread);
@@ -2103,6 +2109,14 @@ public class BookieImpl implements Bookie {
                     var storage = ((InterleavedLedgerStorage) ledgerStorage).closeForFresh();
                     rememberFreshOperationFailure(storage.initializationFailure());
                     rememberFreshOperationFailure(storage.operationFailure());
+                    if (fresh.bootstrapDirectories != null) {
+                        if (storage.index() != null) {
+                            rememberFreshOperationFailure(storage.index().operationFailure());
+                        }
+                        if (storage.entryLogger() != null) {
+                            rememberFreshOperationFailure(storage.entryLogger().operationFailure());
+                        }
+                    }
                     if (!storage.drained()) {
                         Throwable failure = storage.finalFlushFailure() != null ? storage.finalFlushFailure()
                                 : storage.gcFailure() != null ? storage.gcFailure()
@@ -2111,6 +2125,24 @@ public class BookieImpl implements Bookie {
                                 : storage.entryLogger() != null ? storage.entryLogger().closeFailure() : null;
                         return new FreshDrainResult(false, failure);
                     }
+                }
+                var directories = fresh.bootstrapDirectories;
+                if (directories != null && fresh.bootstrapReplayComplete && fresh.operationFailure == null
+                        && quiesced && closeFailure == null) {
+                    fresh.owner.checkStarting();
+                    // Persist names from the closed storage graph before any Journal publishes its new cut.
+                    for (File root : indexDirsManager.getAllLedgerDirs()) {
+                        IndexPersistenceMgr.syncClassicIndexDirectories(directories, root.toPath());
+                    }
+                    if (ledgerDirsManager != indexDirsManager) {
+                        for (File root : ledgerDirsManager.getAllLedgerDirs()) {
+                            directories.syncDirectory(root.toPath());
+                        }
+                    }
+                    for (Journal journal : journals) {
+                        journal.checkpointForClassicBootstrap(directories);
+                    }
+                    fresh.bootstrapReplayComplete = false;
                 }
                 for (Journal journal : journals) {
                     var result = journal.closeForFresh();
@@ -2122,6 +2154,13 @@ public class BookieImpl implements Bookie {
                     }
                     if (closeFailure == null) {
                         closeFailure = result.closeFailure() != null ? result.closeFailure() : result.flushFailure();
+                    }
+                }
+                if (directories != null) {
+                    var result = directories.closeAndDrain();
+                    quiesced &= result.drained();
+                    if (closeFailure == null) {
+                        closeFailure = result.closeFailure();
                     }
                 }
                 dataDrained = quiesced && closeFailure == null && fresh.releaseFailure == null

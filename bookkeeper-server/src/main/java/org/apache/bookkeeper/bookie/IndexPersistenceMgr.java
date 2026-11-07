@@ -102,6 +102,7 @@ public class IndexPersistenceMgr {
     private boolean freshClosing;
     private int freshGets;
     private Throwable freshInitializationFailure;
+    private boolean bootstrapRecovery;
     private final Map<Thread, Integer> freshGetThreads = new IdentityHashMap<>();
 
     public IndexPersistenceMgr(int pageSize,
@@ -438,6 +439,7 @@ public class IndexPersistenceMgr {
             freshInitAttempted = true;
             freshInitializing = true;
             freshInitializingThread = Thread.currentThread();
+            bootstrapRecovery = claims != null;
         }
         try {
             if (history == null) {
@@ -514,6 +516,25 @@ public class IndexPersistenceMgr {
             throw new IOException("Historical index directory has an unresolved link: " + path);
         }
         return attributes.isDirectory();
+    }
+
+    static void syncClassicIndexDirectories(ClassicHistoryFiles files, Path current) throws IOException {
+        try (var grandparents = files.openDirectory(current)) {
+            for (Path grandparent : grandparents.listing) {
+                if (!historicalDirectory(grandparent)) {
+                    continue;
+                }
+                try (var parents = files.openDirectory(grandparent)) {
+                    for (Path parent : parents.listing) {
+                        if (historicalDirectory(parent)) {
+                            files.syncDirectory(parent);
+                        }
+                    }
+                }
+                files.syncDirectory(grandparent);
+            }
+        }
+        files.syncDirectory(current);
     }
 
     private static void scanHistoricalIndexes(List<File> roots, ClassicHistoryFiles history, boolean recover,
@@ -685,12 +706,12 @@ public class IndexPersistenceMgr {
 
     FileInfoBackingCache.FreshDrainResult closeForFresh() throws InterruptedException {
         beginClosingForFresh();
-        fileInfoBackingCache.beginClosingForFresh();
+        fileInfoBackingCache.beginClosingForFresh(bootstrapRecovery);
         writeFileInfoCache.invalidateAll();
         readFileInfoCache.invalidateAll();
         writeFileInfoCache.cleanUp();
         readFileInfoCache.cleanUp();
-        var result = fileInfoBackingCache.closeForFresh();
+        var result = fileInfoBackingCache.closeForFresh(bootstrapRecovery);
         var scans = history == null ? null : history.closeAndDrain();
         return new FileInfoBackingCache.FreshDrainResult(result.drained() && (scans == null || scans.drained()),
                 freshInitializationFailure != null ? freshInitializationFailure : result.operationFailure(),

@@ -26,7 +26,9 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.spy;
 
 import com.sun.security.auth.module.UnixSystem;
 import java.io.IOException;
@@ -511,6 +513,9 @@ public class SegmentClassicHandoffMaterialsTest {
         Object inode = Files.getAttribute(relocated, "unix:ino");
         Path journal = manifest.classicRoots().get(3).directory().resolve("current/8.txn");
         byte[] entry = ClassicClaimTestHistory.writeJournalWithEntry(journal, 19);
+        Path keyOnlyJournal = journal.resolveSibling("9.txn");
+        byte[] key = {7, 8, 9};
+        ClassicClaimTestHistory.writeJournalKey(keyOnlyJournal, 276, key);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
             preparation.initialize();
@@ -531,11 +536,66 @@ public class SegmentClassicHandoffMaterialsTest {
         Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
         Path replayedIndex = index.resolve(IndexPersistenceMgr.getLedgerName(19));
         assertArrayEquals(entry, ClassicClaimTestHistory.readFirstEntry(replayedIndex, ledger));
+        assertArrayEquals(key, ClassicClaimTestHistory.readMasterKey(index.resolve(
+                IndexPersistenceMgr.getLedgerName(276))));
         var mark = ByteBuffer.wrap(Files.readAllBytes(ledger.resolve("lastMark.0")));
-        assertEquals(8, mark.getLong());
-        assertEquals(Files.size(journal), mark.getLong());
+        assertEquals(9, mark.getLong());
+        assertEquals(Files.size(keyOnlyJournal), mark.getLong());
         assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
                 .observation().orElseThrow());
+    }
+
+    @Test(timeout = 30000)
+    public void preparedRecoveryDoesNotWriteLastMarkAfterIndexDirectoryForceFailure() throws Exception {
+        preparedRecoveryFailsOnDirectoryForce(false);
+    }
+
+    @Test(timeout = 30000)
+    public void preparedRecoveryRejectsLastMarkDirectoryForceFailure() throws Exception {
+        preparedRecoveryFailsOnDirectoryForce(true);
+    }
+
+    private void preparedRecoveryFailsOnDirectoryForce(boolean markDirectory) throws Exception {
+        var scope = preparedScope(16);
+        Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
+        Path index = manifest.classicRoots().get(2).directory().resolve("current");
+        Path replayedIndex = index.resolve(IndexPersistenceMgr.getLedgerName(276));
+        Path mark = ledger.resolve("lastMark.0");
+        Path journal = manifest.classicRoots().get(3).directory().resolve("current/8.txn");
+        byte[] entry = ClassicClaimTestHistory.writeJournalWithEntry(journal, 276);
+        Path failedDirectory = markDirectory ? ledger : replayedIndex.getParent();
+        var failure = new IOException("Classic directory force failed");
+        var failedChannel = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                withClaimDriver(control.log(), driver -> preparation.importPrepared(roots, arenas, control, driver));
+                try (var ignored = mockStatic(FileChannel.class, invocation -> {
+                    Object actual = invocation.callRealMethod();
+                    if (invocation.getMethod().getName().equals("open")
+                            && invocation.getMethod().getParameterCount() == 2
+                            && failedDirectory.equals(invocation.getArgument(0)) && Files.exists(mark) == markDirectory
+                            && failedChannel.get() == null) {
+                        var channel = spy(new SegmentDataFileLockTest.FaultChannel((FileChannel) actual));
+                        doThrow(failure).when(channel).force(true);
+                        failedChannel.set(channel);
+                        return channel;
+                    }
+                    return actual;
+                })) {
+                    assertSame(failure, assertThrows(IOException.class, preparation::recoverPrepared));
+                }
+                assertFalse(failedChannel.get().actual.isOpen());
+                assertEquals(markDirectory, Files.exists(mark));
+                assertArrayEquals(entry, ClassicClaimTestHistory.readFirstEntry(replayedIndex, ledger));
+                assertTrue(control.log().bootstrapSeal().isEmpty());
+                assertTrue(preparation.closeAndDrain().drained());
+                assertEquals(markDirectory, Files.exists(mark));
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
     }
 
     @Test(timeout = 30000)
@@ -575,6 +635,7 @@ public class SegmentClassicHandoffMaterialsTest {
         var scope = preparedScope(16);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         Path index = manifest.classicRoots().get(2).directory().resolve("current");
+        Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
         Path unclaimed = index.resolve(IndexPersistenceMgr.getLedgerName(19));
         try {
             preparation.initialize();
@@ -598,6 +659,7 @@ public class SegmentClassicHandoffMaterialsTest {
                 assertTrue(control.log().bootstrapSeal().isEmpty());
                 assertTrue(preparation.closeAndDrain().drained());
                 assertFalse(Files.exists(unclaimed));
+                assertFalse(Files.exists(ledger.resolve("lastMark.0")));
             });
         } finally {
             assertTrue(preparation.closeAndDrain().drained());

@@ -87,6 +87,22 @@ public final class ClassicClaimTestHistory {
         return entry;
     }
 
+    public static void writeJournalKey(Path file, long ledger, byte[] key) throws IOException {
+        var bytes = journalImage(4 + 20 + key.length);
+        bytes.putInt(20 + key.length).putLong(ledger).putLong(BookieImpl.METAENTRY_ID_LEDGER_KEY)
+                .putInt(key.length).put(key);
+        Files.write(file, bytes.array());
+    }
+
+    public static byte[] readMasterKey(Path index) throws IOException {
+        var info = FileInfo.forClassicHistory(index.toFile(), null, 1);
+        try {
+            return info.getMasterKey();
+        } finally {
+            assertTrue(info.closeForFresh(false).drained());
+        }
+    }
+
     public static byte[] readFirstEntry(Path index, Path ledgers) throws IOException {
         long location = ByteBuffer.wrap(Files.readAllBytes(index)).getLong((int) FileInfo.START_OF_DATA);
         var log = ByteBuffer.wrap(Files.readAllBytes(ledgers.resolve(Long.toHexString(location >>> 32) + ".log")));
