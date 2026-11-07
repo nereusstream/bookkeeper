@@ -83,8 +83,8 @@ final class SegmentControlRotation {
 
     static Root publication(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner, int slot,
             SegmentOwnedFiles files) throws IOException {
-        try (FileChannel file = SegmentOwnedFiles.open(files, SegmentControlCheckpoint.superblock(config, slot),
-                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+        try (FileChannel file = SegmentOwnedFiles.openRegularReadOnly(
+                files, SegmentControlCheckpoint.superblock(config, slot))) {
             ByteBuffer page = ByteBuffer.allocate(4096);
             SegmentFileIo.readFully(file, page, publicationOffset(owner));
             // The shared codec validates the envelope, selected reference and owner before this call.

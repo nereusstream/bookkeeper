@@ -23,9 +23,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.LinkOption;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -55,8 +53,7 @@ public final class SegmentStorageInspector {
                 SegmentDataFileLock bookie = SegmentDataFileLock.openExistingControl(
                         scope.resolve("bookie-control.lock"))) {
             ByteBuffer header = ByteBuffer.allocate(4096);
-            try (FileChannel file = FileChannel.open(scope.resolve("data-0"),
-                    StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            try (FileChannel file = SegmentOwnedFiles.openRegularReadOnly(null, scope.resolve("data-0"))) {
                 SegmentFileIo.readFully(file, header, 0);
             }
             header.clear();

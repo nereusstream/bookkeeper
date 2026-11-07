@@ -16,6 +16,8 @@
 
 步骤 15 的物理终结回执从核验到原生提交、读回共用一个 store deadline。跨期限的实际回调场景保留未知，由新一轮确认同一回执。真实反例、16 项回归及样式检查已归档。详见 [删除物理终结记录与持久接续](profile-wire/README.md#删除物理终结记录与持久接续)。
 
+步骤 16 的只读存储诊断在必需 DATA 和日志输入为 FIFO 时明确退出，非普通文件 checkpoint 仍可沿有效备份回退。真实子 JVM 反例、61 项定向回归和样式检查已归档。详见 [只读磁盘状态诊断](local-storage/README.md#只读磁盘状态诊断)。
+
 步骤 14→15 的组合验证覆盖实际承载 3/3/3 已确认数据的 Bookie JVM 退出。临时注册自然消失后，原 auditor 产生任务，worker 将 CLOSED 账本修复到另一 BookieId/incarnation，保留原 CLOSED 边界并通过公开 SDK 读回。旧目录的原 owned restart 拒绝。后续逻辑删除包含原三个及新目标的确切义务，旧离线 incarnation 的物理终结回执仍缺失。详见 [profile-wire](profile-wire/README.md#已确认-data-的-bookie-jvm-退出后修复与删除)。
 
 步骤 7→12 的服务组合验证覆盖持原目录并完成真实注册、从未发 DATA grant 的 Bookie 子 JVM 异常退出。旧临时注册自然消失后，原 owned service 以同一身份、目录和端点重开，持久应用 action 4 后发布新 episode。旧观察在端点复用时仍拒绝，公开 SDK 经新注册池以 3/3/3 确认首次写入，正常关闭并逐条读回。详见 [profile-wire](profile-wire/README.md#未授权-data-的-bookie-jvm-退出后重新注册)。

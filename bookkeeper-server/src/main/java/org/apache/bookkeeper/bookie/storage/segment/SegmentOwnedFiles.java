@@ -26,9 +26,11 @@ import java.nio.channels.FileLock;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileAttribute;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -73,6 +75,14 @@ final class SegmentOwnedFiles {
                 throw new IOException("Checked file aliases a protected lock: " + path);
             }
         }
+    }
+
+    static FileChannel openRegularReadOnly(SegmentOwnedFiles owner, Path path) throws IOException {
+        // Opening a FIFO for read could block before the caller can inspect its size or header.
+        if (!Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).isRegularFile()) {
+            throw new IOException("Segment input must be an existing regular file: " + path);
+        }
+        return open(owner, path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
     }
 
     static FileChannel open(SegmentOwnedFiles owner, Path path, OpenOption... options) throws IOException {

@@ -177,9 +177,8 @@ final class SegmentControlCheckpoint {
         if (reference.payloadBytes() - maxLogBytes > maxLogBytes) {
             throw new IOException("Control checkpoint exceeds its control-state budget");
         }
-        try (FileChannel file = SegmentOwnedFiles.open(files, path(config, owner, reference.slot()),
-                StandardOpenOption.READ,
-                LinkOption.NOFOLLOW_LINKS)) {
+        try (FileChannel file = SegmentOwnedFiles.openRegularReadOnly(
+                files, path(config, owner, reference.slot()))) {
             if (file.size() != 4224L + reference.payloadBytes()) {
                 throw new IOException("Incomplete or extra Control checkpoint bytes");
             }
@@ -278,8 +277,7 @@ final class SegmentControlCheckpoint {
 
     static Reference publication(IsolatedSegmentConfig config, SegmentControlFormat.Owner owner, int slot,
             SegmentOwnedFiles files) throws IOException {
-        try (FileChannel file = SegmentOwnedFiles.open(files, superblock(config, slot), StandardOpenOption.READ,
-                LinkOption.NOFOLLOW_LINKS)) {
+        try (FileChannel file = SegmentOwnedFiles.openRegularReadOnly(files, superblock(config, slot))) {
             if (file.size() < publicationOffset(owner) + 4096 || file.size() > 12288) {
                 throw new IOException("No complete Control checkpoint publication");
             }

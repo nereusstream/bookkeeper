@@ -600,11 +600,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         identity.requireStoredManifest(config, -4, files);
         Path path = config.directory().resolve("arena-control");
-        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Required Arena control must be an existing regular file");
-        }
-        FileChannel original = SegmentOwnedFiles.open(files, path,
-                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
+        FileChannel original = SegmentOwnedFiles.openRegularReadOnly(files, path);
         // No mutable authority or raw handle escapes; the original owner retains all readers on any failure.
         var observed = new SegmentArenaControlLog(config, identity, maxLogBytes, new SegmentFileIo(),
                 original, null, true, files);
@@ -653,7 +649,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         SegmentArenaControlLog result = null;
         try {
             Path path = config.directory().resolve("arena-control");
-            original = inspectionOnly ? FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
+            original = inspectionOnly ? SegmentOwnedFiles.openRegularReadOnly(null, path)
                     : FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE,
                             LinkOption.NOFOLLOW_LINKS);
             result = new SegmentArenaControlLog(config, identity, maxLogBytes, io, original, writerLock,
@@ -1963,11 +1959,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (rotationRoot != null) {
             Path path = SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA,
                     rotationRoot.generation());
-            if (inspectionFiles != null && !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-                throw new IOException("Required rotated Arena control must be an existing regular file");
-            }
             channel = inspectionOnly
-                    ? SegmentOwnedFiles.open(inspectionFiles, path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
+                    ? SegmentOwnedFiles.openRegularReadOnly(inspectionFiles, path)
                     : SegmentOwnedFiles.open(inspectionFiles, path, StandardOpenOption.READ, StandardOpenOption.WRITE,
                             LinkOption.NOFOLLOW_LINKS);
             ByteBuffer header = ByteBuffer.allocate(4096);
@@ -2237,11 +2230,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private void validateIdentityFile(Path path, SegmentFileHeader identity, int fileId, long expectedSize)
             throws IOException {
-        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
-            throw new IOException("Isolated storage file must be a regular file: " + path);
-        }
-        try (FileChannel input = SegmentOwnedFiles.open(inspectionFiles, path,
-                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+        try (FileChannel input = SegmentOwnedFiles.openRegularReadOnly(inspectionFiles, path)) {
             boolean superblock = fileId == -1 || fileId == -2;
             if ((superblock && (input.size() < 4096 || input.size() > 12288))
                     || (!superblock && expectedSize < 0 && input.size() < 4096)

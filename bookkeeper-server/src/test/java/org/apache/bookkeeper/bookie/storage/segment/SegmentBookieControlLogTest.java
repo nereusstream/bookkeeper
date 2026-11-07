@@ -12584,6 +12584,46 @@ public class SegmentBookieControlLogTest {
         assertInspectionImage(before, config.directory());
     }
 
+    @Test
+    public void storageInspectorRejectsNativeFifosAndCanFallBackToTheOtherCheckpoint() throws Exception {
+        IsolatedSegmentConfig config = config();
+        Path directory = config.directory();
+        runAbruptWriter("normal-clean-close", directory, 0, "SESSION_CLOSED");
+        SegmentControlRotation.Root root;
+        try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            root = arena.rotate();
+        }
+        Path rotated = SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, root.generation());
+        Path latest = SegmentControlCheckpoint.path(config, SegmentControlFormat.Owner.ARENA, root.second().slot());
+        Path saved = temporary.newFolder().toPath().resolve("saved-file");
+        Map<String, byte[]> baseline = inspectionImage(directory);
+        for (Path path : List.of(directory.resolve("data-0"), directory.resolve("arena-control"), rotated, latest)) {
+            Files.move(path, saved);
+            try {
+                var fifo = new ProcessBuilder("/usr/bin/mkfifo", "-m", "600", path.toString()).start();
+                assertTrue(fifo.waitFor(5, TimeUnit.SECONDS));
+                assertEquals(0, fifo.exitValue());
+                Map<String, byte[]> before = inspectionImage(directory);
+                String output = runStorageInspector(directory, 1024 * 1024, path.equals(latest) ? 0 : 1);
+                if (path.equals(latest)) {
+                    var observed = new com.fasterxml.jackson.databind.ObjectMapper().readTree(output.trim());
+                    assertEquals(root.generation(), observed.path("observedArena").path("physicalGeneration")
+                            .asLong());
+                    assertFalse(observed.path("authority").asBoolean(true));
+                } else {
+                    assertTrue(output, output.contains("regular file"));
+                }
+                assertTrue(Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes.class).isOther());
+                assertInspectionImage(before, directory);
+            } finally {
+                Files.deleteIfExists(path);
+                Files.move(saved, path);
+            }
+        }
+        runStorageInspector(directory, 1024 * 1024, 0);
+        assertInspectionImage(baseline, directory);
+    }
+
     private static Map<String, byte[]> inspectionImage(Path directory) throws IOException {
         Map<String, byte[]> image = new TreeMap<>();
         try (var files = Files.walk(directory)) {

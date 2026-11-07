@@ -1130,6 +1130,8 @@ Arena 的原 journal/checkpoint/rotation parser、顺序 apply、坏 image fallb
 
 本轮交付的是离线文件/Arena状态观察入口，不是完整运维验收或backup/restore完成。DATA/Bookie语义诊断、运行中采集、同身份unclean-session接受语义、统一full-bytes、兼容与其余16步仍OPEN，目标active、生产Gate OPEN；Linux NUMA、真实掉电、正式性能/canary未执行，默认OFF/SYSTEM/PARK与disabled能力保持。
 
+2026-11-07，基线 `9eb512eae8`。只读诊断在打开 DATA 身份页、原 Arena journal、选中的轮转 journal 及 checkpoint 前先检查常规文件，并继续使用 `NOFOLLOW_LINKS`。坏 checkpoint 由原回退规则处理。真实 FIFO 替换 `data-0` 时，旧子进程超过 15 秒仍未退出。修复后，同一子进程入口拒绝三个必需文件位置的 FIFO，最新 checkpoint 为 FIFO 时仍能从另一份有效镜像恢复观察。诊断前后原常规文件的完整字节一致，恢复正常文件后可再次成功诊断。此检查在持原排他锁的离线范围内观察路径类型。61 项定向测试与 Spotless、Checkstyle 通过。原日志与源码绑定位于 `/Users/liusinan/.codex/artifacts/unified-wal/storage-inspector-fifo-evidence-9eb512ea`。
+
 [SDK 迟到 DATA 到删除复用及健康重启的原生组合](../profile-wire/README.md#sdk-迟到-data-到删除复用及健康重启的原生组合)：2026-10-23父bf9c813280上，新增一方法串联实际3/3/2 SDK ACK、第三副本force跨越stop、固定P/L普通close、三目标delete/本地FREE、ledger45复用generation2及逐节点健康restart/mTLS点读。最终1 PASS、1172输入匹配、生产Java/TLA未改、style通过；旧Manifest/三target义务保留。仅单Arena顺序复用的有限组合，非crash、多Arena、持久physical receipt/GC或完整16步验收；目标active、生产Gate OPEN，默认OFF/SYSTEM/PARK及disabled不变。
 
 ## Profile 启动恢复扫描的 DATA 字节额度
