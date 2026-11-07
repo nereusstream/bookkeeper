@@ -49,6 +49,7 @@ import java.util.Optional;
 import java.util.PrimitiveIterator.OfLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
@@ -1607,6 +1608,10 @@ public class BookieImpl implements Bookie {
         if (fresh == null || !fresh.initialized) {
             throw new IllegalStateException("Fresh Bookie has not completed initialization");
         }
+        if (fresh.historical) {
+            fresh.owner.checkStarting();
+            awaitInitialFlush(syncThread.requestFlushForFresh());
+        }
         for (Journal journal : journals) {
             fresh.owner.checkStarting();
             journal.start();
@@ -1615,10 +1620,8 @@ public class BookieImpl implements Bookie {
             journal.awaitStartedForFresh();
         }
         fresh.owner.checkStarting();
-        try {
-            syncThread.requestFlush().get();
-        } catch (ExecutionException failed) {
-            throw new IOException("Fresh initial storage flush failed", failed.getCause());
+        if (!fresh.historical) {
+            awaitInitialFlush(syncThread.requestFlush());
         }
         if (conf.isLocalConsistencyCheckOnStartup()) {
             var errors = ledgerStorage.localConsistencyCheck(Optional.empty());
@@ -1634,6 +1637,14 @@ public class BookieImpl implements Bookie {
         stateManager.initState();
         if (conf.isForceReadOnlyBookie()) {
             stateManager.forceToReadOnly();
+        }
+    }
+
+    private static void awaitInitialFlush(Future<?> flush) throws IOException, InterruptedException {
+        try {
+            flush.get();
+        } catch (ExecutionException failed) {
+            throw new IOException("Initial owned Classic storage flush failed", failed.getCause());
         }
     }
 

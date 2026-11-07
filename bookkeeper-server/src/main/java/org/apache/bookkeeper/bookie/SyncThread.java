@@ -279,10 +279,7 @@ class SyncThread implements Checkpointer {
                     return;
                 }
                 if (freshFinalFlush == null) {
-                    freshFinalFlush = executor.submit(() -> {
-                        flushForFresh();
-                        return null;
-                    });
+                    freshFinalFlush = requestFlushForFresh();
                     executor.shutdown();
                 }
                 while (!executor.awaitTermination(5, TimeUnit.MINUTES)) {
@@ -318,6 +315,17 @@ class SyncThread implements Checkpointer {
             Thread.currentThread().interrupt();
             throw interrupted;
         }
+    }
+
+    /** Report the actual flush and checkpoint result to the owned Classic lifecycle. */
+    Future<?> requestFlushForFresh() {
+        if (!freshLifecycle) {
+            throw new IllegalStateException("Strict flush requires the owned Classic SyncThread");
+        }
+        return executor.submit(() -> {
+            flushForFresh();
+            return null;
+        });
     }
 
     private void flushForFresh() throws IOException {

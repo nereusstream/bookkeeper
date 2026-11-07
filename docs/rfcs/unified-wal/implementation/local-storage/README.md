@@ -2361,6 +2361,14 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 已验证的上界覆盖离线 claim 清单与受控历史 replay 的 Journal 文件 ID 工作集。共同 scope 的受保护装配、先 claim 后重放的 gate、严格 flush 与封口、PREPARED 到 ENABLED、运行期 route、整图内存上界及批准 Linux 运行仍待验收。
 
+## 受控历史 Bookie 的启动 flush
+
+2026-11-07，基线 `67850c8dec`。受控历史 Bookie 在实际 replay 完成后，提交一次完整 flush 到原 SyncThread，等待 index 和 entry-log flush、各 Journal 的 lastMark 写入、文件 force 和实际关闭成功，随后才启动写者。replay 期间 entry-log 轮转仍可在原 SyncThread 刷盘和关闭已轮转的日志。该阶段跳过 Journal checkpoint 的 lastMark 推进和裁剪，避免轮转改变分页读取的源目录。
+
+实际 `lastMark` 路径冲突的回归在父源码观察到 checkpoint 失败而启动返回成功。修复后原 I/O 错误进入初始化失败，移除冲突并实际排空后，重启读回原条目。257 个 V6 文件的正向回归同时触发多次 entry-log 轮转，核对启动完成时的最后持久 cut、原 Journal 保留和条目字节。八类 116 项定向回归通过，零失败、错误或跳过。Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-strict-replay-flush-evidence-67850c8d`。
+
+此处验证受控历史 child 的初始化。共同离线 bootstrap 还需接入受保护 claim gate、严格恢复与封口以及 native ENABLED，真实 Linux 和掉电矩阵仍待验收。
+
 ## 离线 bootstrap 的 Classic claim 身份与结果续接
 
 在父 `f563eb2e91` 上，Bookie 控制日志新增包内 `prepareBootstrapClaim`。查询由实际 `classicRoutes` 和 `operations` 共同确认相同 binding、ledger、原命令、首次应用序号和成功结果。旧的显式 UUID 随原结果保留。只有健康、无未决写入或应用、尚未封口且没有冲突的 ledger 才能得到待提交命令。已有 seal 时仍可查询原结果。新的命令由既有 Driver 写入并按序应用，准备入口只返回本地控制数据。

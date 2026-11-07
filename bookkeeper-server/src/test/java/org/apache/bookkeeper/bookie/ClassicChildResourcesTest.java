@@ -51,6 +51,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -154,6 +155,7 @@ public class ClassicChildResourcesTest {
     @Test(timeout = 30000)
     public void historicalBookieReplaysTheMarkedSuffixAcrossBoundedJournalPages() throws Exception {
         try (var f = new Fixture()) {
+            f.conf.setEntryLogSizeLimit(2048);
             Path journal = f.conf.getJournalDirs()[0].toPath().resolve("current");
             Path mark = f.conf.getLedgerDirs()[0].toPath().resolve("current/lastMark");
             int recordSize = Integer.BYTES + 32;
@@ -185,11 +187,16 @@ public class ClassicChildResourcesTest {
                     }
                 }
                 assertThrows(Bookie.NoEntryException.class, () -> resource.bookieForIoTests().readEntry(7, 1000));
+                var completed = ByteBuffer.wrap(Files.readAllBytes(mark));
+                assertEquals(257, completed.getLong());
+                assertEquals(JournalChannel.HEADER_SIZE + recordSize, completed.getLong());
+                assertTrue(Files.exists(journal.resolve("1.txn")));
+                try (var entryLogs = Files.newDirectoryStream(mark.getParent(), "*.log")) {
+                    assertEquals(3, java.util.stream.StreamSupport.stream(entryLogs.spliterator(), false)
+                            .limit(3).count());
+                }
                 assertEquals(ClassicChildResources.State.DRAINED, resource.closeAndDrain().state());
             }
-            var completed = ByteBuffer.wrap(Files.readAllBytes(mark));
-            assertEquals(257, completed.getLong());
-            assertEquals(JournalChannel.HEADER_SIZE + recordSize, completed.getLong());
         }
     }
 
@@ -199,6 +206,46 @@ public class ClassicChildResourcesTest {
             target.putInt(input.readableBytes()).put(input.nioBuffer());
         } finally {
             input.release();
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void historicalBookieRejectsStartupWhenTheReplayCutCannotBePersisted() throws Exception {
+        try (var f = new Fixture()) {
+            Path journal = f.conf.getJournalDirs()[0].toPath().resolve("current");
+            Path mark = f.conf.getLedgerDirs()[0].toPath().resolve("current/lastMark");
+            var image = ByteBuffer.allocate(JournalChannel.HEADER_SIZE + Integer.BYTES + 32);
+            image.putInt(0x424b4c47).putInt(JournalChannel.V6).position(JournalChannel.HEADER_SIZE);
+            putJournalEntry(image, 1);
+            Files.write(journal.resolve("1.txn"), image.array());
+            assertFalse(Files.exists(mark));
+
+            var listings = new AtomicInteger();
+            var resource = ClassicChildResources.prepare();
+            f.resources.add(resource);
+            try (var files = mockStatic(Files.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+                files.when(() -> Files.newDirectoryStream(journal)).thenAnswer(invocation -> {
+                    if (listings.incrementAndGet() == 2) {
+                        Files.createDirectory(mark);
+                    }
+                    return invocation.callRealMethod();
+                });
+                var failure = assertThrows(IOException.class,
+                        () -> resource.initializeForIoTests(f.conf, f.registration, f.manager, f.replication));
+                assertTrue(failure.getCause() instanceof FileAlreadyExistsException);
+                assertSame(failure, resource.status().initializationFailure());
+            } finally {
+                Files.deleteIfExists(mark);
+            }
+            assertEquals(ClassicChildResources.State.DRAINED, resource.closeAndDrain().state());
+            var restarted = f.open();
+            ByteBuf read = restarted.bookieForIoTests().readEntry(7, 1);
+            try {
+                assertEquals(901, read.getLong(24));
+            } finally {
+                read.release();
+            }
+            assertEquals(ClassicChildResources.State.DRAINED, restarted.closeAndDrain().state());
         }
     }
 

@@ -1293,6 +1293,10 @@ public class Journal implements CheckpointSource {
             if (!fresh.initialized || fresh.checkpointClosing) {
                 throw new IOException("Fresh Journal checkpoint entry is closed");
             }
+            if (compact && history != null && !fresh.started) {
+                // Replay rotations may flush storage, but the replay suffix must remain intact until the full flush.
+                return;
+            }
             Thread current = Thread.currentThread();
             fresh.checkpointThreads.put(current, fresh.checkpointThreads.getOrDefault(current, 0) + 1);
             fresh.checkpoints++;
