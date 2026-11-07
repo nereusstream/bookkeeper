@@ -167,21 +167,29 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
     void initializeForFresh(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
             LedgerDirsManager indexDirsManager, StatsLogger statsLogger, ByteBufAllocator allocator)
             throws IOException {
-        initializeOwned(conf, ledgerDirsManager, indexDirsManager, statsLogger, allocator, null);
+        initializeOwned(conf, ledgerDirsManager, indexDirsManager, statsLogger, allocator, null, null);
     }
 
     void initializeForClassicHistory(ServerConfiguration conf, ClassicGcMetadata metadata,
             LedgerDirsManager ledgerDirsManager, LedgerDirsManager indexDirsManager, StatsLogger stats,
             ByteBufAllocator allocator) throws IOException {
         initializeOwned(conf, ledgerDirsManager, indexDirsManager, stats, allocator,
-                java.util.Objects.requireNonNull(metadata, "metadata"));
+                java.util.Objects.requireNonNull(metadata, "metadata"), null);
+    }
+
+    void initializeForClassicBootstrap(ServerConfiguration conf, ClassicHistoryFiles.LedgerVisitor claims,
+            LedgerDirsManager ledgerDirsManager, LedgerDirsManager indexDirsManager, StatsLogger stats,
+            ByteBufAllocator allocator) throws IOException {
+        initializeOwned(conf, ledgerDirsManager, indexDirsManager, stats, allocator, null,
+                java.util.Objects.requireNonNull(claims, "claims"));
     }
 
     private void initializeOwned(ServerConfiguration conf, LedgerDirsManager ledgerDirsManager,
             LedgerDirsManager indexDirsManager, StatsLogger statsLogger, ByteBufAllocator allocator,
-            ClassicGcMetadata metadata) throws IOException {
+            ClassicGcMetadata metadata, ClassicHistoryFiles.LedgerVisitor claims) throws IOException {
         synchronized (freshLifecycleLock) {
-            if (!freshLifecycle || historical != (metadata != null) || freshInitAttempted || freshClosing) {
+            if (!freshLifecycle || historical != (metadata != null || claims != null)
+                    || freshInitAttempted || freshClosing) {
                 throw new IllegalStateException("Fresh Interleaved initialization is one-use");
             }
             freshInitAttempted = true;
@@ -206,9 +214,11 @@ public class InterleavedLedgerStorage implements CompactableLedgerStorage, Entry
                 entryLogger.initializeForClassicHistory();
                 ledgerCache = LedgerCacheImpl.forClassicHistory(conf, activeLedgers,
                         indexDirsManager == null ? ledgerDirsManager : indexDirsManager, statsLogger);
-                ((LedgerCacheImpl) ledgerCache).initializeForClassicHistory();
-                gcThread = GarbageCollectorThread.forClassicHistory(
-                        conf, metadata, ledgerDirsManager, this, entryLogger, statsLogger.scope("gc"));
+                ((LedgerCacheImpl) ledgerCache).initializeForClassicHistory(claims);
+                if (metadata != null) {
+                    gcThread = GarbageCollectorThread.forClassicHistory(
+                            conf, metadata, ledgerDirsManager, this, entryLogger, statsLogger.scope("gc"));
+                }
             } else {
                 entryLogger.initializeForFresh();
                 ledgerCache = LedgerCacheImpl.forFresh(conf, activeLedgers,

@@ -22,9 +22,10 @@ import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicBootstrap;
+import org.apache.bookkeeper.stats.NullStatsLogger;
 
-/** Bookie-side bridge for the original offline bootstrap owner's scoped Classic inventory. */
-public final class ClassicBootstrapStorage {
+/** Bookie-side bridge for the original offline bootstrap owner's scoped inventory and recovery. */
+public final class ClassicBootstrapStorage extends OwnedClassicLifecycle {
     @FunctionalInterface
     public interface LedgerVisitor {
         void visit(long ledgerId) throws IOException;
@@ -37,8 +38,11 @@ public final class ClassicBootstrapStorage {
     private ClassicJournalRecovery journals;
     private boolean reading;
     private boolean scanned;
-    private boolean closing;
-    private Drain terminal;
+    private volatile boolean closing;
+    private Drain inventoryTerminal;
+    private BookieImpl recoveryBookie;
+    private Thread recovering;
+    private boolean recoveryAttempted;
 
     private ClassicBootstrapStorage() { }
 
@@ -48,7 +52,7 @@ public final class ClassicBootstrapStorage {
     }
 
     public synchronized void initialize(SegmentClassicBootstrap.InventorySession original) throws IOException {
-        if (session != null || closing) {
+        if (session != null || closing || inventoryTerminal != null) {
             throw new IOException("Classic bootstrap reader initializes once");
         }
         var configuration = original.consume(this);
@@ -66,7 +70,7 @@ public final class ClassicBootstrapStorage {
 
     /** Normal return covers both sources. The caller also observes actual drain before publishing success. */
     public synchronized void scan(LedgerVisitor visitor) throws IOException {
-        if (session == null || closing || scanned) {
+        if (session == null || closing || scanned || inventoryTerminal != null) {
             throw new IOException("Classic bootstrap reader requires its original one-use session");
         }
         session.requireReader(this);
@@ -81,12 +85,11 @@ public final class ClassicBootstrapStorage {
         }
     }
 
-    public synchronized Drain closeAndDrain() {
+    public synchronized Drain closeInventory() {
         if (reading) {
             throw new IllegalStateException("Classic bootstrap reader cannot drain its own activity");
         }
-        if (terminal == null) {
-            closing = true;
+        if (inventoryTerminal == null) {
             var journal = journals == null ? null : journals.closeAndDrain();
             var index = indexes == null ? null : indexes.closeAndDrain();
             boolean drained = (journal == null || journal.drained()) && (index == null || index.drained());
@@ -94,8 +97,88 @@ public final class ClassicBootstrapStorage {
             if (failure == null && journal != null) {
                 failure = journal.closeFailure();
             }
-            terminal = new Drain(drained, failure);
+            inventoryTerminal = new Drain(drained, failure);
         }
-        return terminal;
+        return inventoryTerminal;
+    }
+
+    public synchronized void recover(SegmentClassicBootstrap.RecoverySession original)
+            throws IOException, InterruptedException {
+        checkStarting();
+        if (!scanned || inventoryTerminal == null || !inventoryTerminal.drained() || recoveryAttempted) {
+            throw new IOException("Classic bootstrap recovery requires its drained original inventory");
+        }
+        var configuration = original.consume(this);
+        recoveryAttempted = true;
+        recovering = Thread.currentThread();
+        try {
+            recoveryBookie = BookieImpl.forClassicBootstrap(configuration, NullStatsLogger.INSTANCE, this);
+            recoveryBookie.recoverForClassicBootstrap(this, ledger -> {
+                checkStarting();
+                original.requireClaim(this, ledger);
+            });
+            var bookie = recoveryBookie;
+            var result = closeRecoveryBookie();
+            if (!result.drained()) {
+                throw new IOException("Classic bootstrap recovery has unresolved resources", result.closeFailure());
+            }
+            if (bookie.operationFailureForFresh() != null) {
+                throw new IOException("Classic bootstrap storage recovery failed", bookie.operationFailureForFresh());
+            }
+            checkStarting();
+        } catch (BookieException failure) {
+            throw new IOException("Classic bootstrap storage recovery failed", failure);
+        } finally {
+            recovering = null;
+        }
+    }
+
+    void requireRecoveryBookie(BookieImpl candidate) throws IOException {
+        checkStarting();
+        if (recovering != Thread.currentThread() || candidate != recoveryBookie) {
+            throw new IOException("Classic bootstrap recovery belongs to another Bookie or episode");
+        }
+    }
+
+    public synchronized Drain closeAndDrain() throws InterruptedException {
+        if (recovering == Thread.currentThread()) {
+            throw new IllegalStateException("Classic bootstrap recovery cannot drain its own activity");
+        }
+        closing = true;
+        var readers = closeInventory();
+        if (!readers.drained() || recoveryBookie == null) {
+            return readers;
+        }
+        try {
+            var result = closeRecoveryBookie();
+            return new Drain(result.drained(), result.closeFailure());
+        } catch (IOException failure) {
+            return new Drain(false, failure);
+        }
+    }
+
+    private BookieImpl.FreshDrainResult closeRecoveryBookie() throws IOException, InterruptedException {
+        var result = recoveryBookie.closeForFresh();
+        if (result.drained()) {
+            recoveryBookie = null;
+        }
+        return result;
+    }
+
+    @Override
+    void checkStarting() throws IOException {
+        if (closing) {
+            throw new IOException("Classic bootstrap storage is closing");
+        }
+    }
+
+    @Override
+    boolean isClosing() {
+        return closing;
+    }
+
+    @Override
+    void requestClose() {
+        closing = true;
     }
 }

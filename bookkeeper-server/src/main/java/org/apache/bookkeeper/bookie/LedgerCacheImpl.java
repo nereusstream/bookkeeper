@@ -94,7 +94,11 @@ public class LedgerCacheImpl implements LedgerCache {
     }
 
     void initializeForClassicHistory() throws IOException {
-        indexPersistenceManager.initializeForClassicHistory();
+        initializeForClassicHistory(null);
+    }
+
+    void initializeForClassicHistory(ClassicHistoryFiles.LedgerVisitor claims) throws IOException {
+        indexPersistenceManager.initializeForClassicHistory(claims);
     }
 
     FileInfoBackingCache.FreshDrainResult closeForFresh() throws InterruptedException {

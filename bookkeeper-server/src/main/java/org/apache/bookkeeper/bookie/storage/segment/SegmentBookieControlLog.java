@@ -1200,6 +1200,20 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return config.maxPendingEntries();
     }
 
+    synchronized long unsealedBootstrapCut() throws IOException {
+        unsealedBootstrapClaimLimit();
+        return appliedThrough;
+    }
+
+    synchronized void requireAppliedBootstrapClaim(long ledgerId, long cut) throws IOException {
+        if (unsealedBootstrapCut() != cut) {
+            throw new IOException("Bookie control changed after the Classic bootstrap inventory");
+        }
+        if (prepareBootstrapClaim(ledgerId).applied().isEmpty()) {
+            throw new IOException("Classic bootstrap has no applied claim for ledger " + ledgerId);
+        }
+    }
+
     synchronized long requireSealedBootstrapCut(BookieRouteBinding.BootstrapSeal expected) throws IOException {
         requireBootstrapControl();
         if (!Optional.of(expected).equals(bootstrapSeal())) {

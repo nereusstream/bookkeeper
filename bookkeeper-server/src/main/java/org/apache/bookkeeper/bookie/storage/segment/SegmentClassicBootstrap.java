@@ -41,6 +41,9 @@ public final class SegmentClassicBootstrap {
                  ClassicBootstrapDrain sources,
                  SegmentClassicHandoffMaterials.Result materials) { }
 
+    private record Imported(SegmentClassicRootBindings roots, SegmentClassicArenaBindings arenas,
+                            SegmentBookieControlLog.Owned control, long cut) { }
+
     /** Private issuance for the concrete Bookie reader on this owner's active verification thread. */
     public static final class InventorySession {
         private final SegmentClassicBootstrap owner;
@@ -80,6 +83,48 @@ public final class SegmentClassicBootstrap {
         }
     }
 
+    /** Recovery authority for the concrete bridge and the exact applied control state from its import. */
+    public static final class RecoverySession {
+        private final SegmentClassicBootstrap owner;
+        private final Imported imported;
+        private final ServerConfiguration configuration;
+        private boolean consumed;
+
+        private RecoverySession(SegmentClassicBootstrap owner, Imported imported, ServerConfiguration configuration) {
+            this.owner = owner;
+            this.imported = imported;
+            this.configuration = configuration;
+        }
+
+        public ServerConfiguration consume(ClassicBootstrapStorage bridge) throws IOException {
+            synchronized (owner) {
+                requireOwner(bridge);
+                if (consumed) {
+                    throw new IOException("Classic bootstrap recovery session is one-use");
+                }
+                consumed = true;
+                return configuration;
+            }
+        }
+
+        public void requireClaim(ClassicBootstrapStorage bridge, long ledgerId) throws IOException {
+            synchronized (owner) {
+                requireOwner(bridge);
+                if (!consumed) {
+                    throw new IOException("Classic bootstrap recovery session was not consumed");
+                }
+            }
+            imported.control().log().requireAppliedBootstrapClaim(ledgerId, imported.cut());
+        }
+
+        private void requireOwner(ClassicBootstrapStorage bridge) throws IOException {
+            owner.requireOpen();
+            if (bridge != owner.inventory || imported != owner.imported || owner.checking != Thread.currentThread()) {
+                throw new IOException("Classic bootstrap recovery session belongs to another owner or episode");
+            }
+        }
+    }
+
     private final ZKRegistrationManager manager;
     private final ZKProfileStartupRequirementsStore requirements;
     private final SegmentArenaManifest manifest;
@@ -90,6 +135,8 @@ public final class SegmentClassicBootstrap {
     private ClassicBootstrapSources sources;
     private SegmentClassicHandoffMaterials materials;
     private SegmentClassicBootstrapClaims importer;
+    private Imported imported;
+    private boolean recovered;
     private Thread checking;
     private Thread draining;
     private boolean attempted;
@@ -195,10 +242,54 @@ public final class SegmentClassicBootstrap {
             });
             requireCurrentSources(original);
             arenas.requireVerified(binding.binding().manifest());
-            finishInventory();
+            long cut = bookie.unsealedBootstrapCut();
+            synchronized (this) {
+                requireOpen();
+                imported = new Imported(roots, arenas, control, cut);
+                finishInventory();
+            }
         } catch (IOException | RuntimeException | Error failure) {
             fail(failure);
             throw failure;
+        }
+    }
+
+    /** Recover and flush the same Classic files after their original claim importer has actually drained. */
+    void recoverPrepared() throws IOException, InterruptedException {
+        ClassicBootstrapSnapshot original;
+        Imported prepared;
+        synchronized (this) {
+            if (imported == null || recovered) {
+                throw new IOException("Classic bootstrap recovery requires its completed claim import");
+            }
+            original = beginScopeOperation(BookieRouteBinding.Phase.PREPARED);
+            prepared = imported;
+        }
+        try {
+            var binding = original.nativeBinding();
+            var bookie = prepared.control().log();
+            prepared.roots().verifyPreparedOwner(manager, binding, bookie);
+            prepared.arenas().requireVerified(binding.binding().manifest());
+            requireCurrentSources(original);
+            requireImportedCut(bookie, prepared);
+            inventory.recover(new RecoverySession(this, prepared, prepared.roots().inventoryConfiguration()));
+            requireImportedCut(bookie, prepared);
+            requireCurrentSources(original);
+            prepared.arenas().requireVerified(binding.binding().manifest());
+            synchronized (this) {
+                requireOpen();
+                recovered = true;
+                checking = null;
+            }
+        } catch (IOException | InterruptedException | RuntimeException | Error failure) {
+            fail(failure);
+            throw failure;
+        }
+    }
+
+    private static void requireImportedCut(SegmentBookieControlLog bookie, Imported prepared) throws IOException {
+        if (bookie.unsealedBootstrapCut() != prepared.cut()) {
+            throw new IOException("Bookie control changed after the Classic bootstrap inventory");
         }
     }
 
@@ -248,7 +339,7 @@ public final class SegmentClassicBootstrap {
     }
 
     private void drainInventory() throws IOException {
-        var drained = inventory.closeAndDrain();
+        var drained = inventory.closeInventory();
         if (!drained.drained()) {
             throw new IOException("Classic bootstrap inventory has unresolved resources", drained.closeFailure());
         }
@@ -264,6 +355,7 @@ public final class SegmentClassicBootstrap {
         initializationFailure = failure;
         bound = null;
         importer = null;
+        imported = null;
         checking = null;
     }
 

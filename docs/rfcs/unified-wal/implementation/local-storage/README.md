@@ -2437,4 +2437,14 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 真实 ZooKeeper 与文件夹具覆盖原生出生保留、原控制日志字节不变、缺本地封口拒绝，以及实际提交后延迟回复。延迟期间独立进程观察到 supervisor guard 仍持有。原回复返回后，新的 owner 用原签名及回执完成 `ENABLED` 冷读。另验证同字节重建的 requirements 在条件写之前被拒绝。最终七类 107 项全部通过，Spotless 和 Checkstyle 通过。首轮 106 项通过及两处行长诊断独立归档。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-native-seal-resume-evidence-14e42930`。
 
-此阶段消费已有本地封口。首次 Classic 写入门控、严格 flush 与本地封口的生产接线、公开资源装配、实时 Unix 采用及批准 Linux 验收仍待完成。
+此阶段消费已有本地封口。首次 Classic 写入见[恢复门控](#prepared-的-classic-写入门控与恢复排空)。严格 flush 到本地封口的接线、公开资源装配、实时 Unix 采用及批准 Linux 验收仍待完成。
+
+## PREPARED 的 Classic 写入门控与恢复排空
+
+2026-11-07，基线 `afbc65fde8`。完成实际清单和 claim 导入后，同一离线 owner 冻结原 Bookie control、Arena、根锁和未封口 applied cut。一次性恢复 session 绑定原桥和实际操作线程。恢复使用受控历史 Bookie 的 V1 index 与 V6 Journal 路径。Classic 恢复资源与生产服务启动分离，未激活 Journal 写者、注册、请求准入或 GC。
+
+有效 index 的只读校验先确认原 claim。恢复阶段在 `.rloc` 原地恢复或清理前复查 claim，并在 index 加入缓存前再次核对。每个 V6 记录在 master-key 分配、handle 查找或任何 replay 副作用前核对同一控制日志的原已应用 CLASSIC 回执。不同 applied cut、缺 claim 或原控制 owner 不可用时拒绝。成功仅在实际恢复、storage flush、lastMark checkpoint 和原 Bookie 资源关闭后返回。
+
+真实独立 index、双 Journal 和 ZooKeeper 夹具验证 `.rloc` 保留原 inode 恢复、重放后索引偏移对应的完整 entry 字节和实际 `lastMark`。导入后引入无 claim 的有效 `.rloc` 或带 master key 的 Journal，验证拒绝发生在改名或建立新 index 前。反向验证仅临时绕过 claim 查询，实际观察到两个用例都未收到预期拒绝。恢复正式源码后验证了导入后 applied cut 变化时的拒绝。最终十二类 193 项回归、Spotless 和 Checkstyle 通过。首轮测试编译缺旧无参入口的诊断、三项聚焦与反向验证分别归档。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-guarded-recovery-evidence-afbc65fd`。
+
+当前交付离线写入门控与实际恢复排空。成功结果还需接入原 driver 的 `BOOTSTRAP_COMPLETE`。新建目录项的掉电耐久、公开资源装配、实时 Unix 采用和批准 Linux 验收继续待完成。

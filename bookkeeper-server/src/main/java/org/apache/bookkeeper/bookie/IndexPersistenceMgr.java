@@ -419,14 +419,18 @@ public class IndexPersistenceMgr {
     }
 
     void initializeForFresh() throws IOException {
-        initializeOwned(false);
+        initializeOwned(false, null);
     }
 
     void initializeForClassicHistory() throws IOException {
-        initializeOwned(true);
+        initializeForClassicHistory(null);
     }
 
-    private void initializeOwned(boolean historical) throws IOException {
+    void initializeForClassicHistory(ClassicHistoryFiles.LedgerVisitor claims) throws IOException {
+        initializeOwned(true, claims);
+    }
+
+    private void initializeOwned(boolean historical, ClassicHistoryFiles.LedgerVisitor claims) throws IOException {
         synchronized (freshAdmission) {
             if (!freshLifecycle || historical != (history != null) || freshInitAttempted || freshClosing) {
                 throw new IllegalStateException("Fresh index initialization is one-use");
@@ -441,8 +445,8 @@ public class IndexPersistenceMgr {
             } else {
                 // Validate every candidate before any .rloc mutation. The second pass restores the legacy layout.
                 var roots = ledgerDirsManager.getAllLedgerDirs();
-                scanHistoricalIndexes(roots, history, false, ledger -> { });
-                scanHistoricalIndexes(roots, history, true, ledger -> activeLedgers.put(ledger, true));
+                scanHistoricalIndexes(roots, history, false, null, claims == null ? ledger -> { } : claims);
+                scanHistoricalIndexes(roots, history, true, claims, ledger -> activeLedgers.put(ledger, true));
             }
             synchronized (freshAdmission) {
                 freshInitialized = true;
@@ -486,7 +490,7 @@ public class IndexPersistenceMgr {
             }
             reading = Thread.currentThread();
             try {
-                scanHistoricalIndexes(roots, files, false, visitor);
+                scanHistoricalIndexes(roots, files, false, null, visitor);
             } catch (IOException | RuntimeException | Error failure) {
                 readFailure = failure;
                 throw failure;
@@ -513,7 +517,7 @@ public class IndexPersistenceMgr {
     }
 
     private static void scanHistoricalIndexes(List<File> roots, ClassicHistoryFiles history, boolean recover,
-            ClassicHistoryFiles.LedgerVisitor visitor) throws IOException {
+            ClassicHistoryFiles.LedgerVisitor claims, ClassicHistoryFiles.LedgerVisitor visitor) throws IOException {
         for (File root : roots) {
             Path rootPath = root.toPath();
             try (var grandparents = history.openDirectory(rootPath)) {
@@ -527,13 +531,13 @@ public class IndexPersistenceMgr {
                                 continue;
                             }
                             if (recover) {
-                                recoverHistoricalParent(roots, history, rootPath, parent, visitor);
+                                recoverHistoricalParent(roots, history, rootPath, parent, claims, visitor);
                             }
                             try (var indexes = history.openDirectory(parent)) {
                                 for (Path index : indexes.listing) {
                                     String name = index.getFileName().toString();
                                     if (name.endsWith(IDX) || name.endsWith(RLOC)) {
-                                        long ledger = historicalIndex(roots, history, rootPath, index, false);
+                                        long ledger = historicalIndex(roots, history, rootPath, index, false, claims);
                                         if (recover && name.endsWith(RLOC)) {
                                             throw new IOException("Historical relocation appeared after recovery: "
                                                     + index);
@@ -550,7 +554,8 @@ public class IndexPersistenceMgr {
     }
 
     private static void recoverHistoricalParent(List<File> roots, ClassicHistoryFiles history, Path root,
-            Path parent, ClassicHistoryFiles.LedgerVisitor visitor) throws IOException {
+            Path parent, ClassicHistoryFiles.LedgerVisitor claims, ClassicHistoryFiles.LedgerVisitor visitor)
+            throws IOException {
         while (true) {
             Path candidate = null;
             try (var indexes = history.openDirectory(parent)) {
@@ -565,7 +570,7 @@ public class IndexPersistenceMgr {
                 return;
             }
             // Close this leaf's iterator before changing its entries. Never act on a stale directory snapshot.
-            visitor.visit(historicalIndex(roots, history, root, candidate, true));
+            visitor.visit(historicalIndex(roots, history, root, candidate, true, claims));
         }
     }
 
@@ -584,7 +589,7 @@ public class IndexPersistenceMgr {
     }
 
     private static long historicalIndex(List<File> roots, ClassicHistoryFiles history, Path root, Path index,
-            boolean recover) throws IOException {
+            boolean recover, ClassicHistoryFiles.LedgerVisitor claims) throws IOException {
         String name = index.getFileName().toString();
         boolean relocation = name.endsWith(IDX + RLOC);
         long ledger;
@@ -605,6 +610,9 @@ public class IndexPersistenceMgr {
             throw new IOException("Historical index has ambiguous authoritative copies: " + ledger);
         }
         ClassicHistoryFiles.requireSame(index, header.identity());
+        if (claims != null) {
+            claims.visit(ledger);
+        }
         if (recover && relocation) {
             if (originals == 0) {
                 new NativeIOImpl().renameNoReplace(index.toString(), destination.toString());

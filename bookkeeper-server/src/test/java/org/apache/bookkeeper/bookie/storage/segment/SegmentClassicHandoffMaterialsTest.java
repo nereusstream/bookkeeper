@@ -261,7 +261,11 @@ public class SegmentClassicHandoffMaterialsTest {
     private ServerConfiguration classicConfiguration() {
         var conf = new ServerConfiguration().setBookieId(manifest.bookieId().toString())
                 .setJournalDirsName(new String[]{manifest.classicRoots().get(0).directory().toString()})
-                .setLedgerDirNames(new String[]{manifest.classicRoots().get(1).directory().toString()});
+                .setLedgerDirNames(new String[]{manifest.classicRoots().get(1).directory().toString()})
+                .setAllowMultipleDirsUnderSameDiskPartition(true)
+                .setFileInfoFormatVersionToWrite(1)
+                .setJournalFormatVersionToWrite(6)
+                .setEntryLogFilePreAllocationEnabled(false);
         if (manifest.classicRoots().size() == 4) {
             conf.setJournalDirsName(new String[]{manifest.classicRoots().get(3).directory().toString(),
                     manifest.classicRoots().get(0).directory().toString()});
@@ -495,6 +499,111 @@ public class SegmentClassicHandoffMaterialsTest {
             assertTrue(loop.awaitTermination(Duration.ofSeconds(5)));
             assertNull(loop.failure());
         }
+    }
+
+    @Test(timeout = 30000)
+    public void preparedRecoveryRelocatesClaimedIndexAndPersistsJournalEntryAndCut() throws Exception {
+        var scope = preparedScope(16);
+        Path index = manifest.classicRoots().get(2).directory().resolve("current");
+        Path original = index.resolve(IndexPersistenceMgr.getLedgerName(11));
+        Path relocated = Files.move(original, Path.of(original + ".rloc"));
+        byte[] originalIndex = Files.readAllBytes(relocated);
+        Object inode = Files.getAttribute(relocated, "unix:ino");
+        Path journal = manifest.classicRoots().get(3).directory().resolve("current/8.txn");
+        byte[] entry = ClassicClaimTestHistory.writeJournalWithEntry(journal, 19);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                assertThrows(IOException.class, preparation::recoverPrepared);
+                withClaimDriver(control.log(), driver -> preparation.importPrepared(roots, arenas, control, driver));
+                assertTrue(Files.exists(relocated));
+                preparation.recoverPrepared();
+                assertThrows(IOException.class, preparation::recoverPrepared);
+                assertTrue(control.log().bootstrapSeal().isEmpty());
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        assertArrayEquals(originalIndex, Files.readAllBytes(original));
+        assertEquals(inode, Files.getAttribute(original, "unix:ino"));
+        assertFalse(Files.exists(relocated));
+        Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
+        Path replayedIndex = index.resolve(IndexPersistenceMgr.getLedgerName(19));
+        assertArrayEquals(entry, ClassicClaimTestHistory.readFirstEntry(replayedIndex, ledger));
+        var mark = ByteBuffer.wrap(Files.readAllBytes(ledger.resolve("lastMark.0")));
+        assertEquals(8, mark.getLong());
+        assertEquals(Files.size(journal), mark.getLong());
+        assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                .observation().orElseThrow());
+    }
+
+    @Test(timeout = 30000)
+    public void preparedRecoveryRejectsAnUnclaimedRelocationBeforeChangingItsFile() throws Exception {
+        preparedRecoveryRejectsUnclaimed(true);
+    }
+
+    @Test(timeout = 30000)
+    public void preparedRecoveryRejectsAnUnclaimedJournalKeyBeforeCreatingItsIndex() throws Exception {
+        preparedRecoveryRejectsUnclaimed(false);
+    }
+
+    @Test(timeout = 30000)
+    public void preparedRecoveryRejectsAControlCutThatAdvancedAfterImport() throws Exception {
+        var scope = preparedScope(16);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                var log = control.log();
+                withClaimDriver(log, driver -> preparation.importPrepared(roots, arenas, control, driver));
+                var extra = log.prepareBootstrapClaim(19).command();
+                var result = log.applyDurable(log.appendChangesDurably(List.of(extra))).get(0);
+                assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, result.status());
+                var failure = assertThrows(IOException.class, preparation::recoverPrepared);
+                assertTrue(failure.getMessage(), failure.getMessage().contains("changed after"));
+                assertTrue(log.bootstrapSeal().isEmpty());
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
+        assertFalse(Files.exists(ledger.resolve("lastMark.0")));
+    }
+
+    private void preparedRecoveryRejectsUnclaimed(boolean relocation) throws Exception {
+        var scope = preparedScope(16);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        Path index = manifest.classicRoots().get(2).directory().resolve("current");
+        Path unclaimed = index.resolve(IndexPersistenceMgr.getLedgerName(19));
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                withClaimDriver(control.log(), driver -> preparation.importPrepared(roots, arenas, control, driver));
+                Path source = relocation ? Path.of(unclaimed + ".rloc")
+                        : manifest.classicRoots().get(3).directory().resolve("current/8.txn");
+                if (relocation) {
+                    ClassicClaimTestHistory.writeIndex(index, 19);
+                    Files.move(unclaimed, source);
+                } else {
+                    ClassicClaimTestHistory.writeJournalWithEntry(source, 19);
+                }
+                byte[] original = Files.readAllBytes(source);
+                Object inode = Files.getAttribute(source, "unix:ino");
+                var failure = assertThrows(IOException.class, preparation::recoverPrepared);
+                assertTrue(failure.getMessage(), failure.getMessage().contains("no applied claim for ledger 19"));
+                assertFalse(Files.exists(unclaimed));
+                assertArrayEquals(original, Files.readAllBytes(source));
+                assertEquals(inode, Files.getAttribute(source, "unix:ino"));
+                assertTrue(control.log().bootstrapSeal().isEmpty());
+                assertTrue(preparation.closeAndDrain().drained());
+                assertFalse(Files.exists(unclaimed));
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                .observation().orElseThrow());
     }
 
     @Test(timeout = 30000)

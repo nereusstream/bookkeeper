@@ -553,6 +553,10 @@ public class BookieImpl implements Bookie {
     }
 
     void readJournal() throws IOException, BookieException {
+        readJournal(null);
+    }
+
+    private void readJournal(ClassicHistoryFiles.LedgerVisitor claims) throws IOException, BookieException {
         if (!conf.getJournalWriteData()) {
             log.warn("Journal disabled for add entry requests. Running BookKeeper this way can lead to "
                     + "data loss. It is recommended to use data integrity checking when running without "
@@ -568,6 +572,9 @@ public class BookieImpl implements Bookie {
                 }
                 long ledgerId = recBuff.getLong();
                 long entryId = recBuff.getLong();
+                if (claims != null) {
+                    claims.visit(ledgerId);
+                }
                 try {
                     log.debug()
                             .attr("ledgerId", ledgerId)
@@ -1502,20 +1509,31 @@ public class BookieImpl implements Bookie {
         return new BookieImpl(conf, stats, owner, registration, true);
     }
 
+    static BookieImpl forClassicBootstrap(ServerConfiguration conf, StatsLogger stats, ClassicBootstrapStorage owner) {
+        return new BookieImpl(conf, stats, owner, null, true);
+    }
+
     void initializeForFresh(FreshClassicOwner.Permit permit) throws IOException, InterruptedException, BookieException {
         permit.consume(this);
-        initializeOwnedClassic(null);
+        initializeOwnedClassic(null, null);
     }
 
     void initializeForClassicChild(ClassicChildResources.Permit permit, ClassicGcMetadata metadata)
             throws IOException, InterruptedException, BookieException {
         permit.consume(this);
-        initializeOwnedClassic(java.util.Objects.requireNonNull(metadata, "metadata"));
+        initializeOwnedClassic(java.util.Objects.requireNonNull(metadata, "metadata"), null);
     }
 
-    private void initializeOwnedClassic(ClassicGcMetadata metadata)
+    void recoverForClassicBootstrap(ClassicBootstrapStorage owner, ClassicHistoryFiles.LedgerVisitor claims)
             throws IOException, InterruptedException, BookieException {
-        if (fresh == null || fresh.historical != (metadata != null)) {
+        owner.requireRecoveryBookie(this);
+        initializeOwnedClassic(null, java.util.Objects.requireNonNull(claims, "claims"));
+        readJournal(claims);
+    }
+
+    private void initializeOwnedClassic(ClassicGcMetadata metadata, ClassicHistoryFiles.LedgerVisitor claims)
+            throws IOException, InterruptedException, BookieException {
+        if (fresh == null || fresh.historical != (metadata != null || claims != null)) {
             throw new IllegalStateException("Owned Classic initializer does not match its private startup permit");
         }
         fresh.owner.checkStarting();
@@ -1531,17 +1549,19 @@ public class BookieImpl implements Bookie {
         checkIfDirsOnSameDiskPartition(allLedgerDirectories);
         checkIfDirsOnSameDiskPartition(journalDirectories);
         fresh.owner.checkStarting();
-        if (fresh.historical) {
+        if (metadata != null) {
             var state = BookieStateManager.forClassicChild(conf, registrationManager, ledgerDirsManager,
                     bookieServiceInfoProvider, fresh.owner);
             stateManager = state;
             fresh.historicalState = state;
             state.initializeForClassicChild(statsLogger);
-        } else {
+        } else if (claims == null) {
             stateManager = initializeStateManager();
         }
         fresh.owner.checkStarting();
-        stateManager.setShutdownHandler(this::triggerBookieShutdown);
+        if (stateManager != null) {
+            stateManager.setShutdownHandler(this::triggerBookieShutdown);
+        }
         List<LedgerDirsManager> managers = new ArrayList<>();
         managers.add(ledgerDirsManager);
         if (indexDirsManager != ledgerDirsManager) {
@@ -1581,7 +1601,10 @@ public class BookieImpl implements Bookie {
         ledgerStorage.setCheckpointSource(checkpoints);
         ledgerStorage.setCheckpointer(Checkpointer.NULL);
         fresh.owner.checkStarting();
-        if (fresh.historical) {
+        if (claims != null) {
+            ((InterleavedLedgerStorage) ledgerStorage).initializeForClassicBootstrap(conf, claims, ledgerDirsManager,
+                    indexDirsManager, statsLogger, allocator);
+        } else if (fresh.historical) {
             ((InterleavedLedgerStorage) ledgerStorage).initializeForClassicHistory(conf, metadata, ledgerDirsManager,
                     indexDirsManager, statsLogger, allocator);
         } else {
@@ -1589,16 +1612,22 @@ public class BookieImpl implements Bookie {
                     statsLogger, allocator);
         }
         fresh.owner.checkStarting();
-        syncThread = SyncThread.forFresh(conf, getLedgerDirsListener(), ledgerStorage, checkpoints, statsLogger);
+        var listener = claims == null ? getLedgerDirsListener() : new LedgerDirsListener() {
+            @Override
+            public void fatalError() {
+                triggerBookieShutdown(ExitCode.BOOKIE_EXCEPTION);
+            }
+        };
+        syncThread = SyncThread.forFresh(conf, listener, ledgerStorage, checkpoints, statsLogger);
         fresh.owner.checkStarting();
         ledgerStorage.setStateManager(stateManager);
         ledgerStorage.setCheckpointer(syncThread);
         ledgerStorage.registerLedgerDeletionListener(ledgerId -> masterKeyCache.remove(ledgerId));
         handles = new HandleFactoryImpl(ledgerStorage);
         bookieStats = new BookieStats(statsLogger, journalDirectories.size(), conf.getJournalQueueSize());
-        ledgerDirsManager.addLedgerDirsListener(getLedgerDirsListener());
+        ledgerDirsManager.addLedgerDirsListener(listener);
         if (indexDirsManager != ledgerDirsManager) {
-            indexDirsManager.addLedgerDirsListener(getLedgerDirsListener());
+            indexDirsManager.addLedgerDirsListener(listener);
         }
         fresh.owner.checkStarting();
         fresh.initialized = true;
