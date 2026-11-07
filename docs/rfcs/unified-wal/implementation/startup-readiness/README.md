@@ -1538,6 +1538,16 @@ D2 present cache在原`observeLoaderConfiguration`路径上复用私有Entry及s
 
 本轮覆盖的是已实读文件范围内的可能复用约束。实际初始 namespace 与 vDSO、加载先后和选择、初始化行为、执行期间父进程环境及批准 Linux/vendor 实跑仍未验收。首次 diagnostics、child 和 handoff 的执行门继续拒绝。
 
+## 正常 D2 launcher 的 systemctl NEEDED 候选范围观察
+
+基线 `caaecd724f`。D2 trust 从同一 owner 的原批准 `Loading.systemctl` 取得 `SYSTEMCTL` 文件，要求物理名为 `/usr/bin/systemctl` 且存在唯一同名执行 context。同一文件可有其他已批准的加载视图。沿用同 fd 的 SHA-256、ELF2 和 dev/ino，以及保护链、别名和首次关闭核验。实际 `PT_INTERP` 必须匹配原解释器名，原 loader 必须为带入口、无自身 `PT_INTERP` 和 `DT_NEEDED` 的 `ET_DYN`。
+
+沿用同一 deadline 和递归检查，按请求者的原 NEEDED 序号核验 cache、自身 RPATH/RUNPATH、可能祖先 RPATH、默认目录及内置 hwcap 候选。读取声明可达的未选中候选，检查逻辑名、SONAME 与 dev/ino 的可能复用，并在末轮复核来源。systemctl 和 jspawnhelper 各自建立一张图。候选范围观察不认定实际赢家或加载顺序。原模块声明继续核验引用，运行时模块及其传递依赖仍需结合实际批准构建和固定调用路径取证。 [glibc 加载和复用](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-load.c) · [glibc 初始化](https://raw.githubusercontent.com/bminor/glibc/glibc-2.39/elf/dl-init.c)
+
+固定查询 owner 在构造 ProcessBuilder 和启动管道消费者之前记录首次拒绝。放行依赖批准的 Linux JDK/glibc/JNI 构建、两次 exec 的实际环境连续性、固定调用的初始化和模块范围，以及 CLI 自身与原 manager 的连接来源。上游 systemd v255 的 root 直连失败后可回退到系统总线。须证明实际批准构建的固定调用只能走经认证的原 PID 1 直连，或把可达总线的 broker、服务名归属、原 PID 1、请求回复及其连续性一并核验。独立 peer 探针只能证明自己的连接。批准 Linux 上的首次 diagnostics、固定查询、manager `ControlGroup` 和 episode 取得均为 NOT_EXECUTED。 [systemd v255 CLI 连接分支](https://raw.githubusercontent.com/systemd/systemd/v255/src/systemctl/systemctl-util.c) · [systemd v255 root 连接与回退](https://github.com/systemd/systemd/blob/v255/src/shared/bus-util.c#L187-L213)
+
+Darwin 上最终 253 项定向 JUnit 通过，Spotless 和 Checkstyle 通过。真实临时 ELF 夹具覆盖精确视图、两张图相互独立、未选中传递分支、祖先 RPATH、SONAME/同 inode 复用和末轮替换。首轮发现夹具 cache 名与生产固定规则不同，以及查询读取未保留原拒绝原因。修正后复验通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-systemctl-candidates-evidence-caaecd72`。
+
 ## 首次 D2 loader diagnostics 的来源审计
 
 以 `1199e85016c` 为代码基线。正常启动从独立的 `ControlledClassicLauncherMain` 转入 launcher worker。它先由纯 JDK preload 检查环境快照、参数和固定材料，再核验固定 JNI 的长度、摘要和路径后调用 `System.load`。随后校验完整 JDK 树、原 classpath、配置和 D2 描述，核对实际进程及 provider，再读取平台、cgroup、加载材料、unit 和 systemd 私有 socket 的 peer。此时还未创建 ZooKeeper session、普通 child 或 systemctl 查询。JNI 的 `jdkProcessLaunch` 读取 bootstrap `ProcessImpl` 的静态字段，可能触发其初始化。正常路径在该调用前后各采样一次 libc `environ`，再检查 helper 图。正常 launcher 尚未调用 `verifyLinuxLoaderDiagnostics`，该入口也会在构造 ProcessBuilder 前拒绝。

@@ -2855,7 +2855,7 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
-    public void jdkHelperReachableCandidatesRequireTheOriginalContextAfterFileIdReuse() throws Exception {
+    public void reachableCandidatesRequireTheOriginalContextAfterFileIdReuse() throws Exception {
         var fixture = jdkHelperReuseFixture(null, false);
         var loading = fixture.loading();
         var members = new java.util.ArrayList<>(fixture.files());
@@ -2903,6 +2903,8 @@ public class SegmentClassicLaunchTrustTest {
         } finally {
             assertTrue(retry.closeAndDrain().drained());
         }
+        assertSystemctlCandidateFailure(systemctlFixture(new CandidateFixture(members, refused)),
+                "reuse lacks approval for context 4");
     }
 
     @Test
@@ -3005,6 +3007,146 @@ public class SegmentClassicLaunchTrustTest {
         }
     }
 
+    private CandidateFixture systemctlFixture(CandidateFixture fixture) throws IOException {
+        var loading = fixture.loading();
+        var members = new java.util.ArrayList<>(fixture.files());
+        var helper = members.get(1);
+        Path executable = Files.move(Path.of(helper.path()), Path.of(helper.path()).resolveSibling("systemctl"));
+        Path view = root.resolve("helper-view");
+        Files.delete(view);
+        String target = "jdk/lib/systemctl";
+        Files.createSymbolicLink(view, Path.of(target));
+        var aliases = loading.aliases().stream().map(alias -> alias.link().equals(view.toString())
+                ? new SegmentClassicLinuxDeploymentV2.Alias(alias.link(), target) : alias).toList();
+        var contexts = loading.contexts().stream().map(context -> context.logicalLoadName().equals(helper.path())
+                ? new SegmentClassicLinuxDeploymentV2.Context(context.file(), executable.toString()) : context)
+                .toList();
+        members.set(1, new SegmentClassicLinuxDeploymentV2.File(executable.toString(),
+                SegmentClassicLinuxDeployment.Role.SYSTEMCTL, helper.length(), helper.sha256()));
+        return new CandidateFixture(members, new SegmentClassicLinuxDeploymentV2.Loading(1, loading.loader(),
+                loading.interpreter(), aliases, loading.directories(), loading.configuration(), loading.policy(),
+                loading.elf(), contexts, loading.needed(), loading.modules()));
+    }
+
+    private void assertSystemctlCandidateFailure(CandidateFixture fixture, String message) throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try {
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxSystemctlNeededCandidates(
+                    fixture.files(), fixture.loading(), 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains(message));
+            assertSame(failure, owner.closeAndDrain().launcherFailure());
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void systemctlTraversesAnIndependentGraphIncludingUnselectedTransitiveRules() throws Exception {
+        var fixture = systemctlFixture(jdkHelperTransitiveFixture(true));
+        var loading = fixture.loading();
+        var members = new java.util.ArrayList<>(fixture.files());
+        var metadata = new java.util.ArrayList<>(loading.elf());
+        var contexts = new java.util.ArrayList<>(loading.contexts());
+        Path helper = Path.of(members.get(loading.systemctl()).path()).resolveSibling("jspawnhelper");
+        int helperFile = members.size();
+        int helperContext = contexts.size();
+        var absent = new DynamicPath(false, "");
+        var elf = new SegmentClassicLinuxDeploymentV2.Elf(helperFile, List.of(), absent, absent, 0, 0);
+        // The other exec advertises the same SONAME as a reachable systemctl dependency.
+        byte[] bytes = launcherDropperImage(elf, null, "libindirect.so.1");
+        write(helper, bytes);
+        Files.setPosixFilePermissions(helper, PosixFilePermissions.fromString("rwxr-xr-x"));
+        members.add(new SegmentClassicLinuxDeploymentV2.File(helper.toString(),
+                SegmentClassicLinuxDeployment.Role.START_CHAIN, bytes.length, SegmentClassicHandoff.digest(bytes)));
+        metadata.add(elf);
+        contexts.add(new SegmentClassicLinuxDeploymentV2.Context(helperFile, helper.toString()));
+        var both = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
+                loading.policy(), metadata, contexts, loading.needed(), loading.modules());
+        var owner = owner();
+        owner.initialize();
+        try {
+            assertEquals(List.of(), owner.readLinuxJdkHelperReachableCandidates(members, both, helperContext, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            assertEquals(List.of(4, 5, 6, 7, 8, 9), owner.readLinuxSystemctlNeededCandidates(members, both, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            Path leaf = Path.of(contexts.get(5).logicalLoadName());
+            byte[] changed = Files.readAllBytes(leaf);
+            changed[changed.length - 1] ^= 1;
+            write(leaf, changed);
+            assertEquals(List.of(), owner.readLinuxJdkHelperReachableCandidates(members, both, helperContext, 0,
+                    SegmentClassicLinuxElfTest.deadline()));
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxSystemctlNeededCandidates(
+                    members, both, 0, SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("SHA-256"));
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
+    }
+
+    @Test
+    public void systemctlRequiresTheExactContextAndRoleBeforeReadingFiles() throws Exception {
+        var fixture = systemctlFixture(jdkHelperCacheFixture(false, true));
+        var loading = fixture.loading();
+        var aliasOnly = new SegmentClassicLinuxDeploymentV2.Loading(loading.systemctl(), loading.loader(),
+                loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
+                loading.policy(), loading.elf(), loading.contexts().subList(0, 3), loading.needed(),
+                loading.modules());
+        Path executable = Path.of(fixture.files().get(1).path());
+        Path loader = Path.of(fixture.files().get(0).path());
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            Object path = invocation.getArgument(0);
+            if (invocation.getMethod().getName().equals("open") && (executable.equals(path) || loader.equals(path))) {
+                throw new AssertionError("Invalid systemctl selection reached an executable file open");
+            }
+            return invocation.callRealMethod();
+        })) {
+            assertSystemctlCandidateFailure(new CandidateFixture(fixture.files(), aliasOnly),
+                    "lacks its exact execution context");
+            var wrongRole = new SegmentClassicLinuxDeploymentV2.Loading(loading.loader(), loading.loader(),
+                    loading.interpreter(), loading.aliases(), loading.directories(), loading.configuration(),
+                    loading.policy(), loading.elf(), loading.contexts(), loading.needed(), loading.modules());
+            assertSystemctlCandidateFailure(new CandidateFixture(fixture.files(), wrongRole),
+                    "must identify its SYSTEMCTL member");
+        }
+    }
+
+    @Test
+    public void systemctlRejectsAnUnapprovedCandidateFromAncestorRpath() throws Exception {
+        assertSystemctlCandidateFailure(systemctlFixture(helperInheritedRpathFixture(false)),
+                "exact approved logical context");
+    }
+
+    @Test
+    public void systemctlRejectsUnapprovedSonameReuseAcrossApprovedPaths() throws Exception {
+        assertSystemctlCandidateFailure(systemctlFixture(jdkHelperReuseFixture("libsecond.so", false)),
+                "reuse lacks approval");
+    }
+
+    @Test
+    public void systemctlRejectsAbsentInterpreterBeforeReadingTheLoader() throws Exception {
+        var helper = jdkHelperFixture(false, true, false, false);
+        var fixture = systemctlFixture(new CandidateFixture(helper.members(), helper.loading()));
+        Path loader = Path.of(fixture.files().get(0).path());
+        try (var channels = mockStatic(FileChannel.class, invocation -> {
+            if (invocation.getMethod().getName().equals("open") && loader.equals(invocation.getArgument(0))) {
+                throw new AssertionError("Absent systemctl PT_INTERP reached the loader");
+            }
+            return invocation.callRealMethod();
+        })) {
+            assertSystemctlCandidateFailure(fixture, "SYSTEMCTL interpreter differs");
+        }
+    }
+
+    @Test
+    public void systemctlRejectsAnInterpreterWithItsOwnNeededEntries() throws Exception {
+        var helper = jdkHelperFixture(true, true, false, true);
+        var fixture = withLookupCache(new CandidateFixture(helper.members(), helper.loading()),
+                cacheLookupBytes(new String[0], new byte[0][], new int[0], new long[0]));
+        assertSystemctlCandidateFailure(systemctlFixture(fixture), "PT_INTERP requires an approved self-contained");
+    }
+
     @Test
     public void jdkHelperReachableCandidatesDoNotBorrowApprovalFromTheSameFileInAnotherContext() throws Exception {
         var fixture = jdkHelperTransitiveFixture(true);
@@ -3072,8 +3214,8 @@ public class SegmentClassicLaunchTrustTest {
     }
 
     @Test
-    public void jdkHelperReachableCandidatesRejectSameBytesAtAReplacedEarlierRequester() throws Exception {
-        var fixture = jdkHelperTransitiveFixture(true);
+    public void systemctlReachableCandidatesRejectSameBytesAtAReplacedEarlierRequester() throws Exception {
+        var fixture = systemctlFixture(jdkHelperTransitiveFixture(true));
         var owner = owner();
         owner.initialize();
         Path branch = Path.of(fixture.loading().contexts().get(4).logicalLoadName());
@@ -3088,8 +3230,8 @@ public class SegmentClassicLaunchTrustTest {
             }
             return invocation.callRealMethod();
         })) {
-            var failure = assertThrows(IOException.class, () -> owner.readLinuxJdkHelperReachableCandidates(
-                    fixture.files(), fixture.loading(), 3, 0, SegmentClassicLinuxElfTest.deadline()));
+            var failure = assertThrows(IOException.class, () -> owner.readLinuxSystemctlNeededCandidates(
+                    fixture.files(), fixture.loading(), 0, SegmentClassicLinuxElfTest.deadline()));
             assertTrue(replaced.get());
             assertArrayEquals(Files.readAllBytes(old), Files.readAllBytes(branch));
             assertTrue(failure.getMessage(), failure.getMessage().contains("Reachable NEEDED context changed"));
@@ -3482,7 +3624,8 @@ public class SegmentClassicLaunchTrustTest {
             var failure = assertThrows(IOException.class,
                     () -> owner.readLinuxJdkHelperNeededCandidates(f.files(), f.loading(), 2, 0,
                             SegmentClassicLinuxElfTest.deadline()));
-            assertTrue(failure.getMessage(), failure.getMessage().contains("JDK helper PT_INTERP requires"));
+            assertTrue(failure.getMessage(),
+                    failure.getMessage().contains("PT_INTERP requires an approved self-contained ET_DYN loader"));
             assertEquals(1, loaderOpens.get());
             var drained = owner.closeAndDrain();
             assertTrue(drained.drained());
@@ -3583,6 +3726,22 @@ public class SegmentClassicLaunchTrustTest {
         })) {
             var failure = assertThrows(IOException.class,
                     () -> owner.verifyLinuxJdkHelperNeededCandidates(SegmentClassicLinuxElfTest.deadline()));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("original provider/source binding"));
+            var drained = owner.closeAndDrain();
+            assertTrue(drained.drained());
+            assertSame(failure, drained.launcherFailure());
+        }
+    }
+
+    @Test
+    public void typedSystemctlRequiresOriginalSourceBeforeAnyDependencyRead() throws Exception {
+        var owner = owner();
+        owner.initialize();
+        try (var targets = mockStatic(Files.class, invocation -> {
+            throw new AssertionError("Unbound systemctl reached its executable or dependencies");
+        })) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.verifyLinuxSystemctlNeededCandidates(SegmentClassicLinuxElfTest.deadline()));
             assertTrue(failure.getMessage(), failure.getMessage().contains("original provider/source binding"));
             var drained = owner.closeAndDrain();
             assertTrue(drained.drained());

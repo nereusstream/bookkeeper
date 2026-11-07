@@ -38,6 +38,8 @@
 
 原 owned cgroup2 目录现可读取固定 `cgroup.events`，返回当次 `populated`、目录身份和普通 mount ID。下一步接通实际 manager `ControlGroup` 来源及原 episode 目录的获取、持有和重验。批准 Linux 运行、真实 episode 终态和连续隔离仍待验收。[原 cgroup.events 当次观察](startup-readiness/README.md#原-cgroupevents-当次观察)
 
+正常 D2 现从原批准清单的精确 `/usr/bin/systemctl` 执行视图读取 ELF 和解释器，独立递归核验 `DT_NEEDED` 候选。固定查询 owner 在创建进程和启动管道消费者前拒绝。首次执行仍待批准构建、环境连续性、初始化和运行时模块范围，以及 CLI 自身到原 manager 的连接取证。批准 Linux 查询为 NOT_EXECUTED。[systemctl 的 NEEDED 候选范围观察](startup-readiness/README.md#正常-d2-launcher-的-systemctl-needed-候选范围观察)
+
 正常 D2 两轮启动检查将原 cgroup 目录 fd、固定路径和调用线程的实际 mountinfo 记录绑定。独立 JNI 核对普通 mount ID，并在初始 cgroup namespace 下要求 cgroup2 层级根。33 项 JUnit 通过，2 项 Linux 实读跳过，另有 7 项宿主 Rust 解析与值检查通过。批准 Linux 上的真实挂载、episode 成员关系和排空仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-绑定原-cgroup-挂载记录)。
 
 正常 D2 launcher 由原 trust owner 持有固定 `/sys/fs/cgroup` 目录，并在后续启动检查中复核同一 fd。各 sysfs 父目录使用自己的短期 fd 检查类型和身份，`/` 沿用通用 ACL 检查。26 项定向回归、Java 样式、旧库缺符号检查与 Linux x86_64 交叉检查通过。批准 Linux 实读、episode cgroup 与实际排空仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-持有并复核-cgroup-目录)。

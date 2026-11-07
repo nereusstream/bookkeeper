@@ -30,7 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
-import org.apache.commons.lang3.SystemUtils;
 
 /** One fixed CLI query and bounded raw property data; never unit approval or isolation authority. */
 final class SegmentClassicSystemdQuery {
@@ -44,7 +43,7 @@ final class SegmentClassicSystemdQuery {
             "TriggeredBy", "OnFailure", "OnSuccess");
     private static final Set<String> PROPERTY_SET = Set.copyOf(PROPERTIES);
 
-    /** Original query resources only. Outer launcher must verify the approved CLI/dependencies before initialize. */
+    /** Original query resources. Initialization requires a complete original execution and manager source. */
     static final class Owner {
         private final String unit;
         private final Output output = new Output();
@@ -62,12 +61,9 @@ final class SegmentClassicSystemdQuery {
                 }
                 attempted = true;
             }
-            if (!SystemUtils.IS_OS_LINUX) {
-                throw new IOException("Actual systemd query is unsupported on this platform");
-            }
-            var builder = new ProcessBuilder(command(unit));
-            builder.directory(new java.io.File("/"));
-            output.initialize(builder);
+            var failure = new IOException("Original systemctl execution and manager connection sources are incomplete");
+            output.reject(failure);
+            throw failure;
         }
 
         Map<String, String> properties(long deadline) throws IOException {
@@ -176,7 +172,7 @@ final class SegmentClassicSystemdQuery {
         Bytes read(long deadline) throws IOException {
             synchronized (gate) {
                 if (!attempted) {
-                    throw new IOException("Original query has not started");
+                    throw new IOException("Original query has not started", observationFailure);
                 }
             }
             try {

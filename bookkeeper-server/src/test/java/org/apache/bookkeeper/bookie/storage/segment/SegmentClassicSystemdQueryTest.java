@@ -19,9 +19,9 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import static org.awaitility.Awaitility.await;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assume.assumeFalse;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.spy;
 
@@ -39,7 +39,6 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.commons.lang3.SystemUtils;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -166,13 +165,14 @@ public class SegmentClassicSystemdQueryTest {
     }
 
     @Test
-    public void nonLinuxOwnerRejectsBeforeCreatingAQueryProcess() throws Exception {
-        assumeFalse(SystemUtils.IS_OS_LINUX);
+    public void incompleteOriginalSourcesRejectBeforeAcquiringQueryResources() throws Exception {
         var owner = new SegmentClassicSystemdQuery.Owner(UNIT);
-        assertThrows(IOException.class, owner::initialize);
-        assertThrows(IOException.class, () -> owner.properties(deadline()));
-        assertTrue(owner.drain(deadline()));
-        assertThrows(IOException.class, owner::initialize);
+        var refusal = assertThrows(IOException.class, owner::initialize);
+        assertTrue(refusal.getMessage().contains("execution and manager connection sources are incomplete"));
+        assertTrue(owner.drain(System.nanoTime()));
+        var observation = assertThrows(IOException.class, () -> owner.properties(deadline()));
+        assertSame(refusal, observation.getCause());
+        assertTrue(assertThrows(IOException.class, owner::initialize).getMessage().contains("starts once"));
     }
 
     @Test(timeout = 30000)

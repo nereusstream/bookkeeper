@@ -75,6 +75,22 @@ public class SegmentClassicLinuxDeploymentV2Test {
                 u.service());
     }
 
+    @Test
+    public void productionDeploymentRejectsAnotherPhysicalSystemctlPath() throws Exception {
+        var deployment = original();
+        var files = new ArrayList<>(deployment.files());
+        int systemctl = deployment.loading().systemctl();
+        var original = files.get(systemctl);
+        assertEquals("/usr/bin/systemctl", original.path());
+        files.set(systemctl, new SegmentClassicLinuxDeploymentV2.File(original.path() + "-other",
+                original.role(), original.length(), original.sha256()));
+        var failure = assertThrows(IllegalArgumentException.class, () -> new SegmentClassicLinuxDeploymentV2(
+                deployment.platform(), files, deployment.provider(), deployment.loading(), deployment.startChain(),
+                deployment.units(), deployment.launcherUnit(), deployment.installLinks(), deployment.isolation(),
+                deployment.operations()));
+        assertTrue(failure.getMessage().contains("Only the fixed systemctl executable"));
+    }
+
     private static SegmentClassicLinuxDeploymentV2 units(SegmentClassicLinuxDeploymentV2 d, List<Unit> units) {
         return new SegmentClassicLinuxDeploymentV2(d.platform(), d.files(), d.provider(), d.loading(), d.startChain(),
                 units, d.launcherUnit(), d.installLinks(), d.isolation(), d.operations());
