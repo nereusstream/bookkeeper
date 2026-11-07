@@ -52,7 +52,7 @@ import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStor
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 
-/** Controlled offline recovery of one complete original CLOSED image. */
+/** Controlled offline recovery of the complete original CLOSED DATA file set. */
 public final class SegmentClosedReconstruction {
     private static final int COPY_BYTES = 64 * 1024;
     private static final String CANDIDATE = "image";
@@ -200,9 +200,6 @@ public final class SegmentClosedReconstruction {
         if (operation == null || operation.equals(new UUID(0, 0))) {
             throw new IllegalArgumentException("Reconstruction requires an exact operation");
         }
-        if (imageIo != null && config.dataFiles() > 1) {
-            throw new IOException("Multi-file reconstruction publication is not yet available");
-        }
         var scope = new ProfileClosedReconstruction.Scope(identity.bookieId().toString(), identity.incarnation(),
                 identity.arenaId(), epoch);
         return SegmentStorageInspector.withRecoveryLocks(config, identity, (root, data, arena, bookie, locks) -> {
@@ -210,8 +207,8 @@ public final class SegmentClosedReconstruction {
             if (existing != null && !existing.admission().operation().equals(operation)) {
                 throw new IOException("The original managed epoch already has a different reconstruction operation");
             }
-            if (existing != null && existing.admission().originals().size() != config.dataFiles()) {
-                throw new IOException("Reconstruction DATA file count differs from the original admission");
+            if (existing != null) {
+                requireFileGeometry(config, existing.admission().originals());
             }
             if (existing != null && existing.ready() != null) {
                 if (imageIo != null) {
@@ -338,9 +335,9 @@ public final class SegmentClosedReconstruction {
                     if (shadow.ready() != null) {
                         receipt = shadow.ready();
                     } else {
-                        ProfileClosedReconstruction.Image candidate;
+                        List<ProfileClosedReconstruction.FileImage> candidates;
                         try {
-                            candidate = freshImage(files, nativeIo, root, stage, receipt, imageIo);
+                            candidates = freshImages(files, nativeIo, root, stage, receipt, imageIo);
                         } catch (IOException failure) {
                             try {
                                 reservations.failClosedReconstructionShadow(admission, shadow);
@@ -362,8 +359,7 @@ public final class SegmentClosedReconstruction {
                         files.requireHealthy();
                         verifySourceRegistrations(observations);
                         receipt = reservations.readyClosedReconstruction(metadata,
-                                new PreparedReady(receipt, cohort,
-                                        List.of(new ProfileClosedReconstruction.FileImage(0, candidate)), shadow));
+                                new PreparedReady(receipt, cohort, candidates, shadow));
                     }
                 }
                 if (imageIo != null) {
@@ -438,70 +434,66 @@ public final class SegmentClosedReconstruction {
         return root.resolve(".closed-reconstruction-" + operation);
     }
 
-    private static ProfileClosedReconstruction.Image freshImage(SegmentOwnedFiles files, NativeIO nativeIo,
-            Path root, Path stage, ProfileClosedReconstruction.Receipt receipt, SegmentFileIo io) throws Exception {
-        var admitted = receipt.admission();
-        var original = admitted.original();
-        Path originalPath = root.resolve("data-0");
-        Path candidate = stage.resolve(CANDIDATE);
-        Path interrupted = stage.resolve(INTERRUPTED);
-        if (present(stage.resolve(FAILED)) || present(stage.resolve(RETAINED))) {
-            throw new IOException("ADMITTED staging has an observed failure or an unpublished retained file");
+    private static Path staged(Path stage, String role, int index, int count) {
+        return stage.resolve(count == 1 ? role : role + "-" + index);
+    }
+
+    private static void requireStagingNames(SegmentOwnedFiles files, Path stage, int count, String secondRole)
+            throws IOException {
+        var allowed = new HashSet<Path>();
+        for (int index = 0; index < count; index++) {
+            allowed.add(staged(stage, CANDIDATE, index, count));
+            allowed.add(staged(stage, secondRole, index, count));
         }
         try (var children = files.openDirectory(stage)) {
             for (Path path : children) {
-                if (!path.equals(candidate) && !path.equals(interrupted)) {
+                if (!allowed.contains(path)) {
                     throw new IOException("Unrecognized file in the original reconstruction staging");
                 }
             }
         }
-        if (present(interrupted)) {
-            requirePartialImage(interrupted, stage, original);
+    }
+
+    private static List<ProfileClosedReconstruction.FileImage> freshImages(SegmentOwnedFiles files, NativeIO nativeIo,
+            Path root, Path stage, ProfileClosedReconstruction.Receipt receipt, SegmentFileIo io) throws Exception {
+        var originals = receipt.admission().originals();
+        int count = originals.size();
+        requireStagingNames(files, stage, count, INTERRUPTED);
+        var objects = new HashSet<NativeIO.FileIdentity>();
+        originals.forEach(file -> objects.add(file.image().object()));
+        for (var file : originals) {
+            requirePartialImage(staged(stage, CANDIDATE, file.index(), count), stage, file.image(), objects);
+            requirePartialImage(staged(stage, INTERRUPTED, file.index(), count), stage, file.image(), objects);
         }
-        if (present(candidate)) {
-            requirePartialImage(candidate, stage, original);
-            Files.deleteIfExists(interrupted);
-            // Keep this inode linked until the next original candidate descriptor has actually closed.
-            rename(nativeIo, candidate, interrupted);
-            SegmentOwnedFiles.syncDirectory(files, stage);
+        for (int index = 0; index < count; index++) {
+            Path candidate = staged(stage, CANDIDATE, index, count);
+            if (present(candidate)) {
+                Path interrupted = staged(stage, INTERRUPTED, index, count);
+                Files.deleteIfExists(interrupted);
+                // Keep each previous candidate linked until every new candidate has actually closed.
+                rename(nativeIo, candidate, interrupted);
+            }
         }
+        SegmentOwnedFiles.syncDirectory(files, stage);
         try {
-            var permissions = Files.getPosixFilePermissions(originalPath, LinkOption.NOFOLLOW_LINKS);
-            NativeIO.FileIdentity fresh;
-            try (var input = SegmentOwnedFiles.openRegularReadOnly(files, originalPath);
-                    var output = SegmentOwnedFiles.open(files, candidate,
-                            Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.READ, StandardOpenOption.WRITE,
-                                    LinkOption.NOFOLLOW_LINKS), PosixFilePermissions.asFileAttribute(permissions))) {
-                fresh = files.fileIdentity(output, nativeIo);
-                if (!files.fileIdentity(input, nativeIo).equals(original.object()) || input.size() != original.length()
-                        || fresh.equals(original.object()) || fresh.device() != original.object().device()) {
-                    throw new IOException("Reconstruction copy descriptors do not match their exact roles");
-                }
-                var digest = MessageDigest.getInstance("SHA-256");
-                ByteBuffer buffer = ByteBuffer.allocate(COPY_BYTES);
-                for (long offset = 0; offset < original.length();) {
-                    int count = (int) Math.min(buffer.capacity(), original.length() - offset);
-                    buffer.clear().limit(count);
-                    SegmentFileIo.readFully(input, buffer, offset);
-                    io.writeFully(output, buffer, offset);
-                    digest.update(buffer);
-                    offset += count;
-                }
-                if (!original.sha256().equals(HexFormat.of().formatHex(digest.digest()))) {
-                    throw new IOException("Original DATA changed while generating the complete fresh image");
-                }
-                io.force(output, true);
-                if (!original.sha256().equals(hash(output, original.length()))) {
-                    throw new IOException("Fresh DATA readback differs from the complete original image");
-                }
+            var candidates = new ArrayList<ProfileClosedReconstruction.FileImage>(count);
+            ByteBuffer buffer = ByteBuffer.allocate(COPY_BYTES);
+            for (var file : originals) {
+                int index = file.index();
+                var image = copyFreshImage(files, nativeIo, root.resolve("data-" + index),
+                        staged(stage, CANDIDATE, index, count), file.image(), buffer, io);
+                candidates.add(new ProfileClosedReconstruction.FileImage(index, image));
             }
-            files.requireHealthy();
-            if (!requireOriginalFile(candidate, original.length()).equals(fresh)) {
-                throw new IOException("Fresh DATA path changed during its original first close");
+            for (var candidate : candidates) {
+                var image = candidate.image();
+                if (!requireOriginalFile(staged(stage, CANDIDATE, candidate.index(), count), image.length())
+                        .equals(image.object())) {
+                    throw new IOException("Fresh DATA path changed after its original first close");
+                }
+                Files.deleteIfExists(staged(stage, INTERRUPTED, candidate.index(), count));
             }
-            Files.deleteIfExists(interrupted);
             SegmentOwnedFiles.syncDirectory(files, stage);
-            return new ProfileClosedReconstruction.Image(fresh, original.length(), original.sha256());
+            return List.copyOf(candidates);
         } catch (IOException failure) {
             try {
                 Files.createFile(stage.resolve(FAILED), PosixFilePermissions.asFileAttribute(
@@ -514,23 +506,61 @@ public final class SegmentClosedReconstruction {
         }
     }
 
-    private static void requirePartialImage(Path path, Path stage, ProfileClosedReconstruction.Image original)
-            throws IOException {
+    private static ProfileClosedReconstruction.Image copyFreshImage(SegmentOwnedFiles files, NativeIO nativeIo,
+            Path originalPath, Path candidate, ProfileClosedReconstruction.Image original, ByteBuffer buffer,
+            SegmentFileIo io) throws Exception {
+        var permissions = Files.getPosixFilePermissions(originalPath, LinkOption.NOFOLLOW_LINKS);
+        NativeIO.FileIdentity fresh;
+        try (var input = SegmentOwnedFiles.openRegularReadOnly(files, originalPath);
+                var output = SegmentOwnedFiles.open(files, candidate,
+                        Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.READ, StandardOpenOption.WRITE,
+                                LinkOption.NOFOLLOW_LINKS), PosixFilePermissions.asFileAttribute(permissions))) {
+            fresh = files.fileIdentity(output, nativeIo);
+            if (!files.fileIdentity(input, nativeIo).equals(original.object()) || input.size() != original.length()
+                    || fresh.equals(original.object()) || fresh.device() != original.object().device()) {
+                throw new IOException("Reconstruction copy descriptors do not match their exact roles");
+            }
+            var digest = MessageDigest.getInstance("SHA-256");
+            for (long offset = 0; offset < original.length();) {
+                int count = (int) Math.min(buffer.capacity(), original.length() - offset);
+                buffer.clear().limit(count);
+                SegmentFileIo.readFully(input, buffer, offset);
+                io.writeFully(output, buffer, offset);
+                digest.update(buffer);
+                offset += count;
+            }
+            if (!original.sha256().equals(HexFormat.of().formatHex(digest.digest()))) {
+                throw new IOException("Original DATA changed while generating the complete fresh image");
+            }
+            io.force(output, true);
+            if (!original.sha256().equals(hash(output, original.length(), buffer))) {
+                throw new IOException("Fresh DATA readback differs from the complete original image");
+            }
+        }
+        files.requireHealthy();
+        return new ProfileClosedReconstruction.Image(fresh, original.length(), original.sha256());
+    }
+
+    private static void requirePartialImage(Path path, Path stage, ProfileClosedReconstruction.Image original,
+            Set<NativeIO.FileIdentity> objects) throws IOException {
+        if (!present(path)) {
+            return;
+        }
         var prior = SegmentClassicHandoffPaths.loadingIdentity(path);
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || prior.links() != 1
-                || prior.device() != original.object().device() || prior.inode() == original.object().inode()
+                || prior.device() != original.object().device()
+                || !objects.add(new NativeIO.FileIdentity(prior.device(), prior.inode()))
                 || prior.size() > original.length() || !Files.getOwner(path, LinkOption.NOFOLLOW_LINKS)
                         .equals(Files.getOwner(stage, LinkOption.NOFOLLOW_LINKS))) {
             throw new IOException("Interrupted staging file does not belong to this operation");
         }
     }
 
-    private static String hash(java.nio.channels.FileChannel file, long length) throws Exception {
+    private static String hash(java.nio.channels.FileChannel file, long length, ByteBuffer buffer) throws Exception {
         if (file.size() != length) {
             throw new IOException("Reconstruction file length differs from its native binding");
         }
         var digest = MessageDigest.getInstance("SHA-256");
-        ByteBuffer buffer = ByteBuffer.allocate(COPY_BYTES);
         for (long offset = 0; offset < length;) {
             int count = (int) Math.min(buffer.capacity(), length - offset);
             buffer.clear().limit(count);
@@ -550,16 +580,19 @@ public final class SegmentClosedReconstruction {
         }
     }
 
+    // During publication: INSTALLED* RETAINED? ORIGINAL*. During cleanup: CLEANED* INSTALLED*.
+    private enum PublicationPhase {
+        CLEANED, INSTALLED, RETAINED, ORIGINAL
+    }
+
     private static void finishReady(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
             ProfileDescriptorValidator validator, NativeIO nativeIo, Limits limits, Path root,
             SegmentDataFileLock data, SegmentDataFileLock arena, SegmentDataFileLock bookie, List<Path> locks,
             ProfileClosedReconstruction.Receipt receipt, SegmentFileIo controlIo) throws Exception {
         var admitted = receipt.admission();
-        var fresh = receipt.ready().candidate();
-        Path active = root.resolve("data-0");
+        var candidates = receipt.ready().candidates();
+        int count = candidates.size();
         Path stage = staging(root, admitted.operation());
-        Path candidate = stage.resolve(CANDIDATE);
-        Path retained = stage.resolve(RETAINED);
         var files = new SegmentOwnedFiles(locks);
         try (AutoCloseable cleanup = () -> requireDrained(files, data)) {
             if (!root.toString().equals(admitted.directory())
@@ -567,79 +600,57 @@ public final class SegmentClosedReconstruction {
                 throw new IOException("READY cannot publish into a replacement directory");
             }
             boolean stagePresent = present(stage);
+            var phases = List.<PublicationPhase>of();
+            var dataPaths = new ArrayList<Path>(count);
+            ByteBuffer buffer = ByteBuffer.allocate(COPY_BYTES);
             if (stagePresent) {
                 if (!observeDirectory(files, nativeIo, stage).equals(admitted.stagingObject())) {
                     throw new IOException("READY staging was replaced");
                 }
-                try (var children = files.openDirectory(stage)) {
-                    for (Path path : children) {
-                        if (!path.equals(candidate) && !path.equals(retained)) {
-                            throw new IOException("READY staging contains an unexpected object");
-                        }
-                    }
+                requireStagingNames(files, stage, count, RETAINED);
+                phases = verifyPublicationPrefix(config, identity, files, nativeIo, root, stage, receipt, buffer);
+                for (int index = 0; index < count; index++) {
+                    dataPaths.add(phases.get(index) == PublicationPhase.RETAINED
+                            ? staged(stage, RETAINED, index, count) : root.resolve("data-" + index));
                 }
             }
-            boolean haveCandidate = stagePresent && present(candidate);
-            boolean haveRetained = stagePresent && present(retained);
-            if (present(active)) {
-                var deps = SegmentStorageInspector.readRecoveryDependencies(config, identity, limits.controlBytes(),
-                        limits.controlRows(), key, validator, arena, bookie, locks);
-                if (deps.arena().cut().sessionEpoch() > admitted.scope().epoch()) {
-                    if (stagePresent) {
-                        throw new IOException("Advanced Arena has unexpected historical reconstruction staging");
-                    }
-                    SegmentArenaControlLog.requireReconstructionApplied(config, identity, limits.controlBytes(),
-                            arena, files, receipt);
-                    return;
-                }
-                requireReadyCuts(deps, admitted);
-                if (!deps.arena().cut().sessionOpen()) {
-                    if (stagePresent) {
-                        throw new IOException("Closed Arena has unexpected reconstruction staging");
-                    }
-                    SegmentArenaControlLog.requireReconstructionApplied(config, identity, limits.controlBytes(),
-                            arena, files, receipt);
-                    verifyImage(files, nativeIo, config, identity, active, fresh);
-                    return;
-                }
-                var object = requireOriginalFile(active, admitted.original().length());
-                if (object.equals(admitted.original().object()) && haveCandidate && !haveRetained) {
-                    verifyImage(files, nativeIo, config, identity, active, admitted.original());
-                    verifyImage(files, nativeIo, config, identity, candidate, fresh);
-                    rename(nativeIo, active, retained);
-                    SegmentOwnedFiles.syncDirectory(files, root);
-                    SegmentOwnedFiles.syncDirectory(files, stage);
-                    haveRetained = true;
-                } else if (!object.equals(fresh.object()) || haveCandidate) {
-                    throw new IOException("Active DATA is outside the original READY publication sequence");
-                }
-            }
-            if (!present(active)) {
-                if (!haveRetained || !haveCandidate) {
-                    throw new IOException("Incomplete READY switch lost an exact old or new object");
-                }
-                verifyImage(files, nativeIo, config, identity, retained, admitted.original());
-                verifyImage(files, nativeIo, config, identity, candidate, fresh);
-                SegmentOwnedFiles.syncDirectory(files, root);
-                SegmentOwnedFiles.syncDirectory(files, stage);
-                rename(nativeIo, candidate, active);
-                SegmentOwnedFiles.syncDirectory(files, root);
-                SegmentOwnedFiles.syncDirectory(files, stage);
-            }
-            verifyImage(files, nativeIo, config, identity, active, fresh);
             var deps = SegmentStorageInspector.readRecoveryDependencies(config, identity, limits.controlBytes(),
-                    limits.controlRows(), key, validator, arena, bookie, locks);
-            requireReadyCuts(deps, admitted);
-            if (!deps.arena().cut().sessionOpen()) {
-                throw new IOException("READY installation no longer has the original OPEN epoch");
+                    limits.controlRows(), key, validator, arena, bookie, locks, dataPaths);
+            long epoch = deps.arena().cut().sessionEpoch();
+            if (epoch > admitted.scope().epoch() || !deps.arena().cut().sessionOpen()) {
+                if (stagePresent) {
+                    throw new IOException("Advanced or closed Arena has unexpected historical reconstruction staging");
+                }
+                SegmentArenaControlLog.requireReconstructionApplied(config, identity, limits.controlBytes(),
+                        arena, files, receipt);
+                if (epoch == admitted.scope().epoch()) {
+                    verifyActiveReadyImages(config, identity, files, nativeIo, root, candidates, buffer);
+                }
+                return;
             }
+            requireReadyCuts(deps, admitted);
             if (stagePresent) {
-                SegmentOwnedFiles.syncDirectory(files, root);
-                SegmentOwnedFiles.syncDirectory(files, stage);
-                if (haveRetained) {
-                    verifyImage(files, nativeIo, config, identity, retained, admitted.original());
-                    Files.delete(retained);
-                    SegmentOwnedFiles.syncDirectory(files, stage);
+                syncPublicationDirectories(files, root, stage);
+                for (int index = 0; index < count; index++) {
+                    Path active = root.resolve("data-" + index);
+                    var phase = phases.get(index);
+                    if (phase == PublicationPhase.ORIGINAL) {
+                        rename(nativeIo, active, staged(stage, RETAINED, index, count));
+                        syncPublicationDirectories(files, root, stage);
+                    }
+                    if (phase == PublicationPhase.ORIGINAL || phase == PublicationPhase.RETAINED) {
+                        rename(nativeIo, staged(stage, CANDIDATE, index, count), active);
+                        syncPublicationDirectories(files, root, stage);
+                    }
+                }
+            }
+            verifyActiveReadyImages(config, identity, files, nativeIo, root, candidates, buffer);
+            if (stagePresent) {
+                for (int index = 0; index < count; index++) {
+                    if (phases.get(index) != PublicationPhase.CLEANED) {
+                        Files.delete(staged(stage, RETAINED, index, count));
+                        SegmentOwnedFiles.syncDirectory(files, stage);
+                    }
                 }
                 Files.delete(stage);
             }
@@ -647,6 +658,73 @@ public final class SegmentClosedReconstruction {
             files.requireHealthy();
             SegmentArenaControlLog.resolveReconstruction(config, identity, limits.controlBytes(), controlIo,
                     arena, files, new PublishedImage(receipt));
+        }
+    }
+
+    private static List<PublicationPhase> verifyPublicationPrefix(IsolatedSegmentConfig config,
+            SegmentFileHeader identity, SegmentOwnedFiles files, NativeIO nativeIo, Path root, Path stage,
+            ProfileClosedReconstruction.Receipt receipt, ByteBuffer buffer) throws Exception {
+        var originals = receipt.admission().originals();
+        var candidates = receipt.ready().candidates();
+        int count = originals.size();
+        var phases = new ArrayList<PublicationPhase>(count);
+        PublicationPhase previous = PublicationPhase.CLEANED;
+        boolean cleanup = false;
+        for (int index = 0; index < count; index++) {
+            var original = originals.get(index);
+            var fresh = candidates.get(index);
+            Path active = root.resolve("data-" + index);
+            Path candidate = staged(stage, CANDIDATE, index, count);
+            Path retained = staged(stage, RETAINED, index, count);
+            boolean haveActive = present(active);
+            boolean haveCandidate = present(candidate);
+            boolean haveRetained = present(retained);
+            PublicationPhase phase;
+            if (haveCandidate) {
+                if (haveActive == haveRetained) {
+                    throw new IOException("Incomplete READY switch lost the exact placement of an old DATA file");
+                }
+                verifyImage(files, nativeIo, config, identity, haveActive ? active : retained, original, buffer);
+                verifyImage(files, nativeIo, config, identity, candidate, fresh, buffer);
+                phase = haveActive ? PublicationPhase.ORIGINAL : PublicationPhase.RETAINED;
+            } else {
+                verifyImage(files, nativeIo, config, identity, active, fresh, buffer);
+                if (haveRetained) {
+                    verifyImage(files, nativeIo, config, identity, retained, original, buffer);
+                }
+                phase = haveRetained ? PublicationPhase.INSTALLED : PublicationPhase.CLEANED;
+            }
+            cleanup |= phase == PublicationPhase.CLEANED;
+            if (phase.compareTo(previous) < 0
+                    || (phase == PublicationPhase.RETAINED && previous == PublicationPhase.RETAINED)
+                    || (cleanup && phase.compareTo(PublicationPhase.INSTALLED) > 0)) {
+                throw new IOException("READY DATA files are outside the original publication prefix");
+            }
+            phases.add(phase);
+            previous = phase;
+        }
+        return phases;
+    }
+
+    private static void syncPublicationDirectories(SegmentOwnedFiles files, Path root, Path stage) throws IOException {
+        SegmentOwnedFiles.syncDirectory(files, root);
+        SegmentOwnedFiles.syncDirectory(files, stage);
+    }
+
+    private static void requireFileGeometry(IsolatedSegmentConfig config,
+            List<ProfileClosedReconstruction.FileImage> images) throws IOException {
+        if (images.size() != config.dataFiles()
+                || images.stream().anyMatch(file -> file.image().length() != config.bytesPerFile())) {
+            throw new IOException("Reconstruction DATA file geometry differs from the original admission");
+        }
+    }
+
+    private static void verifyActiveReadyImages(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SegmentOwnedFiles files, NativeIO nativeIo, Path root, List<ProfileClosedReconstruction.FileImage> images,
+            ByteBuffer buffer) throws Exception {
+        requireFileGeometry(config, images);
+        for (var image : images) {
+            verifyImage(files, nativeIo, config, identity, root.resolve("data-" + image.index()), image, buffer);
         }
     }
 
@@ -692,7 +770,8 @@ public final class SegmentClosedReconstruction {
                     || present(staging(root, pending.operation()))) {
                 throw new IOException("First reconstructed OPEN requires the original published and cleaned scope");
             }
-            verifyImage(files, nativeIo, config, identity, root.resolve("data-0"), receipt.ready().candidate());
+            verifyActiveReadyImages(config, identity, files, nativeIo, root, receipt.ready().candidates(),
+                    ByteBuffer.allocate(COPY_BYTES));
         } catch (IOException | InterruptedException failure) {
             throw failure;
         } catch (Exception failure) {
@@ -724,18 +803,20 @@ public final class SegmentClosedReconstruction {
     }
 
     private static void verifyImage(SegmentOwnedFiles files, NativeIO nativeIo, IsolatedSegmentConfig config,
-            SegmentFileHeader identity, Path path, ProfileClosedReconstruction.Image image) throws Exception {
+            SegmentFileHeader identity, Path path, ProfileClosedReconstruction.FileImage row, ByteBuffer buffer)
+            throws Exception {
+        var image = row.image();
         if (!requireOriginalFile(path, image.length()).equals(image.object())) {
             throw new IOException("Reconstruction path does not name the exact READY object");
         }
         try (var file = SegmentOwnedFiles.openRegularReadOnly(files, path)) {
             if (!files.fileIdentity(file, nativeIo).equals(image.object())
-                    || !image.sha256().equals(hash(file, image.length()))) {
+                    || !image.sha256().equals(hash(file, image.length(), buffer))) {
                 throw new IOException("Reconstruction object does not match the exact READY image");
             }
             ByteBuffer header = ByteBuffer.allocate(config.alignment());
             SegmentFileIo.readFully(file, header, 0);
-            identity.validate(header, config, 0);
+            identity.validate(header, config, row.index());
         }
         if (!requireOriginalFile(path, image.length()).equals(image.object())) {
             throw new IOException("Reconstruction image path changed after its original close");

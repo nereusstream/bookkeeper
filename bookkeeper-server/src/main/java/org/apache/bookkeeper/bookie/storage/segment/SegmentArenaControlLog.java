@@ -723,13 +723,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     /** Only the caller's existing lock scope and owned readers participate in this observation. */
     static RecoveryDependencies inspectRecoveryDependencies(IsolatedSegmentConfig config, SegmentFileHeader identity,
-            long maxLogBytes, int maximumRows, SegmentDataFileLock guard, SegmentOwnedFiles files) throws IOException {
+            long maxLogBytes, int maximumRows, SegmentDataFileLock guard, SegmentOwnedFiles files,
+            List<Path> readyDataPaths) throws IOException {
         guard.requireHeld(config.directory().toRealPath().resolve("arena-control.lock"));
         Path path = config.directory().resolve("arena-control");
         FileChannel original = SegmentOwnedFiles.openRegularReadOnly(files, path);
         var observed = new SegmentArenaControlLog(config, identity, maxLogBytes, new SegmentFileIo(),
                 original, null, true, files);
-        observed.validateStorageFiles(identity);
+        observed.validateStorageFiles(identity, readyDataPaths);
         observed.recover(identity);
         if ((long) observed.currentAllocations.size() + observed.streamStarts.size() + observed.selectedMoves.size()
                 + observed.retiredSlots.size() + observed.retiredRanges.size() > maximumRows) {
@@ -1812,11 +1813,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private static ResolveClosedReconstruction reconstructionCommand(ProfileClosedReconstruction.Receipt receipt) {
         var admitted = receipt.admission();
-        // The existing scalar slot is a canonical anchor. The full native cohort is bound by admissionDigest.
+        // The scalar slots anchor the first ledger and data-0. Both native digests bind the full vectors.
         long anchorLedger = admitted.members().get(0).ledger();
         return new ResolveClosedReconstruction(admitted.operation(), new Generation(admitted.scope().epoch()),
                 new ReconstructionBinding(anchorLedger, admitted.arenaCut(), admitted.bookieCut(),
-                        receipt.admissionBirth(), receipt.readyBirth(), receipt.ready().candidate(),
+                        receipt.admissionBirth(), receipt.readyBirth(), receipt.ready().candidates().get(0).image(),
                         admitted.dependencies(), receipt.admissionDigest(), receipt.readyDigest()));
     }
 
@@ -2502,6 +2503,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
     }
 
     private void validateStorageFiles(SegmentFileHeader identity) throws IOException {
+        validateStorageFiles(identity, List.of());
+    }
+
+    private void validateStorageFiles(SegmentFileHeader identity, List<Path> readyDataPaths) throws IOException {
         if (Files.isSymbolicLink(config.directory())) {
             throw new IOException("Isolated storage directory cannot be a symlink");
         }
@@ -2511,7 +2516,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
             validateIdentityFile(config.directory().resolve("bookie-control"), identity, -3, -1);
         }
         for (int file = 0; file < config.dataFiles(); file++) {
-            validateIdentityFile(IsolatedSegmentFiles.dataPath(config, file), identity, file,
+            validateIdentityFile(readyDataPaths.isEmpty() ? IsolatedSegmentFiles.dataPath(config, file)
+                    : readyDataPaths.get(file), identity, file,
                     config.bytesPerFile());
         }
     }
@@ -2830,7 +2836,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (command instanceof ResolveClosedReconstruction resolution) {
             var binding = resolution.binding();
             if (sessionEpoch != resolution.expectedGeneration() || !canResolveSession()
-                    || binding.arenaCut() != appliedThrough - 1 || config.dataFiles() != 1
+                    || binding.arenaCut() != appliedThrough - 1
                     || currentAllocations.isEmpty() || binding.image().length() != config.bytesPerFile()
                     || binding.arenaCut() <= reconstructionNoAppendThrough) {
                 throw new IOException("Invalid resolution of the original CLOSED reconstruction epoch");

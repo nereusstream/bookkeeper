@@ -813,13 +813,13 @@ final class SegmentBookieControlLog implements AutoCloseable {
 
     static RecoveryDependencies inspectRecoveryDependencies(IsolatedSegmentConfig config, SegmentFileHeader identity,
             long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator, int maximumRows,
-            SegmentDataFileLock guard, SegmentOwnedFiles files) throws IOException {
+            SegmentDataFileLock guard, SegmentOwnedFiles files, List<Path> readyDataPaths) throws IOException {
         guard.requireHeld(config.directory().toRealPath().resolve("bookie-control.lock"));
         FileChannel original = SegmentOwnedFiles.openRegularReadOnly(files,
                 config.directory().resolve("bookie-control"));
         var observed = new SegmentBookieControlLog(config, identity, maxLogBytes, new SegmentFileIo(),
                 key, validator, original, null, null, files, true);
-        observed.validateStorageFiles();
+        observed.validateStorageFiles(readyDataPaths);
         observed.recover();
         long rows = (long) observed.ledgers.size() + observed.tombstones.size();
         for (LedgerState state : observed.ledgers.values()) {
@@ -4001,6 +4001,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
     }
 
     private void validateStorageFiles() throws IOException {
+        validateStorageFiles(List.of());
+    }
+
+    private void validateStorageFiles(List<Path> readyDataPaths) throws IOException {
         if (Files.isSymbolicLink(config.directory())) {
             throw new IOException("Isolated storage directory cannot be a symlink");
         }
@@ -4013,7 +4017,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
         validateIdentity(config.directory().resolve("arena-control"), -4, -1);
         for (int file = 0; file < config.dataFiles(); file++) {
-            validateIdentity(IsolatedSegmentFiles.dataPath(config, file), file, config.bytesPerFile());
+            validateIdentity(readyDataPaths.isEmpty() ? IsolatedSegmentFiles.dataPath(config, file)
+                    : readyDataPaths.get(file), file, config.bytesPerFile());
         }
         validateIdentity(config.directory().resolve("bookie-control"), -3, -1);
     }

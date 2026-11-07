@@ -183,6 +183,15 @@ public final class SegmentStorageInspector {
             SegmentFileHeader identity, long maximumControlBytes, int maximumRows, SecretKey key,
             ProfileDescriptorValidator validator, SegmentDataFileLock arena, SegmentDataFileLock bookie,
             List<Path> locks) throws Exception {
+        return readRecoveryDependencies(config, identity, maximumControlBytes, maximumRows, key, validator,
+                arena, bookie, locks, List.of());
+    }
+
+    // READY recovery can supply the already verified retained path for an in-flight DATA rename.
+    static RecoveryDependencies readRecoveryDependencies(IsolatedSegmentConfig config,
+            SegmentFileHeader identity, long maximumControlBytes, int maximumRows, SecretKey key,
+            ProfileDescriptorValidator validator, SegmentDataFileLock arena, SegmentDataFileLock bookie,
+            List<Path> locks, List<Path> readyDataPaths) throws Exception {
         if (maximumControlBytes < 6144 || maximumRows < 1 || maximumRows > 65536) {
             throw new IllegalArgumentException("Recovery dependency observation requires bounded control and rows");
         }
@@ -194,9 +203,9 @@ public final class SegmentStorageInspector {
             }
         }) {
             var arenaDependencies = SegmentArenaControlLog.inspectRecoveryDependencies(config, identity,
-                    maximumControlBytes, maximumRows, arena, files);
+                    maximumControlBytes, maximumRows, arena, files, readyDataPaths);
             var bookieDependencies = SegmentBookieControlLog.inspectRecoveryDependencies(config, identity,
-                    maximumControlBytes, key, validator, maximumRows, bookie, files);
+                    maximumControlBytes, key, validator, maximumRows, bookie, files, readyDataPaths);
             return new RecoveryDependencies(identity, arenaDependencies, bookieDependencies);
         }
     }

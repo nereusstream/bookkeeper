@@ -124,7 +124,7 @@ action 5 使用同一启动锁和控制前置条件。当前 OPEN 的前驱须�
 
 action 4/5 均在 force 和 apply 后结束旧 epoch，保留 epoch 数值及原控制历史。解析动作不产生 CLOSE 尾界或新的 allocation/FREE 事实。新 owner 只重放完整有效记录，原 write/force 结果未确认的尝试保持失败。原重开完成必要 DATA 核验、同步与状态重建后，以普通 OPEN 开启下一 epoch。
 
-单文件 CLOSED 重建使用独立 `DEVICE_STATE` v2 action 6，固定 208 字节大端 body，完整控制记录 352 字节。外层 UUID 为原 native operation，operation generation 和 expected generation 都是旧 DATA epoch。body 如下。
+同一 Arena 的 CLOSED 重建使用独立 `DEVICE_STATE` v2 action 6，固定 208 字节大端 body，完整控制记录 352 字节。外层 UUID 为原 native operation，operation generation 和 expected generation 都是旧 DATA epoch。body 如下。
 
 | 偏移 | 字段 |
 |---|---|
@@ -132,10 +132,10 @@ action 4/5 均在 force 和 apply 后结束旧 epoch，保留 epoch 数值及原
 | 8 / 16 | 旧 epoch u64 / 原 ledger id u64（集合使用最小成员 ID 作规范锚点） |
 | 24 / 32 | 原 Arena predecessor sequence u64 / Bookie cut u64 |
 | 40 / 48 | 原 ADMITTED birth zxid u64 / READY birth zxid u64 |
-| 56 / 64 / 72 | 完整 DATA 长度 u64 / native dev 原始位 u64 / native ino 原始位 u64 |
-| 80 / 112 / 144 / 176 | 控制历史绑定 / ADMITTED / READY / 完整 DATA 的 SHA-256，各 32 字节 |
+| 56 / 64 / 72 | `data-0` 完整长度 u64 / native dev 原始位 u64 / native ino 原始位 u64 |
+| 80 / 112 / 144 / 176 | 控制历史绑定 / ADMITTED / READY / 完整 `data-0` 的 SHA-256，各 32 字节 |
 
-action 6 只接受原发布 owner 清理完成后构造的运行时凭据。首次 apply 要求同一已授权 OPEN、相邻的 Arena predecessor cut、无隔离和相同文件长度。它结束原 epoch 并记录禁止续写的 allocation order 上界，保留旧 grant 的读取与合法回收。checkpoint/rotation 通过原有序业务记录重建该上界。完整成员向量由原生 ADMITTED 摘要绑定。首次后继 OPEN 重新核对原 native READY、已切换对象和清理结果，以及全体成员各自的 CLOSED 或精确 DELETE 后继。后续合法新 OPEN 和 DATA 写入沿用普通规则。[运行顺序与证据](README.md#单-data-文件的-closed-重建发布与重开)
+action 6 只接受原发布 owner 验证全组 active 并清理完成后构造的运行时凭据。首次 apply 要求同一已授权 OPEN、相邻的 Arena predecessor cut、无隔离和相同文件长度。它结束原 epoch 并记录禁止续写的 allocation order 上界，保留旧 grant 的读取与合法回收。checkpoint/rotation 通过原有序业务记录重建该上界。ADMITTED 和 READY 摘要绑定完整成员、原文件与候选文件向量，`data-0` 是控制记录的规范锚点。首次后继 OPEN 重新核对原 native READY、全部 active 对象和清理结果，以及全体成员各自的 CLOSED 或精确 DELETE 后继。后续合法新 OPEN 和 DATA 写入沿用普通规则。[多文件运行顺序](README.md#固定单-arena-的多-data-文件准入与发布)
 
 原生 ADMITTED 的 v1 单成员和 v2 全非空集合维持原字节，成员按 `NONEMPTY_SELF` 解释。混合集合使用 ADMITTED v3，共用 v2 的前缀和 2～16 成员计数。每项在原 60 字节 context、32 字节 CLOSED 摘要和 32 字节来源摘要前增加一个 kind byte，`1=NONEMPTY_SELF`，`2=EMPTY_TERMINAL`。至少一项属于每种类型，ledger ID 严格递增，总记录上限 8192 字节。EMPTY 的关闭摘要绑定原 activated page 出生、selection 和精确 grantless terminal，来源摘要以独立域记录其无 payload 来源审核。v1/v2 reader 读取 v3 ADMITTED 即拒绝。READY、shadow、action 6 及 DATA 保持原编码。
 

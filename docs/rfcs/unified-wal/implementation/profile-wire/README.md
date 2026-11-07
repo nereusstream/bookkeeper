@@ -2894,3 +2894,11 @@ Spotless/Checkstyle实际exit0；独立RAT实际exit1，仍为父982a18dad9既�
 另一场景在 READY 后只删除 EMPTY。原目标有真实 manifest 义务及已提交投递。其本地 `DELETE_APPLY` force 被扣住时，非空成员的直接 mTLS READ 和 FENCE 也被启动门拒绝。追赶后才发布新 writable，EMPTY 持续拒绝。原物理控制返回 `REUSABLE`，实际 MOVE、FREE、退休字节均为零，非空 allocation 和 DATA 摘要保持。原目标回执可由独立 ZooKeeper session 冷读，健康冷启后仍读回非空数据。其他目标保持未结算，全局为 `PENDING`。
 
 最终三项编码、四项 Bookie 控制和六项 socket 回归全部通过，Spotless 和 Checkstyle 通过。旧 reader 使用 `1d7463508b` 的实际类文件，原入口拒绝后对象和控制 cut 保持。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-empty-evidence-1d746350`。实际验收限单 Arena、单文件和原生整账本 EMPTY 与非空 CLOSED 的混合。纯 EMPTY、非空历史的 empty-last、替换后 EMPTY、多文件、多 Arena、损坏数据、批准 Linux 和掉电仍待各自验收。
+
+### 不同 DATA 文件的 CLOSED 成员恢复和删除
+
+真实 3/3/3 SDK 关闭 ledger 44 和 45，原 Bookie 的 allocation 和 DATA 批次分别在 `data-0` 和 `data-1`。原 Bookie JVM 退出后，重建 JVM 在第 0 个文件切换并同步、第 1 个原文件已移动的切点退出。原 service 此时拒绝重开，后继 JVM 按同一 native READY 完成切换。首次重开及健康冷启分别从原 incarnation 读回两个 ledger 的原字节。[本地切换顺序](../local-storage/README.md#固定单-arena-的多-data-文件准入与发布)
+
+另一场景在同一切换切点只提交 ledger 45 的逻辑 DELETE。首次后继 OPEN 依据原 READY 及精确 DELETE 后继进入 owned catch-up。实际 `DELETE_APPLY` force 返回并应用之前，两账本的直接 READ 和存活账本的 FENCE 均拒绝。重开后原物理删除路径只 FREE `data-1` 的已删除 grant，无 MOVE，`data-0` 的 inode、摘要和 allocation 保持。健康冷启后 ledger 44 仍读回原字节，独立 ZooKeeper session 读回同一个原目标回执，其他目标保持待结算，全局状态为 `PENDING`。
+
+最终五项编码与十一项 socket 回归全部通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-multifile-evidence-e315c7d3`。实际多文件验证覆盖 macOS 上的两个 DATA 文件和 JVM 退出。多 Arena、损坏数据、批准 Linux 和真实掉电仍待验收，生产 Gate 保持 OPEN。

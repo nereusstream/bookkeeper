@@ -974,11 +974,17 @@ Native ADMITTED v2 按 ledger ID 严格递增编码完整 context、原 CLOSED �
 
 父版真实重建入口在 READY 已移动旧 active、以及 action 6 已持久两个切点均在读 admission 时拒绝。action 6 后的父版 storage 首次 OPEN 也拒绝。对照比较原 native 回执、名称、inode 和控制字节，均保持。当前版完成原物理续接、同身份重开及混合集合的 EMPTY 删除。[重开与删除证据](../profile-wire/README.md#empty-closed-成员恢复和删除)
 
-### 固定单 Arena 的多 DATA 文件准入
+### 固定单 Arena 的多 DATA 文件准入与发布
 
-以 `e315c7d389` 为基线。按原有效文件头和固定 config 读取 `data-0..data-(N-1)`，包括只有 header 和零页的必需文件。原三把锁下核对每个文件的对象、长度、file index 和所属 filesystem；文件集合和控制对象不得别名。全组共享原 stream/entry 状态、总 DATA 字节上限和累计 entry 上限，每个文件完整扫描一次。非空成员的来源审核按 ledger 进行，全部原文件、成员和来源绑定进入一次 v4 ADMITTED。READY v2 的向量编码已接通，跨文件发布和首次重开继续单独验证。[字节合同](format-v1.md#控制记录)
+以 `e315c7d389` 为基线。按原有效文件头和固定 config 读取 `data-0..data-(N-1)`，包括只有 header 和零页的必需文件。原三把锁下核对每个文件的对象、长度、file index 和所属 filesystem，文件集合和控制对象不得别名。全组共享原 stream/entry 状态、总 DATA 字节上限和累计 entry 上限，每个文件完整扫描一次。非空成员的来源审核按 ledger 进行，全部原文件、成员和来源绑定进入一次 v4 ADMITTED。[字节合同](format-v1.md#控制记录)
 
 真实 3/3/3 SDK 两个账本分别写入 shard/file 0 和 1，原 Bookie JVM 退出。父版在两文件入口拒绝。新版完整准入，并验证总 DATA 字节超限、没有 grant 的必需文件缺失和文件向量错序、缺项、别名均拒绝。父版类文件在原 native read 入口拒绝 v4。五项编码和四项 socket 回归通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-multifile-evidence-e315c7d3`。
+
+一次 native shadow CAS 认领全组。候选按 file index 写入、force、读回和首次 close，整组完成并同步 staging 后才提交 READY v2。无 READY 的继任者重建全部候选，并保留上一组已出现的候选对象直到新组首次关闭完成。
+
+获胜 READY 后，原锁下先检查全组对象和允许的切换前缀，再读取相同的原控制切点。每个索引先将原 active 移到 staging 保留位置，再将该候选移成 active。每次均使用 no-replace rename 并同步两个目录。全部新 active 验证后按索引清理保留文件，同步移除 staging，最后追加一个 action 6。首次后继 OPEN 核对全部 READY 候选对象和当前 ledger 生命周期。
+
+真实 JVM 在第二个候选部分写入后退出，续接重新生成两份候选。另注入第二个候选 force 失败，两个原 active 对象、原控制 cut 和 ADMITTED 保持，未产生 READY。错序的完整对象前缀拒绝续接。只校验 `data-0` 的故障变体会接受同字节但不同 inode 的 `data-1`，整组校验恢复后在首次 OPEN 拒绝。父版 `e315c7d389` 的原生读取入口拒绝实际 v4 ADMITTED，父版 READY 解码器拒绝同一操作的实际 READY v2 字节。[重开与删除证据](../profile-wire/README.md#不同-data-文件的-closed-成员恢复和删除)
 
 ## Profile 普通 Add 的真实接线
 
