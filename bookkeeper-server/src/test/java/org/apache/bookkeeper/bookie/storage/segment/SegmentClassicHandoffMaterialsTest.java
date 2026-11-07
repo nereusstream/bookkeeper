@@ -324,8 +324,13 @@ public class SegmentClassicHandoffMaterialsTest {
         Path controlRoot = manifest.controlDirectory();
         Files.delete(controlRoot.resolve("bookie-control.lock"));
         Files.delete(controlRoot);
-        ClassicClaimTestHistory.writeJournal(manifest.classicRoots().get(0).directory().resolve("current/1.txn"), 11);
-        ClassicClaimTestHistory.writeIndex(manifest.classicRoots().get(1).directory().resolve("current"), 11);
+        Path journal = manifest.classicRoots().get(0).directory().resolve("current/1.txn");
+        Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
+        ClassicClaimTestHistory.writeJournal(journal, 97);
+        long markedOffset = Files.size(journal);
+        ClassicClaimTestHistory.writeJournal(journal, 97, 13, 13);
+        Files.write(ledger.resolve("lastMark"), ByteBuffer.allocate(16).putLong(1).putLong(markedOffset).array());
+        ClassicClaimTestHistory.writeIndex(ledger, 11);
         var config = new IsolatedSegmentConfig(controlRoot, 1, 1, 1, 16384, 4096, 1024, 16,
                 "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
         var route = new SegmentBookieControlLog.RouteBinding(nativeScope.binding().bindingId(), manifest.identity());
@@ -340,11 +345,14 @@ public class SegmentClassicHandoffMaterialsTest {
                     nativeScope)) {
                 roots.openLocks(io);
                 roots.createMarkers(bookie, io);
-                var claim = bookie.prepareBootstrapClaim(11).command();
+                var indexClaim = bookie.prepareBootstrapClaim(11).command();
+                var journalClaim = bookie.prepareBootstrapClaim(13).command();
                 var complete = new SegmentBookieControlLog.RouteChange(
-                        SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, 0, route, new UUID(0, 20));
-                var results = bookie.applyDurable(bookie.appendChangesDurably(List.of(claim, complete)));
+                        SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, 1, route, new UUID(0, 20));
+                var results = bookie.applyDurable(bookie.appendChangesDurably(List.of(indexClaim, journalClaim,
+                        complete)));
                 assertEquals(List.of(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                        SegmentBookieControlLog.Status.APPLIED_DURABLE,
                         SegmentBookieControlLog.Status.APPLIED_DURABLE),
                         results.stream().map(SegmentBookieControlLog.Result::status).toList());
                 seal = bookie.bootstrapSeal().orElseThrow();
@@ -356,6 +364,12 @@ public class SegmentClassicHandoffMaterialsTest {
         return new SealedScope(sources, config, route, seal, enabled);
     }
 
+    private SegmentBookieControlLog.Owned coldControl(SealedScope scope, SegmentFileIo io) throws IOException {
+        return SegmentBookieControlLog.ownedExisting(scope.control(), manifest, manifest.identity(), 32768,
+                new SecretKeySpec(filled(32, 10), "AES"), new ProfileDescriptorValidator((i, v) -> false,
+                        (i, v) -> false), io, scope.route());
+    }
+
     private void verifyColdEnabled(SealedScope scope, SegmentClassicBootstrapPreparation preparation)
             throws Exception {
         assertEquals(scope.enabled(), preparation.boundNative());
@@ -363,19 +377,22 @@ public class SegmentClassicHandoffMaterialsTest {
         try (var roots = new SegmentClassicRootBindings(classicConfiguration(), scope.sources().manager(), manifest,
                 preparation.boundNative())) {
             roots.openLocks(io);
-            var control = SegmentBookieControlLog.ownedExisting(scope.control(), manifest, manifest.identity(),
-                    32768, new SecretKeySpec(filled(32, 10), "AES"),
-                    new ProfileDescriptorValidator((i, v) -> false, (i, v) -> false), io, scope.route());
+            var control = coldControl(scope, io);
             try {
                 control.initialize();
                 var bookie = control.log();
                 assertEquals(Optional.of(scope.localSeal()), bookie.bootstrapSeal());
                 var claim = bookie.prepareBootstrapClaim(11).applied().orElseThrow();
                 assertEquals(0, claim.sequence());
-                preparation.verifyEnabled(roots, control);
+                Path journal = manifest.classicRoots().get(0).directory().resolve("current");
+                Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
+                preparation.verifyEnabled(roots, control,
+                        visitor -> ClassicClaimTestHistory.readIndex(ledger, visitor::visit),
+                        visitor -> ClassicClaimTestHistory.readJournal(journal, ledger, visitor::visit));
                 assertEquals(claim, bookie.prepareBootstrapClaim(11).applied().orElseThrow());
+                assertEquals(1, bookie.prepareBootstrapClaim(13).applied().orElseThrow().sequence());
                 assertEquals(scope.localSeal().sequence(), bookie.appliedThrough());
-                assertThrows(IOException.class, () -> bookie.prepareBootstrapClaim(12));
+                assertThrows(IOException.class, () -> bookie.prepareBootstrapClaim(97));
                 assertEquals(0, io.writes);
             } finally {
                 assertTrue(control.closeAndDrain().drained());
@@ -431,6 +448,71 @@ public class SegmentClassicHandoffMaterialsTest {
             assertTrue(preparation.closeAndDrain().drained());
         }
         probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void enabledVerificationRejectsAnIndexWithoutAnOriginalClassicClaim() throws Exception {
+        var scope = sealScope(true);
+        Path index = manifest.classicRoots().get(1).directory().resolve("current");
+        ClassicClaimTestHistory.writeIndex(index, 19);
+        Path unclaimed = index.resolve(IndexPersistenceMgr.getLedgerName(19));
+        byte[] original = Files.readAllBytes(unclaimed);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            var failure = assertThrows(IOException.class, () -> verifyColdEnabled(scope, preparation));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("ledger 19"));
+            assertFalse(preparation.inputsBound());
+            assertArrayEquals(original, Files.readAllBytes(unclaimed));
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void enabledVerificationRejectsAnUnclaimedLedgerInTheRequiredJournalSuffix() throws Exception {
+        var scope = sealScope(true);
+        Path unclaimed = manifest.classicRoots().get(0).directory().resolve("current/2.txn");
+        ClassicClaimTestHistory.writeJournal(unclaimed, 19);
+        byte[] original = Files.readAllBytes(unclaimed);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            var failure = assertThrows(IOException.class, () -> verifyColdEnabled(scope, preparation));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("ledger 19"));
+            assertFalse(preparation.inputsBound());
+            assertArrayEquals(original, Files.readAllBytes(unclaimed));
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void enabledVerificationRejectsAClaimAppliedAfterTheOriginalSeal() throws Exception {
+        var scope = sealScope(true);
+        var control = coldControl(scope, new SegmentFileIo());
+        try {
+            control.initialize();
+            var bookie = control.log();
+            var late = new SegmentBookieControlLog.RouteChange(SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC,
+                    19, scope.route(), new UUID(0, 23));
+            var receipt = bookie.applyDurable(bookie.appendChangesDurably(List.of(late))).get(0);
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, receipt.status());
+            assertTrue(receipt.sequence() > scope.localSeal().sequence());
+        } finally {
+            assertTrue(control.closeAndDrain().drained());
+        }
+        Path index = manifest.classicRoots().get(1).directory().resolve("current");
+        ClassicClaimTestHistory.writeIndex(index, 19);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            var failure = assertThrows(IOException.class, () -> verifyColdEnabled(scope, preparation));
+            assertEquals("Original bootstrap cut does not include the claim for ledger 19", failure.getMessage());
+            assertFalse(preparation.inputsBound());
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
     }
 
     @Test(timeout = 30000)

@@ -2393,10 +2393,18 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 在父 `c1346d5668` 上，`SegmentClassicBootstrapClaims` 从已初始化的 `SegmentBookieControlLog.Owned` 借用同一个原日志及与该对象绑定的 Driver。调用者在独立的离线扫描线程上顺序执行 index 和 Journal 清单，负责源目录排他、首次关闭以及原控制资源生命周期。导入启动和成功返回均要求原日志健康、已 apply 且未封口。已封口的既有 claim 回执仍可通过原日志查询。
 
-导入只缓存当前批至多 `B = maxPendingEntries` 个不同 ledger。在同一批内以 ledger ID 去重，跨批从原日志读取并保留原 UUID 和回执。每次文件或记录出现仍由 reader 先验证。新增的 map、命令引用列表和唯一在途批次的结果列表合计保留 `O(B)`，终态 latch 和扫描状态占固定空间。这个上界只计算导入器，Journal reader 的原文件 ID 清单随该 Journal 的文件数增长。
+导入只缓存当前批至多 `B = maxPendingEntries` 个不同 ledger。在同一批内以 ledger ID 去重，跨批从原日志读取并保留原 UUID 和回执。每次文件或记录出现仍由 reader 先验证。新增的 map、命令引用列表和唯一在途批次的结果列表合计保留 `O(B)`，终态 latch 和扫描状态占固定空间。这个上界只计算导入器。Journal 文件 ID 工作集见[只读清单的分页验证](#离线-bootstrap-的-journal-suffix-只读清单)。
 
 批次结果只在 Driver 的完成回调中保存。扫描线程等原 Ticket 终态，再按顺序复核每项结果与原日志的已应用 claim。两类清单均成功返回且其 reader 已关闭后，才提交最后不足一批的命令。晚项失败保留已应用的前缀并释放未提交尾批。拒绝接纳立即返回失败，由外层在实际排空和维护后决定是否重扫。超时或中断停止后续接纳，已接纳批次继续等待原终态。实际 force 失败随首次停止原因一并保留，续接依赖原 owner 健康重开。导入器的排空状态只覆盖它自己的扫描调用和批次。
 
 本地隔离验证使用真实 V1 index、多个 V6 Journal 文件及单槽控制 owner。坏重复记录导致整轮失败，维护并重开后沿原回执跳过持久前缀，完成重扫后再次读取全部来源不追加重复 claim。测试也覆盖同一绑定下的旧 Driver 拒绝、维护忙拒绝、实际 force 挂起时的超时，以及中断叠加 force 失败。完整受保护 owner 仍需串联实际 ZK/native 绑定、旧服务退役、Unix 和根排他，之后才进入受控重放、严格 flush、封口与 ENABLED。运行期 route 和批准 Linux 验收仍待完成。
 
 首次定向运行发现测试预期漏算 checkpoint 和 rotation 写入的控制序号。改为从实际重开时的已应用位置检查连续序号后，三项定向和 362 项扩展回归通过。测试夹具换行后，最终 Owned 18、Bookie control 9、Profile INSTALL 3、Journal 13、index 14 共 57 项定向回归通过，Java Spotless 和 Checkstyle 通过。沿用原 acf9afec… native 库，证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-claim-import-evidence-c1346d56`。
+
+## 离线 ENABLED 的既有 Classic claim 核验
+
+2026-11-07，基线 `ce17e3c1dc`。在原签名、原生 `ENABLED` 和本地封口已关联后，包内核验消费两类同步只读清单。每个有效 index 和必要 Journal suffix 中的 ledger 都须在同一 recovered Bookie control 中匹配原已应用 CLASSIC 命令与回执，回执首次序号须落在原 `BOOTSTRAP_COMPLETE.appliedCut` 内。两个 reader 都实际返回后，在 supervisor guard 下重新冷读来源，并检查本地封口与扫描前的已应用位置仍一致。扫描使用现有 route 索引和 reader 的工作集，不复制 ledger 集合或提交新命令。
+
+使用真实 ZooKeeper 和已有文件，父源码在一个缺 claim 的有效 index 上误报成功。新逻辑分别拒绝缺 claim 的 index、必要 Journal suffix，以及封口之后才出现的持久 claim。正向核对 `lastMark` 跳过的旧前缀、必要 suffix 中的重复记录及各自的原回执，原 Journal、index 和控制日志字节保持。八类 406 项通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-enabled-claim-evidence-ce17e3c1`。
+
+本次文件集成通过包内 reader 的测试接线完成。绑定完整受保护 scope 的生产恢复桥、首次导入的写入门控、PREPARED 恢复和批准 Linux 运行仍待验收。

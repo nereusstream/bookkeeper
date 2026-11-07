@@ -187,7 +187,7 @@ final class SegmentClassicRootBindings implements AutoCloseable {
         verifyExisting();
     }
 
-    synchronized void verifyEnabledOwner(ZKRegistrationManager sourceManager, BookieRouteBinding.Observation source,
+    synchronized long verifyEnabledOwner(ZKRegistrationManager sourceManager, BookieRouteBinding.Observation source,
             SegmentBookieControlLog bookie) throws IOException {
         requireLive();
         if (!locked || manager != sourceManager || !nativeBinding.equals(source)
@@ -195,10 +195,9 @@ final class SegmentClassicRootBindings implements AutoCloseable {
             throw new IOException("Common owner does not hold the verified native ENABLED scope");
         }
         bookie.requireCommonBinding(nativeBinding.binding().bindingId(), manifest.identity());
-        if (!nativeBinding.binding().seal().equals(bookie.bootstrapSeal())) {
-            throw new IOException("Native enable and retained control seal differ");
-        }
+        long appliedThrough = bookie.requireSealedBootstrapCut(nativeBinding.binding().seal().orElseThrow());
         verifyExisting();
+        return appliedThrough;
     }
 
     private void verifySources() throws IOException {

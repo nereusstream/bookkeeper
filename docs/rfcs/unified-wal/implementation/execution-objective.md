@@ -50,6 +50,8 @@
 
 离线准备阶段现支持真实 `ENABLED` 的冷读关联和封口核验。原证明和持锁根标记对应同一不可变 `PREPARED` 来源，原生 seal 必须匹配实际重开的 Bookie control。核验在 supervisor guard 下重读 ZooKeeper，拒绝后续出现的注册。完整受保护 bootstrap 仍待装配。详见 [ENABLED 重开时的原证明与本地封口](startup-readiness/README.md#enabled-重开时的原证明与本地封口)。
 
+离线 `ENABLED` 包内核验现在消费两类只读清单，对每个 ledger 核对同一 Bookie control 的原 CLASSIC 回执和封口 applied cut，并复核扫描前后的控制状态。真实 index 与必要 Journal suffix 缺项会拒绝续接。生产恢复桥和首次导入门控继续待接线。详见 [离线 ENABLED 的既有 Classic claim 核验](local-storage/README.md#离线-enabled-的既有-classic-claim-核验)。
+
 共同 route 离线导入已有包内有界 claim 消费器。它从已初始化的原 Bookie control owner 借用同一 Driver，以原 `maxPendingEntries` 分批提交两类已验证清单的 ledger ID，在实际 Ticket 终态后复核原 claim 回执。真实 index 与多份 Journal 验证晚项坏记录、持久前缀、健康重开重扫及 force 在途期间的停止。最终 57 项定向回归和 Java 样式通过。完整受保护 bootstrap owner、受控重放与 flush、封口、ENABLED 和批准 Linux 验收仍待完成。详见 [local-storage](local-storage/README.md#离线-bootstrap-的有界-classic-claim-导入)。
 
 共同 route 离线导入的 Journal ID 清单已按固定页大小枚举，保留各 Journal 的原数字顺序及最大有效 lastMark。真实跨页、目录替换和 claim 续接回归已归档。受控历史 Bookie 的实际 V6 replay 随后接入同一分页，按文件实际关闭推进内存 lastMark。95 项定向回归通过。共同 scope 的受保护装配、重放 gate、flush 与封口仍待接线。详见 [Journal suffix 的只读清单](local-storage/README.md#离线-bootstrap-的-journal-suffix-只读清单)。

@@ -99,8 +99,10 @@ final class SegmentClassicBootstrapPreparation {
         }
     }
 
-    /** Confirm the sealed cold path while the outer owner holds the original roots and recovered control. */
-    void verifyEnabled(SegmentClassicRootBindings roots, SegmentBookieControlLog.Owned control) throws IOException {
+    /** The outer owner retains the locked roots, recovered control and both readers through actual return. */
+    void verifyEnabled(SegmentClassicRootBindings roots, SegmentBookieControlLog.Owned control,
+            SegmentClassicBootstrapClaims.LedgerSource indexes, SegmentClassicBootstrapClaims.LedgerSource journals)
+            throws IOException {
         ClassicBootstrapSnapshot original;
         synchronized (this) {
             if (boundNative().binding().phase() != BookieRouteBinding.Phase.ENABLED || checking != null) {
@@ -110,8 +112,24 @@ final class SegmentClassicBootstrapPreparation {
             checking = Thread.currentThread();
         }
         try {
-            roots.verifyEnabledOwner(manager, original.nativeBinding(), control.log());
+            var bookie = control.log();
+            var seal = original.nativeBinding().binding().seal().orElseThrow();
+            long before = roots.verifyEnabledOwner(manager, original.nativeBinding(), bookie);
+            SegmentClassicBootstrapClaims.LedgerVisitor visitor = ledger -> {
+                requireOpen();
+                var applied = bookie.prepareBootstrapClaim(ledger).applied();
+                if (applied.isEmpty() || applied.orElseThrow().sequence() > seal.appliedCut()) {
+                    throw new IOException("Original bootstrap cut does not include the claim for ledger " + ledger);
+                }
+            };
+            requireOpen();
+            indexes.scan(visitor);
+            requireOpen();
+            journals.scan(visitor);
             requireCurrentSources(original);
+            if (before != bookie.requireSealedBootstrapCut(seal)) {
+                throw new IOException("Bookie control changed during the sealed Classic inventory");
+            }
             synchronized (this) {
                 requireOpen();
                 checking = null;

@@ -712,7 +712,7 @@ supervisor文件名按clusterId、原cluster birth和Bookie固定，绑定UUID�
 
 真实 ZooKeeper 和文件夹具在父源码复现 `ENABLED` 阶段拒绝。正向从实际控制日志重开，复用原签名、retirement 和已应用 claim，核对原 Journal、index 和 control 字节。错误的原生封口 UUID 和证明绑定后新出现的只读注册均拒绝。最终七类 93 项回归和 Spotless、Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-enabled-reopen-evidence-5747c41c`。
 
-此项覆盖包内的签名、原生来源与本地封口核验。完整受保护 owner、Arena 组合与既有 claim 的全量核验、实时 Unix 采用和批准 Linux 运行继续待验收。
+此项覆盖包内的签名、原生来源与本地封口核验。后续在同一冷重开路径增加了[既有 Classic claim 清单核验](../local-storage/README.md#离线-enabled-的既有-classic-claim-核验)。完整受保护 owner、Arena 组合、实时 Unix 采用和批准 Linux 运行继续待验收。
 
 ## 固定交接的原子不覆盖改名
 

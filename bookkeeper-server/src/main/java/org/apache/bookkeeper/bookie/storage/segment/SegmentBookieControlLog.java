@@ -1200,6 +1200,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
         return config.maxPendingEntries();
     }
 
+    synchronized long requireSealedBootstrapCut(BookieRouteBinding.BootstrapSeal expected) throws IOException {
+        requireBootstrapControl();
+        if (!Optional.of(expected).equals(bootstrapSeal())) {
+            throw new IOException("Native enable and retained control seal differ");
+        }
+        return appliedThrough;
+    }
+
     /** A local control observation only. The bootstrap owner still has to prove its scope and submit new claims. */
     synchronized BootstrapClaim prepareBootstrapClaim(long ledgerId) throws IOException {
         if (ledgerId < 0) {
@@ -1221,7 +1229,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             return new BootstrapClaim(existing, Optional.of(routeResult(existing, prior.outcome(), prior.sequence())));
         }
         if (bootstrapComplete != null) {
-            throw new IOException("Classic bootstrap is already sealed");
+            throw new IOException("Classic bootstrap is sealed without an applied claim for ledger " + ledgerId);
         }
         RouteChange candidate = routeBinding.bootstrapClaim(ledgerId);
         UUID operation = candidate.operationId();
