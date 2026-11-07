@@ -956,6 +956,14 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 原 owned service 首次重开时，从真实 DELETE 反向核对原 CLOSED、metadata 与 lifecycle 出生、SELF、保留成员及 READY 摘要，并确认原 BookieId/incarnation 在 manifest 中具有当前 stream/assignment 下的精确已提交事件。原注册尝试仍处于待发布状态时才准许内部 OPEN。listener 绑定后，外部请求仍受原注册门约束。原连续追赶实际 force 并应用 tombstone 和 cursor，随后在当前删除头和 assignment 下发布 writable。借用资源的启动入口仍须当前 CLOSED。现有物理删除路径以原 allocation 作合法回收源，完成实际 FREE 后保存该目标回执。详见 [Profile 删除闭环](../profile-wire/README.md#重建-ready-后的原-incarnation-删除闭环)。
 
+### 单 DATA 文件的完整 CLOSED 集合准入
+
+以 `e3cc807442` 为基线。原 DATA、Arena、Bookie 锁下的完整重放决定成员集合。各成员须为非空 CLOSED，与本地完整 context、唯一已应用 SELF grant 和 terminal close 对应。总计至多 16 个成员，受原控制行、整文件大小和累计 entry 数上限约束。文件只扫描一次，按完整 context 和 entry ID 核对各成员 P/L 和字节，同时维持共享物理 stream 的批次连续性。每个成员使用其两份实际注册来源，逐对排空，使用同一个绝对截止时间。
+
+Native ADMITTED v2 按 ledger ID 严格递增编码完整 context、原 CLOSED 摘要和来源绑定。全体成员的原生检查随同一个 ADMITTED 或 READY 事务提交，继续使用同一 shadow 版本和 operation。ADMITTED 上限仍为 8192 字节。v1 单成员回执保持原编码和出生，READY 仍通过完整 ADMITTED 摘要绑定全部成员。后继首次 OPEN 遍历全体，逐项校验原 CLOSED 或精确已提交 DELETE 后继。已安装但遗漏的 context、空 CLOSED、未关闭账本、损坏数据、多文件、已有 MOVE/FREE 或复用历史仍拒绝。
+
+真实 3/3/3 两账本交错写入并 CLOSED 后，原 Bookie JVM 退出，旧版在完整控制依赖准入处拒绝。新版确认一个原生 v2 ADMITTED，验证遗漏、重复及累计 entry 超限均拒绝。扣住实际 ADMITTED multi，在第二成员提交逻辑 DELETE 后发出原包。省略第二成员检查时实际获准，恢复全体检查后 ZooKeeper 返回 `BADVERSION`，原 scope 仍无 ADMITTED。两项编码及七项定向 socket 回归通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-cohort-evidence-e3cc8074`。共享 allocation 的整组重开和删除回收另行验证。
+
 ## Profile 普通 Add 的真实接线
 
 2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。

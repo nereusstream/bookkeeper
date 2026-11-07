@@ -1812,8 +1812,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private static ResolveClosedReconstruction reconstructionCommand(ProfileClosedReconstruction.Receipt receipt) {
         var admitted = receipt.admission();
+        // The existing scalar slot is a canonical anchor. The full native cohort is bound by admissionDigest.
+        long anchorLedger = admitted.members().get(0).ledger();
         return new ResolveClosedReconstruction(admitted.operation(), new Generation(admitted.scope().epoch()),
-                new ReconstructionBinding(admitted.ledger(), admitted.arenaCut(), admitted.bookieCut(),
+                new ReconstructionBinding(anchorLedger, admitted.arenaCut(), admitted.bookieCut(),
                         receipt.admissionBirth(), receipt.readyBirth(), receipt.ready().candidate(),
                         admitted.dependencies(), receipt.admissionDigest(), receipt.readyDigest()));
     }

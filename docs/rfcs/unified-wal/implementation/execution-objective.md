@@ -34,6 +34,8 @@
 
 步骤 7→12→15 接通 READY 后的逻辑 DELETE。原文件已移动时，后继 JVM 按同一 READY 续接，原 owned service 以精确原生 DELETE 后继和原 incarnation 事件进入内部恢复。删除追赶实际应用后才发布 writable，已删除 entry 持续拒绝。原物理路径完成该 incarnation 的实际 FREE 和持久回执，其他目标义务仍待结算。详见 [重建 READY 后的原 incarnation 删除闭环](profile-wire/README.md#重建-ready-后的原-incarnation-删除闭环)。
 
+步骤 7/12/14 扩展单 DATA 文件的完整非空 CLOSED 集合准入。原生 v2 ADMITTED 持久绑定全部成员，一个 ADMITTED/READY 事务核对全体成员，保留 v1 和 action 6 字节契约。每个成员独立核验 SELF 和当前来源，全体共享原文件扫描、来源截止及累计上限。详见 [单 DATA 文件的完整 CLOSED 集合准入](local-storage/README.md#单-data-文件的完整-closed-集合准入)。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。

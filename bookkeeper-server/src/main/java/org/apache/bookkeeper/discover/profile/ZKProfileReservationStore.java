@@ -1394,18 +1394,31 @@ public final class ZKProfileReservationStore {
         return current;
     }
 
-    private List<Op> reconstructionChecks(ProfileLedgerMetadataStore metadata, ReadOnlySnapshot expected,
+    private List<Op> reconstructionChecks(ProfileLedgerMetadataStore metadata, List<ReadOnlySnapshot> expected,
             ProfileClosedReconstruction.Admission request, long deadline)
             throws IOException, InterruptedException, TimeoutException {
         requireRecoveryClient(metadata);
-        long ledger = request.ledger();
-        if (ledger != expected.context().ledger().ledgerId()
-                || !expected.sameObservation(readClosedForOpen(metadata, ledger).snapshot())) {
+        if (request.members().size() != expected.size()) {
+            throw new IOException("Reconstruction requires its complete CLOSED cohort");
+        }
+        var checks = new ArrayList<Op>();
+        for (int index = 0; index < expected.size(); index++) {
+            checks.addAll(reconstructionMemberChecks(metadata, expected.get(index), request.scope(),
+                    request.members().get(index), deadline));
+        }
+        return checks;
+    }
+
+    private List<Op> reconstructionMemberChecks(ProfileLedgerMetadataStore metadata, ReadOnlySnapshot expected,
+            ProfileClosedReconstruction.Scope scope, ProfileClosedReconstruction.Member member, long deadline)
+            throws IOException, InterruptedException, TimeoutException {
+        long ledger = member.ledger();
+        if (!member.matchesContext(expected.context().ledger())
+                || !expected.sameObservation(readClosedForOpen(metadata, ledger, deadline).snapshot())) {
             throw new IOException("Reconstruction requires its unchanged current CLOSED snapshot");
         }
-        var scope = request.scope();
         var self = closedReconstructionSelf(expected, scope.bookie(), scope.incarnation().value(), deadline);
-        if (!request.closed().equals(ProfileClosedReconstruction.closedDigest(expected, self))) {
+        if (!member.closed().equals(ProfileClosedReconstruction.closedDigest(expected, self))) {
             throw new IOException("Reconstruction request differs from its current native CLOSED evidence");
         }
         var root = read(ledger, deadline);
@@ -1434,16 +1447,17 @@ public final class ZKProfileReservationStore {
 
     /** Prove the current logical DELETE is the exact native successor of this historical READY's CLOSED cut. */
     public void verifyDeletedReconstructionPredecessor(ProfileLedgerMetadataStore metadata,
-            ProfileClosedReconstruction.Receipt ready) throws IOException, InterruptedException {
+            ProfileClosedReconstruction.Receipt ready, ProfileClosedReconstruction.Member member)
+            throws IOException, InterruptedException {
         requireRecoveryClient(metadata);
         var admitted = ready.admission();
         var scope = admitted.scope();
-        long ledger = admitted.ledger();
+        long ledger = member.ledger();
         long deadline = System.nanoTime() + timeoutNanos;
         try {
             var root = read(ledger, deadline).snapshot();
             var membership = metadata.readMembership(ledger, deadline).snapshot();
-            if (ready.ready() == null || root == null || membership == null
+            if (ready.ready() == null || !admitted.members().contains(member) || root == null || membership == null
                     || root.lifecycle().state() != ProfileLifecycleHead.State.DELETE_INTENT) {
                 throw new IOException("Reconstructed startup requires the current committed logical DELETE");
             }
@@ -1465,7 +1479,8 @@ public final class ZKProfileReservationStore {
             var reference = ProfileDeleteRecord.Reference.decode(membership.metadata().getValue()
                     .getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY));
             if (reference.publicationId() == null || context.lifecycleSequence() != 2
-                    || !context.ledger().equals(manifest.ledger()) || !closedAfterDelete(context, root)) {
+                    || !member.matchesContext(context.ledger()) || !context.ledger().equals(manifest.ledger())
+                    || !closedAfterDelete(context, root)) {
                 throw new IOException("Logical DELETE is outside the original READY membership lineage");
             }
             var closed = readClosedRecovery(metadata, context, deadline);
@@ -1479,7 +1494,7 @@ public final class ZKProfileReservationStore {
             var historical = new ReadOnlySnapshot(context, new ClosedRecoveryResult(closed.outcome(), predecessor,
                     closed.selection()), closedSources(value, retained.targets()));
             var self = closedReconstructionSelf(historical, scope.bookie(), scope.incarnation().value(), deadline);
-            if (!admitted.closed().equals(ProfileClosedReconstruction.closedDigest(historical, self))) {
+            if (!member.closed().equals(ProfileClosedReconstruction.closedDigest(historical, self))) {
                 throw new IOException("Logical DELETE predecessor differs from the exact READY CLOSED observation");
             }
             var delivery = readLedgerDeleteDelivery(metadata, ledger, target, deadline);
@@ -1535,8 +1550,11 @@ public final class ZKProfileReservationStore {
 
     /** Independent open: derive the token from actual CLOSED, never adopt a historical close after DELETE. */
     public ReadOnlyRead readClosedForOpen(ProfileLedgerMetadataStore metadata, long ledger) {
+        return readClosedForOpen(metadata, ledger, System.nanoTime() + timeoutNanos);
+    }
+
+    private ReadOnlyRead readClosedForOpen(ProfileLedgerMetadataStore metadata, long ledger, long deadline) {
         requireRecoveryClient(metadata);
-        long deadline = System.nanoTime() + timeoutNanos;
         try {
             var first = metadata.readMembership(ledger, deadline);
             if (first.status() != ReadStatus.FOUND) {
@@ -1559,14 +1577,14 @@ public final class ZKProfileReservationStore {
             if (!context.matchesRoot(root.snapshot())) {
                 return new ReadOnlyRead(ReadOnlyStatus.CONFLICT, null);
             }
-            var closed = readClosedRecovery(metadata, context);
+            var closed = readClosedRecovery(metadata, context, deadline);
             if (closed.metadata() == null) {
                 return new ReadOnlyRead(closed.outcome() == ProfileLedgerMetadataStore.Outcome.QUARANTINED
                         ? ReadOnlyStatus.QUARANTINED : closed.outcome()
                             == ProfileLedgerMetadataStore.Outcome.DURABILITY_UNKNOWN
                                 ? ReadOnlyStatus.UNAVAILABLE : ReadOnlyStatus.CONFLICT, null);
             }
-            var retained = retainedActivationTargets(ledger);
+            var retained = retainedActivationTargets(ledger, deadline);
             if (retained.status() != ReadStatus.FOUND) {
                 return new ReadOnlyRead(retained.status() == ReadStatus.UNAVAILABLE
                         ? ReadOnlyStatus.UNAVAILABLE : ReadOnlyStatus.QUARANTINED, null);

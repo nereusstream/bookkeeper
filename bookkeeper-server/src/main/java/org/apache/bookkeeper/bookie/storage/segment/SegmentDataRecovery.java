@@ -645,20 +645,37 @@ final class SegmentDataRecovery {
 
     record ClosedImageEntry(long cumulativeLength, int payloadLength, String payloadSha256, String entrySha256) { }
 
-    record ClosedImage(long bytes, String sha256, List<ClosedImageEntry> entries) { }
+    record ClosedImageMember(ProfileLedgerContext context, long prefix, long length) { }
+
+    record ClosedImage(long bytes, String sha256, Map<ProfileLedgerContext, List<ClosedImageEntry>> entries) { }
 
     /** Complete single-file audit. No index, retired extent or locally unreadable coordinate can skip bytes. */
     static ClosedImage auditClosedImage(FileChannel data, IsolatedSegmentConfig config, SegmentFileHeader identity,
-            SegmentArenaControlLog.RecoveryDependencies arena, ProfileLedgerContext ledger,
-            long prefix, long length, long maximumDataBytes, int maximumEntries) throws IOException {
+            SegmentArenaControlLog.RecoveryDependencies arena, List<ClosedImageMember> members,
+            long maximumDataBytes, int maximumEntries) throws IOException {
         long bytes = config.bytesPerFile();
-        if (config.dataFiles() != 1 || bytes > maximumDataBytes || data.size() != bytes || length < 0
-                || prefix < 0 || prefix >= maximumEntries || maximumEntries > 65536) {
+        if (config.dataFiles() != 1 || bytes > maximumDataBytes || data.size() != bytes
+                || members.isEmpty() || maximumEntries < 1 || maximumEntries > 65536) {
             throw new IOException("CLOSED reconstruction image exceeds its scope or bounds");
+        }
+        long total = 0;
+        for (var member : members) {
+            if (member.prefix() < 0 || member.prefix() >= maximumEntries || member.length() < 0) {
+                throw new IOException("CLOSED reconstruction requires a bounded nonempty member");
+            }
+            total = Math.addExact(total, member.prefix() + 1);
+            if (total > maximumEntries) {
+                throw new IOException("CLOSED reconstruction exceeds its total entry limit");
+            }
         }
         var imageDigest = sha256();
         var entryDigest = sha256();
-        var entries = new ClosedImageEntry[(int) prefix + 1];
+        var ledgers = new HashMap<ProfileLedgerContext, ClosedImageEntry[]>();
+        for (var member : members) {
+            if (ledgers.putIfAbsent(member.context(), new ClosedImageEntry[(int) member.prefix() + 1]) != null) {
+                throw new IOException("CLOSED reconstruction has a duplicate image member");
+            }
+        }
         var grants = new HashMap<Long, SegmentArenaControlLog.Allocation>();
         for (var grant : arena.grants()) {
             grants.put(grant.allocation().allocationId(), grant.allocation());
@@ -704,9 +721,11 @@ final class SegmentDataRecovery {
             imageDigest.update(content);
             for (var record : batch.records()) {
                 long entry = record.entryId();
-                if (!ledger.equals(record.context()) || record.origin() != SegmentBatchFormat.ENTRY_DATA
+                var ledger = record.context();
+                var entries = ledgers.get(ledger);
+                if (entries == null || record.origin() != SegmentBatchFormat.ENTRY_DATA
                         || SegmentOwnerLoop.shardFor(ledger.ledgerId(), config.logicalShards()) != address.shard()
-                        || entry > prefix) {
+                        || entry < 0 || entry >= entries.length) {
                     throw new IOException("CLOSED reconstruction DATA has a foreign coordinate");
                 }
                 entryDigest.update(record.entry());
@@ -723,18 +742,26 @@ final class SegmentDataRecovery {
             }
             offset += batchLength;
         }
-        long cumulative = 0;
-        for (var entry : entries) {
-            if (entry == null || entry.payloadLength() > length - cumulative
-                    || entry.cumulativeLength() != cumulative + entry.payloadLength()) {
-                throw new IOException("CLOSED reconstruction DATA has a missing entry or inconsistent length");
+        var observed = new HashMap<ProfileLedgerContext, List<ClosedImageEntry>>();
+        for (var member : members) {
+            var entries = ledgers.get(member.context());
+            long cumulative = 0;
+            for (var entry : entries) {
+                if (entry == null || entry.payloadLength() > member.length() - cumulative
+                        || entry.cumulativeLength() != cumulative + entry.payloadLength()) {
+                    throw new IOException("CLOSED reconstruction DATA has a missing entry or inconsistent length");
+                }
+                cumulative = entry.cumulativeLength();
             }
-            cumulative = entry.cumulativeLength();
+            if (cumulative != member.length()) {
+                throw new IOException("CLOSED reconstruction DATA differs from a member's CLOSED length");
+            }
+            observed.put(member.context(), List.of(entries));
         }
-        if (cumulative != length || data.size() != bytes) {
-            throw new IOException("CLOSED reconstruction DATA does not match the complete file and prefix length");
+        if (data.size() != bytes) {
+            throw new IOException("CLOSED reconstruction DATA no longer matches the complete file length");
         }
-        return new ClosedImage(bytes, HexFormat.of().formatHex(imageDigest.digest()), List.of(entries));
+        return new ClosedImage(bytes, HexFormat.of().formatHex(imageDigest.digest()), Map.copyOf(observed));
     }
 
     private static MessageDigest sha256() {

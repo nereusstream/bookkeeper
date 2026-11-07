@@ -24,6 +24,7 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -33,6 +34,7 @@ import java.util.UUID;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.net.BookieId;
 
@@ -64,21 +66,33 @@ public final class SegmentStorageInspector {
     }
 
     static void requireClosedReconstructionScope(IsolatedSegmentConfig config, RecoveryDependencies dependencies,
-            ZKProfileReservationStore.ClosedReconstructionSelf self) throws IOException {
+            List<ZKProfileReservationStore.ClosedReconstructionSelf> members) throws IOException {
         var arena = dependencies.arena();
         var bookie = dependencies.bookie();
         if (config.dataFiles() != 1 || !arena.cut().sessionOpen() || arena.grants().isEmpty()
                 || !arena.reconstructionCapacity()
                 || !arena.cut().recordedQuarantineFiles().isEmpty() || arena.relocationOrReuseHistory()
                 || !arena.selections().isEmpty() || !arena.retiredSlots().isEmpty() || !arena.retiredRanges().isEmpty()
-                || bookie.classicHistory() || bookie.ledgers().size() != 1 || bookie.appliedRecoveryGrants() != 1
+                || bookie.classicHistory() || members == null || members.isEmpty()
+                || bookie.ledgers().size() != members.size() || bookie.appliedRecoveryGrants() != members.size()
                 || !bookie.tombstones().isEmpty() || bookie.deleteApplied() != null
                 || bookie.deleteHandoff() || bookie.deleteEffective()) {
             throw new IOException("Original scope has unsupported CLOSED reconstruction dependencies");
         }
+        var remaining = new HashMap<ProfileLedgerContext, SegmentBookieControlLog.ObservedLedger>();
+        for (var local : bookie.ledgers()) {
+            remaining.put(local.context(), local);
+        }
+        for (var self : members) {
+            var local = remaining.remove(self.repair().intent().recovery().ledger());
+            requireClosedReconstructionMember(local, self);
+        }
+    }
+
+    private static void requireClosedReconstructionMember(SegmentBookieControlLog.ObservedLedger local,
+            ZKProfileReservationStore.ClosedReconstructionSelf self) throws IOException {
         var intent = self.repair().intent();
-        var local = bookie.ledgers().get(0);
-        if (!local.context().equals(intent.recovery().ledger()) || !local.fenced() || local.normalActive()
+        if (local == null || !local.fenced() || local.normalActive()
                 || !Objects.equals(local.terminalPrefix(), intent.range().lastEntryId())
                 || local.recoveryGrants().size() != 1) {
             throw new IOException("Original Bookie has another ledger, grant or terminal boundary");

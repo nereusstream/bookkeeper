@@ -141,7 +141,11 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
     /** Observe another publisher through this reader's client, with a final cold identity check.
      * No enumeration, mutation, watch, automatic retry or same-ID rejoin is performed. */
     public PeerReadResult readPeer(String bookieId) {
-        long deadline = System.nanoTime() + timeoutNanos;
+        return readPeer(bookieId, System.nanoTime() + timeoutNanos);
+    }
+
+    PeerReadResult readPeer(String bookieId, long callerDeadline) {
+        long deadline = Math.min(callerDeadline, System.nanoTime() + timeoutNanos);
         long readerSession = zk.getSessionId();
         try {
             if (readerSession == 0 || zk.getState() != ZooKeeper.States.CONNECTED) {
@@ -193,8 +197,12 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
 
     /** Reconcile after an external handshake. A replacement observation never silently adopts a new peer. */
     public PeerReadResult revalidatePeer(RegisteredPeer expected) {
+        return revalidatePeer(expected, System.nanoTime() + timeoutNanos);
+    }
+
+    PeerReadResult revalidatePeer(RegisteredPeer expected, long deadline) {
         Objects.requireNonNull(expected, "expected");
-        var current = readPeer(expected.projection().bookieId());
+        var current = readPeer(expected.projection().bookieId(), deadline);
         if (current.peer() != null && (!expected.identity.equals(current.peer().identity)
                 || !expected.projection().equals(current.peer().projection())
                 || !expected.readiness().equals(current.peer().readiness()))) {

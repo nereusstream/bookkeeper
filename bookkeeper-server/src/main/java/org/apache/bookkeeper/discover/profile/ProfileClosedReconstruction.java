@@ -22,12 +22,16 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.util.nativeio.NativeIO.FileIdentity;
 import org.apache.bookkeeper.meta.LedgerMetadataSerDe;
 import org.apache.bookkeeper.versioning.LongVersion;
@@ -37,7 +41,9 @@ public final class ProfileClosedReconstruction {
     private static final int ADMISSION = 0x55574341;
     private static final int READY = 0x55574359;
     private static final int VERSION = 1;
+    private static final int COHORT_VERSION = 2;
     private static final int MAX_BYTES = 8192;
+    public static final int MAX_MEMBERS = 16;
 
     public record Scope(String bookie, StorageIncarnation incarnation, UUID arena, long epoch) {
         public Scope {
@@ -68,10 +74,25 @@ public final class ProfileClosedReconstruction {
         }
     }
 
-    public record Admission(Scope scope, UUID operation, long ledger, long arenaCut, long bookieCut,
+    /** Legacy v1 stores just the ledger ID here, with its complete identity bound by the CLOSED digest. */
+    public record Member(long ledger, ProfileLedgerContext context, String closed, String sources) {
+        public Member {
+            if (ledger < 0 || context != null && context.ledgerId() != ledger) {
+                throw new IllegalArgumentException("Invalid CLOSED reconstruction member identity");
+            }
+            requireDigest(closed);
+            requireDigest(sources);
+        }
+
+        public boolean matchesContext(ProfileLedgerContext actual) {
+            return ledger == actual.ledgerId() && (context == null || context.equals(actual));
+        }
+    }
+
+    public record Admission(Scope scope, UUID operation, long arenaCut, long bookieCut,
                             long publisherPid, long publisherStartMillis, long publisherSession,
                             String directory, FileIdentity directoryObject, FileIdentity stagingObject,
-                            Image original, String dependencies, String closed, String sources) {
+                            Image original, String dependencies, List<Member> members) {
         public Admission {
             Objects.requireNonNull(scope, "scope");
             requireId(operation);
@@ -79,7 +100,7 @@ public final class ProfileClosedReconstruction {
             Objects.requireNonNull(stagingObject, "stagingObject");
             Objects.requireNonNull(original, "original");
             Path root = Path.of(directory);
-            if (ledger < 0 || arenaCut < 0 || bookieCut < 0 || publisherPid <= 0 || publisherStartMillis <= 0
+            if (arenaCut < 0 || bookieCut < 0 || publisherPid <= 0 || publisherStartMillis <= 0
                     || publisherSession == 0 || directory.length() > 4096
                     || !root.isAbsolute() || !root.normalize().equals(root)
                     || directoryObject.device() != stagingObject.device()
@@ -89,18 +110,30 @@ public final class ProfileClosedReconstruction {
                 throw new IllegalArgumentException("Invalid original reconstruction scope or staging");
             }
             requireDigest(dependencies);
-            requireDigest(closed);
-            requireDigest(sources);
+            if (members.isEmpty() || members.size() > MAX_MEMBERS) {
+                throw new IllegalArgumentException("Invalid CLOSED reconstruction member count");
+            }
+            members = List.copyOf(members);
+            long previous = -1;
+            for (var member : members) {
+                if (member.ledger() <= previous || (member.context() == null) != (members.size() == 1)) {
+                    throw new IllegalArgumentException("CLOSED reconstruction members are not canonical");
+                }
+                previous = member.ledger();
+            }
         }
 
         byte[] encode() throws IOException {
             var bytes = new ByteArrayOutputStream();
             try (var out = new DataOutputStream(bytes)) {
                 out.writeInt(ADMISSION);
-                out.writeInt(VERSION);
+                boolean legacy = members.size() == 1;
+                out.writeInt(legacy ? VERSION : COHORT_VERSION);
                 writeScope(out, scope);
                 writeId(out, operation);
-                out.writeLong(ledger);
+                if (legacy) {
+                    out.writeLong(members.get(0).ledger());
+                }
                 out.writeLong(arenaCut);
                 out.writeLong(bookieCut);
                 out.writeLong(publisherPid);
@@ -111,8 +144,17 @@ public final class ProfileClosedReconstruction {
                 writeObject(out, stagingObject);
                 writeImage(out, original);
                 writeDigest(out, dependencies);
-                writeDigest(out, closed);
-                writeDigest(out, sources);
+                if (legacy) {
+                    writeDigest(out, members.get(0).closed());
+                    writeDigest(out, members.get(0).sources());
+                } else {
+                    out.writeInt(members.size());
+                    for (var member : members) {
+                        out.write(member.context().encode());
+                        writeDigest(out, member.closed());
+                        writeDigest(out, member.sources());
+                    }
+                }
             }
             if (bytes.size() > MAX_BYTES) {
                 throw new IOException("Reconstruction admission exceeds its byte limit");
@@ -122,14 +164,42 @@ public final class ProfileClosedReconstruction {
 
         static Admission decode(byte[] bytes) throws IOException {
             try (var in = input(bytes, ADMISSION)) {
+                int version = in.readInt();
+                if (version != VERSION && version != COHORT_VERSION) {
+                    throw new IOException("Unknown reconstruction admission version");
+                }
                 var scope = new Scope(in.readUTF(), new StorageIncarnation(in.readNBytes(16)), readId(in),
                         in.readLong());
-                var admission = new Admission(scope, readId(in), in.readLong(), in.readLong(), in.readLong(),
-                        in.readLong(), in.readLong(), in.readLong(),
-                        in.readUTF(), readObject(in), readObject(in), readImage(in),
-                        readDigest(in), readDigest(in), readDigest(in));
+                UUID operation = readId(in);
+                long legacyLedger = version == VERSION ? in.readLong() : -1;
+                long arenaCut = in.readLong();
+                long bookieCut = in.readLong();
+                long pid = in.readLong();
+                long start = in.readLong();
+                long session = in.readLong();
+                String directory = in.readUTF();
+                var directoryObject = readObject(in);
+                var stagingObject = readObject(in);
+                var original = readImage(in);
+                String dependencies = readDigest(in);
+                List<Member> members;
+                if (version == VERSION) {
+                    members = List.of(new Member(legacyLedger, null, readDigest(in), readDigest(in)));
+                } else {
+                    int count = in.readInt();
+                    if (count < 2 || count > MAX_MEMBERS) {
+                        throw new IOException("Invalid reconstruction cohort size");
+                    }
+                    members = new ArrayList<>(count);
+                    for (int index = 0; index < count; index++) {
+                        var context = ProfileLedgerContext.decode(ByteBuffer.wrap(
+                                in.readNBytes(ProfileLedgerContext.ENCODED_LENGTH)));
+                        members.add(new Member(context.ledgerId(), context, readDigest(in), readDigest(in)));
+                    }
+                }
                 requireEnd(in);
-                return admission;
+                return new Admission(scope, operation, arenaCut, bookieCut, pid, start, session, directory,
+                        directoryObject, stagingObject, original, dependencies, members);
             }
         }
     }
@@ -165,6 +235,9 @@ public final class ProfileClosedReconstruction {
 
         static Ready decode(byte[] bytes) throws IOException {
             try (var in = input(bytes, READY)) {
+                if (in.readInt() != VERSION) {
+                    throw new IOException("Unknown reconstruction READY version");
+                }
                 var ready = new Ready(readId(in), in.readLong(), readDigest(in), readId(in), in.readLong(),
                         in.readInt(), readImage(in));
                 requireEnd(in);
@@ -272,7 +345,7 @@ public final class ProfileClosedReconstruction {
             throw new IOException("Invalid reconstruction record extent");
         }
         var in = new DataInputStream(new ByteArrayInputStream(bytes));
-        if (in.readInt() != magic || in.readInt() != VERSION) {
+        if (in.readInt() != magic) {
             throw new IOException("Unknown reconstruction record");
         }
         return in;

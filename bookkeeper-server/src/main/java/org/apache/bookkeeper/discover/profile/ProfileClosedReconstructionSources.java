@@ -59,8 +59,9 @@ public final class ProfileClosedReconstructionSources implements AutoCloseable {
     public static ProfileClosedReconstructionSources open(ClientContext sdk, EventLoopGroup group,
             SslContext tls, ZKProfileRegistrationStore registry, ThreadPoolExecutor cold,
             ZKProfileReservationStore.ReadOnlySnapshot snapshot, BookieId offline, int maxEntryBytes,
-            Duration timeout) throws Exception {
-        if (timeout.isZero() || timeout.isNegative() || timeout.compareTo(Duration.ofMinutes(1)) > 0) {
+            long deadline) throws Exception {
+        ProfileZKReadClient.requireTime(deadline);
+        if (deadline - System.nanoTime() > Duration.ofMinutes(1).toNanos()) {
             throw new IllegalArgumentException("CLOSED source audit requires a bounded deadline");
         }
         for (var loop : group) {
@@ -73,22 +74,22 @@ public final class ProfileClosedReconstructionSources implements AutoCloseable {
         if (ensemble == null || ensemble.size() != 3 || !ensemble.contains(offline)) {
             throw new IOException("CLOSED source audit requires the original offline ensemble member");
         }
-        var owned = new ProfileClosedReconstructionSources(registry, offline,
-                System.nanoTime() + timeout.toNanos());
+        var owned = new ProfileClosedReconstructionSources(registry, offline, deadline);
         try {
             var data = new HashMap<BookieId, ProfileNormalDataClient>();
             for (BookieId bookie : ensemble) {
                 if (bookie.equals(offline)) {
                     continue;
                 }
-                var found = registry.readPeer(bookie.toString());
+                var found = registry.readPeer(bookie.toString(), deadline);
                 if (found.status() != ReadStatus.FOUND) {
                     throw new IOException("Required CLOSED survivor registration is unavailable");
                 }
                 var peer = found.peer();
                 owned.peers.put(bookie, peer);
+                var remaining = Duration.ofNanos(Math.max(1, deadline - System.nanoTime()));
                 var connection = ProfileNormalDataClient.connectRegistered(group, tls, registry, peer, cold, 2,
-                        maxEntryBytes, timeout);
+                        maxEntryBytes, remaining);
                 owned.connections.add(connection);
                 data.put(bookie, ProfileZKReadClient.await(connection.completion(), owned.deadline));
             }
@@ -111,14 +112,14 @@ public final class ProfileClosedReconstructionSources implements AutoCloseable {
 
     public String revalidate() throws IOException, TimeoutException {
         ProfileZKReadClient.requireTime(deadline);
-        if (registry.readPeer(offline.toString()).status() != ReadStatus.NOT_FOUND) {
+        if (registry.readPeer(offline.toString(), deadline).status() != ReadStatus.NOT_FOUND) {
             throw new IOException("Original CLOSED target must remain offline during source audit");
         }
         var bytes = new ByteArrayOutputStream();
         try (var out = new DataOutputStream(bytes)) {
             for (var source : peers.entrySet()) {
                 var peer = source.getValue();
-                if (registry.revalidatePeer(peer).status() != ReadStatus.FOUND) {
+                if (registry.revalidatePeer(peer, deadline).status() != ReadStatus.FOUND) {
                     throw new IOException("A CLOSED survivor registration changed during source audit");
                 }
                 out.writeUTF(source.getKey().toString());
@@ -176,6 +177,8 @@ public final class ProfileClosedReconstructionSources implements AutoCloseable {
         } finally {
             CompletableFuture.allOf(connections.stream().map(connection -> connection.closeAsync())
                     .toArray(CompletableFuture[]::new)).join();
+            connections.clear();
+            audit = null;
         }
     }
 }

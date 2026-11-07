@@ -129,13 +129,13 @@ action 4/5 均在 force 和 apply 后结束旧 epoch，保留 epoch 数值及原
 | 偏移 | 字段 |
 |---|---|
 | 0 / 4 | version u32=2 / action u32=6 |
-| 8 / 16 | 旧 epoch u64 / ledger id u64 |
+| 8 / 16 | 旧 epoch u64 / 原 ledger id u64（集合使用最小成员 ID 作规范锚点） |
 | 24 / 32 | 原 Arena predecessor sequence u64 / Bookie cut u64 |
 | 40 / 48 | 原 ADMITTED birth zxid u64 / READY birth zxid u64 |
 | 56 / 64 / 72 | 完整 DATA 长度 u64 / native dev 原始位 u64 / native ino 原始位 u64 |
 | 80 / 112 / 144 / 176 | 控制历史绑定 / ADMITTED / READY / 完整 DATA 的 SHA-256，各 32 字节 |
 
-action 6 只接受原发布 owner 清理完成后构造的运行时凭据。首次 apply 要求同一已授权 OPEN、相邻的 Arena predecessor cut、无隔离和相同文件长度。它结束原 epoch 并记录禁止续写的 allocation order 上界，保留旧 grant 的读取与合法回收。checkpoint/rotation 通过原有序业务记录重建该上界。首次后继 OPEN 重新核对原 native READY、已切换对象和清理结果，以及当前 CLOSED/成员资格。后续合法新 OPEN 和 DATA 写入沿用普通规则。[运行顺序与证据](README.md#单-data-文件的-closed-重建发布与重开)
+action 6 只接受原发布 owner 清理完成后构造的运行时凭据。首次 apply 要求同一已授权 OPEN、相邻的 Arena predecessor cut、无隔离和相同文件长度。它结束原 epoch 并记录禁止续写的 allocation order 上界，保留旧 grant 的读取与合法回收。checkpoint/rotation 通过原有序业务记录重建该上界。完整成员向量由原生 ADMITTED 摘要绑定。首次后继 OPEN 重新核对原 native READY、已切换对象和清理结果，以及全体成员各自的 CLOSED 或精确 DELETE 后继。后续合法新 OPEN 和 DATA 写入沿用普通规则。[运行顺序与证据](README.md#单-data-文件的-closed-重建发布与重开)
 
 文件隔离后续 ALLOC 条件失败，原 grant 和 stream 起点仍保留。实际故障可先设置易失准入 gate，只有日志中的 DEVICE_STATE 改变重放状态。持久隔离和无法解析的 OPEN 在控制重放后阻止物理重开。缺少隔离记录或后续 DATA sync 成功均无法解除该限制。实际 driver 和生命周期验证见[本地状态](README.md)。
 
