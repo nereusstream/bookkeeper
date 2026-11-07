@@ -186,6 +186,12 @@ final class SegmentOwnedFiles {
         return owned.entry.linuxCgroupMembership(owned, nativeIo);
     }
 
+    NativeIO.LinuxCgroupEvents linuxCgroupEvents(FileChannel directory, NativeIO nativeIo, long deadlineNanos)
+            throws IOException {
+        Channel owned = originalWrapper(directory, nativeIo);
+        return owned.entry.linuxCgroupEvents(owned, nativeIo, deadlineNanos);
+    }
+
     NativeIO.LinuxExt4Mount linuxExt4Mount(FileChannel channel, NativeIO nativeIo, long deadlineNanos)
             throws IOException {
         Channel owned = originalWrapper(channel, nativeIo);
@@ -429,6 +435,22 @@ final class SegmentOwnedFiles {
             }
         }
 
+        synchronized NativeIO.LinuxCgroupEvents linuxCgroupEvents(Channel caller, NativeIO nativeIo, long deadlineNanos)
+                throws IOException {
+            FileChannel original = beginIdentityQuery(caller);
+            try {
+                requireTimelyIdentityQuery(caller, original, deadlineNanos);
+                var observation = nativeIo.linuxCgroupEvents(original);
+                if (observation == null) {
+                    throw new IOException("Unknown original Linux cgroup events observation");
+                }
+                requireTimelyIdentityQuery(caller, original, deadlineNanos);
+                return observation;
+            } finally {
+                queryingThread = null;
+            }
+        }
+
         synchronized NativeIO.LinuxExt4Mount linuxExt4Mount(Channel caller, NativeIO nativeIo, long deadlineNanos)
                 throws IOException {
             FileChannel original = beginIdentityQuery(caller);
@@ -465,7 +487,7 @@ final class SegmentOwnedFiles {
                 throws IOException {
             requireIdentityQuery(caller, original);
             if (deadlineNanos - System.nanoTime() <= 0) {
-                throw new IOException("Owned Linux storage verification deadline elapsed");
+                throw new IOException("Owned Linux file verification deadline elapsed");
             }
         }
 

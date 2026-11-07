@@ -95,6 +95,7 @@ public class NativeIOFileIdentityTest {
             assertThrows(NativeIOException.class, () -> io.directoryFileSystem(wrapper));
             assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(wrapper));
             assertThrows(NativeIOException.class, () -> io.linuxCgroupMembership(wrapper));
+            assertThrows(NativeIOException.class, () -> io.linuxCgroupEvents(wrapper));
             var notDirectory = assertThrows(NativeIOException.class, () -> io.directoryFileSystem(original));
             assertTrue(notDirectory.getMessage().contains("not a directory"));
             assertThrows(NativeIOException.class, () -> io.linuxCgroupMount(original));

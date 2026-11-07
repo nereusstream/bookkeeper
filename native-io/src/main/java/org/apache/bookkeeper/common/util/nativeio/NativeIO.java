@@ -365,6 +365,20 @@ public interface NativeIO {
         throw new NativeIOException("Original Linux cgroup membership query is unsupported");
     }
 
+    /** One kernel sample of the held cgroup v2 directory's recursive population. */
+    record LinuxCgroupEvents(FileIdentity directory, long mountId, boolean populated) {
+        public LinuxCgroupEvents {
+            if (directory == null || mountId <= 0 || mountId > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("Invalid original Linux cgroup events observation");
+            }
+        }
+    }
+
+    /** Reads the fixed events file from the original directory. This observation conveys no drain authority. */
+    default LinuxCgroupEvents linuxCgroupEvents(java.nio.channels.FileChannel directory) throws NativeIOException {
+        throw new NativeIOException("Original Linux cgroup events query is unsupported");
+    }
+
     /** A bounded observation of the held ext4 directory and the calling thread's visible mount table. */
     record LinuxExt4Mount(FileIdentity identity, long mountId, long parentMountId, long mountNamespaceInode,
                           String mountPoint) { }

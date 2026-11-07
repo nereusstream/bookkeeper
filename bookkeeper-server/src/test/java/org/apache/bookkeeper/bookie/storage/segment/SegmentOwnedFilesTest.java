@@ -53,6 +53,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.common.util.nativeio.NativeIO;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOException;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.apache.commons.lang3.SystemUtils;
 import org.junit.Rule;
@@ -91,6 +92,8 @@ public class SegmentOwnedFilesTest {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             assertThrows(IOException.class, () -> files.linuxExt4Mount(foreign, forbidden, deadline));
             assertThrows(IOException.class, () -> files.linuxExt4Mount(raw, forbidden, deadline));
+            assertThrows(IOException.class, () -> files.linuxCgroupEvents(foreign, forbidden, deadline));
+            assertThrows(IOException.class, () -> files.linuxCgroupEvents(raw, forbidden, deadline));
             assertThrows(IOException.class, () -> files.linuxStorageMember(foreign, path, forbidden, deadline));
             assertThrows(IOException.class, () -> files.linuxStorageMember(raw, path, forbidden, deadline));
             var expired = assertThrows(IOException.class,
@@ -99,10 +102,16 @@ public class SegmentOwnedFilesTest {
             var expiredMember = assertThrows(IOException.class,
                     () -> files.linuxStorageMember(owned, path, forbidden, System.nanoTime()));
             assertTrue(expiredMember.getMessage().contains("deadline"));
+            var expiredEvents = assertThrows(IOException.class,
+                    () -> files.linuxCgroupEvents(owned, forbidden, System.nanoTime()));
+            assertTrue(expiredEvents.getMessage().contains("deadline"));
+            assertThrows(NativeIOException.class, () -> files.linuxCgroupEvents(owned, io, deadline));
+            assertEquals(id, files.fileIdentity(owned, io));
             owned.close();
             assertThrows(IOException.class, () -> files.fileIdentity(owned, forbidden));
             assertThrows(IOException.class, () -> files.linuxExt4Mount(owned, forbidden, deadline));
             assertThrows(IOException.class, () -> files.linuxStorageMember(owned, path, forbidden, deadline));
+            assertThrows(IOException.class, () -> files.linuxCgroupEvents(owned, forbidden, deadline));
         } finally {
             assertTrue(files.drain().drained());
             assertTrue(other.drain().drained());
@@ -166,6 +175,35 @@ public class SegmentOwnedFilesTest {
                     () -> files.linuxStorageMember(held, member, io, deadline.get()));
             assertTrue(failure.getMessage().contains("deadline"));
             assertNotNull(actual.get());
+            assertTrue(held.isOpen());
+        } finally {
+            assertTrue(files.drain().drained());
+        }
+    }
+
+    @Test
+    public void ownedCgroupEventsDoesNotPublishAnActualLateKernelSample() throws Exception {
+        String fixture = System.getProperty("bookkeeper.test.cgroup.events.directory");
+        assumeTrue(SystemUtils.IS_OS_LINUX && fixture != null);
+        var files = new SegmentOwnedFiles();
+        NativeIO io = spy(new NativeIOImpl());
+        var deadline = new AtomicLong();
+        var actual = new AtomicReference<NativeIO.LinuxCgroupEvents>();
+        doAnswer(call -> {
+            var result = (NativeIO.LinuxCgroupEvents) call.callRealMethod();
+            actual.set(result);
+            long remaining = deadline.get() - System.nanoTime();
+            if (remaining > 0) {
+                assertFalse(new CountDownLatch(1).await(remaining, TimeUnit.NANOSECONDS));
+            }
+            return result;
+        }).when(io).linuxCgroupEvents(any(FileChannel.class));
+        try (var held = SegmentOwnedFiles.open(files, Path.of(fixture), StandardOpenOption.READ)) {
+            deadline.set(System.nanoTime() + TimeUnit.SECONDS.toNanos(3));
+            var failure = assertThrows(IOException.class, () -> files.linuxCgroupEvents(held, io, deadline.get()));
+            assertTrue(failure.getMessage().contains("deadline"));
+            assertNotNull(actual.get());
+            assertEquals(actual.get().directory(), files.fileIdentity(held, io));
             assertTrue(held.isOpen());
         } finally {
             assertTrue(files.drain().drained());

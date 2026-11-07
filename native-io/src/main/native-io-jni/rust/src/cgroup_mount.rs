@@ -23,6 +23,7 @@ use super::{
     read_thread_namespace_links, ProcIdentityResult,
 };
 
+pub(super) mod events;
 pub(super) mod ext4;
 mod membership;
 

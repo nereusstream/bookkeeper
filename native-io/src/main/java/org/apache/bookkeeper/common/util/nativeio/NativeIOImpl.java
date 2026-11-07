@@ -471,6 +471,22 @@ public class NativeIOImpl implements NativeIO {
     }
 
     @Override
+    public LinuxCgroupEvents linuxCgroupEvents(java.nio.channels.FileChannel directory) throws NativeIOException {
+        try {
+            long[] values = NativeIOJni.linuxCgroupEvents(directory);
+            if (values == null || values.length != 4 || values[2] <= 0 || values[2] > Integer.MAX_VALUE
+                    || values[3] != 0 && values[3] != 1) {
+                throw new NativeIOException("Invalid original Linux cgroup events observation");
+            }
+            return new LinuxCgroupEvents(new FileIdentity(values[0], values[1]), values[2], values[3] == 1);
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Original Linux cgroup events are unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    @Override
     public LinuxExt4Mount linuxExt4Mount(java.nio.channels.FileChannel root, String canonicalRoot)
             throws NativeIOException {
         byte[] bytes = canonicalStoragePath(canonicalRoot, true);

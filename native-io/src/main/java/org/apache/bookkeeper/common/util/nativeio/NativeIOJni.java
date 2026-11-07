@@ -86,6 +86,8 @@ class NativeIOJni {
 
     static native Object[] linuxCgroupMembership(java.nio.channels.FileChannel root) throws NativeIOException;
 
+    static native long[] linuxCgroupEvents(java.nio.channels.FileChannel directory) throws NativeIOException;
+
     static native Object[] linuxExt4Mount(java.nio.channels.FileChannel root, byte[] canonicalRoot)
             throws NativeIOException;
 

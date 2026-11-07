@@ -1772,6 +1772,48 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     }
 }
 
+/// Fresh fixed cgroup.events sample under the original directory's descriptor monitor.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_linuxCgroupEvents(
+    mut env: JNIEnv,
+    _class: JClass,
+    _directory: JObject,
+) -> jlongArray {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(values) = observe_original_file(&mut env, &_directory, |env, fd, status| {
+            match cgroup_mount::events::observe(fd, status) {
+                Ok(values) => Some(values),
+                Err((operation, error)) => {
+                    throw_exception_with_error_code(env, operation, error);
+                    None
+                }
+            }
+        }) else {
+            return ptr::null_mut();
+        };
+        let Ok(array) = env.new_long_array(4) else {
+            return ptr::null_mut();
+        };
+        if env
+            .set_long_array_region(&array, 0, &values.map(|value| value as jlong))
+            .is_err()
+        {
+            return ptr::null_mut();
+        }
+        array.into_raw()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Original Linux cgroup events query is unsupported",
+            libc::ENOTSUP,
+        );
+        ptr::null_mut()
+    }
+}
+
 /// Bounded visible mount observation for the exact held directory, under the original fd monitor.
 #[no_mangle]
 pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_linuxExt4Mount(

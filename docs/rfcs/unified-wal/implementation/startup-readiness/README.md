@@ -1582,6 +1582,16 @@ Corretto 参考 tag `21.0.10.7.1` 对应 `8fc3d1e215eb50da15e9f27a934a335081456c
 
 结果限定于执行 JNI 的线程及两轮采样。成员目录 fd 的持有区间限于一次观察。整个进程的成员关系、systemd ControlGroup、episode 长期持有与排空、retirement 和生产 Gate 仍待独立验证。 [cgroup v2 的线程模式](https://docs.kernel.org/admin-guide/cgroup-v2.html#threads)
 
+## 原 cgroup.events 当次观察
+
+2026-11-08，基线 `759c638705`。`NativeIO.linuxCgroupEvents` 通过 `SegmentOwnedFiles` 的原私有 Entry 和 JDK 原 fd monitor 借用一个目录 fd。核对完整 cgroup2 magic、目录类型和 dev/ino/普通 mount ID。每次以 `openat2` 打开固定 `cgroup.events`，限制 `BENEATH | NO_XDEV | NO_SYMLINKS | NO_MAGICLINKS`。读取真实 EOF 后复核持有目录和实际叶，再从同一目录重开叶名核对身份。临时 fd 的首次关闭成功后才能返回，原 owner 拒绝迟到结果。
+
+总长上限 4096 字节，单行上限 256 字节，`populated` 必须恰好一项且为 ASCII `0` 或 `1`。支持任意行顺序，校验 `frozen` 的 0/1 及有界合法附加字段。缺项、重复、截断、坏格式、权限错误和非支持平台均明确失败。层级根缺少该文件时保留 `ENOENT`。内核的 `0` 表示当次读取所见的该 cgroup 及后代没有活进程。[Linux cgroup v2 文档](https://docs.kernel.org/admin-guide/cgroup-v2.html) · [Linux cgroup.events 实现](https://raw.githubusercontent.com/torvalds/linux/v6.17/kernel/cgroup/cgroup.c)
+
+结果绑定原 fd 指向的对象。下一步由实际 manager `ControlGroup` 和原 episode owner 同时持有固定层级根与 episode 目录，从原根重开批准路径以复核身份。真实进程正常退出、组件排空、注册消失、持久退休和连续隔离仍需组合验证。`requestHandoff` 和 Linux `bound` 前的拒绝继续生效。
+
+Darwin arm64 原生库构建成功，34 项宿主 Rust 测试与 274 项定向 JUnit 通过，7 项 Linux 条件用例跳过。独立 JVM 使用原 JNI 库确认新符号缺失时明确拒绝，旧目录查询继续可用。Linux x86_64 `cargo check --tests` 通过。首次 Checkstyle 发现一处测试行长，修正后新测试复验及 Spotless、Checkstyle 均通过。真实 cgroup 子树的空/占用/退出后再空、同路径重建、bind 覆盖及迟到内核样本仍为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-cgroup-events-evidence-759c6387`。
+
 ## 正常 D2 launcher 绑定原 cgroup 挂载记录
 
 首次取得固定 cgroup 目录与后续复核时，原 trust owner 先完成目录类型、保护链和 dev/ino 检查，再从同一个原 fd 取得挂载观察。独立 JNI 在原 FileDescriptor monitor 内用 `statx(AT_EMPTY_PATH)` 要求目录类型、inode 和普通 `STATX_MNT_ID`，并和同 fd 的 `fstat` 对照设备与 inode。固定 `/sys/fs/cgroup` 在观察窗口前后各做一次 NOFOLLOW、NO_AUTOMOUNT 的路径 statx，必须与原 fd 的设备、inode 和 mount ID 一致。同 inode 的另一挂载不能替换原对象。 [Linux statx](https://man7.org/linux/man-pages/man2/statx.2.html)
