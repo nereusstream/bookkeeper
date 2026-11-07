@@ -2437,7 +2437,7 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 真实 ZooKeeper 与文件夹具覆盖原生出生保留、原控制日志字节不变、缺本地封口拒绝，以及实际提交后延迟回复。延迟期间独立进程观察到 supervisor guard 仍持有。原回复返回后，新的 owner 用原签名及回执完成 `ENABLED` 冷读。另验证同字节重建的 requirements 在条件写之前被拒绝。最终七类 107 项全部通过，Spotless 和 Checkstyle 通过。首轮 106 项通过及两处行长诊断独立归档。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-native-seal-resume-evidence-14e42930`。
 
-此阶段消费已有本地封口。首次 Classic 写入见[恢复门控](#prepared-的-classic-写入门控与恢复排空)。严格 flush 到本地封口的接线、公开资源装配、实时 Unix 采用及批准 Linux 验收仍待完成。
+此阶段消费已有本地封口。首次 Classic 写入见[恢复门控](#prepared-的-classic-写入门控与恢复排空)，首次封口见[恢复后的本地封口](#prepared-恢复后的首次本地封口)。
 
 ## PREPARED 的 Classic 写入门控与恢复排空
 
@@ -2447,7 +2447,7 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 真实独立 index、双 Journal 和 ZooKeeper 夹具验证 `.rloc` 保留原 inode 恢复、重放后索引偏移对应的完整 entry 字节和实际 `lastMark`。导入后引入无 claim 的有效 `.rloc` 或带 master key 的 Journal，验证拒绝发生在改名或建立新 index 前。反向验证仅临时绕过 claim 查询，实际观察到两个用例都未收到预期拒绝。恢复正式源码后验证了导入后 applied cut 变化时的拒绝。最终十二类 193 项回归、Spotless 和 Checkstyle 通过。首轮测试编译缺旧无参入口的诊断、三项聚焦与反向验证分别归档。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-guarded-recovery-evidence-afbc65fd`。
 
-当前交付离线写入门控与实际恢复排空。目录项的持久顺序见下节。成功结果还需接入原 driver 的 `BOOTSTRAP_COMPLETE`。
+此阶段交付离线写入门控与实际恢复排空。目录项的持久顺序见下节，封口见[恢复后的本地封口](#prepared-恢复后的首次本地封口)。
 
 ## PREPARED 恢复的目录同步与持久 lastMark
 
@@ -2457,4 +2457,14 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 真实 ZooKeeper、双 Journal 和独立 index 的回归从新索引读回只有 master key 的 ledger，并注入实际索引目录和 mark 目录的 force 失败。父源码缺失 key-only 索引，两个同步故障用例均误报恢复成功。修复后三项通过，13 类 205 项定向回归零失败、错误和跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-directory-durability-evidence-0fdf6354`。
 
-首次 `BOOTSTRAP_COMPLETE` 仍须通过原控制 driver 接入这一持久边界。实际掉电恢复、公开资源装配、实时 Unix 采用及批准 Linux 验收继续待完成。
+首次 `BOOTSTRAP_COMPLETE` 的接线见下节。
+
+## PREPARED 恢复后的首次本地封口
+
+2026-11-07，基线 `01baa40e9a`。同一离线 owner 从实际重放、文件及目录同步、`lastMark` 和 Bookie 排空返回后，复验原生来源、持锁根、Arena 和导入时的 applied cut。复用导入所用的控制 driver 提交一条 `BOOTSTRAP_COMPLETE`。操作 UUID 由独立域、原绑定 UUID、manifest 和 applied cut 派生，现有 ROUTE 记录格式保持原样。只有恰接原 cut 的 durable apply、原回执和实际 ticket 归还，才允许复核本地封口并返回成功。
+
+已接纳的封口 force 在途时，关闭保留原工作线程及 supervisor guard。实际完成后，关闭中的旧调用拒绝返回成功。下一次冷开从原控制日志消费已持久封口，沿既有条件 multi 续接同一原生出生，随后可再次冷开 `ENABLED` 核验原 claim。封口 force 失败时，原调用返回 I/O 错误，原生状态仍为 `PREPARED`。
+
+真实 ZooKeeper、双 Journal 和独立 index 用例核对封口紧接原 applied cut。挂起实际 force 时，已读到落盘的 `lastMark`，控制尚未 apply 封口，独立进程仍观察到 supervisor guard。父源码复现缺少封口、未进入封口 force。修复后验证原封口的冷开续接、`ENABLED` 冷读，以及 force 失败的原始异常和原生状态。最终九类 458 项定向回归零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-local-seal-evidence-01baa40e`。
+
+根锁、Arena 和控制 driver 由包内调用方持有。公开资源装配、实际进程崩溃与掉电恢复、实时 Unix 采用及批准 Linux 验收继续待完成。

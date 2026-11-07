@@ -54,11 +54,11 @@
 
 共同 route 离线导入已有包内有界 claim 消费器。它从已初始化的原 Bookie control owner 借用同一 Driver，以原 `maxPendingEntries` 分批提交两类已验证清单的 ledger ID，在实际 Ticket 终态后复核原 claim 回执。真实 index 与多份 Journal 验证晚项坏记录、持久前缀、健康重开重扫及 force 在途期间的停止。最终 57 项定向回归和 Java 样式通过。完整受保护 bootstrap owner、受控重放与 flush、封口、ENABLED 和批准 Linux 验收仍待完成。详见 [local-storage](local-storage/README.md#离线-bootstrap-的有界-classic-claim-导入)。
 
-包内 `PREPARED` 首次导入已将实际持锁清单接到同一 Bookie control driver，使用原回执续接已持久前缀。关闭保留原已接纳批次直到实际终态。首次导入的 Classic 写入门控、封口与原生状态续接仍待接线。详见 [PREPARED 的清单与控制批次接线](local-storage/README.md#prepared-的-classic-清单与控制批次接线)。
+包内 `PREPARED` 首次导入已将实际持锁清单接到同一 Bookie control driver，使用原回执续接已持久前缀。关闭保留原已接纳批次直到实际终态。导入后的恢复和封口见下文。[PREPARED 的清单与控制批次接线](local-storage/README.md#prepared-的-classic-清单与控制批次接线)
 
-本地已有封口的 `PREPARED` 现可在包内完成原生续接。条件 multi 和确认读随同一 supervisor 与 callback owner 排空。真实 ZooKeeper 丢回复后，新的 scope 可用同一出生与封口进行 `ENABLED` 冷读核验。首次写入门控、严格 flush 到本地封口及完整公开装配仍待接线。详见 [已封口 PREPARED 的原生续接](local-storage/README.md#已封口-prepared-的原生续接)。
+本地已有封口的 `PREPARED` 现可在包内完成原生续接。条件 multi 和确认读随同一 supervisor 与 callback owner 排空。真实 ZooKeeper 丢回复后，新的 scope 可用同一出生与封口进行 `ENABLED` 冷读核验。[已封口 PREPARED 的原生续接](local-storage/README.md#已封口-prepared-的原生续接)
 
-包内 `PREPARED` 恢复已绑定原导入 applied cut，通过同一控制日志在 `.rloc` 写入和 V6 replay 副作用前核对原 CLASSIC 回执。实际恢复须等待严格 flush、lastMark 和 Bookie 排空。成功结果到本地封口、完整公开装配与批准 Linux 验收仍待接线。详见 [Classic 写入门控与恢复排空](local-storage/README.md#prepared-的-classic-写入门控与恢复排空)。
+包内 `PREPARED` 恢复已绑定原导入 applied cut，通过同一控制日志在 `.rloc` 写入和 V6 replay 副作用前核对原 CLASSIC 回执。严格 flush、目录同步、lastMark 和 Bookie 实际排空后，原 driver 才提交首个本地封口。冷开以该原回执续接同一原生出生并核验 `ENABLED`。公开资源装配、实时 Unix 采用、实际崩溃与掉电恢复及批准 Linux 验收仍 OPEN。详见 [PREPARED 恢复后的首次本地封口](local-storage/README.md#prepared-恢复后的首次本地封口)。
 
 共同 route 离线导入的 Journal ID 清单已按固定页大小枚举，保留各 Journal 的原数字顺序及最大有效 lastMark。真实跨页、目录替换和 claim 续接回归已归档。受控历史 Bookie 的实际 V6 replay 随后接入同一分页，按文件实际关闭推进内存 lastMark。95 项定向回归通过。共同 scope 的受保护装配、重放 gate、flush 与封口仍待接线。详见 [Journal suffix 的只读清单](local-storage/README.md#离线-bootstrap-的-journal-suffix-只读清单)。
 

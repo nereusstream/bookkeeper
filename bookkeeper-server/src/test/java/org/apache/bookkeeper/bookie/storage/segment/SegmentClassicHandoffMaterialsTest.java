@@ -26,6 +26,9 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.spy;
@@ -521,11 +524,18 @@ public class SegmentClassicHandoffMaterialsTest {
             preparation.initialize();
             withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
                 assertThrows(IOException.class, preparation::recoverPrepared);
-                withClaimDriver(control.log(), driver -> preparation.importPrepared(roots, arenas, control, driver));
-                assertTrue(Files.exists(relocated));
-                preparation.recoverPrepared();
-                assertThrows(IOException.class, preparation::recoverPrepared);
-                assertTrue(control.log().bootstrapSeal().isEmpty());
+                var log = control.log();
+                withClaimDriver(log, driver -> {
+                    preparation.importPrepared(roots, arenas, control, driver);
+                    long cut = log.unsealedBootstrapCut();
+                    assertTrue(Files.exists(relocated));
+                    preparation.recoverPrepared();
+                    assertThrows(IOException.class, preparation::recoverPrepared);
+                    var seal = log.bootstrapSeal().orElseThrow();
+                    assertEquals(cut, seal.appliedCut());
+                    assertEquals(cut + 1, seal.sequence());
+                    assertEquals(seal.sequence(), log.appliedThrough());
+                });
             });
         } finally {
             assertTrue(preparation.closeAndDrain().drained());
@@ -541,6 +551,125 @@ public class SegmentClassicHandoffMaterialsTest {
         var mark = ByteBuffer.wrap(Files.readAllBytes(ledger.resolve("lastMark.0")));
         assertEquals(9, mark.getLong());
         assertEquals(Files.size(keyOnlyJournal), mark.getLong());
+        assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                .observation().orElseThrow());
+    }
+
+    @Test(timeout = 30000)
+    public void closingDuringSealForceRetainsTheActualBatchAndResumesFromTheColdSeal() throws Exception {
+        var scope = preparedScope(16);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var hold = new AtomicBoolean();
+        var retainedSeal = new AtomicReference<BookieRouteBinding.BootstrapSeal>();
+        var io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (hold.compareAndSet(true, false)) {
+                entered.countDown();
+                try {
+                    assertTrue(release.await(10, TimeUnit.SECONDS));
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(failure);
+                }
+            }
+        });
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, io, (roots, arenas, control, ignored) -> {
+                var log = control.log();
+                withClaimDriver(log, driver -> {
+                    preparation.importPrepared(roots, arenas, control, driver);
+                    long cut = log.unsealedBootstrapCut();
+                    hold.set(true);
+                    var task = new FutureTask<Void>(() -> {
+                        preparation.recoverPrepared();
+                        return null;
+                    });
+                    var worker = new Thread(task, "held-prepared-seal-force");
+                    worker.start();
+                    try {
+                        assertTrue(entered.await(5, TimeUnit.SECONDS));
+                        var mark = manifest.classicRoots().get(1).directory().resolve("current/lastMark.0");
+                        assertEquals(7, ByteBuffer.wrap(Files.readAllBytes(mark)).getLong());
+                        assertEquals(cut, log.appliedThrough());
+                        assertTrue(log.bootstrapSeal().isEmpty());
+                        assertFalse(preparation.closeAndDrain().drained());
+                        assertFalse(task.isDone());
+                        probe("HELD");
+                    } finally {
+                        release.countDown();
+                        worker.join(5000);
+                        assertFalse(worker.isAlive());
+                    }
+                    var failure = assertThrows(ExecutionException.class, () -> task.get(5, TimeUnit.SECONDS));
+                    assertTrue(failure.getCause().getMessage(), failure.getCause().getMessage().contains("closing"));
+                    var seal = log.bootstrapSeal().orElseThrow();
+                    assertEquals(cut, seal.appliedCut());
+                    assertEquals(cut + 1, seal.sequence());
+                    retainedSeal.set(seal);
+                });
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+        var reopened = prepare(scope.sources(), Duration.ofSeconds(5));
+        var enabledScope = new AtomicReference<SealedScope>();
+        try {
+            reopened.initialize();
+            withColdScope(scope, nativeScope, reopened, new SegmentFileIo(), (roots, arenas, control, coldIo) -> {
+                var seal = retainedSeal.get();
+                assertEquals(Optional.of(seal), control.log().bootstrapSeal());
+                var enabled = reopened.completePrepared(roots, arenas, control);
+                assertEquals(nativeScope.binding().enabled(seal), enabled.binding());
+                assertEquals(nativeScope.birthId(), enabled.birthId());
+                assertEquals(seal.sequence(), control.log().appliedThrough());
+                assertEquals(0, coldIo.writes);
+                enabledScope.set(new SealedScope(scope, seal, enabled));
+            });
+        } finally {
+            assertTrue(reopened.closeAndDrain().drained());
+        }
+        var verify = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            verify.initialize();
+            verifyColdEnabled(enabledScope.get(), verify);
+        } finally {
+            assertTrue(verify.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void sealForceFailureLeavesTheNativeBindingPrepared() throws Exception {
+        var scope = preparedScope(16);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        var fail = new AtomicBoolean();
+        var forceFailure = new IOException("Classic seal force failed");
+        var io = spy(new SegmentFileIo());
+        doAnswer(call -> {
+            if (fail.compareAndSet(true, false)) {
+                throw forceFailure;
+            }
+            return call.callRealMethod();
+        }).when(io).force(any(FileChannel.class), eq(true));
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, io, (roots, arenas, control, ignored) -> {
+                var log = control.log();
+                withClaimDriver(log, driver -> {
+                    preparation.importPrepared(roots, arenas, control, driver);
+                    long cut = log.unsealedBootstrapCut();
+                    fail.set(true);
+                    assertSame(forceFailure, assertThrows(IOException.class, preparation::recoverPrepared));
+                    assertEquals(cut, log.appliedThrough());
+                    assertTrue(log.bootstrapSeal().isEmpty());
+                    assertThrows(IOException.class, () -> preparation.completePrepared(roots, arenas, control));
+                });
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
         assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
                 .observation().orElseThrow());
     }

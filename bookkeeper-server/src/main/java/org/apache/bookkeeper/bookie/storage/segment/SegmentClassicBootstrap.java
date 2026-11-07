@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.security.PublicKey;
 import java.time.Duration;
+import java.util.List;
 import java.util.Objects;
 import org.apache.bookkeeper.bookie.ClassicBootstrapStorage;
 import org.apache.bookkeeper.conf.ServerConfiguration;
@@ -42,7 +43,7 @@ public final class SegmentClassicBootstrap {
                  SegmentClassicHandoffMaterials.Result materials) { }
 
     private record Imported(SegmentClassicRootBindings roots, SegmentClassicArenaBindings arenas,
-                            SegmentBookieControlLog.Owned control, long cut) { }
+                            SegmentBookieControlLog.Owned control, SegmentBookieControlDriver driver, long cut) { }
 
     /** Private issuance for the concrete Bookie reader on this owner's active verification thread. */
     public static final class InventorySession {
@@ -245,7 +246,7 @@ public final class SegmentClassicBootstrap {
             long cut = bookie.unsealedBootstrapCut();
             synchronized (this) {
                 requireOpen();
-                imported = new Imported(roots, arenas, control, cut);
+                imported = new Imported(roots, arenas, control, driver, cut);
                 finishInventory();
             }
         } catch (IOException | RuntimeException | Error failure) {
@@ -254,13 +255,16 @@ public final class SegmentClassicBootstrap {
         }
     }
 
-    /** Recover and flush the same Classic files after their original claim importer has actually drained. */
+    /** Seal only after the original claimed Classic files and Journal marks have actually drained. */
     void recoverPrepared() throws IOException, InterruptedException {
         ClassicBootstrapSnapshot original;
         Imported prepared;
         synchronized (this) {
             if (imported == null || recovered) {
                 throw new IOException("Classic bootstrap recovery requires its completed claim import");
+            }
+            if (imported.driver().isOwnerThread()) {
+                throw new IllegalStateException("Bookie control owner cannot wait for its own seal");
             }
             original = beginScopeOperation(BookieRouteBinding.Phase.PREPARED);
             prepared = imported;
@@ -273,9 +277,16 @@ public final class SegmentClassicBootstrap {
             requireCurrentSources(original);
             requireImportedCut(bookie, prepared);
             inventory.recover(new RecoverySession(this, prepared, prepared.roots().inventoryConfiguration()));
-            requireImportedCut(bookie, prepared);
             requireCurrentSources(original);
+            prepared.roots().verifyPreparedOwner(manager, binding, bookie);
             prepared.arenas().requireVerified(binding.binding().manifest());
+            var seal = sealRecoveredClassic(prepared, bookie);
+            requireCurrentSources(original);
+            prepared.roots().verifyPreparedRootsForCompletion(manager, binding, bookie);
+            prepared.arenas().requireVerified(binding.binding().manifest());
+            if (bookie.requireSealedBootstrapCut(seal) != seal.sequence()) {
+                throw new IOException("Bookie control advanced past the original Classic bootstrap seal");
+            }
             synchronized (this) {
                 requireOpen();
                 recovered = true;
@@ -285,6 +296,32 @@ public final class SegmentClassicBootstrap {
             fail(failure);
             throw failure;
         }
+    }
+
+    private BookieRouteBinding.BootstrapSeal sealRecoveredClassic(Imported prepared, SegmentBookieControlLog bookie)
+            throws IOException, InterruptedException {
+        var command = bookie.prepareBootstrapSeal(prepared.cut());
+        var seal = new BookieRouteBinding.BootstrapSeal(command.operationId(), prepared.cut() + 1, prepared.cut());
+        var expected = new SegmentBookieControlLog.Result(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                seal.operationId(), seal.sequence(), 1, 0);
+        var batch = new SegmentClassicBootstrapClaims.Batch();
+        synchronized (this) {
+            requireOpen();
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("Classic bootstrap interrupted before seal admission");
+            }
+            if (!prepared.driver().submitChanges(List.of(command), batch::completed, batch.terminal::countDown)) {
+                throw new IOException("Classic bootstrap seal was not admitted");
+            }
+        }
+        var interrupted = batch.awaitTerminal();
+        if (interrupted != null) {
+            throw interrupted;
+        }
+        if (!List.of(expected).equals(batch.appliedResults())) {
+            throw new IOException("Classic bootstrap seal result differs from the original applied cut");
+        }
+        return seal;
     }
 
     private static void requireImportedCut(SegmentBookieControlLog bookie, Imported prepared) throws IOException {

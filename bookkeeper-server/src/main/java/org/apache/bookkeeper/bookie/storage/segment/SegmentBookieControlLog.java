@@ -73,6 +73,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
             "UW-RECOVERY-CLOSE-V1".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] CLASSIC_BOOTSTRAP_CLAIM_DOMAIN =
             "BookKeeper/ClassicBootstrap/CLAIM_CLASSIC/v1".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] CLASSIC_BOOTSTRAP_SEAL_DOMAIN =
+            "BookKeeper/ClassicBootstrap/BOOTSTRAP_COMPLETE/v1".getBytes(StandardCharsets.US_ASCII);
 
     enum Status {
         APPLIED_DURABLE, ALREADY_DURABLE, CONDITION_FAILED, INCOMPATIBLE
@@ -113,16 +115,21 @@ final class SegmentBookieControlLog implements AutoCloseable {
             if (ledgerId < 0) {
                 throw new IllegalArgumentException("Classic bootstrap requires a nonnegative ledger ID");
             }
-            ByteBuffer input = ByteBuffer.allocate(CLASSIC_BOOTSTRAP_CLAIM_DOMAIN.length + 1
-                    + 3 * Long.BYTES + ManifestIdentity.LENGTH);
-            input.put(CLASSIC_BOOTSTRAP_CLAIM_DOMAIN).put((byte) 0)
+            return new RouteChange(RouteAction.CLAIM_CLASSIC, ledgerId,
+                    this, bootstrapOperation(CLASSIC_BOOTSTRAP_CLAIM_DOMAIN, ledgerId));
+        }
+
+        RouteChange bootstrapSeal(long cut) {
+            return new RouteChange(RouteAction.BOOTSTRAP_COMPLETE, cut,
+                    this, bootstrapOperation(CLASSIC_BOOTSTRAP_SEAL_DOMAIN, cut));
+        }
+
+        private UUID bootstrapOperation(byte[] domain, long value) {
+            ByteBuffer input = ByteBuffer.allocate(domain.length + 1 + 3 * Long.BYTES + ManifestIdentity.LENGTH);
+            input.put(domain).put((byte) 0)
                     .putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits())
-                    .put(manifest.value()).putLong(ledgerId);
-            UUID operation = operationId(sha256(input.array()));
-            if (operation.equals(new UUID(0, 0))) {
-                throw new IllegalArgumentException("Derived Classic bootstrap claim identity is zero");
-            }
-            return new RouteChange(RouteAction.CLAIM_CLASSIC, ledgerId, this, operation);
+                    .put(manifest.value()).putLong(value);
+            return operationId(sha256(input.array()));
         }
     }
 
@@ -1212,6 +1219,19 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (prepareBootstrapClaim(ledgerId).applied().isEmpty()) {
             throw new IOException("Classic bootstrap has no applied claim for ledger " + ledgerId);
         }
+    }
+
+    synchronized RouteChange prepareBootstrapSeal(long cut) throws IOException {
+        if (unsealedBootstrapCut() != cut) {
+            throw new IOException("Classic bootstrap seal does not cover the current applied cut");
+        }
+        var candidate = routeBinding.bootstrapSeal(cut);
+        UUID operation = candidate.operationId();
+        if (operations.containsKey(operation) || fenceOperations.containsKey(operation)
+                || reservedOperation(operation)) {
+            throw new IOException("Classic bootstrap seal operation is already occupied");
+        }
+        return candidate;
     }
 
     synchronized long requireSealedBootstrapCut(BookieRouteBinding.BootstrapSeal expected) throws IOException {

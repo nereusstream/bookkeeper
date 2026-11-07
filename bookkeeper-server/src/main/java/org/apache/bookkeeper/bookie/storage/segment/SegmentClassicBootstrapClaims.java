@@ -38,7 +38,7 @@ final class SegmentClassicBootstrapClaims {
         void scan(LedgerVisitor visitor) throws IOException;
     }
 
-    private static final class Batch {
+    static final class Batch {
         final CountDownLatch terminal = new CountDownLatch(1);
         List<SegmentBookieControlLog.Result> results;
         Throwable failure;
@@ -46,6 +46,31 @@ final class SegmentClassicBootstrapClaims {
         void completed(List<SegmentBookieControlLog.Result> results, Throwable failure) {
             this.results = results;
             this.failure = failure;
+        }
+
+        List<SegmentBookieControlLog.Result> appliedResults() throws IOException {
+            throwFailure(failure);
+            return results;
+        }
+
+        InterruptedException awaitTerminal() {
+            InterruptedException interrupted = null;
+            try {
+                while (true) {
+                    try {
+                        terminal.await();
+                        return interrupted;
+                    } catch (InterruptedException cause) {
+                        if (interrupted == null) {
+                            interrupted = cause;
+                        }
+                    }
+                }
+            } finally {
+                if (interrupted != null) {
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
     }
 
@@ -153,34 +178,15 @@ final class SegmentClassicBootstrapClaims {
                 throw new IOException("Classic bootstrap claim batch was not admitted");
             }
         }
-        awaitTerminal(batch);
-        throwFailure(batch.failure);
-        verifyApplied(log, commands, batch.results);
+        var interrupted = batch.awaitTerminal();
+        if (interrupted != null) {
+            var failure = new InterruptedIOException("Classic bootstrap claim batch interrupted");
+            failure.initCause(interrupted);
+            stop(failure);
+        }
+        verifyApplied(log, commands, batch.appliedResults());
         pending.clear();
         checkRunning();
-    }
-
-    private void awaitTerminal(Batch batch) {
-        boolean interrupted = false;
-        try {
-            while (true) {
-                try {
-                    batch.terminal.await();
-                    return;
-                } catch (InterruptedException cause) {
-                    if (!interrupted) {
-                        var failure = new InterruptedIOException("Classic bootstrap claim batch interrupted");
-                        failure.initCause(cause);
-                        stop(failure);
-                        interrupted = true;
-                    }
-                }
-            }
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
     }
 
     private static void verifyApplied(SegmentBookieControlLog log,
