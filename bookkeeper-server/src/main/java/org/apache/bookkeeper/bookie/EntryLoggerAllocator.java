@@ -37,6 +37,7 @@ import java.io.OutputStreamWriter;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.LinkOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -311,7 +312,7 @@ class EntryLoggerAllocator {
         FreshAllocation allocation = new FreshAllocation();
         freshAllocations.add(allocation);
         allocation.channel = FileChannel.open(directory.toPath().resolve("lastId"), StandardOpenOption.CREATE,
-                StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+                StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING, LinkOption.NOFOLLOW_LINKS);
         while (bytes.hasRemaining()) {
             if (allocation.channel.write(bytes) <= 0) {
                 throw new IOException("Fresh lastId write made no progress");

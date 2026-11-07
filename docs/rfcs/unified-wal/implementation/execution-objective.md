@@ -60,7 +60,7 @@
 
 包内 `PREPARED` 恢复已绑定原导入 applied cut，通过同一控制日志在 `.rloc` 写入和 V6 replay 副作用前核对原 CLASSIC 回执。严格 flush、目录同步、lastMark 和 Bookie 实际排空后，原 driver 才提交首个本地封口。冷开以该原回执续接同一原生出生并核验 `ENABLED`。公开资源装配、实时 Unix 采用、实际崩溃与掉电恢复及批准 Linux 验收仍 OPEN。详见 [PREPARED 恢复后的首次本地封口](local-storage/README.md#prepared-恢复后的首次本地封口)。
 
-交接材料读取、发布及包内 Classic preparation 已接入实时 ACL 复核。绑定输入、导入 claim 和实际 replay 前，逐项核验签名根下的保留树，包括未参与 replay 的旧 entry log。原目标身份下的目录搜索及既有文件读写权限已接入。实际创建和改名、旧 UID 进程与 fd 排除、挂载别名隔离及批准 Linux 交接仍 OPEN。[Classic 交接目标身份的访问检查](startup-readiness/README.md#classic-交接目标身份的访问检查)
+交接材料读取、发布及包内 Classic preparation 已接入实时 ACL 复核。绑定输入、导入 claim 和实际 replay 前，逐项核验签名根下的保留树，包括未参与 replay 的旧 entry log。原目标身份下的目录搜索及既有文件读写权限已接入。本机真实 replay 已验证索引改名、entry-log 创建及 `lastId` 链接拒绝后的冷重开。旧 UID 进程与 fd 排除、挂载别名隔离及批准 Linux 交接仍 OPEN。[目标身份访问检查](startup-readiness/README.md#classic-交接目标身份的访问检查) · [实际写入验证](local-storage/README.md#classic-replay-的-lastid-实际打开保护)
 
 冻结源码 `57cfe72cd6` 的 803 项 TLC 声明矩阵已全部结束，131 项完整正向通过、672 项命中各自预期反例。原始回执绑定该次源码及配置。完整模型组合、真实 native 行为和综合验收仍按原证据要求执行。[803 项声明矩阵](models/README.md#803-项声明矩阵)
 

@@ -792,6 +792,108 @@ public class SegmentClassicHandoffMaterialsTest {
     }
 
     @Test(timeout = 30000)
+    public void preparedRecoveryKeepsTheOriginalCutAfterLastIdIsReplacedByALink() throws Exception {
+        var scope = preparedScope(16);
+        Path index = manifest.classicRoots().get(2).directory().resolve("current");
+        Path original = index.resolve(IndexPersistenceMgr.getLedgerName(11));
+        Path relocation = Files.move(original, Path.of(original + ".rloc"));
+        Object inode = Files.getAttribute(relocation, "unix:ino");
+        byte[] originalIndex = Files.readAllBytes(relocation);
+        Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
+        Path hint = ledger.resolve("lastId");
+        Path mark = ledger.resolve("lastMark.0");
+        Path journal = manifest.classicRoots().get(3).directory().resolve("current/8.txn");
+        byte[] entry = ClassicClaimTestHistory.writeJournalWithEntry(journal, 19);
+        Path victim = temporary.newFile("last-id-link-target").toPath().toRealPath();
+        byte[] sentinel = {1, 3, 5, 7};
+        privateFile(victim, sentinel);
+        var claim = new AtomicReference<SegmentBookieControlLog.BootstrapClaim>();
+        var injected = new AtomicBoolean();
+        var first = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            first.initialize();
+            withColdScope(scope, nativeScope, first, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                var log = control.log();
+                withClaimDriver(log, driver -> {
+                    first.importPrepared(roots, arenas, control, driver);
+                    long cut = log.unsealedBootstrapCut();
+                    claim.set(log.prepareBootstrapClaim(19));
+                    try {
+                        IOException denied = null;
+                        var nativeOpenFailure = new AtomicReference<IOException>();
+                        try (var opens = mockStatic(FileChannel.class, invocation -> {
+                            if (isMaterialOpen(hint, invocation.getMethod().getName(),
+                                    invocation.getMethod().getParameterTypes(), invocation.getArgument(0))
+                                    && injected.compareAndSet(false, true)) {
+                                Files.createSymbolicLink(hint, victim);
+                                try {
+                                    return invocation.callRealMethod();
+                                } catch (IOException failure) {
+                                    nativeOpenFailure.set(failure);
+                                    throw failure;
+                                }
+                            }
+                            return invocation.callRealMethod();
+                        })) {
+                            try {
+                                first.recoverPrepared();
+                            } catch (IOException failure) {
+                                denied = failure;
+                            }
+                        }
+                        assertTrue(injected.get());
+                        assertArrayEquals(sentinel, Files.readAllBytes(victim));
+                        assertNotNull(denied);
+                        assertSame(nativeOpenFailure.get(), denied);
+                        assertTrue(Files.isSymbolicLink(hint));
+                        assertEquals(inode, Files.getAttribute(original, "unix:ino"));
+                        assertArrayEquals(originalIndex, Files.readAllBytes(original));
+                        assertFalse(Files.exists(relocation));
+                        assertFalse(Files.exists(mark));
+                        assertEquals(cut, log.unsealedBootstrapCut());
+                        try (var contents = Files.newDirectoryStream(ledger, "*.log")) {
+                            assertTrue(contents.iterator().hasNext());
+                        }
+                        probe("HELD");
+                    } finally {
+                        assertTrue(first.closeAndDrain().drained());
+                    }
+                });
+            });
+        } finally {
+            assertTrue(first.closeAndDrain().drained());
+            if (injected.get()) {
+                assertEquals(victim, Files.readSymbolicLink(hint));
+                Files.delete(hint);
+            }
+        }
+
+        var reopened = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            reopened.initialize();
+            withColdScope(scope, nativeScope, reopened, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                var log = control.log();
+                withClaimDriver(log, driver -> {
+                    long cut = log.unsealedBootstrapCut();
+                    reopened.importPrepared(roots, arenas, control, driver);
+                    assertEquals(cut, log.unsealedBootstrapCut());
+                    assertEquals(claim.get(), log.prepareBootstrapClaim(19));
+                    reopened.recoverPrepared();
+                    assertEquals(cut, log.bootstrapSeal().orElseThrow().appliedCut());
+                });
+            });
+        } finally {
+            assertTrue(reopened.closeAndDrain().drained());
+        }
+        assertArrayEquals(sentinel, Files.readAllBytes(victim));
+        assertArrayEquals(entry, ClassicClaimTestHistory.readFirstEntry(
+                index.resolve(IndexPersistenceMgr.getLedgerName(19)), ledger));
+        var recoveredMark = ByteBuffer.wrap(Files.readAllBytes(mark));
+        assertEquals(8, recoveredMark.getLong());
+        assertEquals(Files.size(journal), recoveredMark.getLong());
+    }
+
+    @Test(timeout = 30000)
     public void closingDuringSealForceRetainsTheActualBatchAndResumesFromTheColdSeal() throws Exception {
         var scope = preparedScope(16);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));

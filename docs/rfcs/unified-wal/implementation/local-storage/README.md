@@ -2468,3 +2468,13 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 真实 ZooKeeper、双 Journal 和独立 index 用例核对封口紧接原 applied cut。挂起实际 force 时，已读到落盘的 `lastMark`，控制尚未 apply 封口，独立进程仍观察到 supervisor guard。父源码复现缺少封口、未进入封口 force。修复后验证原封口的冷开续接、`ENABLED` 冷读，以及 force 失败的原始异常和原生状态。最终九类 458 项定向回归零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-local-seal-evidence-01baa40e`。
 
 根锁、Arena 和控制 driver 由包内调用方持有。公开资源装配、实际进程崩溃与掉电恢复、实时 Unix 采用及批准 Linux 验收继续待完成。
+
+## Classic replay 的 lastId 实际打开保护
+
+2026-11-07，基线 `199259b9b5`。Owned entry-log allocator 在实际创建或覆盖 `lastId` 时使用 `NOFOLLOW_LINKS`。如果链接在保留树检查后才出现，实际打开仍拒绝。原已创建的 entry-log candidate 和 allocator 按既有关闭协议排空，失败的 replay 保留原控制 cut。
+
+真实 ZooKeeper 和保留文件用例先让原 `.rloc` 通过 native 不覆盖改名恢复到原索引 inode，然后由实际回放创建 entry log。到 allocator 打开 `lastId` 时，测试才引入指向隔离文件的链接。父源码实际截短了该链接的目标。修复后保留目标字节、已恢复的索引及未封口的原 claim，`lastMark` 尚未推进。清除测试引入的链接后，新的 cold owner 复用原 claim 回执并完成回放，读回原 V6 entry 字节和新的持久 cut。
+
+最终定向用例验证恢复返回实际打开的原异常，独立进程在排空前观察到 supervisor guard 仍持有。扩大回归的其余 182 项通过，新增用例的路径文本断言曾因 JDK 异常省略路径而失败。改为校验原异常后，该用例和 Spotless、Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-replay-last-id-link-evidence-199259b9`。
+
+这组目录操作证据来自 macOS 文件和实际离线恢复。批准 Linux 的交接运行、完整挂载隔离和旧写者排除继续待完成。

@@ -742,7 +742,7 @@ supervisor文件名按clusterId、原cluster birth和Bookie固定，绑定UUID�
 
 macOS 上，父源码实际接受了不可读的旧 entry log，并在既有 index 变成只读后继续提交 claim。修复后两项由 Unix 权限查询拒绝，文件字节保留。真实 ZooKeeper 和回放用例也验证只读 V6 Journal 可正常导入及恢复。首轮扩大回归中的错误 UID 诊断文本已恢复。最终 155 项定向测试全部通过，另有 9 项原生凭据和内核测试通过，2 项 Linux 专属测试跳过。Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-handoff-target-access-evidence-58898f26`。
 
-完整 Unix 采用仍需实际创建和改名、挂载别名隔离、旧 UID 进程和已打开 fd 排除及批准 Linux 上的交接证据。公开启动装配继续待完成。
+本机离线 replay 的实际创建、改名和失败后续接见[Classic replay 的 lastId 实际打开保护](../local-storage/README.md#classic-replay-的-lastid-实际打开保护)。完整 Unix 采用仍需挂载别名隔离、旧 UID 进程和已打开 fd 排除及批准 Linux 上的交接证据。公开启动装配继续待完成。
 
 ## 固定交接的原子不覆盖改名
 
