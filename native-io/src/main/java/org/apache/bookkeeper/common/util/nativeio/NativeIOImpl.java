@@ -20,6 +20,7 @@
  */
 package org.apache.bookkeeper.common.util.nativeio;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.UUID;
 
@@ -429,6 +430,47 @@ public class NativeIOImpl implements NativeIO {
             failure.initCause(unavailable);
             throw failure;
         }
+    }
+
+    @Override
+    public LinuxExt4Mount linuxExt4Mount(java.nio.channels.FileChannel root, String canonicalRoot)
+            throws NativeIOException {
+        byte[] bytes = canonicalMountPath(canonicalRoot);
+        try {
+            Object[] observed = NativeIOJni.linuxExt4Mount(root, bytes);
+            if (observed == null || observed.length != 2 || !(observed[0] instanceof long[] values)
+                    || values.length != 5 || values[2] <= 0 || values[2] > Integer.MAX_VALUE
+                    || values[3] <= 0 || values[3] > Integer.MAX_VALUE
+                    || values[4] <= 0 || values[4] > 0xffff_ffffL || !(observed[1] instanceof String point)
+                    || !point.equals("/") && !point.equals(canonicalRoot) && !canonicalRoot.startsWith(point + "/")) {
+                throw new NativeIOException("Invalid original Linux ext4 mount observation");
+            }
+            canonicalMountPath(point);
+            return new LinuxExt4Mount(new FileIdentity(values[0], values[1]), values[2], values[3], values[4], point);
+        } catch (LinkageError unavailable) {
+            var failure = new NativeIOException("Original Linux ext4 mount is unavailable in this JNI library");
+            failure.initCause(unavailable);
+            throw failure;
+        }
+    }
+
+    private static byte[] canonicalMountPath(String path) throws NativeIOException {
+        if (path == null || path.length() > 4095 || !path.startsWith("/") || path.indexOf(0) >= 0
+                || !StandardCharsets.UTF_8.newEncoder().canEncode(path)) {
+            throw new NativeIOException("Invalid canonical UTF-8 ext4 path");
+        }
+        if (path.length() > 1) {
+            for (String part : path.substring(1).split("/", -1)) {
+                if (part.isEmpty() || part.equals(".") || part.equals("..")) {
+                    throw new NativeIOException("Invalid canonical UTF-8 ext4 path component");
+                }
+            }
+        }
+        byte[] bytes = path.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > 4095) {
+            throw new NativeIOException("Canonical ext4 path exceeds the byte limit");
+        }
+        return bytes;
     }
 
     private static LinuxCgroupMount decodeCgroupMount(long[] values, int expectedLength) throws NativeIOException {

@@ -744,6 +744,16 @@ macOS 上，父源码实际接受了不可读的旧 entry log，并在既有 ind
 
 本机离线 replay 的实际创建、改名和失败后续接见[Classic replay 的 lastId 实际打开保护](../local-storage/README.md#classic-replay-的-lastid-实际打开保护)。完整 Unix 采用仍需挂载别名隔离、旧 UID 进程和已打开 fd 排除及批准 Linux 上的交接证据。公开启动装配继续待完成。
 
+## Classic 保留根的 Linux ext4 挂载观察
+
+2026-11-08，基线 `bbcb55b739`，按当前规划会话裁决增加 `NativeIO.linuxExt4Mount`。`SegmentOwnedFiles` 的私有 Entry 从其原路径取得严格 UTF-8 字节等价的规范绝对路径，在同一个实际 FileChannel 上读取。首次关闭及在途查询沿用原 Entry 和 JDK FileDescriptor 的互斥边界，超过原 owner deadline 的结果拒绝返回。Linux 原生查询核对目录的 `fstat`、完整 ext magic、普通 `STATX_MNT_ID` 和精确的 `ext4` mountinfo 类型。调用前后均按无符号链接的原路径重新查 dev/ino/mount ID，复核调用线程 mount namespace 和原 procfs 根，临时 fd 结算实际首次关闭。
+
+同一次观察从固定 procfs 读完可见的 `thread-self/mountinfo`，总量上限 1 MiB，单行上限 64 KiB。逐行解码路径原字节，以组件边界检查范围。所选行必须唯一，挂载根为 `/`，且挂载点覆盖原目录。拒绝同设备的其他 attachment、根内或根上的其他挂载，以及所选挂载点的堆叠。其他记录中的非 UTF-8 名称保留原字节。多个保留根可以共享同一个合法 ext4 挂载。
+
+返回值只覆盖调用线程在本次采样中可见的挂载。chroot 外的挂载、其他 namespace、detached mount、旧进程 fd、设备下层访问、ID 映射和采样之间的变更，仍须由批准宿主、原 launcher 的管理面持续封锁及旧 UID/cgroup/FD 排除验证。普通 mount ID 仅在当前观察中使用。保留树后续要持有原根贯穿两轮检查，并对每个成员从原根 fd 进行同挂载相对解析。loader 冷开必须重验。完整 Unix 采用、批准 Linux 交接和生产 Gate 继续 OPEN。[Linux mountinfo](https://man7.org/linux/man-pages/man5/proc_pid_mountinfo.5.html) · [Linux statx](https://man7.org/linux/man-pages/man2/statx.2.html) · [内核 mountinfo 实现](https://raw.githubusercontent.com/torvalds/linux/v6.17/fs/proc_namespace.c)
+
+Darwin arm64 上原生库构建成功，301 项定向 JUnit 通过，3 项 Linux 条件用例跳过。独立 JVM 加载父 JNI 库，确认缺符号明确拒绝且原目录身份查询仍可用。宿主 Cargo 测试因既有 `-install_name` 链接参数失败，随后以原 crate 源码和 Cargo 已构建的锁定依赖直接运行 29 项 Rust 测试，含 6 项新解析器测试，全部通过。Linux x86_64 `cargo check --tests` 通过。实际 Linux JNI、bind mount 和批准宿主的阳性为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-retained-mount-evidence-bbcb55b7`。
+
 ## 固定交接的原子不覆盖改名
 
 2026-10-31在父源码`facda20fcc9ef6ce31202fee1ddcdc02a1d53648`上，接续规划裁决，为固定retirement/proof发布增加既有native-io的窄renameNoReplace依赖。NativeIO新增默认拒绝，旧方法集合的Java实现无需增加实现即可明确拒绝新能力；NativeIOImpl/NativeIOJni及原Rust库增加一次原子改名。Linux走libc架构常量与syscall(RENAME_NOREPLACE)，不直接链接较新的glibc renameat2符号；macOS走renamex_np(RENAME_EXCL)。不增加通用flags、I/O后端、客户端线程或自动重试，不复制/删除源、fsync或打开业务fd；只有原生明确返回0才成功，其余保留真实errno或明确报能力不可用。旧库缺符号/装载失败不回退到Java move或hardlink。JNI直接读取UTF-16并严格转换，NUL、null或未配对surrogate拒绝，不经lossy转换改名另一路径；有效非BMP/非ASCII路径保持。

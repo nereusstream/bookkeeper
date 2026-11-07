@@ -82,8 +82,15 @@ public class SegmentOwnedFilesTest {
             assertThrows(IOException.class, () -> files.fileIdentity(foreign, forbidden));
             assertThrows(IOException.class, () -> files.fileIdentity(raw, forbidden));
             assertThrows(IOException.class, () -> files.fileIdentity(null, forbidden));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            assertThrows(IOException.class, () -> files.linuxExt4Mount(foreign, forbidden, deadline));
+            assertThrows(IOException.class, () -> files.linuxExt4Mount(raw, forbidden, deadline));
+            var expired = assertThrows(IOException.class,
+                    () -> files.linuxExt4Mount(owned, forbidden, System.nanoTime()));
+            assertTrue(expired.getMessage().contains("deadline"));
             owned.close();
             assertThrows(IOException.class, () -> files.fileIdentity(owned, forbidden));
+            assertThrows(IOException.class, () -> files.linuxExt4Mount(owned, forbidden, deadline));
         } finally {
             assertTrue(files.drain().drained());
             assertTrue(other.drain().drained());

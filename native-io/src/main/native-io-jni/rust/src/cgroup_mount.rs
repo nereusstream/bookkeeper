@@ -23,6 +23,7 @@ use super::{
     read_thread_namespace_links, ProcIdentityResult,
 };
 
+pub(super) mod ext4;
 mod membership;
 
 const CGROUP_PATH: &[u8] = b"/sys/fs/cgroup";
@@ -113,24 +114,18 @@ fn selected_mount_parent(
     Ok(Some(parent))
 }
 
-struct MountInfo {
-    directory: MountDirectory,
+#[derive(Default)]
+struct MountInfoLines {
     bytes: usize,
     line: Vec<u8>,
-    parent: Option<u32>,
 }
 
-impl MountInfo {
-    fn new(directory: MountDirectory) -> Self {
-        Self {
-            directory,
-            bytes: 0,
-            line: Vec::new(),
-            parent: None,
-        }
-    }
-
-    fn push(&mut self, bytes: &[u8]) -> Result<(), libc::c_int> {
+impl MountInfoLines {
+    fn push(
+        &mut self,
+        bytes: &[u8],
+        mut visit: impl FnMut(&[u8]) -> Result<(), libc::c_int>,
+    ) -> Result<(), libc::c_int> {
         if bytes.len() > MAX_MOUNTINFO_BYTES - self.bytes {
             return Err(libc::EOVERFLOW);
         }
@@ -147,11 +142,7 @@ impl MountInfo {
             }
             self.line.extend_from_slice(body);
             if complete {
-                if let Some(parent) = selected_mount_parent(&self.line, self.directory)? {
-                    if self.parent.replace(parent).is_some() {
-                        return Err(libc::EINVAL);
-                    }
-                }
+                visit(&self.line)?;
                 self.line.clear();
             }
         }
@@ -159,12 +150,25 @@ impl MountInfo {
     }
 
     // Called only after the actual source read returns EOF, even when a selected record was already found.
-    fn finish(self) -> Result<u32, libc::c_int> {
+    fn finish(self) -> Result<(), libc::c_int> {
         if !self.line.is_empty() {
             return Err(libc::EINVAL);
         }
-        self.parent.ok_or(libc::ENOENT)
+        Ok(())
     }
+}
+
+fn record_cgroup_parent(
+    directory: MountDirectory,
+    line: &[u8],
+    parent: &mut Option<u32>,
+) -> Result<(), libc::c_int> {
+    if let Some(found) = selected_mount_parent(line, directory)? {
+        if parent.replace(found).is_some() {
+            return Err(libc::EINVAL);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -174,7 +178,7 @@ const MOUNT_STATX_MASK: u32 = libc::STATX_TYPE | libc::STATX_INO | libc::STATX_M
 fn statx_directory(stat: &libc::statx) -> ProcIdentityResult<MountDirectory> {
     if stat.stx_mask & MOUNT_STATX_MASK != MOUNT_STATX_MASK {
         return Err((
-            "cgroup mount statx is missing required fields",
+            "directory statx is missing required mount fields",
             libc::EOPNOTSUPP,
         ));
     }
@@ -183,7 +187,7 @@ fn statx_directory(stat: &libc::statx) -> ProcIdentityResult<MountDirectory> {
         || stat.stx_mnt_id > i32::MAX as u64
     {
         return Err((
-            "cgroup mount statx is not a directory with an ordinary mount ID",
+            "statx did not return a directory with an ordinary mount ID",
             libc::EINVAL,
         ));
     }
@@ -213,7 +217,7 @@ fn query_statx(
         )
     };
     if result != 0 {
-        return Err(proc_identity_errno("cgroup mount statx failed"));
+        return Err(proc_identity_errno("directory mount statx failed"));
     }
     statx_directory(&unsafe { stat.assume_init() })
 }
@@ -237,8 +241,8 @@ fn require_fixed_path(held: MountDirectory) -> ProcIdentityResult<()> {
 fn read_mountinfo(
     root: libc::c_int,
     root_stat: &libc::stat,
-    held: MountDirectory,
-) -> ProcIdentityResult<u32> {
+    mut visit: impl FnMut(&[u8]) -> Result<(), libc::c_int>,
+) -> ProcIdentityResult<()> {
     let how = [
         (libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) as u64,
         0,
@@ -254,44 +258,38 @@ fn read_mountinfo(
         )
     };
     if leaf < 0 {
-        return Err(proc_identity_errno("cgroup mountinfo fixed openat2 failed"));
+        return Err(proc_identity_errno("mountinfo fixed openat2 failed"));
     }
     let leaf = leaf as libc::c_int;
     let outcome = (|| {
         let before = proc_identity_stat(leaf)?;
         if before.st_mode & libc::S_IFMT != libc::S_IFREG || before.st_dev != root_stat.st_dev {
-            return Err((
-                "cgroup mountinfo leaf differs from its held procfs",
-                libc::EINVAL,
-            ));
+            return Err(("mountinfo leaf differs from its held procfs", libc::EINVAL));
         }
-        let mut parser = MountInfo::new(held);
+        let mut parser = MountInfoLines::default();
         let mut bytes = [0_u8; 8192];
         loop {
             let count = unsafe { libc::read(leaf, bytes.as_mut_ptr().cast(), bytes.len()) };
             if count < 0 {
-                return Err(proc_identity_errno("cgroup mountinfo bounded read failed"));
+                return Err(proc_identity_errno("mountinfo bounded read failed"));
             }
             if count == 0 {
                 break;
             }
             parser
-                .push(&bytes[..count as usize])
-                .map_err(|error| ("Invalid or oversized cgroup mountinfo", error))?;
+                .push(&bytes[..count as usize], &mut visit)
+                .map_err(|error| ("Invalid, oversized or conflicting mountinfo", error))?;
         }
         let after = proc_identity_stat(leaf)?;
         if before.st_dev != after.st_dev
             || before.st_ino != after.st_ino
             || before.st_mode != after.st_mode
         {
-            return Err((
-                "cgroup mountinfo held leaf changed during read",
-                libc::EAGAIN,
-            ));
+            return Err(("mountinfo held leaf changed during read", libc::EAGAIN));
         }
         parser
             .finish()
-            .map_err(|error| ("Missing or truncated cgroup mountinfo record", error))
+            .map_err(|error| ("Truncated mountinfo record", error))
     })();
     close_proc_identity_fd(leaf, outcome)
 }
@@ -348,7 +346,11 @@ pub(super) fn observe(
         let namespaces = read_thread_namespace_links(root, &root_stat, LINKS)?;
         require_initial_cgroup_namespace(namespaces)
             .map_err(|error| ("cgroup mount requires the initial cgroup namespace", error))?;
-        let parent = read_mountinfo(root, &root_stat, held)?;
+        let mut parent = None;
+        read_mountinfo(root, &root_stat, |line| {
+            record_cgroup_parent(held, line, &mut parent)
+        })?;
+        let parent = parent.ok_or(("Missing cgroup mountinfo record", libc::ENOENT))?;
         let member = if include_membership {
             Some(membership::observe(fd, held, root, &root_stat)?)
         } else {
@@ -387,9 +389,28 @@ mod tests {
     const ROW: &[u8] =
         b"29 23 0:26 / /sys/fs/cgroup rw,nosuid shared:4 future:tag - cgroup2 cg\\040source rw\n";
 
+    #[derive(Default)]
+    struct CgroupScan {
+        lines: MountInfoLines,
+        parent: Option<u32>,
+    }
+
+    impl CgroupScan {
+        fn push(&mut self, bytes: &[u8]) -> Result<(), libc::c_int> {
+            self.lines.push(bytes, |line| {
+                record_cgroup_parent(HELD, line, &mut self.parent)
+            })
+        }
+
+        fn finish(self) -> Result<u32, libc::c_int> {
+            self.lines.finish()?;
+            self.parent.ok_or(libc::ENOENT)
+        }
+    }
+
     #[test]
     fn exact_mount_record_accepts_chunk_boundaries_escaped_names_and_unknown_tags() {
-        let mut parser = MountInfo::new(HELD);
+        let mut parser = CgroupScan::default();
         parser
             .push(b"18 12 0:99 /bad\\012path /any\\040path\xff rw - tmpfs tmpfs rw\n")
             .unwrap();
@@ -401,8 +422,8 @@ mod tests {
 
     #[test]
     fn absent_duplicate_mismatched_and_incomplete_records_reject() {
-        assert_eq!(MountInfo::new(HELD).finish(), Err(libc::ENOENT));
-        let mut parser = MountInfo::new(HELD);
+        assert_eq!(CgroupScan::default().finish(), Err(libc::ENOENT));
+        let mut parser = CgroupScan::default();
         parser.push(ROW).unwrap();
         assert_eq!(parser.push(ROW), Err(libc::EINVAL));
         for invalid in [
@@ -413,9 +434,9 @@ mod tests {
             b"29 23 0:26 / /sys/fs/cgroup rw cgroup2 cg rw\n",
             b"29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cg\n",
         ] {
-            assert_eq!(MountInfo::new(HELD).push(invalid), Err(libc::EINVAL));
+            assert_eq!(CgroupScan::default().push(invalid), Err(libc::EINVAL));
         }
-        let mut parser = MountInfo::new(HELD);
+        let mut parser = CgroupScan::default();
         parser.push(ROW).unwrap();
         parser.push(b"30 29 0:28 / /unfinished").unwrap();
         assert_eq!(parser.finish(), Err(libc::EINVAL));
@@ -423,14 +444,14 @@ mod tests {
 
     #[test]
     fn selected_record_does_not_end_the_scan_or_waive_either_bound() {
-        let mut parser = MountInfo::new(HELD);
+        let mut parser = CgroupScan::default();
         parser.push(ROW).unwrap();
         parser.push(&vec![b'a'; MAX_MOUNTINFO_LINE]).unwrap();
         assert_eq!(parser.push(b"a\n"), Err(libc::EOVERFLOW));
-        let mut parser = MountInfo::new(HELD);
+        let mut parser = CgroupScan::default();
         parser.push(ROW).unwrap();
         let unrelated = b"18 12 0:99 / /other rw - tmpfs tmpfs rw\n";
-        while parser.bytes + unrelated.len() <= MAX_MOUNTINFO_BYTES {
+        while parser.lines.bytes + unrelated.len() <= MAX_MOUNTINFO_BYTES {
             parser.push(unrelated).unwrap();
         }
         assert_eq!(parser.push(unrelated), Err(libc::EOVERFLOW));

@@ -743,6 +743,31 @@ final class SegmentClassicLaunchTrust {
         return new LinuxProvider(filesystem, provider, rootPath.getClass());
     }
 
+    /** Byte equivalence for the original owner's retained root. Does not look up or normalize the path. */
+    static String requireOwnedLinuxRoot(Path path, long deadlineNanos) throws IOException {
+        requireTime(deadlineNanos);
+        var provider = linuxProviderObjects();
+        if (path.getClass() != provider.pathClass() || path.getFileSystem() != provider.filesystem()
+                || !path.isAbsolute() || !path.equals(path.normalize())) {
+            throw new IOException("Owned ext4 root requires a canonical default Linux path");
+        }
+        String text = path.toString();
+        if (text.length() > 4095 || text.indexOf(0) >= 0 || !StandardCharsets.UTF_8.newEncoder().canEncode(text)) {
+            throw new IOException("Owned ext4 root has invalid UTF-8 path text");
+        }
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > 4095) {
+            throw new IOException("Owned ext4 root exceeds the byte limit");
+        }
+        // Percent-encode the original bytes directly so URI conversion cannot normalize Unicode text.
+        String raw = HexFormat.of().withPrefix("%").formatHex(bytes, 1, bytes.length);
+        if (!path.equals(Path.of(URI.create("file:///" + raw)))) {
+            throw new IOException("Owned ext4 root differs from its strict UTF-8 path bytes");
+        }
+        requireTime(deadlineNanos);
+        return text;
+    }
+
     private static void requireBootstrapType(Class<?> actual, String name) throws IOException {
         try {
             if (!actual.getName().equals(name) || actual != Class.forName(name, false, null)

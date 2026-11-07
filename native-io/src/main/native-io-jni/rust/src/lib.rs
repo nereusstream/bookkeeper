@@ -1697,6 +1697,72 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     }
 }
 
+/// Bounded visible mount observation for the exact held directory, under the original fd monitor.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_linuxExt4Mount(
+    mut env: JNIEnv,
+    _class: JClass,
+    _channel: JObject,
+    _root: JByteArray,
+) -> jobjectArray {
+    #[cfg(target_os = "linux")]
+    {
+        if _root.is_null() || !matches!(env.get_array_length(&_root), Ok(1..=4095)) {
+            throw_exception_with_error_code(
+                &mut env,
+                "Invalid ext4 root byte length",
+                libc::EINVAL,
+            );
+            return ptr::null_mut();
+        }
+        let Ok(root) = env.convert_byte_array(&_root) else {
+            return ptr::null_mut();
+        };
+        let Some((mount, identity)) =
+            observe_original_file(&mut env, &_channel, |env, fd, status| {
+                match cgroup_mount::ext4::observe(fd, status, &root) {
+                    Ok(mount) => Some((mount, [status.st_dev as jlong, status.st_ino as jlong])),
+                    Err((operation, error)) => {
+                        throw_exception_with_error_code(env, operation, error);
+                        None
+                    }
+                }
+            })
+        else {
+            return ptr::null_mut();
+        };
+        let result = (|| -> jni::errors::Result<jobjectArray> {
+            let numbers = env.new_long_array(5)?;
+            env.set_long_array_region(
+                &numbers,
+                0,
+                &[
+                    identity[0],
+                    identity[1],
+                    mount.mount_id as jlong,
+                    mount.parent_id as jlong,
+                    mount.namespace as jlong,
+                ],
+            )?;
+            let point = env.new_string(mount.point)?;
+            let array = env.new_object_array(2, "java/lang/Object", JObject::null())?;
+            env.set_object_array_element(&array, 0, numbers)?;
+            env.set_object_array_element(&array, 1, point)?;
+            Ok(array.into_raw())
+        })();
+        result.unwrap_or(ptr::null_mut())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Linux ext4 mount query is unsupported",
+            libc::ENOTSUP,
+        );
+        ptr::null_mut()
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy)]
 enum OriginalFileQuery {
@@ -1721,7 +1787,57 @@ fn read_original_file_facts(
     channel: &JObject,
     query: OriginalFileQuery,
 ) -> Option<OriginalFileObservation> {
-    match with_original_file_stat(env, channel, query) {
+    observe_original_file(env, channel, |env, fd, status| {
+        let mut observation = OriginalFileObservation {
+            values: [status.st_dev as jlong, status.st_ino as jlong, 0],
+            #[cfg(target_os = "linux")]
+            member: None,
+        };
+        match query {
+            OriginalFileQuery::Identity => {}
+            OriginalFileQuery::DirectoryFileSystem => {
+                if status.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                    throw_exception_with_error_code(
+                        env,
+                        "Original file is not a directory",
+                        libc::ENOTDIR,
+                    );
+                    return None;
+                }
+                let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
+                if unsafe { libc::fstatfs(fd, fs.as_mut_ptr()) } != 0 {
+                    throw_exception_with_errno(env, "Original directory fstatfs failed");
+                    return None;
+                }
+                let fs = unsafe { fs.assume_init() };
+                observation.values[2] = fs.f_type as jlong;
+            }
+            #[cfg(target_os = "linux")]
+            OriginalFileQuery::CgroupMount | OriginalFileQuery::CgroupMembership => {
+                let include_membership = matches!(query, OriginalFileQuery::CgroupMembership);
+                match cgroup_mount::observe(fd, status, include_membership) {
+                    Ok(observed) => {
+                        observation.values = observed.mount.map(|value| value as jlong);
+                        observation.member = observed.member;
+                    }
+                    Err((operation, error)) => {
+                        throw_exception_with_error_code(env, operation, error);
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(observation)
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn observe_original_file<T>(
+    env: &mut JNIEnv,
+    channel: &JObject,
+    observe: impl FnOnce(&mut JNIEnv, libc::c_int, &libc::stat) -> Option<T>,
+) -> Option<T> {
+    match with_original_file_stat(env, channel, observe) {
         Ok(result) => result,
         Err(error) => {
             if !env.exception_check().unwrap_or(true) {
@@ -1760,11 +1876,11 @@ fn original_file_facts(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn with_original_file_stat(
+fn with_original_file_stat<T>(
     env: &mut JNIEnv,
     channel: &JObject,
-    query: OriginalFileQuery,
-) -> jni::errors::Result<Option<OriginalFileObservation>> {
+    observe: impl FnOnce(&mut JNIEnv, libc::c_int, &libc::stat) -> Option<T>,
+) -> jni::errors::Result<Option<T>> {
     if channel.is_null() {
         throw_exception_with_error_code(env, "Original file channel is null", libc::EINVAL);
         return Ok(None);
@@ -1834,7 +1950,7 @@ fn with_original_file_stat(
         }
         return Ok(None);
     }
-    let observed = (|| -> jni::errors::Result<Option<OriginalFileObservation>> {
+    let observed = (|| -> jni::errors::Result<Option<T>> {
         if env.exception_check()? {
             return Ok(None);
         }
@@ -1872,45 +1988,9 @@ fn with_original_file_stat(
             return Ok(None);
         }
         let status = unsafe { status.assume_init() };
-        let mut observation = OriginalFileObservation {
-            values: [status.st_dev as jlong, status.st_ino as jlong, 0],
-            #[cfg(target_os = "linux")]
-            member: None,
+        let Some(observation) = observe(env, fd, &status) else {
+            return Ok(None);
         };
-        match query {
-            OriginalFileQuery::Identity => {}
-            OriginalFileQuery::DirectoryFileSystem => {
-                if status.st_mode & libc::S_IFMT != libc::S_IFDIR {
-                    throw_exception_with_error_code(
-                        env,
-                        "Original file is not a directory",
-                        libc::ENOTDIR,
-                    );
-                    return Ok(None);
-                }
-                let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
-                if unsafe { libc::fstatfs(fd, fs.as_mut_ptr()) } != 0 {
-                    throw_exception_with_errno(env, "Original directory fstatfs failed");
-                    return Ok(None);
-                }
-                let fs = unsafe { fs.assume_init() };
-                observation.values[2] = fs.f_type as jlong;
-            }
-            #[cfg(target_os = "linux")]
-            OriginalFileQuery::CgroupMount | OriginalFileQuery::CgroupMembership => {
-                let include_membership = matches!(query, OriginalFileQuery::CgroupMembership);
-                match cgroup_mount::observe(fd, &status, include_membership) {
-                    Ok(observed) => {
-                        observation.values = observed.mount.map(|value| value as jlong);
-                        observation.member = observed.member;
-                    }
-                    Err((operation, error)) => {
-                        throw_exception_with_error_code(env, operation, error);
-                        return Ok(None);
-                    }
-                }
-            }
-        }
         let final_fd = env
             .get_field_unchecked(&descriptor, fd_field, ReturnType::Primitive(Primitive::Int))?
             .i()?;

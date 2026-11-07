@@ -82,6 +82,9 @@ class NativeIOJni {
 
     static native Object[] linuxCgroupMembership(java.nio.channels.FileChannel root) throws NativeIOException;
 
+    static native Object[] linuxExt4Mount(java.nio.channels.FileChannel root, byte[] canonicalRoot)
+            throws NativeIOException;
+
     static {
         NativeIOBootstrap.initializeJni();
     }

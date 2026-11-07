@@ -337,4 +337,17 @@ public interface NativeIO {
     default LinuxCgroupMembership linuxCgroupMembership(java.nio.channels.FileChannel root) throws NativeIOException {
         throw new NativeIOException("Original Linux cgroup membership query is unsupported");
     }
+
+    /** A bounded observation of the held ext4 directory and the calling thread's visible mount table. */
+    record LinuxExt4Mount(FileIdentity identity, long mountId, long parentMountId, long mountNamespaceInode,
+                          String mountPoint) { }
+
+    /**
+     * Compare the original directory with its owner's canonical absolute UTF-8 path and visible ext4 mount.
+     * The result covers only this thread's current view and conveys no durable identity or isolation authority.
+     */
+    default LinuxExt4Mount linuxExt4Mount(java.nio.channels.FileChannel root, String canonicalRoot)
+            throws NativeIOException {
+        throw new NativeIOException("Original Linux ext4 mount query is unsupported");
+    }
 }

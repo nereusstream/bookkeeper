@@ -173,6 +173,12 @@ final class SegmentOwnedFiles {
         return owned.entry.linuxCgroupMembership(owned, nativeIo);
     }
 
+    NativeIO.LinuxExt4Mount linuxExt4Mount(FileChannel channel, NativeIO nativeIo, long deadlineNanos)
+            throws IOException {
+        Channel owned = originalWrapper(channel, nativeIo);
+        return owned.entry.linuxExt4Mount(owned, nativeIo, deadlineNanos);
+    }
+
     private Channel originalWrapper(FileChannel channel, NativeIO nativeIo) throws IOException {
         if (nativeIo == null || !(channel instanceof SegmentOwnedFiles.Channel owned) || !owned.ownedBy(this)) {
             throw new IOException("Original file query requires this owner's channel wrapper");
@@ -387,6 +393,25 @@ final class SegmentOwnedFiles {
                     throw new IOException("Unknown original cgroup membership outcome");
                 }
                 requireIdentityQuery(caller, original);
+                return observation;
+            } finally {
+                queryingThread = null;
+            }
+        }
+
+        synchronized NativeIO.LinuxExt4Mount linuxExt4Mount(Channel caller, NativeIO nativeIo, long deadlineNanos)
+                throws IOException {
+            FileChannel original = beginIdentityQuery(caller);
+            try {
+                String canonicalRoot = SegmentClassicLaunchTrust.requireOwnedLinuxRoot(path, deadlineNanos);
+                var observation = nativeIo.linuxExt4Mount(original, canonicalRoot);
+                if (observation == null || observation.identity() == null || observation.mountPoint() == null) {
+                    throw new IOException("Unknown original Linux ext4 mount outcome");
+                }
+                requireIdentityQuery(caller, original);
+                if (deadlineNanos - System.nanoTime() <= 0) {
+                    throw new IOException("Owned ext4 mount verification deadline elapsed");
+                }
                 return observation;
             } finally {
                 queryingThread = null;
