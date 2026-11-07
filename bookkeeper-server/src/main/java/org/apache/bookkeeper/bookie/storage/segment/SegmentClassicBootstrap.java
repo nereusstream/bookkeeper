@@ -439,7 +439,7 @@ public final class SegmentClassicBootstrap {
                 throw new IOException("Classic bootstrap physical member differs from the signed scope: " + root);
             }
             if (verifyStorageTree) {
-                materials.verifyStorageTree(root, actual, this::requireOpen);
+                materials.verifyStorageTree(root, actual, physical, this::requireOpen);
             }
         }
     }

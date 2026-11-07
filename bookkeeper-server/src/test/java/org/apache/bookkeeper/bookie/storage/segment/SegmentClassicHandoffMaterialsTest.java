@@ -590,6 +590,55 @@ public class SegmentClassicHandoffMaterialsTest {
     }
 
     @Test(timeout = 30000)
+    public void preparationRejectsAnUnreadableRetainedEntryLog() throws Exception {
+        assumeTrue(uid != 0);
+        var scope = preparedScope(16);
+        Path log = manifest.classicRoots().get(1).directory().resolve("current/99.log");
+        byte[] original = {1, 2, 3};
+        privateFile(log, original);
+        Files.setPosixFilePermissions(log, PosixFilePermissions.fromString("-w-------"));
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            var failure = assertThrows(AccessDeniedException.class, preparation::initialize);
+            assertEquals(log.toString(), failure.getFile());
+            assertFalse(preparation.inputsBound());
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+            Files.setPosixFilePermissions(log, PosixFilePermissions.fromString("rw-------"));
+        }
+        assertArrayEquals(original, Files.readAllBytes(log));
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void preparedImportRejectsAnIndexThatTheTargetCannotWrite() throws Exception {
+        assumeTrue(uid != 0);
+        var scope = preparedScope(16);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        Path index = manifest.classicRoots().get(2).directory().resolve("current")
+                .resolve(IndexPersistenceMgr.getLedgerName(11));
+        byte[] original = Files.readAllBytes(index);
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                Files.setPosixFilePermissions(index, PosixFilePermissions.fromString("r--------"));
+                var log = control.log();
+                withClaimDriver(log, driver -> {
+                    var failure = assertThrows(AccessDeniedException.class,
+                            () -> preparation.importPrepared(roots, arenas, control, driver));
+                    assertEquals(index.toString(), failure.getFile());
+                    assertEquals(-1, log.unsealedBootstrapCut());
+                    assertEquals(0, io.writes);
+                });
+                assertArrayEquals(original, Files.readAllBytes(index));
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
     public void preparedImportRejectsAnExtendedAclOnAnUnusedEntryLog() throws Exception {
         assumeTrue(SystemUtils.IS_OS_MAC_OSX);
         var scope = preparedScope(16);
@@ -702,6 +751,7 @@ public class SegmentClassicHandoffMaterialsTest {
         Object inode = Files.getAttribute(relocated, "unix:ino");
         Path journal = manifest.classicRoots().get(3).directory().resolve("current/8.txn");
         byte[] entry = ClassicClaimTestHistory.writeJournalWithEntry(journal, 19);
+        Files.setPosixFilePermissions(journal, PosixFilePermissions.fromString("r--------"));
         Path keyOnlyJournal = journal.resolveSibling("9.txn");
         byte[] key = {7, 8, 9};
         ClassicClaimTestHistory.writeJournalKey(keyOnlyJournal, 276, key);

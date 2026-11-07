@@ -732,7 +732,17 @@ supervisor文件名按clusterId、原cluster birth和Bookie固定，绑定UUID�
 
 真实文件和 ZooKeeper 用例复现父源码接受指向闲置 entry log 的外部硬链接，以及在带附加 ACL 的闲置 entry log 存在时提交 claim。修复后两项均拒绝，保留原文件字节。另包装实际目录流注入首次关闭失败，独立进程确认 supervisor guard 持有，后续排空保持原错误。macOS 上原生 ACL 4 项和服务端 149 项定向回归零失败、错误或跳过。修正一处行长后，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-handoff-retained-tree-evidence-83775516`。
 
-完整 Unix 采用仍需专用旧 UID 的其他进程和已打开 fd 排除、目标实际访问权限、挂载别名隔离和批准 Linux 上的交接证据。公开启动装配继续待完成。
+目标身份的访问检查见下节。
+
+## Classic 交接目标身份的访问检查
+
+2026-11-07，基线 `58898f2626`。材料读取器核对原目标的实际 real/effective UID、主 GID 和补充组，在每次保留树检查前后复核。Linux 分支还要求调用线程的 filesystem UID/GID 与实际有效凭据一致。保留树使用默认 Unix 文件系统 provider 查询路径权限，并在查询后复核实际身份。目录要求读取和搜索权限，原 PREPARED 控制写入目录及 Classic 当前存储写入目录另需写权限。
+
+文件默认要求读取。现有锁与实际以读写打开的 Bookie 控制文件需要读写权限。PREPARED 另要求可写的现有 Classic index、可恢复 relocation、ledger `lastId` 与 `lastMark` 副本，以及已有绑定标记。旧 Journal、旧 entry log 和 Arena DATA 在本离线路径按读取检查。访问查询不另开 guard inode 的文件描述符。实际目录枚举、后续回放文件打开和关闭继续由原资源 owner 观察。
+
+macOS 上，父源码实际接受了不可读的旧 entry log，并在既有 index 变成只读后继续提交 claim。修复后两项由 Unix 权限查询拒绝，文件字节保留。真实 ZooKeeper 和回放用例也验证只读 V6 Journal 可正常导入及恢复。首轮扩大回归中的错误 UID 诊断文本已恢复。最终 155 项定向测试全部通过，另有 9 项原生凭据和内核测试通过，2 项 Linux 专属测试跳过。Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-handoff-target-access-evidence-58898f26`。
+
+完整 Unix 采用仍需实际创建和改名、挂载别名隔离、旧 UID 进程和已打开 fd 排除及批准 Linux 上的交接证据。公开启动装配继续待完成。
 
 ## 固定交接的原子不覆盖改名
 

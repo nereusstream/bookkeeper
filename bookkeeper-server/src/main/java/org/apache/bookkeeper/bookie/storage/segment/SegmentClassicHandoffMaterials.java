@@ -17,11 +17,15 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
-import com.sun.security.auth.module.UnixSystem;
+import static java.nio.file.AccessMode.EXECUTE;
+import static java.nio.file.AccessMode.READ;
+import static java.nio.file.AccessMode.WRITE;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
@@ -39,7 +43,10 @@ import java.util.Objects;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentClassicHandoffPaths.Identity;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.apache.bookkeeper.discover.BookieRouteBinding;
+import org.apache.bookkeeper.util.BookKeeperConstants;
 
 /** Owned material I/O and signed-scope comparison only. Does not establish current native/Unix adoption authority. */
 final class SegmentClassicHandoffMaterials {
@@ -97,7 +104,10 @@ final class SegmentClassicHandoffMaterials {
     private final SegmentDataFileLock guard;
     private final SegmentOwnedFiles files;
     private final SegmentClassicHandoffPaths paths;
+    private final NativeIO nativeIo = new NativeIOImpl();
     private final Map<Path, ProtectedFile> protectedFiles = new LinkedHashMap<>();
+    private NativeIO.ProcessCredentials targetCredentials;
+    private boolean linux;
     private boolean attempted;
     private boolean closing;
     private Thread initializingThread;
@@ -150,9 +160,8 @@ final class SegmentClassicHandoffMaterials {
         initializingThread = Thread.currentThread();
         byte[] rawKey = null;
         try {
-            if (new UnixSystem().getUid() != expected.targetUid()) {
-                throw new IOException("Handoff material reader is not the expected actual target UID");
-            }
+            linux = "Linux".equals(nativeIo.currentKernelIdentity().sysname());
+            targetCredentials = requireTargetCredentials();
             paths.requireDirectory(references.directory());
             protectedFiles.put(guardPath, fileProtection(guardPath, 0, SegmentClassicHandoff.MAX_BYTES));
             guard.initialize();
@@ -235,12 +244,31 @@ final class SegmentClassicHandoffMaterials {
     }
 
     private void recheckFiles() throws IOException {
+        requireTargetCredentials();
         guard.requireHeld(guardPath);
         for (var original : protectedFiles.entrySet()) {
             if (!original.getValue().equals(fileProtection(original.getKey(), 0, SegmentClassicHandoff.MAX_BYTES))) {
                 throw new IOException("Handoff material or supervisor protection changed: " + original.getKey());
             }
         }
+    }
+
+    private NativeIO.ProcessCredentials requireTargetCredentials() throws IOException {
+        var observed = nativeIo.currentProcessCredentials();
+        if (observed.realUid() != expected.targetUid() || observed.effectiveUid() != expected.targetUid()) {
+            throw new IOException("Handoff material reader is not the expected actual target UID");
+        }
+        if (observed.realGid() != observed.effectiveGid()
+                || targetCredentials != null && !targetCredentials.equals(observed)) {
+            throw new IOException("Classic handoff requires the original target primary and supplementary groups");
+        }
+        if (linux) {
+            var filesystem = nativeIo.currentLinuxThreadFilesystemIds();
+            if (filesystem.fsUid() != observed.effectiveUid() || filesystem.fsGid() != observed.effectiveGid()) {
+                throw new IOException("Classic handoff target filesystem credentials differ from the original IDs");
+            }
+        }
+        return observed;
     }
 
     private List<Path> allMaterialPaths() {
@@ -370,18 +398,22 @@ final class SegmentClassicHandoffMaterials {
         return before;
     }
 
-    synchronized void verifyStorageTree(Path root, Identity expected, OpenCheck check) throws IOException {
+    synchronized void verifyStorageTree(Path root, Identity expected, SegmentClassicHandoff.Physical member,
+            OpenCheck check) throws IOException {
         guard.requireHeld(guardPath);
+        requireTargetCredentials();
         var before = paths.retainedStorageIdentity(root, expected.device());
         if (!expected.equals(before.parent())) {
             throw new IOException("Retained storage root changed before enumeration: " + root);
         }
-        verifyStorageDirectory(root, before, 0, check);
+        verifyStorageDirectory(root, root, before, member, 0, check);
+        requireTargetCredentials();
     }
 
-    private void verifyStorageDirectory(Path directory, Identity before, int depth, OpenCheck check)
-            throws IOException {
+    private void verifyStorageDirectory(Path root, Path directory, Identity before,
+            SegmentClassicHandoff.Physical member, int depth, OpenCheck check) throws IOException {
         check.requireOpen();
+        requireStorageAccess(root, directory, before, member);
         try (var children = files.openDirectory(directory)) {
             for (Path child : children) {
                 check.requireOpen();
@@ -391,13 +423,81 @@ final class SegmentClassicHandoffMaterials {
                     if (depth == 3) {
                         throw new IOException("Retained storage exceeds the supported directory depth: " + child);
                     }
-                    verifyStorageDirectory(child, identity, depth + 1, check);
+                    verifyStorageDirectory(root, child, identity, member, depth + 1, check);
+                } else {
+                    requireStorageAccess(root, child, identity, member);
+                    if (!identity.equals(SegmentClassicHandoffPaths.fileIdentity(child))) {
+                        throw new IOException("Retained storage file changed during access check: " + child);
+                    }
                 }
             }
         }
         if (!before.equals(paths.retainedStorageIdentity(directory, before.device()))) {
             throw new IOException("Retained storage directory changed during enumeration: " + directory);
         }
+    }
+
+    private void requireStorageAccess(Path root, Path path, Identity identity, SegmentClassicHandoff.Physical member)
+            throws IOException {
+        var filesystem = FileSystems.getDefault();
+        if (path.getFileSystem() != filesystem) {
+            throw new IOException("Retained storage requires the original Unix filesystem provider: " + path);
+        }
+        boolean write = requiresStorageWrite(root, path, identity.directory(), member);
+        var provider = filesystem.provider();
+        // The Unix provider queries access without opening a second descriptor for a protected lock inode.
+        if (identity.directory()) {
+            if (write) {
+                provider.checkAccess(path, READ, WRITE, EXECUTE);
+            } else {
+                provider.checkAccess(path, READ, EXECUTE);
+            }
+        } else if (write) {
+            provider.checkAccess(path, READ, WRITE);
+        } else {
+            provider.checkAccess(path, READ);
+        }
+    }
+
+    private boolean requiresStorageWrite(Path root, Path path, boolean directory,
+            SegmentClassicHandoff.Physical member) {
+        boolean prepared = expected.nativeScope().binding().phase() == BookieRouteBinding.Phase.PREPARED;
+        String name = path.getFileName().toString();
+        if (member.kind() == SegmentClassicHandoff.CONTROL) {
+            if (directory) {
+                return prepared && root.equals(path);
+            }
+            return root.equals(path.getParent()) && (name.equals("bookie-control.lock")
+                    || name.equals("bookie-control") || name.equals("bookie-control-generation-a")
+                    || name.equals("bookie-control-generation-b")
+                    || prepared && name.equals(SegmentClassicRootBindings.FILE_NAME));
+        }
+        if (member.kind() == SegmentClassicHandoff.ARENA) {
+            return !directory && root.equals(path.getParent())
+                    && (name.equals("isolated.lock") || name.equals("arena-control.lock"));
+        }
+        Path current = root.resolve(BookKeeperConstants.CURRENT_DIR);
+        if (!path.startsWith(current)) {
+            return false;
+        }
+        var roles = manifest.classicRoots().get(member.member()).roles();
+        if (directory) {
+            return prepared && (path.equals(current) || roles.contains(SegmentArenaManifest.ClassicRole.INDEX));
+        }
+        boolean direct = current.equals(path.getParent());
+        if (direct && name.equals(SegmentClassicRootBindings.LOCK_NAME)) {
+            return true;
+        }
+        if (!prepared) {
+            return false;
+        }
+        if (direct) {
+            return name.equals(SegmentClassicRootBindings.FILE_NAME)
+                    || roles.contains(SegmentArenaManifest.ClassicRole.LEDGER)
+                            && (name.equals("lastId") || name.matches("lastMark(?:\\.[0-9]+)?"));
+        }
+        return roles.contains(SegmentArenaManifest.ClassicRole.INDEX) && current.relativize(path).getNameCount() == 3
+                && (name.endsWith(".idx") || name.endsWith(".idx.rloc"));
     }
 
     /** Outer native/Unix checks and all actual users must terminate before releasing this child. */
