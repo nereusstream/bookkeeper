@@ -2200,7 +2200,7 @@ public final class ProfileRecoveryCoordinator {
                 if (fresh.snapshot() == null) {
                     return replicaReadFailure(fresh.status());
                 }
-                if (!sameClosedSnapshot(snapshot, fresh.snapshot())) {
+                if (!snapshot.sameObservation(fresh.snapshot())) {
                     return replicaFailure(ReplicaHealthStatus.CONFLICT, PrefixReason.AUTHORITY_CHANGED);
                 }
                 return result.status() == ReplicaHealthStatus.FULLY_REPLICATED
@@ -2210,16 +2210,6 @@ public final class ProfileRecoveryCoordinator {
                                 result.sources(), null);
             }, cold)));
         });
-    }
-
-    private static boolean sameClosedSnapshot(ZKProfileReservationStore.ReadOnlySnapshot before,
-            ZKProfileReservationStore.ReadOnlySnapshot after) {
-        return before.context().equals(after.context())
-                && before.closed().metadata().birthZxid() == after.closed().metadata().birthZxid()
-                && before.closed().metadata().metadata().getVersion()
-                    .equals(after.closed().metadata().metadata().getVersion())
-                && ProfileLedgerMetadataStore.sameMetadata(before.closed().metadata().metadata().getValue(),
-                    after.closed().metadata().metadata().getValue()) && before.sources().equals(after.sources());
     }
 
     public enum MarkerCleanupStatus { CLEARED, DEFERRED, CONFLICT, QUARANTINED, DELETED }
@@ -2276,7 +2266,7 @@ public final class ProfileRecoveryCoordinator {
                 default -> MarkerCleanupStatus.CONFLICT;
             };
         }
-        if (!sameClosedSnapshot(proof.snapshot, current.snapshot())) {
+        if (!proof.snapshot.sameObservation(current.snapshot())) {
             return MarkerCleanupStatus.CONFLICT;
         }
         return stopped.get() || proof.deadline - System.nanoTime() <= 0 ? MarkerCleanupStatus.DEFERRED

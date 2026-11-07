@@ -25,8 +25,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
+import javax.crypto.SecretKey;
+import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.net.BookieId;
 
@@ -41,6 +45,77 @@ public final class SegmentStorageInspector {
         }
         Map<String, Object> observation = inspect(Path.of(args[0]), Long.parseLong(args[1]));
         System.out.println(new ObjectMapper().writeValueAsString(observation));
+    }
+
+    record RecoveryDependencies(SegmentFileHeader identity, SegmentArenaControlLog.RecoveryDependencies arena,
+                                SegmentBookieControlLog.RecoveryDependencies bookie) { }
+
+    @FunctionalInterface
+    interface DependencyObserver<T> {
+        T observe(RecoveryDependencies dependencies) throws Exception;
+    }
+
+    /**
+     * Observe the original single-Arena control scope without recovery barriers. The observer must finish using
+     * its evidence before returning. No control owner, descriptor or write authority is exposed.
+     */
+    static <T> T withRecoveryDependencies(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maximumControlBytes, int maximumRows, SecretKey key, ProfileDescriptorValidator validator,
+            DependencyObserver<T> observer) throws Exception {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(validator, "validator");
+        Objects.requireNonNull(observer, "observer");
+        if (identity.manifest() != null) {
+            throw new IOException("Recovery dependency observation requires an isolated single-Arena scope");
+        }
+        if (maximumControlBytes < 6144 || maximumRows < 1 || maximumRows > 65536) {
+            throw new IllegalArgumentException("Recovery dependency observation requires bounded control and rows");
+        }
+        if (Files.isSymbolicLink(config.directory())) {
+            throw new IOException("Recovery dependency observation requires the original canonical scope");
+        }
+        Path scope = config.directory().toRealPath();
+        Path dataPath = scope.resolve("isolated.lock");
+        Path arenaPath = scope.resolve("arena-control.lock");
+        Path bookiePath = scope.resolve("bookie-control.lock");
+        if (Files.isSameFile(dataPath, arenaPath) || Files.isSameFile(dataPath, bookiePath)
+                || Files.isSameFile(arenaPath, bookiePath)) {
+            throw new IOException("Recovery control locks must identify different files");
+        }
+        try (var data = SegmentDataFileLock.open(scope);
+                var arena = SegmentDataFileLock.openExistingControl(arenaPath);
+                var bookie = SegmentDataFileLock.openExistingControl(bookiePath)) {
+            var locks = List.of(dataPath, arenaPath, bookiePath);
+            data.requireHeld(dataPath);
+            var before = readRecoveryDependencies(config, identity, maximumControlBytes, maximumRows,
+                    key, validator, arena, bookie, locks);
+            T result = observer.observe(before);
+            data.requireHeld(dataPath);
+            if (!before.equals(readRecoveryDependencies(config, identity, maximumControlBytes, maximumRows,
+                    key, validator, arena, bookie, locks))) {
+                throw new IOException("Recovery control dependencies changed during observation");
+            }
+            return result;
+        }
+    }
+
+    private static RecoveryDependencies readRecoveryDependencies(IsolatedSegmentConfig config,
+            SegmentFileHeader identity, long maximumControlBytes, int maximumRows, SecretKey key,
+            ProfileDescriptorValidator validator, SegmentDataFileLock arena, SegmentDataFileLock bookie,
+            List<Path> locks) throws Exception {
+        var files = new SegmentOwnedFiles(locks);
+        try (AutoCloseable cleanup = () -> {
+            var result = files.drain();
+            if (!result.drained()) {
+                throw new IOException("Recovery control readers did not drain", result.closeFailure());
+            }
+        }) {
+            var arenaDependencies = SegmentArenaControlLog.inspectRecoveryDependencies(config, identity,
+                    maximumControlBytes, maximumRows, arena, files);
+            var bookieDependencies = SegmentBookieControlLog.inspectRecoveryDependencies(config, identity,
+                    maximumControlBytes, key, validator, maximumRows, bookie, files);
+            return new RecoveryDependencies(identity, arenaDependencies, bookieDependencies);
+        }
     }
 
     static Map<String, Object> inspect(Path directory, long maxControlBytes) throws IOException {

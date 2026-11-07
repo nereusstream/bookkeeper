@@ -28,6 +28,8 @@
 
 步骤 7/12/14 现通过独立 action 5 解析历史曾使用 DATA、但本次 OPEN 始终无 grant 的会话。原 replay 核对前驱受管终态、OPEN 时的存续 grant 及本 epoch 的成功授权。实际进程退出、轮转后的正反例和同目录写读已验证。一般已授权 OPEN 仍待独立恢复协议。详见 [本 epoch 始终无 grant 的 OPEN 会话重开](local-storage/README.md#本-epoch-始终无-grant-的-open-会话重开)。
 
+步骤 7/12/14 补充已授权 OPEN 的原 scope 控制清单。在原 DATA、Arena、Bookie 锁下只读重放，保留没有 DATA payload 的已安装 ledger。已确认 3/3/3 的原 Bookie JVM 退出后，替换前的两个当前存活来源经真实注册和 mTLS 逐条验证 CLOSED 数据。实际替换保留 P/L 并使旧完整快照失效。原 scope 的重建准入与持久解析待冻结。详见 [已授权 OPEN 的只读控制依赖与 CLOSED 来源](local-storage/README.md#已授权-open-的只读控制依赖与-closed-来源)。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。

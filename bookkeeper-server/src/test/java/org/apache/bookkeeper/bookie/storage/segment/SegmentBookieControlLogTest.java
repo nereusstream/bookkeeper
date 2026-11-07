@@ -12362,6 +12362,77 @@ public class SegmentBookieControlLogTest {
         assertManagedDataHalt("normal-managed-after-force", 0, "LOCAL_DURABLE");
     }
 
+    @Test(timeout = 60000)
+    public void offlineRecoveryDependenciesIncludeASecondLedgerWithoutPayloadAfterRotation() throws Exception {
+        var config = config();
+        try (var storage = storage(config, 1, 6, 4)) {
+            storage.startNew();
+            installStorage(storage, install(1, (byte) 5), activate(2));
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                    storageWrite(storage, context(), 1).status());
+            installStorage(storage, install(48, 21, (byte) 5));
+        }
+        SegmentControlRotation.Root bookieRoot;
+        long maxBytes = 1024 * 1024;
+        try (var lock = SegmentDataFileLock.open(config.directory());
+                var arena = SegmentArenaControlLog.open(config, identity(), maxBytes);
+                var bookie = SegmentBookieControlLog.open(config, identity(), maxBytes, key((byte) 3), VALIDATOR)) {
+            assertTrue(lock.lock().isValid());
+            arena.rotate();
+            bookieRoot = bookie.rotate();
+        }
+        runAbruptWriter("session-reopen-unused", config.directory(), 86, "SESSION_OPEN_WITHOUT_GRANT");
+        var before = inspectionImage(config.directory());
+        var observation = SegmentStorageInspector.withRecoveryDependencies(config, identity(), maxBytes, 16,
+                key((byte) 3), VALIDATOR, result -> {
+                    assertThrows(IOException.class, () -> SegmentDataFileLock.open(config.directory()));
+                    for (String name : List.of("arena-control.lock", "bookie-control.lock")) {
+                        assertThrows(IOException.class, () -> SegmentDataFileLock.openExistingControl(
+                                config.directory().resolve(name)));
+                    }
+                    return result;
+                });
+        assertEquals(identity(), observation.identity());
+        assertTrue(observation.arena().cut().sessionOpen());
+        assertEquals(2, observation.arena().cut().sessionEpoch());
+        assertEquals(1, observation.arena().grants().size());
+        assertEquals(bookieRoot.generation(), observation.bookie().physicalGeneration());
+        assertEquals(List.of(context(), context(48)), observation.bookie().ledgers().stream()
+                .map(SegmentBookieControlLog.ObservedLedger::context).toList());
+        assertTrue(observation.bookie().ledgers().get(0).normalActive());
+        assertFalse(observation.bookie().ledgers().get(1).normalActive());
+        var wrongIdentity = new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 8)),
+                identity().arenaId(), identity().bookieId());
+        assertThrows(IOException.class, () -> SegmentStorageInspector.withRecoveryDependencies(config, wrongIdentity,
+                maxBytes, 16, key((byte) 3), VALIDATOR, unexpected -> failUnexpectedObservation()));
+        assertThrows(IOException.class, () -> SegmentStorageInspector.withRecoveryDependencies(config, identity(),
+                maxBytes, 16, key((byte) 4), VALIDATOR, unexpected -> failUnexpectedObservation()));
+        assertThrows(IOException.class, () -> SegmentStorageInspector.withRecoveryDependencies(config, identity(),
+                maxBytes, 1, key((byte) 3), VALIDATOR, unexpected -> failUnexpectedObservation()));
+        assertInspectionImage(before, config.directory());
+
+        Path active = SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE, bookieRoot.generation());
+        Path saved = temporary.getRoot().toPath().resolve("saved-bookie-log");
+        Files.move(active, saved);
+        try {
+            assertThrows(IOException.class, () -> SegmentStorageInspector.withRecoveryDependencies(config, identity(),
+                    maxBytes, 16, key((byte) 3), VALIDATOR, unexpected -> failUnexpectedObservation()));
+            assertFalse(Files.exists(active));
+            Files.copy(saved, active);
+            Files.write(active, new byte[] {1}, StandardOpenOption.APPEND);
+            assertThrows(IOException.class, () -> SegmentStorageInspector.withRecoveryDependencies(config, identity(),
+                    maxBytes, 16, key((byte) 3), VALIDATOR, unexpected -> failUnexpectedObservation()));
+        } finally {
+            Files.deleteIfExists(active);
+            Files.move(saved, active);
+        }
+        assertInspectionImage(before, config.directory());
+    }
+
+    private static Void failUnexpectedObservation() {
+        throw new AssertionError("Incomplete control scope reached the dependency observer");
+    }
+
     private void assertManagedDataHalt(String phase, int exit, String marker) throws Exception {
         var config = abruptWriterConfig(temporary.getRoot().toPath().resolve(phase));
         runAbruptWriter(phase, config.directory(), exit, marker);

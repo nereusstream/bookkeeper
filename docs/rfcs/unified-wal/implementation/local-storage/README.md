@@ -908,7 +908,7 @@ OPEN 记录可能来自进程退出，或来自尚未来得及持久化隔离的
 
 基线 `1fcb9c5016`。现有 `IsolatedSegmentStorage.start` 先持原 DATA 排他锁，再重放 Arena。原锁排除同目录的合作写者。健康 `DEVICE_STATE CLOSE` 由 DATA 实际停收、I/O 排空和文件关闭后的原 writer 产生，保留复用 allocation 的有效尾界。异常退出缺 CLOSE 时，冷读无法判断上次 force 是否完成，或是否有尚未来得及持久化的隔离通知。持久 quarantine、未决控制与已授权 OPEN 均在打开 Bookie control 或索引前拒绝。
 
-Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起点、最终 MOVE selector 与已退休范围。Bookie applied cut 补充当前可读范围和 MOVE/FREE 的必要前置。已允许的健康重开才使用这些事实核验 DATA、连续序号和必要位置，按文件同步并复核两侧 cut，再更新派生索引和 HotDirectory。复用 allocation 的旧 CLOSE 尾界只覆盖该次健康结束的范围。当前正常追加的游标先越过恢复切点的旧 grant，但 `resumeRetainedTail` 在受保护测量后可接续旧 compaction destination。既有满容量健康重开用例在旧 destination 上继续 COPY。因此某次 OPEN 后没有新 ALLOC，仍可能在旧 grant 上写 DATA。现有实现可证明未授予任何 DATA 的子集仍是 action 4 的全生命周期条件。
+Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起点、最终 MOVE selector 与已退休范围。Bookie applied cut 补充当前可读范围和 MOVE/FREE 的必要前置。已允许的健康重开才使用这些事实核验 DATA、连续序号和必要位置，按文件同步并复核两侧 cut，再更新派生索引和 HotDirectory。复用 allocation 的旧 CLOSE 尾界只覆盖该次健康结束的范围。当前正常追加的游标先越过恢复切点的旧 grant，但 `resumeRetainedTail` 在受保护测量后可接续旧 compaction destination。既有满容量健康重开用例在旧 destination 上继续 COPY。因此某次 OPEN 后没有新 ALLOC，仍可能在旧 grant 上写 DATA。action 5 也要求 OPEN 时没有继承 grant。
 
 两个真实 managed 子 JVM 使用同一逻辑批次。一个在完整 DATA write 之后、第一次 DATA force 调用前退出，另一个在收到原请求的 `LOCAL_DURABLE` 后退出。各自冷读都见到原 OPEN、连续已应用的 grant 和通过身份、CRC 与 payload 校验的物理候选，控制尾部仍止于 ALLOC。原 restart 拒绝，两类锁均可重新取得，索引和 coverage 缺失，原文件逐字节一致。前一退出点只定位应用调用顺序，后一结果只对应原单副本请求。这两次进程退出的证据范围不含介质掉电和集群 ACK。
 
@@ -919,6 +919,14 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 一般已授权 OPEN 的恢复协议需冻结可验证的旧 epoch 终结或隔离事实，以及绑定原 scope、Arena/Bookie cut、必要 DATA 与安全追加尾界的证据。现有字节无法补齐未记录的旧 I/O 故障或缺失尾界时，需由写入期的持久见证或受保护的当前集群取证提供必要事实。完成验证和所需同步后，才由独立的可重放决议解除原 OPEN，再走既有新 epoch 与 readiness。证据不足时可使用已有替代目标修复路径，其结果独立于原同身份重开。记录格式、前置权威和放行条件待规划冻结。
 
 新增进程对照和相关回归共 10 项通过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/open-data-recovery-gate-evidence-1fcb9c50`。
+
+### 已授权 OPEN 的只读控制依赖与 CLOSED 来源
+
+基线 `0064ecfcde`。原独立单 Arena 目录按 DATA、Arena、Bookie 顺序取得三个既有排他锁。只读重放核对原身份、已发布 checkpoint、rotation 与当前控制记录。Arena 清单记录 epoch 和观察到的 cut、grant、stream 起点、MOVE selector、FREE 和退休范围。Bookie 清单独立于 DATA payload，包含本地 ledger context、安装和激活状态、fence、terminal prefix、recovery grant 和删除状态。字节及行数超限、身份或密钥错误、必需控制文件缺失或损坏时拒绝交付清单。锁内复核两侧清单，读者先于锁实际关闭。原入口只观察 DATA 文件头和尺寸，跳过恢复 force 与 checkpoint 同步。
+
+复用已有 3/3/3 已确认写入和 `CLOSED(1, 35)` 的 Bookie 子 JVM 退出用例。原目录仍有 OPEN 与 grant。本地 Bookie control 的 fenced terminal prefix 为 1。原 Bookie 的临时注册自然消失后，在替换前取当前 ZooKeeper CLOSED 快照。两个原存活目标经各自当前注册、session 和实际 mTLS DATA 连接，逐条通过原 SDK digest 校验并对齐 payload 与累计长度。原目标返回 unavailable。使用无 fencing flag 的读取，校验前后注册与完整 CLOSED 快照。连接实际排空后才离开原 scope 锁。原文件摘要与存活侧控制 cut 保持一致。原 worker 的实际替换保留 RecoveryContext、CLOSE 和 P/L，旧完整快照因 metadata 版本、ensemble 与授权来源变化而失效。另一个跨 rotation 的场景验证第二个已安装但无 payload 的 ledger 仍在原 scope 清单内。
+
+58 项定向回归通过，Spotless 与 Checkstyle 通过。观察结果只用于后续判断。原已授权 OPEN 的正常启动仍拒绝。CLOSED 重建准入、旧尾界处理、持久决议、Linux 资格与真实掉电仍待验收。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/closed-open-recovery-evidence-0064ecfc`。
 
 ## Profile 普通 Add 的真实接线
 

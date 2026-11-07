@@ -38,6 +38,7 @@ import org.apache.bookkeeper.client.api.WriteFlag;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.discover.profile.ProfileInitialControlClient;
 import org.apache.bookkeeper.discover.profile.ProfileInstallReceipt;
+import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryContext;
 import org.apache.bookkeeper.discover.profile.ProfileRepairCommit;
@@ -162,11 +163,6 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         }
     }
 
-    private ProfileRecoveryReadHandle(ProfileLedgerHandle.ProfileContext context,
-            ZKProfileReservationStore.RecoveryResult accepted) throws GeneralSecurityException {
-        this(context, accepted.context().ledger().ledgerId(), accepted.metadata().metadata(), true);
-    }
-
     private ProfileRecoveryReadHandle(ProfileLedgerHandle.ProfileContext context, long ledger,
             org.apache.bookkeeper.versioning.Versioned<LedgerMetadata> metadata, boolean fencingReads)
             throws GeneralSecurityException {
@@ -227,26 +223,57 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
             ZKProfileReservationStore.RecoveryResult accepted, List<ProfileInstallReceipt> permitted,
             Map<BookieId, ProfileNormalDataClient> data, Map<BookieId, ProfileInitialControlClient> controls)
             throws GeneralSecurityException {
-        return build(base, accepted, permitted, data, controls, false);
+        return build(base, accepted.context(), accepted.metadata(), permitted, data, controls, false, true);
     }
 
     public static ProfileRecoveryReadHandle fromClosedRepairContext(ClientContext base,
             ZKProfileReservationStore.RecoveryResult accepted, List<ProfileInstallReceipt> permitted,
             Map<BookieId, ProfileNormalDataClient> data, Map<BookieId, ProfileInitialControlClient> controls)
             throws GeneralSecurityException {
-        return build(base, accepted, permitted, data, controls, true);
+        return build(base, accepted.context(), accepted.metadata(), permitted, data, controls, true, true);
     }
 
-    private static ProfileRecoveryReadHandle build(ClientContext base,
-            ZKProfileReservationStore.RecoveryResult accepted,
+    /** A non-fencing CLOSED evidence reader. The caller retains and revalidates its source registrations. */
+    public static final class ClosedSourceAudit {
+        private final ProfileRecoveryReadHandle reader;
+
+        private ClosedSourceAudit(ProfileRecoveryReadHandle reader) {
+            this.reader = reader;
+        }
+
+        public CompletableFuture<PointEvidence> probeBufferEvidence(long entryId) {
+            return reader.probeBufferEvidence(entryId);
+        }
+
+        public CompletableFuture<Void> closeAsync() {
+            return reader.closeAsync();
+        }
+    }
+
+    public static ClosedSourceAudit fromClosedAudit(ClientContext base,
+            ZKProfileReservationStore.ReadOnlySnapshot snapshot, Map<BookieId, ProfileNormalDataClient> data)
+            throws GeneralSecurityException {
+        var closed = snapshot.closed().metadata();
+        var value = closed.metadata().getValue();
+        if (value.getEnsembleSize() != 3 || value.getWriteQuorumSize() != 3 || value.getAckQuorumSize() != 3
+                || value.getAllEnsembles().size() != 1 || data.size() != 2
+                || !value.getAllEnsembles().firstEntry().getValue().containsAll(data.keySet())) {
+            throw new IllegalArgumentException("CLOSED source audit requires two members of the exact 3/3/3 cohort");
+        }
+        return new ClosedSourceAudit(build(base, snapshot.context(), closed, snapshot.sources(), data, Map.of(),
+                true, false));
+    }
+
+    private static ProfileRecoveryReadHandle build(ClientContext base, ProfileRecoveryContext context,
+            ProfileLedgerMetadataStore.MembershipSnapshot frozen,
             List<ProfileInstallReceipt> permitted, Map<BookieId, ProfileNormalDataClient> data,
-            Map<BookieId, ProfileInitialControlClient> controls, boolean closedRepair) throws GeneralSecurityException {
-        if (accepted.context() == null || data.isEmpty() || data.size() > 64 || controls.size() > 64
+            Map<BookieId, ProfileInitialControlClient> controls, boolean closedRepair, boolean fencingReads)
+            throws GeneralSecurityException {
+        if (context == null || data.isEmpty() || data.size() > 64 || controls.size() > 64
                 || base.getConf().useV2WireProtocol || base.getConf().explicitLacInterval != 0) {
             throw new IllegalArgumentException("Readonly recovery requires the frozen context and bounded V3 peers");
         }
-        var context = accepted.context();
-        var metadata = accepted.metadata().metadata();
+        var metadata = frozen.metadata();
         var value = metadata.getValue();
         if (value.getState() != (closedRepair ? LedgerMetadata.State.CLOSED : LedgerMetadata.State.IN_RECOVERY)
                 || !(metadata.getVersion() instanceof LongVersion version)
@@ -256,7 +283,7 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
                         .size()
                     + org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary.versionOffset(value)
                     + (closedRepair ? 1 : 0)
-                || accepted.metadata().birthZxid() != context.metadataBirth()
+                || frozen.birthZxid() != context.metadataBirth()
                 || !context.equals(ProfileRecoveryContext.decode(
                         value.getCustomMetadata().get(ProfileRecoveryContext.KEY)))
                 || value.getEnsembleSize() > 32 || value.getAllEnsembles().size() > 32) {
@@ -288,7 +315,8 @@ public final class ProfileRecoveryReadHandle extends LedgerHandle {
         var transport = new ProfileBookieClient(base, context.ledger(), credential, data, 1,
                 new ProfileBookieClient.Retry(1, Duration.ofSeconds(5), Duration.ofMillis(1)), context, controls,
                 closedRepair ? value.getLastEntryId() : Long.MAX_VALUE);
-        return new ProfileRecoveryReadHandle(new ProfileLedgerHandle.ProfileContext(base, transport), accepted);
+        return new ProfileRecoveryReadHandle(new ProfileLedgerHandle.ProfileContext(base, transport),
+                context.ledger().ledgerId(), metadata, fencingReads);
     }
 
     public CompletableFuture<ProfileLedgerHandle.LacEvidence> readLacEvidence() {

@@ -1060,6 +1060,17 @@ public final class ZKProfileReservationStore {
         public ReadOnlySnapshot {
             sources = List.copyOf(sources);
         }
+
+        /** Compare a new cold observation against the original CLOSED cut and authorized sources. */
+        public boolean sameObservation(ReadOnlySnapshot current) {
+            return current != null && context.equals(current.context)
+                    && closed.metadata().birthZxid() == current.closed.metadata().birthZxid()
+                    && closed.metadata().metadata().getVersion().equals(
+                            current.closed.metadata().metadata().getVersion())
+                    && ProfileLedgerMetadataStore.sameMetadata(closed.metadata().metadata().getValue(),
+                            current.closed.metadata().metadata().getValue())
+                    && sources.equals(current.sources);
+        }
     }
 
     public record ReadOnlyRead(ReadOnlyStatus status, ReadOnlySnapshot snapshot) {

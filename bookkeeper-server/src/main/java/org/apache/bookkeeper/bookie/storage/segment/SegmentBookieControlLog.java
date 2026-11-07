@@ -666,6 +666,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
     private final SecretKey key;
     private final ProfileDescriptorValidator descriptorValidator;
     private final RouteBinding routeBinding;
+    private final boolean inspectionOnly;
     private FileChannel channel;
     private final FileChannel originalChannel;
     private final SegmentDataFileLock writerLock;
@@ -760,6 +761,14 @@ final class SegmentBookieControlLog implements AutoCloseable {
             long maxLogBytes, SegmentFileIo io, SecretKey key, ProfileDescriptorValidator descriptorValidator,
             FileChannel channel, SegmentDataFileLock writerLock, RouteBinding routeBinding,
             SegmentOwnedFiles ownedFiles) {
+        this(config, identity, maxLogBytes, io, key, descriptorValidator, channel, writerLock, routeBinding,
+                ownedFiles, false);
+    }
+
+    private SegmentBookieControlLog(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SegmentFileIo io, SecretKey key, ProfileDescriptorValidator descriptorValidator,
+            FileChannel channel, SegmentDataFileLock writerLock, RouteBinding routeBinding,
+            SegmentOwnedFiles ownedFiles, boolean inspectionOnly) {
         this.ownedFiles = ownedFiles;
         this.config = config;
         this.identity = identity;
@@ -771,6 +780,54 @@ final class SegmentBookieControlLog implements AutoCloseable {
         this.originalChannel = channel;
         this.writerLock = writerLock;
         this.routeBinding = routeBinding;
+        this.inspectionOnly = inspectionOnly;
+    }
+
+    record ObservedRecoveryGrant(UUID operationId, long authorityGeneration, ProfileExactRange range,
+                                 boolean committedReadable) { }
+
+    record ObservedLedger(ProfileLedgerContext context, long installGeneration, long activationGeneration,
+                          long localGeneration, boolean normalActive, boolean fenced, Long terminalPrefix,
+                          List<ObservedRecoveryGrant> recoveryGrants) { }
+
+    record RecoveryDependencies(long physicalGeneration, long observedSequence, long checkpointGeneration,
+                                List<ObservedLedger> ledgers, Map<Long, ProfileLedgerContext> tombstones,
+                                ProfileControlRequest.DeleteBinding deleteApplied, boolean deleteHandoff,
+                                boolean deleteEffective) { }
+
+    static RecoveryDependencies inspectRecoveryDependencies(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator, int maximumRows,
+            SegmentDataFileLock guard, SegmentOwnedFiles files) throws IOException {
+        guard.requireHeld(config.directory().toRealPath().resolve("bookie-control.lock"));
+        FileChannel original = SegmentOwnedFiles.openRegularReadOnly(files,
+                config.directory().resolve("bookie-control"));
+        var observed = new SegmentBookieControlLog(config, identity, maxLogBytes, new SegmentFileIo(),
+                key, validator, original, null, null, files, true);
+        observed.validateStorageFiles();
+        observed.recover();
+        long rows = (long) observed.ledgers.size() + observed.tombstones.size();
+        for (LedgerState state : observed.ledgers.values()) {
+            rows += state.recoveryGrants.size();
+        }
+        if (rows > maximumRows) {
+            throw new IOException("Bookie recovery dependency observation exceeds its row limit");
+        }
+        var ledgers = observed.ledgers.values().stream().sorted(Comparator.comparingLong(state ->
+                state.context.ledgerId())).map(state -> new ObservedLedger(state.context, state.localInstallGeneration,
+                        state.activationGeneration, state.localGeneration, state.active, state.fenced,
+                        state.terminalPrefix,
+                        state.recoveryGrants.values().stream().map(grant -> new ObservedRecoveryGrant(
+                                grant.command.operationId(), grant.command.scope.authorityGeneration,
+                                grant.command.scope.exactRange, grant.committedReadable))
+                                .sorted(Comparator.comparing(ObservedRecoveryGrant::operationId)).toList())).toList();
+        var result = new RecoveryDependencies(observed.physicalGeneration.value(), observed.appliedThrough,
+                observed.checkpointGeneration, ledgers, Map.copyOf(observed.tombstones), observed.deleteApplied,
+                observed.deleteHandoff != null, observed.deleteEffective != null);
+        if (observed.channel != original) {
+            observed.channel.close();
+        }
+        original.close();
+        return result;
     }
 
     record OwnedResult(boolean drained, Throwable initializationFailure, Throwable lifecycleFailure,
@@ -3158,10 +3215,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
             }
         }
         if (rotationRoot != null) {
-            channel = SegmentOwnedFiles.open(ownedFiles,
-                    SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE,
-                    rotationRoot.generation()),
-                    StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+            Path path = SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE,
+                    rotationRoot.generation());
+            channel = inspectionOnly ? SegmentOwnedFiles.openRegularReadOnly(ownedFiles, path)
+                    : SegmentOwnedFiles.open(ownedFiles, path, StandardOpenOption.READ, StandardOpenOption.WRITE,
+                            LinkOption.NOFOLLOW_LINKS);
             ByteBuffer header = ByteBuffer.allocate(4096);
             SegmentFileIo.readFully(channel, header, 0);
             identity.validate(header, config, -3);
@@ -3194,7 +3252,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
             } catch (IOException invalidPublication) {
                 // Recovery still has to validate one complete publication and every current suffix record.
             }
-            if (valid) {
+            if (valid && !inspectionOnly) {
                 SegmentControlCheckpoint.syncPublication(config, slot, ownedFiles);
             }
         }
@@ -3235,7 +3293,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
             offset += length;
             sequence++;
         }
-        channel.force(true);
+        if (!inspectionOnly) {
+            channel.force(true);
+        }
         candidates.sort(Comparator.comparingLong(SegmentControlCheckpoint.Reference::generation).reversed());
         boolean restored = false;
         for (SegmentControlCheckpoint.Reference reference : candidates) {
@@ -3356,7 +3416,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
             offset += length;
             sequence++;
         }
-        channel.force(true);
+        if (!inspectionOnly) {
+            channel.force(true);
+        }
         recoverCheckpoint(checkpoints);
         sequence = appliedThrough + 1;
         for (long offset = appliedOffset; offset < size;) {
@@ -3378,7 +3440,9 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 resetRecoveredState();
                 continue;
             }
-            SegmentControlCheckpoint.syncPublication(config, reference.slot(), ownedFiles);
+            if (!inspectionOnly) {
+                SegmentControlCheckpoint.syncPublication(config, reference.slot(), ownedFiles);
+            }
             return;
         }
         resetRecoveredState();
@@ -3899,7 +3963,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Isolated storage file must be a regular file");
         }
-        try (FileChannel input = SegmentOwnedFiles.open(ownedFiles, path, StandardOpenOption.READ)) {
+        try (FileChannel input = inspectionOnly ? SegmentOwnedFiles.openRegularReadOnly(ownedFiles, path)
+                : SegmentOwnedFiles.open(ownedFiles, path, StandardOpenOption.READ)) {
             boolean superblock = fileId == -1 || fileId == -2;
             if ((superblock && (input.size() < FIRST_RECORD || input.size() > 12288))
                     || (!superblock && expectedSize < 0 && input.size() < FIRST_RECORD)
@@ -3916,7 +3981,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (ownedFiles != null) {
             ownedFiles.requireHealthy();
         }
-        if (closed || failed || (rotating != null && rotating != Thread.currentThread())) {
+        if (inspectionOnly || closed || failed || (rotating != null && rotating != Thread.currentThread())) {
             throw new IOException("Bookie control log is closed, rotating or has uncertain I/O");
         }
     }

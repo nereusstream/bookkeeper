@@ -605,16 +605,69 @@ final class SegmentArenaControlLog implements AutoCloseable {
     static Inspection inspect(IsolatedSegmentConfig config, SegmentFileHeader identity, long maxLogBytes)
             throws IOException {
         try (SegmentArenaControlLog observed = open(config, identity, maxLogBytes, new SegmentFileIo(), true)) {
-            List<Integer> quarantine = new ArrayList<>();
-            for (int file = 0; file < observed.durableQuarantine.length; file++) {
-                if (observed.durableQuarantine[file]) {
-                    quarantine.add(file);
-                }
-            }
-            return new Inspection(observed.physicalGeneration.value(), observed.appliedThrough,
-                    observed.checkpointGeneration, observed.sessionEpoch, observed.sessionOpen,
-                    observed.currentAllocations.size(), observed.retiredBlockCount(), List.copyOf(quarantine));
+            return observed.inspection();
         }
+    }
+
+    private Inspection inspection() {
+        List<Integer> quarantine = new ArrayList<>();
+        for (int file = 0; file < durableQuarantine.length; file++) {
+            if (durableQuarantine[file]) {
+                quarantine.add(file);
+            }
+        }
+        return new Inspection(physicalGeneration.value(), appliedThrough, checkpointGeneration, sessionEpoch,
+                sessionOpen, currentAllocations.size(), retiredBlockCount(), List.copyOf(quarantine));
+    }
+
+    record ObservedGrant(Allocation allocation, long controlSequence) { }
+
+    record ObservedStream(int shard, long generation, long firstSequence) { }
+
+    record ObservedSelection(UUID moveId, Generation moveGeneration, long bookieCut, SegmentPointRead.Location target,
+                             String entrySha256, long controlSequence) { }
+
+    record ObservedRetirement(UUID operationId, Generation generation, FreeFacts facts) { }
+
+    record RecoveryDependencies(Inspection cut, long allocationHighWatermark, long retiredBookieCut,
+                                List<ObservedGrant> grants, List<ObservedStream> streams,
+                                List<ObservedSelection> selections,
+                                List<ObservedRetirement> retiredSlots, List<RetiredRange> retiredRanges) { }
+
+    /** Only the caller's existing lock scope and owned readers participate in this observation. */
+    static RecoveryDependencies inspectRecoveryDependencies(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, int maximumRows, SegmentDataFileLock guard, SegmentOwnedFiles files) throws IOException {
+        guard.requireHeld(config.directory().toRealPath().resolve("arena-control.lock"));
+        Path path = config.directory().resolve("arena-control");
+        FileChannel original = SegmentOwnedFiles.openRegularReadOnly(files, path);
+        var observed = new SegmentArenaControlLog(config, identity, maxLogBytes, new SegmentFileIo(),
+                original, null, true, files);
+        observed.validateStorageFiles(identity);
+        observed.recover(identity);
+        if ((long) observed.currentAllocations.size() + observed.streamStarts.size() + observed.selectedMoves.size()
+                + observed.retiredSlots.size() + observed.retiredRanges.size() > maximumRows) {
+            throw new IOException("Arena recovery dependency observation exceeds its row limit");
+        }
+        var result = new RecoveryDependencies(observed.inspection(), observed.allocationHighWatermark,
+                observed.retiredBookieCut, observed.currentAllocations.values().stream()
+                        .map(grant -> new ObservedGrant(grant.command(), grant.allocationOrder()))
+                        .sorted(Comparator.comparingLong(ObservedGrant::controlSequence)).toList(),
+                observed.streamStarts.entrySet().stream().map(entry -> new ObservedStream(entry.getKey().shard(),
+                        entry.getKey().generation(), entry.getValue()))
+                        .sorted(Comparator.comparingInt(ObservedStream::shard)
+                                .thenComparingLong(ObservedStream::generation)).toList(),
+                observed.selectedMoves.values().stream().map(move -> new ObservedSelection(move.moveId(),
+                        move.moveGeneration(), move.bookieCut(), move.target(), move.entrySha256(), move.sequence()))
+                        .sorted(Comparator.comparingLong(ObservedSelection::controlSequence)
+                                .thenComparingInt(selection -> selection.target().address().fileIndex())
+                                .thenComparingLong(selection -> selection.target().recordOffset())).toList(),
+                observed.retiredSlots.values().stream().map(free -> new ObservedRetirement(free.operationId(),
+                        free.operationGeneration(), free.facts())).toList(), List.copyOf(observed.retiredRanges));
+        if (observed.channel != original) {
+            observed.channel.close();
+        }
+        original.close();
+        return result;
     }
 
     /** The bootstrap child already holds both existing guards and owns every reader, including failed opens. */

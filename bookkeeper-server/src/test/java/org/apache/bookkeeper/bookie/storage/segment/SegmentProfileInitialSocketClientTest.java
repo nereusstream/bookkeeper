@@ -18943,6 +18943,7 @@ public class SegmentProfileInitialSocketClientTest {
                         serviceReadinessPath(oldBookie.toString()));
                 assertEquals(oldPeer.readiness(), registry.read(oldBookie.toString()).versionedRecord()
                         .orElseThrow().record());
+                observeCrashedScopeAndClosedSources(episode, prepared, metadata, original, oldIdentity, first, second);
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
                 var task = monitor.getLedgerUnreplicationInfo(ledger);
                 while (task == null && System.nanoTime() < deadline) {
@@ -18975,6 +18976,7 @@ public class SegmentProfileInitialSocketClientTest {
             var before = original.closed().metadata();
             var after = repaired.closed().metadata();
             assertEquals(original.context(), repaired.context());
+            assertFalse(original.sameObservation(repaired));
             assertEquals(before.birthZxid(), after.birthZxid());
             var previous = before.metadata().getValue();
             var current = after.metadata().getValue();
@@ -19003,6 +19005,136 @@ public class SegmentProfileInitialSocketClientTest {
                 }
             }
         }
+    }
+
+    private void observeCrashedScopeAndClosedSources(PublicProfileReadonlyEpisode episode, ServiceEpisode prepared,
+            ProfileLedgerMetadataStore metadata, ZKProfileReservationStore.ReadOnlySnapshot expected,
+            SegmentFileHeader original, byte[]... payloads) throws Exception {
+        var fixture = episode.fixture;
+        var registry = episode.episodes.get(0).persistent;
+        long ledger = expected.context().ledger().ledgerId();
+        var beforeFiles = recoveryObservationFileDigests(prepared.config.directory());
+        var survivorCuts = List.of(bookie(episode.episodes.get(0).storage()).appliedThrough(),
+                bookie(episode.episodes.get(1).storage()).appliedThrough());
+        SegmentStorageInspector.withRecoveryDependencies(prepared.config, original, ServiceEpisode.CONTROL_LOG_BYTES,
+                64, new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, dependencies -> {
+                    assertEquals(original, dependencies.identity());
+                    assertTrue(dependencies.arena().cut().sessionOpen());
+                    assertFalse(dependencies.arena().grants().isEmpty());
+                    assertTrue(dependencies.arena().cut().appliedSequence() >= 0);
+                    assertTrue(dependencies.bookie().observedSequence() >= 0);
+                    assertEquals(1, dependencies.bookie().ledgers().size());
+                    var local = dependencies.bookie().ledgers().get(0);
+                    assertEquals(expected.context().ledger(), local.context());
+                    assertTrue(local.fenced());
+                    assertFalse(local.normalActive());
+                    assertEquals(Long.valueOf(payloads.length - 1L), local.terminalPrefix());
+                    assertTrue(local.recoveryGrants().stream()
+                            .allMatch(SegmentBookieControlLog.ObservedRecoveryGrant::committedReadable));
+                    assertTrue(dependencies.bookie().tombstones().isEmpty());
+                    assertNull(dependencies.bookie().deleteApplied());
+                    assertFalse(dependencies.bookie().deleteHandoff());
+                    assertFalse(dependencies.bookie().deleteEffective());
+                    assertEquals(ProfileRegistrationStore.ReadStatus.NOT_FOUND,
+                            registry.readPeer(original.bookieId().toString()).status());
+                    var frozen = fixture.reservations.readClosedForOpen(metadata, ledger).snapshot();
+                    assertTrue(expected.sameObservation(frozen));
+                    assertTrue(frozen.sources().stream().anyMatch(source ->
+                            source.scope().targetBookie().equals(original.bookieId().toString())
+                            && Arrays.equals(source.scope().targetStorageIncarnation(),
+                                    original.incarnation().value())));
+                    readClosedSurvivorEvidence(episode, registry, frozen, original.bookieId(), payloads);
+                    assertTrue(frozen.sameObservation(fixture.reservations.readClosedForOpen(metadata, ledger)
+                            .snapshot()));
+                    assertEquals(ProfileRegistrationStore.ReadStatus.NOT_FOUND,
+                            registry.readPeer(original.bookieId().toString()).status());
+                    return null;
+                });
+        assertEquals(beforeFiles, recoveryObservationFileDigests(prepared.config.directory()));
+        assertEquals(survivorCuts, List.of(bookie(episode.episodes.get(0).storage()).appliedThrough(),
+                bookie(episode.episodes.get(1).storage()).appliedThrough()));
+    }
+
+    private void readClosedSurvivorEvidence(PublicProfileReadonlyEpisode episode, ZKProfileRegistrationStore registry,
+            ZKProfileReservationStore.ReadOnlySnapshot frozen, BookieId offline, byte[][] payloads) throws Exception {
+        var fixture = episode.fixture;
+        var metadata = frozen.closed().metadata().metadata().getValue();
+        assertEquals(payloads.length - 1L, metadata.getLastEntryId());
+        var peers = new java.util.LinkedHashMap<BookieId, ZKProfileRegistrationStore.RegisteredPeer>();
+        var connectionDrains = new ArrayList<java.util.function.Supplier<CompletableFuture<Void>>>();
+        var connectionChecks = new ArrayList<Runnable>();
+        var data = new java.util.HashMap<BookieId, ProfileNormalDataClient>();
+        try {
+            for (BookieId source : metadata.getAllEnsembles().firstEntry().getValue()) {
+                if (source.equals(offline)) {
+                    continue;
+                }
+                var peer = registry.readPeer(source.toString()).peer();
+                assertNotNull(peer);
+                peers.put(source, peer);
+                var connection = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                        registry, peer, fixture.cold, 4, 1060, Duration.ofSeconds(5));
+                connectionDrains.add(connection::closeAsync);
+                connectionChecks.add(() -> {
+                    assertEquals(0, connection.backingBytes());
+                    assertEquals(0, connection.codecWorkspaceBytes());
+                });
+                data.put(source, connection.completion().get(5, TimeUnit.SECONDS));
+                assertEquals(ProfileRegistrationStore.ReadStatus.FOUND, registry.revalidatePeer(peer).status());
+            }
+            var audit = ProfileRecoveryReadHandle.fromClosedAudit(episode.sdk.getClientCtx(), frozen, data);
+            try {
+                long length = 0;
+                for (int entry = 0; entry < payloads.length; entry++) {
+                    length += payloads[entry].length;
+                    var attempt = audit.probeBufferEvidence(entry);
+                    try (var evidence = attempt.get(5, TimeUnit.SECONDS)) {
+                        assertFalse(evidence.conflict());
+                        assertEquals(3, evidence.sources().size());
+                        for (var source : evidence.sources()) {
+                            assertEquals(source.bookie().equals(offline)
+                                            ? ProfileRecoveryReadHandle.SourceOutcome.UNAVAILABLE
+                                            : ProfileRecoveryReadHandle.SourceOutcome.FOUND,
+                                    source.outcome());
+                            if (!source.bookie().equals(offline)) {
+                                assertEquals(peers.get(source.bookie()).projection().storageIncarnation().toString(),
+                                        source.storageIncarnation());
+                            }
+                        }
+                        var candidate = evidence.candidate();
+                        assertNotNull(candidate);
+                        assertEquals(length, candidate.length());
+                        assertEquals(java.nio.ByteBuffer.wrap(payloads[entry]), candidate.payload());
+                    } catch (java.util.concurrent.TimeoutException | InterruptedException failure) {
+                        if (!attempt.cancel(false)) {
+                            attempt.thenAccept(ProfileRecoveryReadHandle.PointEvidence::close);
+                        }
+                        throw failure;
+                    }
+                }
+                assertEquals(metadata.getLength(), length);
+                for (var peer : peers.values()) {
+                    assertEquals(ProfileRegistrationStore.ReadStatus.FOUND, registry.revalidatePeer(peer).status());
+                }
+            } finally {
+                audit.closeAsync().join();
+            }
+        } finally {
+            CompletableFuture.allOf(connectionDrains.stream().map(java.util.function.Supplier::get)
+                    .toArray(CompletableFuture[]::new)).join();
+        }
+        connectionChecks.forEach(Runnable::run);
+    }
+
+    private static Map<Path, String> recoveryObservationFileDigests(Path directory) throws Exception {
+        var result = new java.util.HashMap<Path, String>();
+        try (var paths = Files.walk(directory)) {
+            for (var file : paths.filter(Files::isRegularFile).toList()) {
+                result.put(directory.relativize(file), java.util.HexFormat.of().formatHex(
+                        java.security.MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file))));
+            }
+        }
+        return result;
     }
 
     private void assertCrashedDataServiceCannotRestart(PublicProfileReadonlyEpisode episode, ServiceEpisode prepared,
