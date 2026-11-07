@@ -350,4 +350,13 @@ public interface NativeIO {
             throws NativeIOException {
         throw new NativeIOException("Original Linux ext4 mount query is unsupported");
     }
+
+    /** Same-mount observation of a regular file or directory relative to an original held root. */
+    record LinuxStorageMember(FileIdentity identity, long mountId, boolean directory) { }
+
+    /** Resolves a canonical relative UTF-8 path without symlinks or mount crossings. No handle is returned. */
+    default LinuxStorageMember linuxStorageMember(java.nio.channels.FileChannel root, String relativePath)
+            throws NativeIOException {
+        throw new NativeIOException("Original Linux retained member query is unsupported");
+    }
 }

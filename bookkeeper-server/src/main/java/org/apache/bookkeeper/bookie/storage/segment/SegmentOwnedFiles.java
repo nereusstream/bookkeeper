@@ -30,7 +30,9 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.SecureDirectoryStream;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributeView;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileAttribute;
 import java.util.ArrayList;
@@ -129,22 +131,11 @@ final class SegmentOwnedFiles {
         }
     }
 
-    DirectoryStream<Path> openDirectory(Path path) throws IOException {
+    OwnedDirectory openDirectory(Path path) throws IOException {
         Entry entry = begin(path);
         try {
-            DirectoryStream<Path> original = Files.newDirectoryStream(path);
-            entry.directory = original;
-            return new DirectoryStream<>() {
-                @Override
-                public Iterator<Path> iterator() {
-                    return original.iterator();
-                }
-
-                @Override
-                public void close() throws IOException {
-                    entry.close();
-                }
-            };
+            entry.directory = Files.newDirectoryStream(path);
+            return new OwnedDirectory(entry);
         } catch (IOException | RuntimeException | Error problem) {
             if (entry.directory == null) {
                 // Preserve an acquisition that did not return its actual listing.
@@ -154,6 +145,28 @@ final class SegmentOwnedFiles {
             throw problem;
         } finally {
             end(entry);
+        }
+    }
+
+    final class OwnedDirectory implements DirectoryStream<Path> {
+        private final Entry entry;
+
+        private OwnedDirectory(Entry entry) {
+            this.entry = entry;
+        }
+
+        void requireFileKey(Object expected) throws IOException {
+            entry.requireListingKey(expected);
+        }
+
+        @Override
+        public Iterator<Path> iterator() {
+            return entry.directory.iterator();
+        }
+
+        @Override
+        public void close() throws IOException {
+            entry.close();
         }
     }
 
@@ -177,6 +190,12 @@ final class SegmentOwnedFiles {
             throws IOException {
         Channel owned = originalWrapper(channel, nativeIo);
         return owned.entry.linuxExt4Mount(owned, nativeIo, deadlineNanos);
+    }
+
+    NativeIO.LinuxStorageMember linuxStorageMember(FileChannel root, Path member, NativeIO nativeIo,
+            long deadlineNanos) throws IOException {
+        Channel owned = originalWrapper(root, nativeIo);
+        return owned.entry.linuxStorageMember(owned, member, nativeIo, deadlineNanos);
     }
 
     private Channel originalWrapper(FileChannel channel, NativeIO nativeIo) throws IOException {
@@ -336,6 +355,17 @@ final class SegmentOwnedFiles {
             return resource != null || directory != null;
         }
 
+        synchronized void requireListingKey(Object expected) throws IOException {
+            requireUsable();
+            if (expected == null || closeStarted || !(directory instanceof SecureDirectoryStream<Path> secure)) {
+                throw new IOException("Retained listing requires a held secure directory: " + path);
+            }
+            var attributes = secure.getFileAttributeView(BasicFileAttributeView.class);
+            if (attributes == null || !expected.equals(attributes.readAttributes().fileKey())) {
+                throw new IOException("Retained listing differs from the observed directory: " + path);
+            }
+        }
+
         private void requireIdentityQuery(Channel caller, FileChannel expected) throws IOException {
             requireUsable();
             if (wrapper != caller || !caller.isOpen() || resource == null || !resource.isOpen()
@@ -408,13 +438,34 @@ final class SegmentOwnedFiles {
                 if (observation == null || observation.identity() == null || observation.mountPoint() == null) {
                     throw new IOException("Unknown original Linux ext4 mount outcome");
                 }
-                requireIdentityQuery(caller, original);
-                if (deadlineNanos - System.nanoTime() <= 0) {
-                    throw new IOException("Owned ext4 mount verification deadline elapsed");
-                }
+                requireTimelyIdentityQuery(caller, original, deadlineNanos);
                 return observation;
             } finally {
                 queryingThread = null;
+            }
+        }
+
+        synchronized NativeIO.LinuxStorageMember linuxStorageMember(Channel caller, Path member, NativeIO nativeIo,
+                long deadlineNanos) throws IOException {
+            FileChannel original = beginIdentityQuery(caller);
+            try {
+                String relative = SegmentClassicLaunchTrust.requireOwnedLinuxMember(path, member, deadlineNanos);
+                var observation = nativeIo.linuxStorageMember(original, relative);
+                if (observation == null || observation.identity() == null) {
+                    throw new IOException("Unknown retained member observation");
+                }
+                requireTimelyIdentityQuery(caller, original, deadlineNanos);
+                return observation;
+            } finally {
+                queryingThread = null;
+            }
+        }
+
+        private void requireTimelyIdentityQuery(Channel caller, FileChannel original, long deadlineNanos)
+                throws IOException {
+            requireIdentityQuery(caller, original);
+            if (deadlineNanos - System.nanoTime() <= 0) {
+                throw new IOException("Owned Linux storage verification deadline elapsed");
             }
         }
 

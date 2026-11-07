@@ -96,6 +96,8 @@ final class SegmentClassicHandoffMaterials {
 
     private record ProtectedFile(Identity identity, List<Identity> parents) { }
 
+    private record RetainedRoot(FileChannel directory, NativeIO.LinuxExt4Mount mount) { }
+
     private final References references;
     private final Expected expected;
     private final SegmentArenaManifest manifest;
@@ -106,6 +108,7 @@ final class SegmentClassicHandoffMaterials {
     private final SegmentClassicHandoffPaths paths;
     private final NativeIO nativeIo = new NativeIOImpl();
     private final Map<Path, ProtectedFile> protectedFiles = new LinkedHashMap<>();
+    private final Map<Path, RetainedRoot> retainedRoots = new LinkedHashMap<>();
     private NativeIO.ProcessCredentials targetCredentials;
     private boolean linux;
     private boolean attempted;
@@ -399,31 +402,87 @@ final class SegmentClassicHandoffMaterials {
     }
 
     synchronized void verifyStorageTree(Path root, Identity expected, SegmentClassicHandoff.Physical member,
-            OpenCheck check) throws IOException {
+            long readBudgetNanos, OpenCheck check) throws IOException {
         guard.requireHeld(guardPath);
         requireTargetCredentials();
         var before = paths.retainedStorageIdentity(root, expected.device());
         if (!expected.equals(before.parent())) {
             throw new IOException("Retained storage root changed before enumeration: " + root);
         }
-        verifyStorageDirectory(root, root, before, member, 0, check);
+        RetainedRoot retained = linux ? retainedRoot(root, expected, readBudgetNanos) : null;
+        verifyStorageDirectory(root, root, before, member, retained, 0, readBudgetNanos, check);
+        verifyStorageMount(root, expected, readBudgetNanos);
         requireTargetCredentials();
+        check.requireOpen();
+    }
+
+    private RetainedRoot retainedRoot(Path root, Identity expected, long readBudgetNanos) throws IOException {
+        RetainedRoot retained = retainedRoots.get(root);
+        if (retained == null) {
+            var directory = SegmentOwnedFiles.open(files, root, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS);
+            var observed = files.linuxExt4Mount(directory, nativeIo, System.nanoTime() + readBudgetNanos);
+            requireStorageIdentity(root, expected, observed.identity());
+            retained = new RetainedRoot(directory, observed);
+            retainedRoots.put(root, retained);
+        } else {
+            verifyStorageMount(root, expected, readBudgetNanos);
+        }
+        return retained;
+    }
+
+    synchronized void verifyStorageMount(Path root, Identity expected, long readBudgetNanos) throws IOException {
+        if (linux) {
+            RetainedRoot retained = retainedRoots.get(root);
+            if (retained == null) {
+                throw new IOException("Missing original retained Linux root: " + root);
+            }
+            var observed = files.linuxExt4Mount(retained.directory(), nativeIo, System.nanoTime() + readBudgetNanos);
+            requireStorageIdentity(root, expected, observed.identity());
+            if (!retained.mount().equals(observed)) {
+                throw new IOException("Retained Linux root mount changed: " + root);
+            }
+        }
+    }
+
+    private static void requireStorageIdentity(Path path, Identity expected, NativeIO.FileIdentity actual)
+            throws IOException {
+        if (actual.device() != expected.device() || actual.inode() != expected.inode()) {
+            throw new IOException("Retained Linux member identity changed: " + path);
+        }
+    }
+
+    private void verifyStorageMember(RetainedRoot retained, Path path, Identity expected, long readBudgetNanos)
+            throws IOException {
+        if (retained != null) {
+            var observed = files.linuxStorageMember(retained.directory(), path, nativeIo,
+                    System.nanoTime() + readBudgetNanos);
+            requireStorageIdentity(path, expected, observed.identity());
+            if (observed.directory() != expected.directory() || observed.mountId() != retained.mount().mountId()) {
+                throw new IOException("Retained Linux member type or mount changed: " + path);
+            }
+        }
     }
 
     private void verifyStorageDirectory(Path root, Path directory, Identity before,
-            SegmentClassicHandoff.Physical member, int depth, OpenCheck check) throws IOException {
+            SegmentClassicHandoff.Physical member, RetainedRoot retained, int depth, long readBudgetNanos,
+            OpenCheck check) throws IOException {
         check.requireOpen();
         requireStorageAccess(root, directory, before, member);
+        Object key = retained == null ? null : SegmentClassicHandoffPaths.retainedDirectoryKey(directory, before);
         try (var children = files.openDirectory(directory)) {
+            if (retained != null) {
+                children.requireFileKey(key);
+            }
             for (Path child : children) {
                 check.requireOpen();
                 var identity = paths.retainedStorageIdentity(child, before.device());
+                verifyStorageMember(retained, child, identity, readBudgetNanos);
                 if (identity.directory()) {
                     // The deepest supported path is a Classic index beneath current and its two hash directories.
                     if (depth == 3) {
                         throw new IOException("Retained storage exceeds the supported directory depth: " + child);
                     }
-                    verifyStorageDirectory(root, child, identity, member, depth + 1, check);
+                    verifyStorageDirectory(root, child, identity, member, retained, depth + 1, readBudgetNanos, check);
                 } else {
                     requireStorageAccess(root, child, identity, member);
                     if (!identity.equals(SegmentClassicHandoffPaths.fileIdentity(child))) {

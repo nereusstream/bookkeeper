@@ -24,7 +24,9 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
@@ -38,7 +40,9 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.SecureDirectoryStream;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
@@ -46,9 +50,11 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
+import org.apache.commons.lang3.SystemUtils;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -85,15 +91,84 @@ public class SegmentOwnedFilesTest {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             assertThrows(IOException.class, () -> files.linuxExt4Mount(foreign, forbidden, deadline));
             assertThrows(IOException.class, () -> files.linuxExt4Mount(raw, forbidden, deadline));
+            assertThrows(IOException.class, () -> files.linuxStorageMember(foreign, path, forbidden, deadline));
+            assertThrows(IOException.class, () -> files.linuxStorageMember(raw, path, forbidden, deadline));
             var expired = assertThrows(IOException.class,
                     () -> files.linuxExt4Mount(owned, forbidden, System.nanoTime()));
             assertTrue(expired.getMessage().contains("deadline"));
+            var expiredMember = assertThrows(IOException.class,
+                    () -> files.linuxStorageMember(owned, path, forbidden, System.nanoTime()));
+            assertTrue(expiredMember.getMessage().contains("deadline"));
             owned.close();
             assertThrows(IOException.class, () -> files.fileIdentity(owned, forbidden));
             assertThrows(IOException.class, () -> files.linuxExt4Mount(owned, forbidden, deadline));
+            assertThrows(IOException.class, () -> files.linuxStorageMember(owned, path, forbidden, deadline));
         } finally {
             assertTrue(files.drain().drained());
             assertTrue(other.drain().drained());
+        }
+    }
+
+    @Test
+    public void heldDirectoryListingRejectsTheFileKeyOfAReplacement() throws Exception {
+        Path parent = temporary.getRoot().toPath().toRealPath();
+        Path root = Files.createDirectory(parent.resolve("retained"));
+        Path file = Files.createFile(root.resolve("original"));
+        var before = SegmentClassicHandoffPaths.fileIdentity(root);
+        Object originalKey = SegmentClassicHandoffPaths.retainedDirectoryKey(root, before);
+        boolean secure;
+        try (var providerListing = Files.newDirectoryStream(root)) {
+            secure = providerListing instanceof SecureDirectoryStream<Path>;
+        }
+        var files = new SegmentOwnedFiles();
+        try (var listing = files.openDirectory(root)) {
+            if (!secure) {
+                assertFalse(SystemUtils.IS_OS_LINUX);
+                var failure = assertThrows(IOException.class, () -> listing.requireFileKey(originalKey));
+                assertTrue(failure.getMessage().contains("held secure directory"));
+                assertEquals(file.getFileName(), listing.iterator().next().getFileName());
+                return;
+            }
+            listing.requireFileKey(originalKey);
+            Files.move(root, parent.resolve("parked"));
+            Files.createDirectory(root);
+            var replacement = Files.readAttributes(root, BasicFileAttributes.class).fileKey();
+            assertThrows(IOException.class, () -> SegmentClassicHandoffPaths.retainedDirectoryKey(root, before));
+            assertThrows(IOException.class, () -> listing.requireFileKey(replacement));
+            listing.requireFileKey(originalKey);
+            assertEquals(file.getFileName(), listing.iterator().next().getFileName());
+        } finally {
+            assertTrue(files.drain().drained());
+        }
+    }
+
+    @Test
+    public void ownedLinuxMemberDiscardsTheActualNativeResultAfterTheDeadline() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_LINUX);
+        Path root = temporary.getRoot().toPath().toRealPath();
+        Path member = Files.createDirectory(root.resolve("current"));
+        var files = new SegmentOwnedFiles();
+        NativeIO io = spy(new NativeIOImpl());
+        var deadline = new AtomicLong();
+        var actual = new AtomicReference<NativeIO.LinuxStorageMember>();
+        doAnswer(call -> {
+            var result = (NativeIO.LinuxStorageMember) call.callRealMethod();
+            actual.set(result);
+            long remaining = deadline.get() - System.nanoTime();
+            if (remaining > 0) {
+                assertFalse(new CountDownLatch(1).await(remaining, TimeUnit.NANOSECONDS));
+            }
+            return result;
+        }).when(io).linuxStorageMember(any(FileChannel.class), eq("current"));
+        try (var held = SegmentOwnedFiles.open(files, root, StandardOpenOption.READ)) {
+            deadline.set(System.nanoTime() + TimeUnit.SECONDS.toNanos(3));
+            var failure = assertThrows(IOException.class,
+                    () -> files.linuxStorageMember(held, member, io, deadline.get()));
+            assertTrue(failure.getMessage().contains("deadline"));
+            assertNotNull(actual.get());
+            assertTrue(held.isOpen());
+        } finally {
+            assertTrue(files.drain().drained());
         }
     }
 

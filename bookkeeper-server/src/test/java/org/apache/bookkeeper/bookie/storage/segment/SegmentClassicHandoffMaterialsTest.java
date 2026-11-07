@@ -27,10 +27,12 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
+import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.spy;
 
@@ -46,6 +48,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.SecureDirectoryStream;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.KeyPair;
@@ -681,6 +684,15 @@ public class SegmentClassicHandoffMaterialsTest {
                 @SuppressWarnings("unchecked")
                 var original = (DirectoryStream<Path>) result;
                 captured.set(original);
+                if (original instanceof SecureDirectoryStream<Path>) {
+                    @SuppressWarnings("unchecked")
+                    SecureDirectoryStream<Path> listing = mock(SecureDirectoryStream.class, delegatesTo(original));
+                    doAnswer(close -> {
+                        closes.incrementAndGet();
+                        throw firstClose;
+                    }).when(listing).close();
+                    return listing;
+                }
                 return new DirectoryStream<Path>() {
                     @Override
                     public Iterator<Path> iterator() {

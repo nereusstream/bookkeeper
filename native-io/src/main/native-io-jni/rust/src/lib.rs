@@ -1763,6 +1763,63 @@ pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJ
     }
 }
 
+/// Resolve one retained member from the exact original directory fd, with mount crossing disabled.
+#[no_mangle]
+pub extern "system" fn Java_org_apache_bookkeeper_common_util_nativeio_NativeIOJni_linuxStorageMember(
+    mut env: JNIEnv,
+    _class: JClass,
+    _root: JObject,
+    _path: JByteArray,
+) -> jlongArray {
+    #[cfg(target_os = "linux")]
+    {
+        if _path.is_null() || !matches!(env.get_array_length(&_path), Ok(1..=4095)) {
+            throw_exception_with_error_code(
+                &mut env,
+                "Invalid retained member byte length",
+                libc::EINVAL,
+            );
+            return ptr::null_mut();
+        }
+        let Ok(path) = env.convert_byte_array(&_path) else {
+            return ptr::null_mut();
+        };
+        let Some(member) = observe_original_file(&mut env, &_root, |env, fd, status| {
+            match cgroup_mount::ext4::observe_member(fd, status, &path) {
+                Ok(member) => Some(member),
+                Err((operation, error)) => {
+                    throw_exception_with_error_code(env, operation, error);
+                    None
+                }
+            }
+        }) else {
+            return ptr::null_mut();
+        };
+        let Ok(array) = env.new_long_array(4) else {
+            return ptr::null_mut();
+        };
+        let values = [
+            member.device as jlong,
+            member.inode as jlong,
+            member.mount_id as jlong,
+            jlong::from(member.directory),
+        ];
+        if env.set_long_array_region(&array, 0, &values).is_err() {
+            return ptr::null_mut();
+        }
+        array.into_raw()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        throw_exception_with_error_code(
+            &mut env,
+            "Linux retained member query is unsupported",
+            libc::ENOTSUP,
+        );
+        ptr::null_mut()
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Clone, Copy)]
 enum OriginalFileQuery {

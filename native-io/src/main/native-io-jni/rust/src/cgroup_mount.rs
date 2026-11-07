@@ -176,20 +176,9 @@ const MOUNT_STATX_MASK: u32 = libc::STATX_TYPE | libc::STATX_INO | libc::STATX_M
 
 #[cfg(target_os = "linux")]
 fn statx_directory(stat: &libc::statx) -> ProcIdentityResult<MountDirectory> {
-    if stat.stx_mask & MOUNT_STATX_MASK != MOUNT_STATX_MASK {
-        return Err((
-            "directory statx is missing required mount fields",
-            libc::EOPNOTSUPP,
-        ));
-    }
-    if stat.stx_mode as libc::mode_t & libc::S_IFMT != libc::S_IFDIR
-        || stat.stx_mnt_id == 0
-        || stat.stx_mnt_id > i32::MAX as u64
-    {
-        return Err((
-            "statx did not return a directory with an ordinary mount ID",
-            libc::EINVAL,
-        ));
+    require_mount_statx(stat)?;
+    if stat.stx_mode as libc::mode_t & libc::S_IFMT != libc::S_IFDIR {
+        return Err(("statx did not return a directory", libc::EINVAL));
     }
     Ok(MountDirectory {
         mount_id: stat.stx_mnt_id as u32,
@@ -200,11 +189,31 @@ fn statx_directory(stat: &libc::statx) -> ProcIdentityResult<MountDirectory> {
 }
 
 #[cfg(target_os = "linux")]
+fn require_mount_statx(stat: &libc::statx) -> ProcIdentityResult<()> {
+    if stat.stx_mask & MOUNT_STATX_MASK != MOUNT_STATX_MASK {
+        return Err(("statx is missing required mount fields", libc::EOPNOTSUPP));
+    }
+    if stat.stx_mnt_id == 0 || stat.stx_mnt_id > i32::MAX as u64 {
+        return Err(("statx did not return an ordinary mount ID", libc::EINVAL));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn query_statx(
     fd: libc::c_int,
     path: &[u8],
     flags: libc::c_int,
 ) -> ProcIdentityResult<MountDirectory> {
+    statx_directory(&mount_statx(fd, path, flags)?)
+}
+
+#[cfg(target_os = "linux")]
+fn mount_statx(
+    fd: libc::c_int,
+    path: &[u8],
+    flags: libc::c_int,
+) -> ProcIdentityResult<libc::statx> {
     let mut stat = std::mem::MaybeUninit::<libc::statx>::zeroed();
     let result = unsafe {
         libc::syscall(
@@ -217,9 +226,9 @@ fn query_statx(
         )
     };
     if result != 0 {
-        return Err(proc_identity_errno("directory mount statx failed"));
+        return Err(proc_identity_errno("mount statx failed"));
     }
-    statx_directory(&unsafe { stat.assume_init() })
+    Ok(unsafe { stat.assume_init() })
 }
 
 #[cfg(target_os = "linux")]

@@ -22,14 +22,19 @@ pub(crate) fn canonical_root(path: &[u8]) -> bool {
     path.len() <= 4095 && std::str::from_utf8(path).is_ok() && absolute_components(path)
 }
 
+fn canonical_member(path: &[u8]) -> bool {
+    path.len() <= 4095 && std::str::from_utf8(path).is_ok() && canonical_components(path)
+}
+
 fn absolute_components(path: &[u8]) -> bool {
-    path == b"/"
-        || path.strip_prefix(b"/").is_some_and(|tail| {
-            !tail.contains(&0)
-                && tail
-                    .split(|byte| *byte == b'/')
-                    .all(|name| !name.is_empty() && name != b"." && name != b"..")
-        })
+    path == b"/" || path.strip_prefix(b"/").is_some_and(canonical_components)
+}
+
+fn canonical_components(path: &[u8]) -> bool {
+    !path.contains(&0)
+        && path
+            .split(|byte| *byte == b'/')
+            .all(|name| !name.is_empty() && name != b"." && name != b"..")
 }
 
 fn mount_path(field: &[u8]) -> Result<Vec<u8>, libc::c_int> {
@@ -158,8 +163,10 @@ impl<'a> Ext4Table<'a> {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{canonical_root, Ext4Table, MountDirectory};
-    use crate::cgroup_mount::{query_statx, read_mountinfo, require_current_directory};
+    use super::{canonical_member, canonical_root, Ext4Table, MountDirectory};
+    use crate::cgroup_mount::{
+        mount_statx, query_statx, read_mountinfo, require_current_directory, require_mount_statx,
+    };
     use crate::{
         close_identity_fd, close_proc_identity_fd, proc_identity_errno, proc_identity_root,
         read_thread_namespace_links, ProcIdentityResult,
@@ -171,6 +178,95 @@ mod linux {
         pub(crate) parent_id: u32,
         pub(crate) namespace: u32,
         pub(crate) point: String,
+    }
+
+    pub(crate) struct MemberObservation {
+        pub(crate) device: libc::dev_t,
+        pub(crate) inode: u64,
+        pub(crate) mount_id: u64,
+        pub(crate) directory: bool,
+    }
+
+    fn held_directory(
+        fd: libc::c_int,
+        original: &libc::stat,
+    ) -> ProcIdentityResult<MountDirectory> {
+        if original.st_mode & libc::S_IFMT != libc::S_IFDIR {
+            return Err(("Original retained root is not a directory", libc::ENOTDIR));
+        }
+        let held = query_statx(fd, b"\0", libc::AT_EMPTY_PATH)?;
+        let (major, minor) =
+            unsafe { (libc::major(original.st_dev), libc::minor(original.st_dev)) };
+        if (held.major, held.minor, held.inode) != (major, minor, original.st_ino) {
+            return Err((
+                "Retained root statx differs from original fstat",
+                libc::ESTALE,
+            ));
+        }
+        Ok(held)
+    }
+
+    pub(crate) fn observe_member(
+        fd: libc::c_int,
+        original: &libc::stat,
+        relative: &[u8],
+    ) -> ProcIdentityResult<MemberObservation> {
+        if !canonical_member(relative) {
+            return Err(("Invalid canonical UTF-8 retained member path", libc::EINVAL));
+        }
+        let path =
+            CString::new(relative).map_err(|_| ("Invalid retained member path", libc::EINVAL))?;
+        let held = held_directory(fd, original)?;
+        // O_PATH does not open the member for I/O or release POSIX locks when its fd closes.
+        let how = [
+            (libc::O_PATH | libc::O_CLOEXEC) as u64,
+            0,
+            libc::RESOLVE_BENEATH
+                | libc::RESOLVE_NO_XDEV
+                | libc::RESOLVE_NO_SYMLINKS
+                | libc::RESOLVE_NO_MAGICLINKS,
+        ];
+        let member = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                fd,
+                path.as_ptr(),
+                how.as_ptr(),
+                std::mem::size_of_val(&how),
+            )
+        };
+        if member < 0 {
+            return Err(proc_identity_errno(
+                "Retained member same-mount openat2 failed",
+            ));
+        }
+        let member = member as libc::c_int;
+        let observed = (|| {
+            let current = mount_statx(member, b"\0", libc::AT_EMPTY_PATH)?;
+            require_mount_statx(&current)?;
+            if (
+                current.stx_dev_major,
+                current.stx_dev_minor,
+                current.stx_mnt_id,
+            ) != (held.major, held.minor, u64::from(held.mount_id))
+            {
+                return Err(("Retained member crossed the held root mount", libc::EXDEV));
+            }
+            let kind = current.stx_mode as libc::mode_t & libc::S_IFMT;
+            if kind != libc::S_IFREG && kind != libc::S_IFDIR {
+                return Err((
+                    "Retained member is not a regular file or directory",
+                    libc::EINVAL,
+                ));
+            }
+            Ok(MemberObservation {
+                device: original.st_dev,
+                inode: current.stx_ino,
+                mount_id: current.stx_mnt_id,
+                directory: kind == libc::S_IFDIR,
+            })
+        })();
+        close_identity_fd(member, observed, "Retained member observation close failed")
     }
 
     fn require_root_path(path: &CString, held: MountDirectory) -> ProcIdentityResult<()> {
@@ -212,9 +308,7 @@ mod linux {
             return Err(("Invalid canonical UTF-8 ext4 root path", libc::EINVAL));
         }
         let path = CString::new(root).map_err(|_| ("Invalid ext4 root path", libc::EINVAL))?;
-        if original.st_mode & libc::S_IFMT != libc::S_IFDIR {
-            return Err(("Original ext4 root is not a directory", libc::ENOTDIR));
-        }
+        let held = held_directory(fd, original)?;
         let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
         if unsafe { libc::fstatfs(fd, fs.as_mut_ptr()) } != 0 {
             return Err(proc_identity_errno(
@@ -226,12 +320,6 @@ mod linux {
                 "Original directory does not have ext filesystem magic",
                 libc::EINVAL,
             ));
-        }
-        let held = query_statx(fd, b"\0", libc::AT_EMPTY_PATH)?;
-        let (major, minor) =
-            unsafe { (libc::major(original.st_dev), libc::minor(original.st_dev)) };
-        if (held.major, held.minor, held.inode) != (major, minor, original.st_ino) {
-            return Err(("ext4 root statx differs from original fstat", libc::ESTALE));
         }
         let proc_root = unsafe {
             libc::open(
@@ -283,7 +371,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::observe;
+pub(crate) use linux::{observe, observe_member};
 
 #[cfg(test)]
 mod tests {
@@ -417,5 +505,126 @@ mod tests {
         }
         let long = format!("/{}", "a".repeat(4095));
         assert!(!canonical_root(long.as_bytes()));
+    }
+
+    #[test]
+    fn member_input_must_be_bounded_canonical_relative_utf8() {
+        assert!(canonical_member("current/旧 file".as_bytes()));
+        for invalid in [
+            b"".as_slice(),
+            b"/current",
+            b"current/",
+            b"current//file",
+            b"./file",
+            b"../file",
+            b"current/../file",
+            b"current/.",
+            b"a\0b",
+            b"a\xff",
+        ] {
+            assert!(!canonical_member(invalid));
+        }
+        assert!(canonical_member(&[b'a'; 4095]));
+        assert!(!canonical_member(&[b'a'; 4096]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires CAP_SYS_ADMIN and BOOKKEEPER_TEST_EXT4_SCRATCH on an approved ext4 fixture"]
+    fn self_bind_preserves_dev_and_inode_but_member_resolution_rejects_it() {
+        use std::ffi::CString;
+        use std::fs::{self, File};
+        use std::os::{fd::AsRawFd, unix::ffi::OsStrExt, unix::fs::MetadataExt};
+        use std::ptr;
+
+        let scratch =
+            fs::canonicalize(std::env::var_os("BOOKKEEPER_TEST_EXT4_SCRATCH").unwrap()).unwrap();
+        let root = scratch.join(format!("bk-ext4-member-test-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let run = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    // Only the isolated test thread's mount namespace changes. Disable outward propagation first.
+                    assert_eq!(
+                        unsafe { libc::unshare(libc::CLONE_NEWNS) },
+                        0,
+                        "{}",
+                        std::io::Error::last_os_error()
+                    );
+                    assert_eq!(
+                        unsafe {
+                            libc::mount(
+                                ptr::null(),
+                                b"/\0".as_ptr().cast(),
+                                ptr::null(),
+                                libc::MS_REC | libc::MS_PRIVATE,
+                                ptr::null(),
+                            )
+                        },
+                        0,
+                        "{}",
+                        std::io::Error::last_os_error()
+                    );
+                    let child = root.join("current");
+                    fs::create_dir(&child).unwrap();
+                    let original = File::open(&root).unwrap();
+                    let fd = original.as_raw_fd();
+                    let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+                    assert_eq!(unsafe { libc::fstat(fd, status.as_mut_ptr()) }, 0);
+                    let status = unsafe { status.assume_init() };
+                    let initial = observe(fd, &status, root.as_os_str().as_bytes()).unwrap();
+                    let before = observe_member(fd, &status, b"current").unwrap();
+                    let path = CString::new(child.as_os_str().as_bytes()).unwrap();
+                    assert_eq!(
+                        unsafe {
+                            libc::mount(
+                                path.as_ptr(),
+                                path.as_ptr(),
+                                ptr::null(),
+                                libc::MS_BIND,
+                                ptr::null(),
+                            )
+                        },
+                        0,
+                        "{}",
+                        std::io::Error::last_os_error()
+                    );
+                    let mounted = fs::metadata(&child).unwrap();
+                    assert_eq!(
+                        (mounted.dev(), mounted.ino()),
+                        (before.device, before.inode)
+                    );
+                    let mounted_id = crate::cgroup_mount::query_statx(
+                        libc::AT_FDCWD,
+                        path.as_bytes_with_nul(),
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                    .unwrap()
+                    .mount_id;
+                    assert_ne!(u64::from(mounted_id), before.mount_id);
+                    assert_eq!(
+                        observe_member(fd, &status, b"current").err().unwrap().1,
+                        libc::EXDEV
+                    );
+                    assert_eq!(
+                        observe(fd, &status, root.as_os_str().as_bytes())
+                            .err()
+                            .unwrap()
+                            .1,
+                        libc::EXDEV
+                    );
+                    assert_eq!(
+                        unsafe { libc::umount2(path.as_ptr(), 0) },
+                        0,
+                        "{}",
+                        std::io::Error::last_os_error()
+                    );
+                    let after = observe_member(fd, &status, b"current").unwrap();
+                    assert_eq!(after.mount_id, u64::from(initial.mount_id));
+                })
+                .join()
+        });
+        fs::remove_dir_all(root).unwrap();
+        run.unwrap();
     }
 }

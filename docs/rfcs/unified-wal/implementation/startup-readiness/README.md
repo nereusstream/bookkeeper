@@ -750,9 +750,19 @@ macOS 上，父源码实际接受了不可读的旧 entry log，并在既有 ind
 
 同一次观察从固定 procfs 读完可见的 `thread-self/mountinfo`，总量上限 1 MiB，单行上限 64 KiB。逐行解码路径原字节，以组件边界检查范围。所选行必须唯一，挂载根为 `/`，且挂载点覆盖原目录。拒绝同设备的其他 attachment、根内或根上的其他挂载，以及所选挂载点的堆叠。其他记录中的非 UTF-8 名称保留原字节。多个保留根可以共享同一个合法 ext4 挂载。
 
-返回值只覆盖调用线程在本次采样中可见的挂载。chroot 外的挂载、其他 namespace、detached mount、旧进程 fd、设备下层访问、ID 映射和采样之间的变更，仍须由批准宿主、原 launcher 的管理面持续封锁及旧 UID/cgroup/FD 排除验证。普通 mount ID 仅在当前观察中使用。保留树后续要持有原根贯穿两轮检查，并对每个成员从原根 fd 进行同挂载相对解析。loader 冷开必须重验。完整 Unix 采用、批准 Linux 交接和生产 Gate 继续 OPEN。[Linux mountinfo](https://man7.org/linux/man-pages/man5/proc_pid_mountinfo.5.html) · [Linux statx](https://man7.org/linux/man-pages/man2/statx.2.html) · [内核 mountinfo 实现](https://raw.githubusercontent.com/torvalds/linux/v6.17/fs/proc_namespace.c)
+返回值只覆盖调用线程在本次采样中可见的挂载。chroot 外的挂载、其他 namespace、detached mount、旧进程 fd、设备下层访问、ID 映射和采样之间的变更，仍须由批准宿主、原 launcher 的管理面持续封锁及旧 UID/cgroup/FD 排除验证。普通 mount ID 仅在持有原根的观察期间使用。保留树的实际接线见下节。完整 Unix 采用、批准 Linux 交接和生产 Gate 继续 OPEN。[Linux mountinfo](https://man7.org/linux/man-pages/man5/proc_pid_mountinfo.5.html) · [Linux statx](https://man7.org/linux/man-pages/man2/statx.2.html) · [内核 mountinfo 实现](https://raw.githubusercontent.com/torvalds/linux/v6.17/fs/proc_namespace.c)
 
 Darwin arm64 上原生库构建成功，301 项定向 JUnit 通过，3 项 Linux 条件用例跳过。独立 JVM 加载父 JNI 库，确认缺符号明确拒绝且原目录身份查询仍可用。宿主 Cargo 测试因既有 `-install_name` 链接参数失败，随后以原 crate 源码和 Cargo 已构建的锁定依赖直接运行 29 项 Rust 测试，含 6 项新解析器测试，全部通过。Linux x86_64 `cargo check --tests` 通过。实际 Linux JNI、bind mount 和批准宿主的阳性为 NOT_EXECUTED。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-retained-mount-evidence-bbcb55b7`。
+
+## Classic 保留树的 Linux 同挂载核验
+
+2026-11-08，基线 `71ab9d2873`。Linux 冷开逐个获取签名 Classic、control 和 Arena 根的原 FileChannel，材料 owner 持有这些根直到排空。根的文件身份和挂载观察在全树枚举前后核对，原生来源重读和完成条件继续复核同一个原根 fd。导入 claim 和 replay 前各重扫实际保留树。每次原生查询沿用原准备 owner 的读操作预算，迟到结果拒绝返回。
+
+原 owner 从实际枚举项生成规范相对路径，严格核对 UTF-8 字节。`linuxStorageMember` 在原根 fd 上以 `openat2`、`O_PATH` 和 `BENEATH | NO_XDEV | NO_SYMLINKS | NO_MAGICLINKS` 取证，比较设备、inode、普通 mount ID 及普通文件或目录类型，结算临时 fd 的实际首次关闭。关闭 `O_PATH` fd 不释放该 inode 上原有的进程 POSIX 锁。目录流在枚举前核对其实际 file key 与此前观察到的目录身份；原有 ACL、访问、目录深度和关闭检查继续参与验收。[Linux openat2](https://man7.org/linux/man-pages/man2/openat2.2.html) · [Linux 关闭实现](https://raw.githubusercontent.com/torvalds/linux/v6.17/fs/open.c) · [JDK SecureDirectoryStream](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/file/SecureDirectoryStream.html)
+
+成员观察针对当前解析。后续真正打开业务文件仍由原 I/O owner 核对。批准宿主的持续管理面封锁、其他 namespace 和旧进程 fd 排除仍待独立验证。完整 Unix 采用和生产 Gate 保持 OPEN。
+
+Darwin arm64 上原生库构建和 Java 样式通过，303 项定向 JUnit 通过，5 项 Linux 条件用例跳过。首轮实际验证发现 Darwin provider 返回普通目录流，最终分别断言普通流明确拒绝与安全目录流下的目录替换行为。独立 JVM 验证父 JNI 库缺少成员符号时明确拒绝，原目录和挂载调用保持可达。30 项宿主 Rust 测试及 Linux x86_64 `cargo check --tests` 通过。真实同 dev/ino 自 bind、Linux 下路径替换和迟到结果用例等待批准环境执行。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-retained-member-evidence-71ab9d28`。
 
 ## 固定交接的原子不覆盖改名
 

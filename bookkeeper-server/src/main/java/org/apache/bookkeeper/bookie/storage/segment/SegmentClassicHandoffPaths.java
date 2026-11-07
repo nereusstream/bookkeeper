@@ -105,6 +105,17 @@ final class SegmentClassicHandoffPaths {
         return identity;
     }
 
+    static Object retainedDirectoryKey(Path path, Identity expected) throws IOException {
+        var attributes = Files.readAttributes(path, "unix:dev,ino,fileKey", LinkOption.NOFOLLOW_LINKS);
+        Object key = attributes.get("fileKey");
+        if (!expected.directory() || !(attributes.get("dev") instanceof Number device)
+                || !(attributes.get("ino") instanceof Number inode) || key == null
+                || device.longValue() != expected.device() || inode.longValue() != expected.inode()) {
+            throw new IOException("Retained directory file key differs from the observed identity: " + path);
+        }
+        return key;
+    }
+
     static Identity fileIdentity(Path path) throws IOException {
         if (!path.equals(path.toRealPath())) {
             throw new IOException("Handoff path must contain no symbolic aliases");

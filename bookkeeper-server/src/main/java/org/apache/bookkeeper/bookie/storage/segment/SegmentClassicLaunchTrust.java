@@ -751,18 +751,37 @@ final class SegmentClassicLaunchTrust {
                 || !path.isAbsolute() || !path.equals(path.normalize())) {
             throw new IOException("Owned ext4 root requires a canonical default Linux path");
         }
+        return exactOwnedLinuxText(path, deadlineNanos);
+    }
+
+    /** Derive the lookup name from the original owned root and an enumerated physical member. */
+    static String requireOwnedLinuxMember(Path root, Path member, long deadlineNanos) throws IOException {
+        requireTime(deadlineNanos);
+        var provider = linuxProviderObjects();
+        if (root.getClass() != provider.pathClass() || member.getClass() != provider.pathClass()
+                || root.getFileSystem() != provider.filesystem() || member.getFileSystem() != provider.filesystem()
+                || !root.isAbsolute() || !member.startsWith(root) || member.equals(root)
+                || !member.equals(member.normalize())) {
+            throw new IOException("Retained member requires a canonical path below its original Linux root");
+        }
+        return exactOwnedLinuxText(root.relativize(member), deadlineNanos);
+    }
+
+    private static String exactOwnedLinuxText(Path path, long deadlineNanos) throws IOException {
         String text = path.toString();
-        if (text.length() > 4095 || text.indexOf(0) >= 0 || !StandardCharsets.UTF_8.newEncoder().canEncode(text)) {
-            throw new IOException("Owned ext4 root has invalid UTF-8 path text");
+        if (text.isEmpty() || text.length() > 4095 || text.indexOf(0) >= 0
+                || !StandardCharsets.UTF_8.newEncoder().canEncode(text)) {
+            throw new IOException("Owned Linux path has invalid UTF-8 text");
         }
         byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
         if (bytes.length > 4095) {
-            throw new IOException("Owned ext4 root exceeds the byte limit");
+            throw new IOException("Owned Linux path exceeds the byte limit");
         }
         // Percent-encode the original bytes directly so URI conversion cannot normalize Unicode text.
-        String raw = HexFormat.of().withPrefix("%").formatHex(bytes, 1, bytes.length);
-        if (!path.equals(Path.of(URI.create("file:///" + raw)))) {
-            throw new IOException("Owned ext4 root differs from its strict UTF-8 path bytes");
+        String raw = HexFormat.of().withPrefix("%").formatHex(bytes, path.isAbsolute() ? 1 : 0, bytes.length);
+        Path encoded = Path.of(URI.create("file:///" + raw));
+        if (!path.equals(path.isAbsolute() ? encoded : encoded.getRoot().relativize(encoded))) {
+            throw new IOException("Owned Linux path differs from its strict UTF-8 bytes");
         }
         requireTime(deadlineNanos);
         return text;
