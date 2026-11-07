@@ -688,6 +688,9 @@ public class BookieImpl implements Bookie {
      * @throws IOException
      */
     private void replay(Journal journal, JournalScanner scanner) throws IOException {
+        if (journal.replayHistorical(scanner, conf.isSkipReplayJournalInvalidRecord())) {
+            return;
+        }
         final LogMark markedLog = journal.getLastLogMark().getCurMark();
         List<Long> logs = journal.journalIdsForRecovery(markedLog.getLogFileId());
         ClassicJournalRecovery.requireMarkedJournal(markedLog.getLogFileId(), logs,

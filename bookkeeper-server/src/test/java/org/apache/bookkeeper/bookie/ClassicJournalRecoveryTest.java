@@ -433,6 +433,38 @@ public class ClassicJournalRecoveryTest {
     }
 
     @Test(timeout = 30000)
+    public void historicalReplayOnlyAdvancesPastFilesThatHaveClosed() throws Exception {
+        try (var f = new Fixture()) {
+            byte[] first = suffixImage(entryRecord(44, 0, 0, 0));
+            Files.write(f.journal.resolve("1.txn"), first);
+            Path next = f.journal.resolve("2.txn");
+            Files.write(next, suffixImage(entryRecord(55, 0, 0, 0)));
+            var channel = new ControlledFileChannel(FileChannel.open(next, StandardOpenOption.READ));
+            channel.closeFailure = new IOException("original replay file close failed");
+            var reader = f.reader();
+            var visited = new ArrayList<Long>();
+            var completed = new ArrayList<List<Long>>();
+            try (var opens = mockStatic(FileChannel.class, CALLS_REAL_METHODS)) {
+                opens.when(() -> FileChannel.open(next, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS))
+                        .thenReturn(channel);
+                assertSame(channel.closeFailure, assertThrows(IOException.class, () -> reader.replaySuffix(
+                        1, JournalChannel.HEADER_SIZE, (v, o, bytes) -> visited.add(bytes.getLong()),
+                        (id, offset) -> completed.add(List.of(id, offset)))));
+                assertEquals(List.of(44L, 55L), visited);
+                assertEquals(List.of(List.of(1L, (long) first.length)), completed);
+            } finally {
+                var drain = reader.closeAndDrain();
+                assertFalse(drain.drained());
+                assertSame(channel.closeFailure, drain.readFailure());
+                assertSame(channel.closeFailure, drain.closeFailure());
+                assertEquals(drain, reader.closeAndDrain());
+                assertEquals(1, channel.closeAttempts.get());
+                channel.delegate.close();
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
     public void actualReadNativeCloseFailureIsRetainedAndNeverRetried() throws Exception {
         try (var f = new Fixture()) {
             Path file = f.journal.resolve("1.txn");

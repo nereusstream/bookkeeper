@@ -38,8 +38,10 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
+import lombok.CustomLog;
 
 /** Read-only V6 recovery resources. Supplies no startup, metadata, launcher or bootstrap permission. */
+@CustomLog
 final class ClassicJournalRecovery {
     private static final int INVENTORY_PAGE_SIZE = 256;
 
@@ -50,6 +52,11 @@ final class ClassicJournalRecovery {
     }
 
     record Drain(boolean drained, int retainedResources, Throwable readFailure, Throwable closeFailure) { }
+
+    @FunctionalInterface
+    interface ReplayedFile {
+        void complete(long id, long offset);
+    }
 
     private record Source(Path journal, String markName) {
         Source {
@@ -109,7 +116,8 @@ final class ClassicJournalRecovery {
         try {
             Journal.JournalScanner scan = (version, position, record) -> visitor.visit(validateRecord(record));
             for (var source : sources) {
-                readInventory(source, readMarks(source.markName()), scan);
+                var mark = readMarks(source.markName());
+                readSuffix(source.journal(), mark.logId(), mark.offset(), scan, null);
             }
         } catch (IOException | RuntimeException | Error failure) {
             failed(failure);
@@ -119,19 +127,41 @@ final class ClassicJournalRecovery {
         }
     }
 
-    private void readInventory(Source source, Marks mark, Journal.JournalScanner scan) throws IOException {
-        Path journal = source.journal();
+    synchronized void replaySuffix(long markedId, long markedOffset, Journal.JournalScanner scanner,
+            ReplayedFile replayed) throws IOException {
+        Objects.requireNonNull(scanner, "scanner");
+        Objects.requireNonNull(replayed, "replayed");
+        enter();
+        try {
+            readSuffix(singleSource().journal(), markedId, markedOffset, scanner, replayed);
+        } catch (IOException | RuntimeException | Error failure) {
+            failed(failure);
+            throw failure;
+        } finally {
+            active = null;
+        }
+    }
+
+    private void readSuffix(Path journal, long markedId, long markedOffset, Journal.JournalScanner scan,
+            ReplayedFile replayed) throws IOException {
         var originalDirectory = inventoryDirectory(journal);
-        long minimum = mark.logId();
+        long minimum = markedId;
         while (true) {
-            boolean first = minimum == mark.logId();
+            boolean first = minimum == markedId;
             var logs = inventoryPage(journal, minimum, first);
             requireSameInventoryDirectory(journal, originalDirectory);
             if (first) {
-                requireMarkedJournal(mark.logId(), logs, journal);
+                requireMarkedJournal(markedId, logs, journal);
             }
             for (long id : logs) {
-                scanFile(journal, id, id == mark.logId() ? mark.offset() : 0, scan);
+                long offset = id == markedId ? markedOffset : 0;
+                if (replayed != null) {
+                    log.info().attr("journalId", id).attr("logPosition", offset).log("Replaying journal");
+                }
+                long end = scanFile(journal, id, offset, scan);
+                if (replayed != null) {
+                    replayed.complete(id, end);
+                }
             }
             if (logs.size() < INVENTORY_PAGE_SIZE || logs.get(logs.size() - 1) == Long.MAX_VALUE) {
                 requireSameInventoryDirectory(journal, originalDirectory);
@@ -146,17 +176,7 @@ final class ClassicJournalRecovery {
         var page = new TreeSet<Long>();
         try (var read = files.openDirectory(journal)) {
             for (Path path : read.listing) {
-                String name = path.getFileName().toString();
-                if (!name.endsWith(".txn")) {
-                    continue;
-                }
-                long id = journalId(path, name);
-                if (id < 0 || !name.equals(Long.toHexString(id) + ".txn")) {
-                    throw new IOException("Noncanonical historical Journal file name: " + path);
-                }
-                if (first) {
-                    fileIdentity(path);
-                }
+                long id = canonicalJournalId(path, first);
                 if (id >= minimum) {
                     if (page.size() == INVENTORY_PAGE_SIZE) {
                         if (id >= page.last()) {
@@ -169,6 +189,38 @@ final class ClassicJournalRecovery {
             }
         }
         return List.copyOf(page);
+    }
+
+    /** Validate the full directory without retaining file IDs during owned Journal initialization or startup. */
+    synchronized long lastJournalId() throws IOException {
+        enter();
+        try (var read = files.openDirectory(singleSource().journal())) {
+            long last = -1;
+            for (Path path : read.listing) {
+                last = Math.max(last, canonicalJournalId(path, true));
+            }
+            return last;
+        } catch (IOException | RuntimeException | Error failure) {
+            failed(failure);
+            throw failure;
+        } finally {
+            active = null;
+        }
+    }
+
+    private static long canonicalJournalId(Path path, boolean checkFile) throws IOException {
+        String name = path.getFileName().toString();
+        if (!name.endsWith(".txn")) {
+            return -1;
+        }
+        long id = journalId(path, name);
+        if (id < 0 || !name.equals(Long.toHexString(id) + ".txn")) {
+            throw new IOException("Noncanonical historical Journal file name: " + path);
+        }
+        if (checkFile) {
+            fileIdentity(path);
+        }
+        return id;
     }
 
     private static BasicFileAttributes inventoryDirectory(Path journal) throws IOException {

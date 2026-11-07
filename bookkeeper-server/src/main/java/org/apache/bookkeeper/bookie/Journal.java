@@ -1139,7 +1139,7 @@ public class Journal implements CheckpointSource {
                     throw freshIo("Fresh Journal directory listing did not close", fresh.listingCloseFailure);
                 }
             } else {
-                history.ids(0);
+                history.lastJournalId();
             }
             fresh.markDirectories = List.copyOf(ledgerDirsManager.getAllLedgerDirs());
             if (fresh.markDirectories.isEmpty()) {
@@ -1205,7 +1205,7 @@ public class Journal implements CheckpointSource {
      * @param id
      * @param scanOffset
      */
-    void setLastLogMark(Long id, long scanOffset) {
+    void setLastLogMark(long id, long scanOffset) {
         lastLogMark.setCurLogMark(id, scanOffset);
     }
 
@@ -1499,6 +1499,24 @@ public class Journal implements CheckpointSource {
             decrementFreshThread(fresh.producerThreads);
             fresh.producers--;
             fresh.gate.notifyAll();
+        }
+    }
+
+    /** Replay the owned V6 suffix as one historical reader, retaining only a page of file IDs. */
+    boolean replayHistorical(JournalScanner scanner, boolean skipInvalidRecord) throws IOException {
+        if (history == null) {
+            return false;
+        }
+        if (skipInvalidRecord) {
+            throw new IOException("This owned Journal does not admit the requested historical scan");
+        }
+        beginHistoricalRead();
+        try {
+            var mark = lastLogMark.markLog().getCurMark();
+            history.replaySuffix(mark.getLogFileId(), mark.getLogFileOffset(), scanner, this::setLastLogMark);
+            return true;
+        } finally {
+            endHistoricalRead();
         }
     }
 
@@ -1973,11 +1991,17 @@ public class Journal implements CheckpointSource {
         Stopwatch journalFlushWatcher = Stopwatch.createUnstarted();
         long batchSize = 0;
         try {
-            List<Long> journalIds = history == null ? listJournalIds(journalDirectory, null) : history.ids(0);
             // Should not use MathUtils.now(), which use System.nanoTime() and
             // could only be used to measure elapsed time.
             // http://docs.oracle.com/javase/1.5.0/docs/api/java/lang/System.html#nanoTime%28%29
-            long logId = journalIds.isEmpty() ? System.currentTimeMillis() : journalIds.get(journalIds.size() - 1);
+            long logId;
+            if (history == null) {
+                var journalIds = listJournalIds(journalDirectory, null);
+                logId = journalIds.isEmpty() ? System.currentTimeMillis() : journalIds.get(journalIds.size() - 1);
+            } else {
+                long last = history.lastJournalId();
+                logId = last == -1 ? System.currentTimeMillis() : last;
+            }
             long lastFlushPosition = 0;
             boolean groupWhenTimeout = false;
 
@@ -1999,7 +2023,7 @@ public class Journal implements CheckpointSource {
                 // new journal file to write
                 if (null == logFile) {
                     logId = logId + 1;
-                    journalIds = listJournalIds(journalDirectory, null);
+                    List<Long> journalIds = listJournalIds(journalDirectory, null);
                     Long replaceLogId = fileChannelProvider.supportReuseFile() && journalReuseFiles
                         && journalIds.size() >= maxBackupJournals
                         && journalIds.get(0) < lastLogMark.getCurMark().getLogFileId()

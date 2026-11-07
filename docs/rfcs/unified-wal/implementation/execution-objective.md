@@ -50,7 +50,7 @@
 
 共同 route 离线导入已有包内有界 claim 消费器。它从已初始化的原 Bookie control owner 借用同一 Driver，以原 `maxPendingEntries` 分批提交两类已验证清单的 ledger ID，在实际 Ticket 终态后复核原 claim 回执。真实 index 与多份 Journal 验证晚项坏记录、持久前缀、健康重开重扫及 force 在途期间的停止。最终 57 项定向回归和 Java 样式通过。完整受保护 bootstrap owner、受控重放与 flush、封口、ENABLED 和批准 Linux 验收仍待完成。详见 [local-storage](local-storage/README.md#离线-bootstrap-的有界-classic-claim-导入)。
 
-共同 route 离线导入的 Journal ID 清单已按固定页大小枚举，保留各 Journal 的原数字顺序及最大有效 lastMark。真实跨页、目录替换和 claim 续接回归已归档。实际 Classic replay 工作集、受保护装配、flush 与封口仍待接线。详见 [Journal suffix 的只读清单](local-storage/README.md#离线-bootstrap-的-journal-suffix-只读清单)。
+共同 route 离线导入的 Journal ID 清单已按固定页大小枚举，保留各 Journal 的原数字顺序及最大有效 lastMark。真实跨页、目录替换和 claim 续接回归已归档。受控历史 Bookie 的实际 V6 replay 随后接入同一分页，按文件实际关闭推进内存 lastMark。95 项定向回归通过。共同 scope 的受保护装配、重放 gate、flush 与封口仍待接线。详见 [Journal suffix 的只读清单](local-storage/README.md#离线-bootstrap-的-journal-suffix-只读清单)。
 
 Bookie 控制 Driver 的批次提交已有实际终态通知。原 owner 在结果回调返回或抛错、Driver busy 清理以及该 Ticket 的完成额度归还后通知外部调用者。单槽真实顺序 claim、force 失败、回调异常和拒绝接纳已验证，最终 27 项回归和 Java 样式通过。受保护导入仍待接入。详见 [local-storage](local-storage/README.md#离线-bootstrap-的-bookie-控制批次实际终态)。
 

@@ -47,6 +47,7 @@ import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
+import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
@@ -147,6 +148,57 @@ public class ClassicChildResourcesTest {
             }
             assertEquals(ClassicChildResources.State.DRAINED, restarted.closeAndDrain().state());
             assertArrayEquals(original, Files.readAllBytes(version));
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void historicalBookieReplaysTheMarkedSuffixAcrossBoundedJournalPages() throws Exception {
+        try (var f = new Fixture()) {
+            Path journal = f.conf.getJournalDirs()[0].toPath().resolve("current");
+            Path mark = f.conf.getLedgerDirs()[0].toPath().resolve("current/lastMark");
+            int recordSize = Integer.BYTES + 32;
+            Files.write(mark, ByteBuffer.allocate(16).putLong(1)
+                    .putLong(JournalChannel.HEADER_SIZE + recordSize).array());
+            for (long id = 257; id > 0; id--) {
+                var image = ByteBuffer.allocate(JournalChannel.HEADER_SIZE + recordSize * (id == 1 ? 2 : 1));
+                image.putInt(0x424b4c47).putInt(JournalChannel.V6).position(JournalChannel.HEADER_SIZE);
+                if (id == 1) {
+                    putJournalEntry(image, 1000);
+                }
+                putJournalEntry(image, id);
+                Files.write(journal.resolve(Long.toHexString(id) + ".txn"), image.array());
+            }
+            var pages = new AtomicInteger();
+            try (var files = mockStatic(Files.class, org.mockito.Mockito.CALLS_REAL_METHODS)) {
+                files.when(() -> Files.newDirectoryStream(journal)).thenAnswer(invocation -> {
+                    pages.incrementAndGet();
+                    return invocation.callRealMethod();
+                });
+                var resource = f.open();
+                assertEquals(3, pages.get());
+                for (long id : List.of(1L, 256L, 257L)) {
+                    ByteBuf read = resource.bookieForIoTests().readEntry(7, id);
+                    try {
+                        assertEquals(900 + id, read.getLong(24));
+                    } finally {
+                        read.release();
+                    }
+                }
+                assertThrows(Bookie.NoEntryException.class, () -> resource.bookieForIoTests().readEntry(7, 1000));
+                assertEquals(ClassicChildResources.State.DRAINED, resource.closeAndDrain().state());
+            }
+            var completed = ByteBuffer.wrap(Files.readAllBytes(mark));
+            assertEquals(257, completed.getLong());
+            assertEquals(JournalChannel.HEADER_SIZE + recordSize, completed.getLong());
+        }
+    }
+
+    private static void putJournalEntry(ByteBuffer target, long id) {
+        ByteBuf input = entry(id);
+        try {
+            target.putInt(input.readableBytes()).put(input.nioBuffer());
+        } finally {
+            input.release();
         }
     }
 

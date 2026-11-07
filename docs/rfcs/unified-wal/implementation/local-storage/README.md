@@ -2355,7 +2355,11 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 旧实现一次收集全部 Journal ID。真实跨页夹具先观察到该行为，修复后两页各 256 条，以 `Long.MAX_VALUE` 结束。另在保留原 Journal 文件 inode 的情况下替换父目录，确认清单失败。五类 88 项回归通过，满页夹具加强后同类 16 项复验通过，Spotless 与 Checkstyle 通过。日志、命令与阶段源码绑定在 `/Users/liusinan/.codex/artifacts/unified-wal/classic-journal-inventory-paging-evidence-57cfe72c`。
 
-内存上界限定于 claim 清单的 Journal 文件 ID 工作集。实际 Classic replay 的文件清单、整图内存上界、受保护装配、严格 flush、BOOTSTRAP_COMPLETE、PREPARED 到 ENABLED、运行期 route 与批准 Linux 运行仍待验收。
+2026-11-07，基线 `9560d25211`。受控历史 Bookie 的实际 V6 replay 使用同一分页，并在完整 suffix 期间持原 Journal reader。初始 lastMark 只冻结一次，原 scanner 仍按文件数字顺序及首文件 offset 重放。每个文件成功扫描并实际关闭后才推进内存 lastMark，原 flush 与 checkpoint 负责落盘。历史 Journal 的初始化和写者启动单次扫描目录，验证文件并只保留最大 ID。普通 Classic replay 和运行期 Journal 轮转仍沿原路径。
+
+真实 Bookie 用 257 个 V6 文件验证首文件原 cut、跨页条目读回和排空后的持久 lastMark。旧实现只执行预检和一次整表枚举，跨页断言实际失败。另注入第二文件首次 native close 失败，确认进度只推进到第一文件。六类 95 项通过，零失败、错误或跳过。Spotless 与 Checkstyle 通过。原始证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-journal-paged-replay-evidence-9560d252`。
+
+已验证的上界覆盖离线 claim 清单与受控历史 replay 的 Journal 文件 ID 工作集。共同 scope 的受保护装配、先 claim 后重放的 gate、严格 flush 与封口、PREPARED 到 ENABLED、运行期 route、整图内存上界及批准 Linux 运行仍待验收。
 
 ## 离线 bootstrap 的 Classic claim 身份与结果续接
 
