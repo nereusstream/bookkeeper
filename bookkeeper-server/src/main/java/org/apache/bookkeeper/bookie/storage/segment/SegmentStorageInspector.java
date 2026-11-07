@@ -35,6 +35,7 @@ import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.net.BookieId;
 
@@ -74,14 +75,13 @@ public final class SegmentStorageInspector {
         if (!arena.cut().sessionOpen() || arena.grants().isEmpty()
                 || !arena.reconstructionCapacity()
                 || !arena.cut().recordedQuarantineFiles().isEmpty()
-                || !arena.retiredSlots().isEmpty() || !arena.retiredRanges().isEmpty()
                 || bookie.classicHistory() || nonempty == 0
                 || bookie.ledgers().size() != members.size() || bookie.appliedRecoveryGrants() != nonempty
                 || !bookie.tombstones().isEmpty() || bookie.deleteApplied() != null
                 || bookie.deleteHandoff() || bookie.deleteEffective()) {
             throw new IOException("Original scope has unsupported CLOSED reconstruction dependencies");
         }
-        requireReconstructionMoveMode(dependencies, arena.history().committedMoves());
+        requireReconstructionMode(dependencies, arena.history().mode());
         var remaining = new HashMap<ProfileLedgerContext, SegmentBookieControlLog.ObservedLedger>();
         for (var local : bookie.ledgers()) {
             remaining.put(local.context(), local);
@@ -96,11 +96,12 @@ public final class SegmentStorageInspector {
         }
     }
 
-    static void requireReconstructionMoveMode(RecoveryDependencies dependencies, boolean committedMoves)
+    static void requireReconstructionMode(RecoveryDependencies dependencies,
+            ProfileClosedReconstruction.HistoryMode mode)
             throws IOException {
         var arena = dependencies.arena();
-        arena.history().requireMode(committedMoves, dependencies.bookie().observedSequence(),
-                !arena.selections().isEmpty());
+        arena.history().requireMode(mode, dependencies.bookie().observedSequence(),
+                !arena.selections().isEmpty(), arena.retiredSlots().size());
     }
 
     static void requireEmptyReconstructionMember(SegmentBookieControlLog.ObservedLedger local,

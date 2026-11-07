@@ -305,6 +305,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     allocation.streamFirstSequence());
         }
 
+        long extentEnd() {
+            return offset + blocks * BLOCK_BYTES;
+        }
+
         ByteBuffer encode() {
             return ByteBuffer.allocate(48).putInt(file).putInt(ownerShard).putLong(ownerGeneration.value())
                     .putLong(allocationId).putLong(offset).putInt(blocks).putInt(0).putLong(streamFirstSequence).flip();
@@ -712,11 +716,21 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     record ObservedRetirement(UUID operationId, Generation generation, FreeFacts facts) { }
 
-    record ReconstructionHistory(boolean committedMoves, boolean freedOrReused, long requiredBookieCut) {
-        void requireMode(boolean moveMode, long bookieCut, boolean hasSelectors) throws IOException {
-            if (freedOrReused || committedMoves != moveMode || hasSelectors != moveMode
-                    || bookieCut < requiredBookieCut) {
-                throw new IOException("CLOSED reconstruction MOVE mode or original control history differs");
+    record ReconstructionHistory(boolean committedMoves, int successfulFrees, boolean reused, long requiredBookieCut) {
+        ProfileClosedReconstruction.HistoryMode mode() {
+            if (successfulFrees > 0) {
+                return ProfileClosedReconstruction.HistoryMode.RETIRED;
+            }
+            return committedMoves ? ProfileClosedReconstruction.HistoryMode.COMMITTED_MOVE
+                    : ProfileClosedReconstruction.HistoryMode.ORIGINAL;
+        }
+
+        void requireMode(ProfileClosedReconstruction.HistoryMode expected, long bookieCut,
+                boolean hasSelectors, int retiredSlots) throws IOException {
+            if (reused || mode() != expected || retiredSlots != successfulFrees || bookieCut < requiredBookieCut
+                    || (hasSelectors && !committedMoves)
+                    || (expected == ProfileClosedReconstruction.HistoryMode.COMMITTED_MOVE && !hasSelectors)) {
+                throw new IOException("CLOSED reconstruction mode or original control history differs");
             }
         }
     }
@@ -748,7 +762,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     synchronized ReconstructionHistory reconstructionHistory() {
         boolean moves = false;
-        boolean freedOrReused = false;
+        int successfulFrees = 0;
+        boolean reused = false;
         long bookieCut = -1;
         for (var operation : appliedOperations.values()) {
             if (operation.status() != Status.APPLIED_DURABLE) {
@@ -757,12 +772,19 @@ final class SegmentArenaControlLog implements AutoCloseable {
             if (operation.command() instanceof SegmentArenaMove move) {
                 moves = true;
                 bookieCut = Math.max(bookieCut, move.bookieCut());
-            } else if (operation.command() instanceof Free
-                    || operation.command() instanceof Allocation allocation && allocation.expectedGeneration() > 0) {
-                freedOrReused = true;
+            } else if (operation.command() instanceof Free free) {
+                successfulFrees++;
+                bookieCut = Math.max(bookieCut, free.facts().bookieCut());
+            } else if (operation.command() instanceof Allocation allocation && allocation.expectedGeneration() > 0) {
+                reused = true;
             }
         }
-        return new ReconstructionHistory(moves, freedOrReused, bookieCut);
+        return new ReconstructionHistory(moves, successfulFrees, reused, bookieCut);
+    }
+
+    synchronized void requireReconstructionMode(ProfileClosedReconstruction.HistoryMode mode, long bookieCut)
+            throws IOException {
+        reconstructionHistory().requireMode(mode, bookieCut, !selectedMoves.isEmpty(), retiredSlots.size());
     }
 
     /** Only the caller's existing lock scope and owned readers participate in this observation. */
@@ -1416,8 +1438,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     synchronized long retiredExtentEnd(int file, long offset) {
         requireOpenHistory();
         Free free = retiredExtentAt(slot(file, offset));
-        return free == null ? -1 : free.facts().allocation().offset()
-                + free.facts().allocation().blocks() * BLOCK_BYTES;
+        return free == null ? -1 : free.facts().allocation().extentEnd();
     }
 
     synchronized long allocationGeneration(int file, long offset) {

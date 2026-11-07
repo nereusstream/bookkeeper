@@ -15932,6 +15932,17 @@ public class SegmentBookieControlLogTest {
             files.close();
         }
         assertEquals(2, SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024).retiredSlots());
+        SegmentStorageInspector.withRecoveryDependencies(config, identity(), 1024 * 1024, 64,
+                key((byte) 3), VALIDATOR, observed -> {
+                    var arena = observed.arena();
+                    assertEquals(1, arena.history().successfulFrees());
+                    assertFalse(arena.history().reused());
+                    assertTrue(arena.retiredRanges().isEmpty());
+                    assertEquals(end, arena.retiredSlots().get(0).facts().allocation().extentEnd());
+                    SegmentStorageInspector.requireReconstructionMode(observed,
+                            org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction.HistoryMode.RETIRED);
+                    return null;
+                });
         try (SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024);
                 IsolatedSegmentFiles files = IsolatedSegmentFiles.openAppendOnly(
                         config, identity(), arena, new SegmentFileIo())) {
@@ -18169,11 +18180,14 @@ public class SegmentBookieControlLogTest {
                 key((byte) 3), VALIDATOR, observed -> {
                     var arena = observed.arena();
                     assertTrue(arena.history().committedMoves());
-                    assertFalse(arena.history().freedOrReused());
+                    assertEquals(0, arena.history().successfulFrees());
+                    assertFalse(arena.history().reused());
                     assertEquals(Set.copyOf(targets), arena.selectedLocations());
                     int copies = arena.committedCopyCount();
                     assertEquals(4, copies);
-                    SegmentStorageInspector.requireReconstructionMoveMode(observed, true);
+                    SegmentStorageInspector.requireReconstructionMode(observed,
+                            org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction.HistoryMode
+                                    .COMMITTED_MOVE);
                     return arena.grants().size() + arena.streams().size() + targets.size() + copies;
                 });
         var rowLimit = assertThrows(IOException.class, () -> SegmentStorageInspector.withRecoveryDependencies(

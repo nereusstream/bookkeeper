@@ -1844,3 +1844,14 @@ TLC 1.7.4 的正向配置生成 629 个状态，372 个不同状态，队列 0�
 python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" \
   --config-prefix c-closed-moved-image --config-prefix ce-closed-moved-image
 ```
+
+## FREE 后 CLOSED 映像的完整扫描
+
+`ClosedRetiredImage.tla` 将现有 `RetiredSequenceRanges` 提供的确切退休序号与完整扫描的准入条件组合。模型保留已 FREE 的旧范围、两个当前 grant 和一个可能被空 FREE 证明的范围。每个范围的字节均读取，只有当前记录能满足 required entry。只有原成功 FREE 贡献的退休序号可以和当前批次合并。原 native 重放、范围几何和实际 I/O 由 Java 和真实文件回归提供。[FREE 后真实重建](../local-storage/README.md#free-已提交且尚未复用的-closed-重建)
+
+TLC 1.7.4 的正向配置生成 1,088 个状态，544 个不同状态，队列 0，深度 6。三个故障变体分别在用旧 entry 补缺、跳过未授权范围及跨越未证明的序号缺口时命中指定性质。最终核对 1,222 个源码输入和 942 个文件校验和。原始命令、覆盖和轨迹位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-retired-evidence-3b71ba64/model`。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" \
+  --config-prefix c-closed-retired-image --config-prefix ce-closed-retired-image
+```

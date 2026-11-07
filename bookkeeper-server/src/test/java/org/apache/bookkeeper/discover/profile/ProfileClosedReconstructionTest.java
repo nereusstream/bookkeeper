@@ -188,6 +188,14 @@ public class ProfileClosedReconstructionTest {
         ByteBuffer.wrap(downgrade).putInt(4, 4);
         assertThrows(IOException.class, () -> ProfileClosedReconstruction.Admission.decode(downgrade));
         assertTrue(moved.matchesCandidates(ready(List.of(file(0, 4, 11))).candidates()));
+        var retired = new ProfileClosedReconstruction.Admission(base.scope(), base.operation(), base.arenaCut(),
+                base.bookieCut(), base.publisherPid(), base.publisherStartMillis(), base.publisherSession(),
+                base.directory(), base.directoryObject(), base.stagingObject(), List.of(original),
+                base.dependencies(), List.of(member), ProfileClosedReconstruction.HistoryMode.RETIRED);
+        byte[] retiredGolden = encoded.clone();
+        ByteBuffer.wrap(retiredGolden).putInt(4, 6);
+        assertArrayEquals(retiredGolden, retired.encode());
+        assertEquals(retired, ProfileClosedReconstruction.Admission.decode(retiredGolden));
     }
 
     private static ProfileClosedReconstruction.Ready ready(List<ProfileClosedReconstruction.FileImage> files) {

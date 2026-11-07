@@ -666,8 +666,10 @@ final class SegmentDataRecovery {
         private final List<ClosedImageMember> members;
         private final Set<SegmentPointRead.Location> missingTargets;
         private final HashMap<ProfileLedgerContext, ClosedImageEntry[]> ledgers = new HashMap<>();
-        private final HashMap<Long, SegmentArenaControlLog.Allocation> grants = new HashMap<>();
+        private final HashMap<Long, SegmentArenaControlLog.ObservedGrant> grants = new HashMap<>();
         private final HashMap<StreamKey, Long> nextSequence = new HashMap<>();
+        private final Map<Integer, TreeMap<Long, Long>> retiredExtents = new HashMap<>();
+        private final Map<StreamKey, StreamProgress> retiredStreams = new HashMap<>();
         private final MessageDigest entryDigest = sha256();
         private final ByteBuffer page;
         private int nextFile;
@@ -699,19 +701,60 @@ final class SegmentDataRecovery {
                     throw new IOException("CLOSED reconstruction has a duplicate image member");
                 }
             }
+            for (var retirement : arena.retiredSlots()) {
+                var retired = retirement.facts().allocation();
+                long start = retired.offset();
+                long end = retired.extentEnd();
+                if (retirement.generation().value() != 2 || retired.file() < 0 || retired.file() >= config.dataFiles()
+                        || retired.ownerShard() < 0 || retired.ownerShard() >= config.logicalShards()
+                        || retired.ownerShard() % config.dataFiles() != retired.file()
+                        || start < config.alignment()
+                        || (start - config.alignment()) % SegmentArenaControlLog.BLOCK_BYTES != 0
+                        || end <= start || end > config.bytesPerFile()
+                        || overlapsRetirement(retired.file(), start, end)) {
+                    throw new IOException("CLOSED reconstruction has an invalid or overlapping retired extent");
+                }
+                retiredExtents.computeIfAbsent(retired.file(), ignored -> new TreeMap<>()).put(start, end);
+            }
             for (var grant : arena.grants()) {
                 var allocation = grant.allocation();
-                if (allocation.file() != allocation.ownerShard() % config.dataFiles()) {
-                    throw new IOException("CLOSED reconstruction grant is outside its original shard file");
+                if (allocation.file() != allocation.ownerShard() % config.dataFiles()
+                        || overlapsRetirement(allocation.file(), allocation.offset(),
+                                allocation.offset() + allocation.blocks() * SegmentArenaControlLog.BLOCK_BYTES)) {
+                    throw new IOException("CLOSED reconstruction grant is outside its shard file or overlaps FREE");
                 }
-                grants.put(allocation.allocationId(), allocation);
+                grants.put(allocation.allocationId(), grant);
             }
             for (var stream : arena.streams()) {
-                nextSequence.put(new StreamKey(stream.shard(), new Generation(stream.generation())),
-                        stream.firstSequence());
+                var key = new StreamKey(stream.shard(), new Generation(stream.generation()));
+                if (retiredExtents.isEmpty()) {
+                    nextSequence.put(key, stream.firstSequence());
+                } else {
+                    retiredStreams.put(key, new StreamProgress(stream.firstSequence()));
+                }
+            }
+            for (var range : arena.retiredRanges()) {
+                var progress = retiredStreams.get(new StreamKey(range.shard(), range.generation()));
+                if (progress == null || progress.firstSequence != range.streamFirstSequence()) {
+                    throw new IOException("CLOSED reconstruction retirement has no exact original stream");
+                }
+                progress.retire(range.allocationOrder(), range.firstSequence(), range.through());
             }
             missingTargets = new HashSet<>(arena.selectedLocations());
+            for (var target : missingTargets) {
+                var address = target.address();
+                if (overlapsRetirement(address.fileIndex(), address.offset(),
+                        address.offset() + target.batchLength())) {
+                    throw new IOException("CLOSED reconstruction target overlaps a retired extent");
+                }
+            }
             page = ByteBuffer.allocate(config.alignment());
+        }
+
+        private boolean overlapsRetirement(int file, long start, long end) {
+            var extents = retiredExtents.get(file);
+            var possible = extents == null ? null : extents.floorEntry(end - 1);
+            return possible != null && possible.getValue() > start;
         }
 
         String scan(FileChannel data, int fileIndex) throws IOException {
@@ -723,7 +766,19 @@ final class SegmentDataRecovery {
             SegmentFileIo.readFully(data, page.clear(), 0);
             identity.validate(page, config, fileIndex);
             imageDigest.update(page.rewind());
+            var retired = retiredExtents.get(fileIndex);
+            boolean moved = arena.history().committedMoves();
             for (long offset = config.alignment(); offset < bytes;) {
+                Long retiredEnd = retired == null ? null : retired.get(offset);
+                if (retiredEnd != null) {
+                    // A successful FREE ended record authority, not custody of the original file bytes.
+                    do {
+                        SegmentFileIo.readFully(data, page.clear(), offset);
+                        imageDigest.update(page);
+                        offset += config.alignment();
+                    } while (offset < retiredEnd);
+                    continue;
+                }
                 page.clear();
                 SegmentFileIo.readFully(data, page, offset);
                 if (allZero(page)) {
@@ -733,18 +788,24 @@ final class SegmentDataRecovery {
                 }
                 var address = address(page, offset);
                 int batchLength = SegmentBatchParser.batchLength(page, address, bytes);
-                var grant = grants.get(address.allocation());
+                var observedGrant = grants.get(address.allocation());
+                var grant = observedGrant == null ? null : observedGrant.allocation();
                 var stream = new StreamKey(address.shard(), address.streamGeneration());
+                var progress = retiredStreams.get(stream);
                 if (grant == null || address.fileIndex() != fileIndex || grant.file() != fileIndex
                         || grant.ownerShard() != address.shard()
                         || !grant.ownerGeneration().equals(address.streamGeneration())
                         || grant.generation() != address.generation().value() || offset < grant.offset()
                         || batchLength > grant.offset() + grant.blocks() * SegmentArenaControlLog.BLOCK_BYTES - offset
-                        || address.sequence() != nextSequence.getOrDefault(stream, -1L)
+                        || (progress == null && address.sequence() != nextSequence.getOrDefault(stream, -1L))
                         || address.sequence() == Long.MAX_VALUE) {
                     throw new IOException("CLOSED reconstruction batch has no exact grant or continuous stream");
                 }
-                nextSequence.put(stream, address.sequence() + 1);
+                if (progress == null) {
+                    nextSequence.put(stream, address.sequence() + 1);
+                } else {
+                    progress.observe(observedGrant.controlSequence(), address.sequence());
+                }
                 ByteBuffer content = page;
                 if (batchLength > page.remaining()) {
                     content = ByteBuffer.allocate(batchLength);
@@ -753,7 +814,6 @@ final class SegmentDataRecovery {
                 }
                 var batch = SegmentBatchParser.parse(content, address, bytes);
                 imageDigest.update(content);
-                boolean moved = arena.history().committedMoves();
                 var locations = moved ? SegmentPointRead.locations(batch) : List.<SegmentPointRead.Location>of();
                 for (int index = 0; index < batch.records().size(); index++) {
                     var record = batch.records().get(index);
@@ -801,6 +861,11 @@ final class SegmentDataRecovery {
             }
             if (!missingTargets.isEmpty()) {
                 throw new IOException("CLOSED reconstruction is missing an exact current MOVE target");
+            }
+            for (var stream : retiredStreams.values()) {
+                if (!stream.snapshot().contiguous()) {
+                    throw new IOException("CLOSED reconstruction current and retired DATA have a sequence gap");
+                }
             }
             var observed = new HashMap<ProfileLedgerContext, List<ClosedImageEntry>>();
             for (var member : members) {

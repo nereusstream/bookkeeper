@@ -48,6 +48,7 @@ public final class ProfileClosedReconstruction {
     private static final int MIXED_VERSION = 3;
     private static final int FILE_VECTOR_VERSION = 4;
     private static final int COMMITTED_MOVE_VERSION = 5;
+    private static final int RETIRED_VERSION = 6;
     private static final int READY_VECTOR_VERSION = 2;
     private static final int MAX_BYTES = 8192;
     public static final int MAX_MEMBERS = 16;
@@ -93,6 +94,8 @@ public final class ProfileClosedReconstruction {
 
     public enum Kind { NONEMPTY_SELF, EMPTY_TERMINAL }
 
+    public enum HistoryMode { ORIGINAL, COMMITTED_MOVE, RETIRED }
+
     /** Legacy v1 stores just the ledger ID here, with its complete identity bound by the CLOSED digest. */
     public record Member(long ledger, ProfileLedgerContext context, String closed, String sources, Kind kind) {
         public Member(long ledger, ProfileLedgerContext context, String closed, String sources) {
@@ -118,7 +121,16 @@ public final class ProfileClosedReconstruction {
                             long publisherPid, long publisherStartMillis, long publisherSession,
                             String directory, FileIdentity directoryObject, FileIdentity stagingObject,
                             List<FileImage> originals, String dependencies, List<Member> members,
-                            boolean committedMoves) {
+                            HistoryMode historyMode) {
+        public Admission(Scope scope, UUID operation, long arenaCut, long bookieCut, long publisherPid,
+                long publisherStartMillis, long publisherSession, String directory, FileIdentity directoryObject,
+                FileIdentity stagingObject, List<FileImage> originals, String dependencies, List<Member> members,
+                boolean committedMoves) {
+            this(scope, operation, arenaCut, bookieCut, publisherPid, publisherStartMillis, publisherSession,
+                    directory, directoryObject, stagingObject, originals, dependencies, members,
+                    committedMoves ? HistoryMode.COMMITTED_MOVE : HistoryMode.ORIGINAL);
+        }
+
         public Admission(Scope scope, UUID operation, long arenaCut, long bookieCut, long publisherPid,
                 long publisherStartMillis, long publisherSession, String directory, FileIdentity directoryObject,
                 FileIdentity stagingObject, List<FileImage> originals, String dependencies, List<Member> members) {
@@ -139,6 +151,7 @@ public final class ProfileClosedReconstruction {
             requireId(operation);
             Objects.requireNonNull(directoryObject, "directoryObject");
             Objects.requireNonNull(stagingObject, "stagingObject");
+            Objects.requireNonNull(historyMode, "historyMode");
             originals = canonicalFiles(originals);
             Path root = Path.of(directory);
             if (arenaCut < 0 || bookieCut < 0 || publisherPid <= 0 || publisherStartMillis <= 0
@@ -162,7 +175,7 @@ public final class ProfileClosedReconstruction {
             members = List.copyOf(members);
             long previous = -1;
             boolean nonempty = false;
-            boolean legacy = !committedMoves && originals.size() == 1 && members.size() == 1;
+            boolean legacy = historyMode == HistoryMode.ORIGINAL && originals.size() == 1 && members.size() == 1;
             for (var member : members) {
                 if (member.ledger() <= previous || (member.context() == null) != legacy) {
                     throw new IllegalArgumentException("CLOSED reconstruction members are not canonical");
@@ -177,6 +190,11 @@ public final class ProfileClosedReconstruction {
 
         public Image original() {
             return singleImage(originals);
+        }
+
+        /** Whether this record declares the v5 scope with MOVE and no successful FREE. */
+        public boolean committedMoves() {
+            return historyMode == HistoryMode.COMMITTED_MOVE;
         }
 
         boolean matchesCandidates(List<FileImage> candidates) {
@@ -204,11 +222,15 @@ public final class ProfileClosedReconstruction {
             var bytes = new ByteArrayOutputStream();
             try (var out = new DataOutputStream(bytes)) {
                 out.writeInt(ADMISSION);
-                boolean vector = committedMoves || originals.size() > 1;
+                boolean vector = historyMode != HistoryMode.ORIGINAL || originals.size() > 1;
                 boolean legacy = !vector && members.size() == 1;
                 boolean mixed = members.stream().anyMatch(member -> member.kind() == Kind.EMPTY_TERMINAL);
                 int version = vector ? FILE_VECTOR_VERSION : legacy ? VERSION : mixed ? MIXED_VERSION : COHORT_VERSION;
-                out.writeInt(committedMoves ? COMMITTED_MOVE_VERSION : version);
+                out.writeInt(switch (historyMode) {
+                    case ORIGINAL -> version;
+                    case COMMITTED_MOVE -> COMMITTED_MOVE_VERSION;
+                    case RETIRED -> RETIRED_VERSION;
+                });
                 writeScope(out, scope);
                 writeId(out, operation);
                 if (legacy) {
@@ -253,7 +275,8 @@ public final class ProfileClosedReconstruction {
             try (var in = input(bytes, ADMISSION)) {
                 int version = in.readInt();
                 if (version != VERSION && version != COHORT_VERSION && version != MIXED_VERSION
-                        && version != FILE_VECTOR_VERSION && version != COMMITTED_MOVE_VERSION) {
+                        && version != FILE_VECTOR_VERSION && version != COMMITTED_MOVE_VERSION
+                        && version != RETIRED_VERSION) {
                     throw new IOException("Unknown reconstruction admission version");
                 }
                 var scope = new Scope(in.readUTF(), new StorageIncarnation(in.readNBytes(16)), readId(in),
@@ -268,9 +291,13 @@ public final class ProfileClosedReconstruction {
                 String directory = in.readUTF();
                 var directoryObject = readObject(in);
                 var stagingObject = readObject(in);
-                boolean committedMoves = version == COMMITTED_MOVE_VERSION;
-                boolean vector = committedMoves || version == FILE_VECTOR_VERSION;
-                var originals = vector ? readFiles(in, committedMoves ? 1 : 2)
+                HistoryMode historyMode = switch (version) {
+                    case COMMITTED_MOVE_VERSION -> HistoryMode.COMMITTED_MOVE;
+                    case RETIRED_VERSION -> HistoryMode.RETIRED;
+                    default -> HistoryMode.ORIGINAL;
+                };
+                boolean vector = historyMode != HistoryMode.ORIGINAL || version == FILE_VECTOR_VERSION;
+                var originals = vector ? readFiles(in, version == FILE_VECTOR_VERSION ? 2 : 1)
                         : List.of(new FileImage(0, readImage(in)));
                 String dependencies = readDigest(in);
                 List<Member> members;
@@ -296,7 +323,7 @@ public final class ProfileClosedReconstruction {
                 }
                 requireEnd(in);
                 return new Admission(scope, operation, arenaCut, bookieCut, pid, start, session, directory,
-                        directoryObject, stagingObject, originals, dependencies, members, committedMoves);
+                        directoryObject, stagingObject, originals, dependencies, members, historyMode);
             }
         }
 

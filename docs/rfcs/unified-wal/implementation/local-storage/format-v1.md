@@ -143,6 +143,8 @@ action 6 只接受原发布 owner 验证全组 active 并清理完成后构造�
 
 已有成功 MOVE、从未成功 FREE 或复用的原 scope 使用 ADMITTED v5。v5 沿用 v4 的文件向量与 typed 成员行，文件计数允许 1～64，单文件单成员也携带完整 context。版本声明由实际 Arena 与 Bookie 控制重放验证，原控制依赖摘要算法保留。READY 根据文件数使用原 v1 或 v2，action 6 与 DATA 字节合同保持。[MOVE 后 CLOSED 重建](README.md#move-已提交且尚未-free-的-closed-重建)
 
+已有成功 FREE 且从未成功复用的原 scope 使用 ADMITTED v6，沿用 v5 的文件向量和 typed 成员布局。v6 依赖成功重放的 FREE、确切退休 extent 和原序号范围。已退休范围的字节进入原完整文件摘要与候选复制，当前记录只来自仍有效的 grant 和 selector。v1–v5、原控制依赖摘要、READY、action 6、DATA 和 FREE 的字节合同保持。[FREE 后 CLOSED 重建](README.md#free-已提交且尚未复用的-closed-重建)
+
 文件隔离后续 ALLOC 条件失败，原 grant 和 stream 起点仍保留。实际故障可先设置易失准入 gate，只有日志中的 DEVICE_STATE 改变重放状态。持久隔离和无法解析的 OPEN 在控制重放后阻止物理重开。缺少隔离记录或后续 DATA sync 成功均无法解除该限制。实际 driver 和生命周期验证见[本地状态](README.md)。
 
 实际绑定的DATA合批路径在I/O前为该记录共享预留每文件160字节逻辑控制日志容量（128-byte header、16-byte body、16-byte footer）及原owner通知完成槽。普通控制追加不能占用这份容量，未知结果不释放实际I/O资源；成功DATA不写故障记录，只在I/O/owner终结后归还预留。控制忙时每文件保留一条通知并按原序执行，停收仍使用原ticket排空；预留不足先背压，Arena关闭/物理重开拒绝未终结通知。这不预分配实际文件系统空间，也不证明记录落盘前退出、实际控制I/O或owner失败已可跨重启解析。

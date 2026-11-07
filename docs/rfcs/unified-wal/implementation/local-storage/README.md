@@ -998,6 +998,18 @@ Native ADMITTED v2 按 ledger ID 严格递增编码完整 context、原 CLOSED �
 
 最终六项编码、两项实际控制、五项 socket 回归全部通过，Spotless 和 Checkstyle 通过。实际重建范围为 macOS 单 Arena、单 DATA 文件、两个非空成员和 JVM 退出。已有 FREE 或复用历史、损坏恢复、批准 Linux 和真实掉电仍待各自验收，生产 Gate 保持 OPEN。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-move-evidence-51f7f96a`。
 
+### FREE 已提交且尚未复用的 CLOSED 重建
+
+原控制历史至少有一个 `APPLIED_DURABLE` FREE，且所有成功 ALLOC/POOL 均为 fresh。已退休 slot 必须对应成功 FREE，原 Bookie cut 覆盖全体成功 MOVE 和 FREE 的依赖。扫描检查退休 extent 的文件和范围，拒绝与当前 grant 或 selector 重叠。当前批次按原 allocation order 与重放的退休序号合并，由原 `StreamProgress` 检查连续性。空 FREE 不贡献序号。
+
+退休 extent 内的字节完整读取、散列和复制，仍保留原文件几何。原 FREE 已终结这些字节的记录权威，旧 CRC 或旧摘要不参与当前解析。未获退休证明的非零范围须由原 grant 解释。当前普通 entry 或精确 COPY 缺失时拒绝，保留的旧源字节也不能补缺。ADMITTED v6、READY 续接和首次 OPEN 共同绑定原模式。重建后可按已有 allocator 契约复用退休容量，由新 allocation ID、generation 和截止后的 order 授权。[字节合同](format-v1.md#控制记录)
+
+真实 3/3/3 的两本 CLOSED ledger 经原 compaction 写入 COPY、应用 MOVE 和两个 FREE。控制轮转完成后目标 Bookie JVM 退出，保留原 OPEN、两个退休 slot、合并的退休序号和当前 COPY。置零末尾当前 COPY 时，即使旧 ENTRY_DATA 仍完整，准入也拒绝。未分配尾部写入非零字节同样拒绝。将已 FREE 源的一页写成不可解析字节后，v6 重建保留其完整文件摘要和字节，重建派生索引后读回两本原 ledger。SDK 后续以新 ID、generation 2 和原截止后的 order 实际复用一个退休 slot，健康冷启读回原数据和新 ledger。重放的复用历史仍在重建准入检查拒绝。
+
+实际父版 `3b71ba64a6` 拒绝该已退休 scope，父版原生读取入口也拒绝实际 v6 记录。将未分配尾部误当退休范围的故障变体在真实文件上错误准入，恢复精确范围判断后拒绝。
+
+六项编码、两项真实控制、五项 socket 回归和样式检查全部通过。实际范围为 macOS 单 Arena、单 DATA 文件和 JVM 退出。复用后再次异常退出、损坏恢复、批准 Linux 和真实掉电仍待验收，生产 Gate 保持 OPEN。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-retired-evidence-3b71ba64`。[退休完整扫描的有限投影](../models/README.md#free-后-closed-映像的完整扫描)
+
 ## Profile 普通 Add 的真实接线
 
 2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。
