@@ -1800,3 +1800,36 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" \
   --config-prefix ce-profile-restore-dependencies \
   --config-prefix a-profile-delete-retention --config-prefix ce-profile-delete-retention
 ```
+
+## CLOSED 重建发布与启动的有限组合模型
+
+`ClosedReconstructionPublication.tla` 以 `8158ff83573a` 的真实 Java 实现为基线。两个配置分别使用两个非空成员，以及一个非空成员和一个原生 EMPTY 成员。每个配置固定一个 Arena、两个必需 DATA 文件，至多两次 shadow attempt、两次 owned startup 和一次成员生命周期、出生或版本变化。成员快照记录各自的出生、版本和证明类型，文件向量逐项记录对象身份。文件内容、摘要与签名验证、原生受保护出生、原 OPEN 控制依赖、SELF 与 type 12 证明作为已验证输入。
+
+| 模型动作 | 实现中的事件 |
+| --- | --- |
+| `Admit`、`ReadAdmission`、`SubmitClaim`、`CommitClaim`、`ReadClaim` | `admitClosedReconstruction` 原生提交及读回，`beginClosedReconstructionShadow` CAS 后核对原 birth、nonce 和 version |
+| `StartWrite` 至 `FirstClose`、`SyncCandidates` | `freshImages` 对每个新对象写、force、读回和首次关闭，整组成功后清理旧候选并同步 staging |
+| `SubmitReady`、`CommitReady`、`ReadReady` | `readyClosedReconstruction` 检查全体成员并用同一个 multi 终结 shadow 和发布 READY，提交与回执分开 |
+| `CheckPublicationPrefix`、`MoveOld` 至 `SyncNewMove`、`VerifyAllActive`、清理及目录同步 | `finishReady` 验证允许的文件前缀和原控制切点，按索引切换，再核对整组和移除 staging |
+| `IssueResolution`、`ForceResolution`、`ApplyOrReplayResolution` | Arena action 6 以原 operation 结算原 epoch，实际 force 后才有可重放记录；后续 OPEN 保留原追加截止 |
+| `OpenStorage`、`ForceDelete`、`ApplyDelete`、`ReconcileStartup`、`PublishWritable` | `verifyFirstOpen` 核对整组和每个当前成员，owned 启动完成本地 DELETE force、owner apply/cursor 和注册核对后，`Admission.hasCompletedFirstOpen` 才放行该 episode 的非 HELLO 请求 |
+
+JVM 退出保留排队的 native 请求、已发生的名称变化和已发出的底层写入。恢复者重读准入并重新检查发布前缀，已发出的迟到写入只影响原候选对象。目录同步作为独立事件，模型保留进程退出前后的可见状态。已 force 的 action 6 可以在丢回执后重放，重放和健康重启均保留旧 grant 截止。合法 FREE 只移除已删非空成员的旧 grant，新 grant 使用截止后的 order。EMPTY 没有原 grant，成员删除保留原目标义务和邻居的读权限。
+
+两项正向检查之外，可达性见证覆盖四条路径：旧 READY 先赢并丢回复后继任者复用原对象、action 6 force 后退出并重放；旧 READY 晚到被新 shadow 拒绝；第二个文件半切换时退出并接续 READY 后的单成员 DELETE、读回邻居；首次 owned OPEN 后健康清理，新 episode 在 DELETE 追赶前拒绝请求，追赶后才开放。八个故障变体分别漏掉第二成员条件、shadow 版本、整组候选确认、整组切换、清理屏障、后续文件的首次 OPEN 校验、重试的 wire gate 和旧 grant 截止。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" \
+  --config-prefix c-closed-reconstruction \
+  --config-prefix witness-closed-reconstruction \
+  --config-prefix ce-closed-reconstruction
+```
+
+| 正向配置 | 生成状态 | 不同状态 | 剩余队列 | 搜索深度 |
+| --- | ---: | ---: | ---: | ---: |
+| 两个非空成员 | 1,159,706 | 479,160 | 0 | 83 |
+| 非空与 EMPTY 混合 | 972,026 | 405,840 | 0 | 82 |
+
+最终 14 项符合预期。两个正向配置均穷尽搜索。覆盖日志中，原生认领与 READY、首次关闭、逐文件切换、action 6 force/replay、DELETE force/apply、启动门和新 grant 追加均有命中，`ResumeOldTail` 为零。四项见证及八项故障变体均返回指定性质的轨迹。启动门反例实际经过逻辑 DELETE 和健康重试，错误放行时本地 cursor 仍为空。既有 `a-startup-data-exclusion` 与 `a-registration-admission` 的 runner 检查也通过。最终回执核对 1,213 个源码输入和 952 个文件校验和，原始命令、覆盖和轨迹保存在 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-publication-model-evidence-8158ff83/exact`。
+
+投影限于上述有限状态和安全性质。TLC 使用官方 1.7.4、单 worker、固定 seed/fingerprint，无 state constraint 或对称归约。`CHECK_DEADLOCK FALSE` 允许有限终态。真实 fsync、掉电、Linux D2、full-bytes、一般 OPEN 恢复、完整 A/C/D 组合及生产资格仍由各自的验收证据负责。[真实双文件与删除测试](../profile-wire/README.md#不同-data-文件的-closed-成员恢复和删除)
