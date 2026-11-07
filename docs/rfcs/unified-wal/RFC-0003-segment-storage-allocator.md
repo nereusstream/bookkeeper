@@ -303,6 +303,8 @@ DATA batch只共享物理写入、barrier和buffer生命周期，不是跨ledger
 
 2026-11-05，既有 graph restart 可解析一种同身份 OPEN 会话。持原 DATA 排他锁完整重放 Arena，若整个 Arena 历史从未成功应用 ALLOC 或 ALLOC_POOL，且没有控制未决、故障通知或文件隔离，则允许持锁 force 并应用独立的 `DEVICE_STATE` action 4。该记录结束原 epoch，后续仍走正常 DATA 验证、Bookie applied cut、索引和 bootstrap，再开下一 epoch。历史 grant 即使全部 FREE 也继续拒绝。记录写入或 force 结果不确定时，当前启动失败。新 owner 按原必需控制记录规则重放，只有完整且前驱条件匹配的 action 4 才能应用。已授权 DATA 的异常退出、旧 I/O 结果和生产 ACK 仍待验收。[字节合同](implementation/local-storage/format-v1.md)
 
+2026-11-08，独立的 action 5 可解析历史曾授权、但本次 epoch 始终无 DATA grant 的 OPEN。重放须确认前驱受管终态、本次 OPEN 时没有存续 grant，且本 epoch 从未成功应用 ALLOC 或 ALLOC_POOL。当前已获写权限的异常会话仍待独立恢复。新记录的前置条件及实际验证见[本地重开](implementation/local-storage/README.md#本-epoch-始终无-grant-的-open-会话重开)。
+
 涉及既有成功数据的compaction同样须保证new DATA在恢复可发现边界内，才允许`MOVE_COMMIT`、selector切换或释放旧位置。以后若要跨缺口独立发布，须先接受独立块发现/恢复算法；本次不并行建设第二套模式。分别报告write wait、durability wait、physical-prefix wait和locator wait，不将同stream排队归为NVMe延迟。
 
 ### 6.2 对齐缓冲池的NUMA属地

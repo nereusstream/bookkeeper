@@ -114,11 +114,15 @@ Bookie局部FENCE记录的body固定为60字节ledger context；header使用wire
 
 当前ALLOC/ALLOC_POOL body为48字节：file index u32、owner shard u32、owner shard generation u64、allocation ID u64、绝对文件offset u64、whole block数u32、保留零u32、stream首个物理sequence u64。allocation ID为正数，同一Arena内不能重复授给另一范围；同一shard/generation后续分配必须声明相同首序号，否则按条件失败且不授予空间。当前仅接受expected generation=0，成功分配的allocation generation为1；ALLOC要求1块，ALLOC_POOL可覆盖连续多块，每块1 MiB且从DATA身份块后的4096开始。控制header的operation UUID/generation绑定命令重试，文件身份块绑定Arena与storage incarnation。局部日志按batch完整写入并同步，然后按sequence逐条判断/apply；失败no-op仍消耗sequence。只有已同步且成功apply的grant及stream起点可查询；每文件已授权block的最高结束位置可由重放状态计算，并随只读DATA恢复候选报告。零填充的已授权block仍包含在内；这个水位不证明pool中的DATA位置已用或未用，也不授权普通Add或可写重开。完整记录在重开时验证并同步后重放，未知/损坏尾部拒绝可写恢复；未执行下述显式Arena rotation时容量满额停止；尚不支持FREE与复用。此前40字节语义记录不被新解释器接纳；此文件格式仍为可丢弃实验，不承诺跨修订版本重开。
 
-Arena `DEVICE_STATE` v1 有四种 16 字节 body。文件隔离依次编码 version u32=1、action u32=1、DATA file index u32、reserved u32=0，expected generation 固定为 0。会话记录依次编码 version u32=1、action u32、epoch u64。action 2 为 OPEN，action 3 为健康 CLOSE，action 4 为 `RESOLVE_NEVER_ALLOCATED_SESSION`。正 epoch 必须等于外层 operation generation。OPEN 的 expected generation 为 epoch-1，CLOSE 与 action 4 均为 epoch。未知版本、action、长度或身份绑定拒绝重放。旧 reader 遇 action 4 拒绝打开该历史。
+Arena `DEVICE_STATE` v1 有五种 16 字节 body。文件隔离依次编码 version u32=1、action u32=1、DATA file index u32、reserved u32=0，expected generation 固定为 0。会话记录依次编码 version u32=1、action u32、epoch u64。action 2 为 OPEN，action 3 为健康 CLOSE，action 4 为 `RESOLVE_NEVER_ALLOCATED_SESSION`，action 5 为 `RESOLVE_GRANT_FREE_SESSION`。正 epoch 必须等于外层 operation generation，operation UUID 必须非零。OPEN 的 expected generation 为 epoch-1，CLOSE 与两个解析动作均为 epoch。未知版本、action、长度或身份绑定拒绝重放。旧 reader 遇到未知解析动作时拒绝打开该历史。
 
 批次 force 后按序 apply。同一 UUID 和命令沿用原幂等结果，改 body 发生冲突。OPEN 要求前一个 epoch 已结束、predecessor 匹配且无持久文件隔离，首个 epoch 还拒绝接管 legacy allocation。健康 CLOSE 由持同一 DATA 锁的实际 writer 提交。它先关闭新 DATA 准入、排空 I/O 和预留并关闭描述符，确认 Arena 控制和故障通知均已终结、没有文件故障，再持锁完成 CLOSE 的 I/O 和 apply。完整但 force 未知的 CLOSE 经新 owner 验证并恢复同步后可解析为已关闭，原调用仍失败。OPEN 前逻辑预留至少 160 字节 CLOSE 容量。
 
-action 4 仅由既有 graph restart 在持原作用域 DATA 锁、完整 Arena 重放后提交。前驱须为同一仍 OPEN 的 epoch，无运行时 writer、控制未决或文件隔离，并且完整业务历史从未成功应用 ALLOC 或 ALLOC_POOL。已发 grant 后全部 FREE 仍不满足条件。apply 和 replay 都核对该条件。记录结束旧 epoch，保留 epoch 数值与幂等身份，checkpoint 和 rotation 保留该业务记录。原重开验证通过后以普通 OPEN 开启下一 epoch。该记录表达从未授权 DATA 写入的证明。已有授权历史的 OPEN 会话仍拒绝物理重开。
+action 4 仅由既有 graph restart 在持原作用域 DATA 锁、完整 Arena 重放后提交。前驱须为同一仍 OPEN 的 epoch，无运行时 writer、控制未决或文件隔离，并且完整业务历史从未成功应用 ALLOC 或 ALLOC_POOL。已发 grant 后全部 FREE 仍不满足条件。apply 和 replay 都核对该条件。
+
+action 5 使用同一启动锁和控制前置条件。当前 OPEN 的前驱须是受管终态，由健康 CLOSE 或已验证的解析记录建立。应用该 OPEN 时须无存续 grant，从该 OPEN 至原切点也不得成功应用 ALLOC 或 ALLOC_POOL。失败命令与幂等读回保留原结果。已经 FREE 的 grant 仍计入其所在 epoch，继承的 grant 也使本 epoch 不具备解析资格。重放从有序业务记录重建该事实，checkpoint 和 rotation 保留原记录和结果。全生命周期无 grant 的运行时分支优先使用 action 4。
+
+两个解析记录均在 force 和 apply 后结束旧 epoch，保留 epoch 数值及原控制历史。解析动作不产生 CLOSE 尾界或新的 allocation/FREE 事实。新 owner 只重放完整有效记录，原 write/force 结果未确认的尝试保持失败。原重开完成必要 DATA 核验、同步与状态重建后，以普通 OPEN 开启下一 epoch。
 
 文件隔离后续 ALLOC 条件失败，原 grant 和 stream 起点仍保留。实际故障可先设置易失准入 gate，只有日志中的 DEVICE_STATE 改变重放状态。持久隔离和无法解析的 OPEN 在控制重放后阻止物理重开。缺少隔离记录或后续 DATA sync 成功均无法解除该限制。实际 driver 和生命周期验证见[本地状态](README.md)。
 

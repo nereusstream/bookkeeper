@@ -216,12 +216,12 @@ public class SegmentArenaControlLogTest {
         try (SegmentDataFileLock foreign = SegmentDataFileLock.create(temporary.newFolder("foreign-lock").toPath());
                 SegmentDataFileLock lock = SegmentDataFileLock.open(config.directory());
                 SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(), 32768)) {
-            assertThrows(IOException.class, () -> log.resolveNeverAllocatedSession(foreign));
+            assertThrows(IOException.class, () -> log.resolveUnclosedDataSession(foreign));
             var pending = log.appendDurably(List.of(
                     new SegmentArenaControlLog.FileQuarantine(new UUID(0, 2), new Generation(1), 0)));
-            assertThrows(IOException.class, () -> log.resolveNeverAllocatedSession(lock));
+            assertThrows(IOException.class, () -> log.resolveUnclosedDataSession(lock));
             assertEquals(SegmentArenaControlLog.Status.APPLIED_DURABLE, log.applyDurable(pending).get(0).status());
-            assertThrows(IOException.class, () -> log.resolveNeverAllocatedSession(lock));
+            assertThrows(IOException.class, () -> log.resolveUnclosedDataSession(lock));
             assertTrue(log.hasUnclosedDataSession());
             assertTrue(log.hasDurableQuarantine(0));
             assertEquals(1, log.appliedThrough());
@@ -242,7 +242,7 @@ public class SegmentArenaControlLogTest {
             try (SegmentDataFileLock lock = SegmentDataFileLock.open(config.directory());
                     SegmentArenaControlLog log = SegmentArenaControlLog.open(config, identity(),
                             failure.equals("capacity") ? 4288 : 32768, io)) {
-                assertThrows(IOException.class, () -> log.resolveNeverAllocatedSession(lock));
+                assertThrows(IOException.class, () -> log.resolveUnclosedDataSession(lock));
                 assertTrue(log.hasUnclosedDataSession());
                 assertEquals(0, log.appliedThrough());
                 assertThrows(IOException.class, () -> log.requireQuiescentRecovery(config, identity()));
@@ -263,7 +263,7 @@ public class SegmentArenaControlLogTest {
                 } else {
                     assertTrue(log.hasUnclosedDataSession());
                     assertEquals(0, log.appliedThrough());
-                    log.resolveNeverAllocatedSession(lock);
+                    log.resolveUnclosedDataSession(lock);
                 }
                 log.requireQuiescentRecovery(config, identity());
                 assertEquals(1, log.dataSessionEpoch());

@@ -892,6 +892,18 @@ OPEN 记录可能来自进程退出，或来自尚未来得及持久化隔离的
 
 服务级组合覆盖实际持锁并注册的 Bookie 子 JVM 异常退出。原启动路径持久化 action 4、开启新 DATA epoch，经同身份重新注册后由公开 SDK 首次写入并读回。[服务级回执](../profile-wire/README.md#未授权-data-的-bookie-jvm-退出后重新注册)
 
+### 本 epoch 始终无 grant 的 OPEN 会话重开
+
+基线 `73e9563651`。Arena 从原完整重放记录判断本次 OPEN 是否曾有 DATA 写权限。前驱须由健康 CLOSE 或已验证的解析记录结束。成功 OPEN 以当时没有存续 grant 为前提建立资格，本 epoch 中任何成功 ALLOC 或 ALLOC_POOL 都会使资格失效，随后 FREE 也无法恢复。checkpoint fallback 和 rotation 从有序业务历史重算。原 DATA 锁、身份、控制终态和隔离检查继续用于启动。
+
+全生命周期从未授予 DATA 的历史继续使用 action 4。此前用过 DATA、但本次 OPEN 始终无 grant 的历史使用独立 `DEVICE_STATE` action 5。记录 force 并 apply 后结束原 epoch，原 grant、FREE、代数、stream、selector 和 Bookie 前置证据继续参与重开检查。已有有效解析记录的冷重开只应用原结果。普通 OPEN 仍须等待 DATA 验证、同步和后续原启动门。[字节合同](format-v1.md)
+
+真实 Bookie 写入及回收后，健康 CLOSE 留存原历史。子 JVM 在下次 OPEN 前后两处退出，分别覆盖已解析后重启、轮转和再一次无 grant OPEN。原目录与身份随后完成新写、点读、健康关闭和重开。继承旧 grant 和本 epoch 授权后又 FREE 两种历史在轮转后仍拒绝。新增回归还覆盖 action 4 对既有使用历史的拒绝、解码记录直提、错误作用域、控制容量和 action 5 force 失败后的冷读。
+
+四项新增定向测试和 66 项相关回归通过。补充轮转后的 OPEN checkpoint 正向覆盖后，该用例复验通过。Spotless 和 Checkstyle 通过。独立 action 5 向量在原健康关闭及第二次 OPEN 的真实控制历史后追加，当前 reader 可重放原记录及轮转后的 checkpoint。父版本 reader 在原日志遇到未知动作时拒绝，轮转后也无法选取可恢复 checkpoint。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/grant-free-epoch-evidence-73e95636`。
+
+本次覆盖进程退出和实际控制文件回执。现有有限模型未覆盖此解析转移。已授予 DATA 的 OPEN、掉电及生产资格仍待验收。
+
 ### 已授予 DATA 的 OPEN 会话恢复证据
 
 基线 `1fcb9c5016`。现有 `IsolatedSegmentStorage.start` 先持原 DATA 排他锁，再重放 Arena。原锁排除同目录的合作写者。健康 `DEVICE_STATE CLOSE` 由 DATA 实际停收、I/O 排空和文件关闭后的原 writer 产生，保留复用 allocation 的有效尾界。异常退出缺 CLOSE 时，冷读无法判断上次 force 是否完成，或是否有尚未来得及持久化的隔离通知。持久 quarantine、未决控制与已授权 OPEN 均在打开 Bookie control 或索引前拒绝。
@@ -902,7 +914,7 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 只读解析可输出物理候选。恢复同步可为已核验范围建立新的本地持久事实，无法补齐未解析的旧 I/O、缺失尾界或当前 required frontier。健康重开的本地读取和重复成功还依赖原 Bookie cut、恢复清单和已启用的新 session。服务注册随后核对当前 required-device、删除追赶、readiness 与原会话准入。现有镜像/repair 路径消费匹配的当前集群取证与目标授权，可修复替代目标并保留旧目标删除义务。旧镜像、单副本最大 entry、LAC、CRC 或索引覆盖均缺少为原 OPEN 解除隔离的权威。
 
-现有 checkpoint 保留按序的业务操作和应用结果。可进一步评估一个窄子集，即先前 epoch 已健康 CLOSE，本次 OPEN 时没有任何存续 grant，且完整后缀证明本 epoch 没有成功授予 DATA。受管写入必须匹配已应用 grant，因此这组事实可用于证明没有可执行的 DATA 写入。当前末态的空 allocation 集合不足以证明这组事实，解除也仍需独立的持久语义。
+现有 checkpoint 保留按序的业务操作和应用结果。这使前节的无 grant epoch 可以从已有历史证明并独立解析。当前末态的空 allocation 集合仍不足以证明某个 epoch 没有获得过写权限。
 
 一般已授权 OPEN 的恢复协议需冻结可验证的旧 epoch 终结或隔离事实，以及绑定原 scope、Arena/Bookie cut、必要 DATA 与安全追加尾界的证据。现有字节无法补齐未记录的旧 I/O 故障或缺失尾界时，需由写入期的持久见证或受保护的当前集群取证提供必要事实。完成验证和所需同步后，才由独立的可重放决议解除原 OPEN，再走既有新 epoch 与 readiness。证据不足时可使用已有替代目标修复路径，其结果独立于原同身份重开。记录格式、前置权威和放行条件待规划冻结。
 

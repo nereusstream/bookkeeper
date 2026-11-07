@@ -12462,6 +12462,202 @@ public class SegmentBookieControlLogTest {
         assertInspectionImage(before, config.directory());
     }
 
+    @Test(timeout = 60000)
+    public void graphResolvesGrantFreeEpochsAfterHealthyUseAndRotation() throws Exception {
+        var config = config();
+        createHealthyAllocatedEpoch(config, true);
+        runAbruptWriter("session-reopen-unused", config.directory(), 86, "SESSION_OPEN_WITHOUT_GRANT");
+        var open = SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+        assertTrue(open.sessionOpen());
+        assertEquals(2, open.sessionEpoch());
+        assertEquals(0, open.currentAllocations());
+        assertEquals(1, open.retiredSlots());
+        Path journal = config.directory().resolve("arena-control");
+        int prefix = Math.toIntExact(Files.size(journal));
+
+        runAbruptWriter("session-resolved-before-reopen", config.directory(), 86, "SESSION_RESOLUTION_APPLIED");
+        var ended = SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+        assertFalse(ended.sessionOpen());
+        assertEquals(2, ended.sessionEpoch());
+        assertEquals(open.appliedSequence() + 1, ended.appliedSequence());
+        byte[] bytes = Files.readAllBytes(journal);
+        var command = SegmentControlParser.parse(ByteBuffer.wrap(bytes, prefix, bytes.length - prefix),
+                SegmentControlFormat.Owner.ARENA, new Generation(open.physicalGeneration()), ended.appliedSequence());
+        assertEquals(SegmentControlFormat.Type.DEVICE_STATE, command.type());
+        assertEquals(ByteBuffer.allocate(16).putInt(1).putInt(5).putLong(2).flip(), command.body());
+        try (var lock = SegmentDataFileLock.open(config.directory());
+                var arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertThrows(IOException.class, () -> arena.resolveUnclosedDataSession(lock));
+            assertEquals(ended.appliedSequence(), arena.appliedThrough());
+            arena.rotate();
+        }
+
+        runAbruptWriter("session-reopen-unused", config.directory(), 86, "SESSION_OPEN_WITHOUT_GRANT");
+        try (var lock = SegmentDataFileLock.open(config.directory());
+                var arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertTrue(lock.lock().isValid());
+            arena.checkpoint();
+        }
+        var rotated = SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+        assertTrue(rotated.sessionOpen());
+        assertEquals(3, rotated.sessionEpoch());
+        assertTrue(rotated.physicalGeneration() > open.physicalGeneration());
+        assertEquals(1, rotated.retiredSlots());
+        try (var storage = storage(config, 1, 6, 4)) {
+            storage.restart();
+            installStorage(storage, install(48, 21, (byte) 5), activate(48, 22));
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                    storageWrite(storage, context(48), 2).status());
+            try (var read = storageRead(storage, context(48), 2).result()) {
+                assertEquals(2, read.result().record().entryId());
+            }
+        }
+        var closed = SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+        assertFalse(closed.sessionOpen());
+        assertEquals(4, closed.sessionEpoch());
+        try (var storage = storage(config, 1, 6, 4)) {
+            storage.restart();
+            try (var read = storageRead(storage, context(48), 2).result()) {
+                assertEquals(2, read.result().record().entryId());
+            }
+        }
+    }
+
+    @Test(timeout = 60000)
+    public void graphRejectsGrantExposureAtOpenOrBeforeFreeInTheSameEpoch() throws Exception {
+        for (boolean inherited : new boolean[]{true, false}) {
+            String phase = inherited ? "session-reopen-unused" : "session-reopen-then-free";
+            var config = abruptWriterConfig(temporary.getRoot().toPath().resolve(phase));
+            createHealthyAllocatedEpoch(config, !inherited);
+            runAbruptWriter(phase, config.directory(), 86,
+                    inherited ? "SESSION_OPEN_WITHOUT_GRANT" : "SESSION_WITH_FREED_GRANT");
+            try (var lock = SegmentDataFileLock.open(config.directory());
+                    var arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+                assertTrue(lock.lock().isValid());
+                arena.rotate();
+            }
+            var open = SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+            assertTrue(open.sessionOpen());
+            assertEquals(2, open.sessionEpoch());
+            assertEquals(inherited ? 1 : 0, open.currentAllocations());
+            assertTrue(open.checkpointGeneration() > 0);
+            var before = inspectionImage(config.directory());
+            try (var storage = storage(config, 1, 6, 4)) {
+                var failure = assertThrows(IOException.class, storage::restart);
+                assertTrue(failure.getMessage(), failure.getMessage().contains("Unclosed DATA writer session"));
+            }
+            assertInspectionImage(before, config.directory());
+        }
+    }
+
+    @Test(timeout = 60000)
+    public void grantFreeResolutionVectorRequiresStartupAndDoesNotExtendActionFour() throws Exception {
+        byte[] vector = HexFormat.of().parseHex(
+                "555743544c303031000000010000000200000007000000a00000000000000001"
+                + "0000000000000000000000000000000400000000000000020000000000000002"
+                + "0000001000000080000000000000000100000000000000000000000000000000"
+                + "00000000000000000000000000000000000000000000000000000000e9c825bb"
+                + "0000000100000005000000000000000243544c45b968c6030000000000000001");
+        var config = config();
+        createHealthyAllocatedEpoch(config, true);
+        runAbruptWriter("session-reopen-unused", config.directory(), 86, "SESSION_OPEN_WITHOUT_GRANT");
+        var before = inspectionImage(config.directory());
+        long nextSequence;
+        try (var foreign = SegmentDataFileLock.create(temporary.newFolder("foreign").toPath());
+                var arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            var decoded = arena.decodeCommand(ByteBuffer.wrap(vector), 1);
+            var generation = new Generation(1);
+            var encoded = SegmentControlFormat.encode(decoded.type(), generation, 1, decoded.operationId(),
+                    decoded.operationGeneration(), decoded.expectedGeneration(), decoded.body());
+            assertEquals(ByteBuffer.wrap(vector), encoded);
+            assertThrows(IOException.class, () -> arena.submitBatch(List.of(decoded)));
+            assertThrows(IOException.class, () -> arena.resolveUnclosedDataSession(foreign));
+            var wrongExpected = SegmentControlFormat.encode(decoded.type(), generation, 1, decoded.operationId(),
+                    decoded.operationGeneration(), 1, decoded.body());
+            assertThrows(IOException.class, () -> arena.decodeCommand(wrongExpected, 1));
+            nextSequence = arena.appliedThrough() + 1;
+        }
+        assertInspectionImage(before, config.directory());
+
+        ByteBuffer oldResolution = SegmentControlFormat.encode(SegmentControlFormat.Type.DEVICE_STATE,
+                new Generation(1), nextSequence, new UUID(0, 4), new Generation(2), 2,
+                ByteBuffer.allocate(16).putInt(1).putInt(4).putLong(2).flip());
+        try (var log = FileChannel.open(config.directory().resolve("arena-control"), StandardOpenOption.WRITE)) {
+            new SegmentFileIo().writeFully(log, oldResolution, log.size());
+            log.force(true);
+        }
+        var refusal = assertThrows(IOException.class,
+                () -> SegmentArenaControlLog.open(config, identity(), 1024 * 1024));
+        assertTrue(refusal.getMessage(), refusal.getMessage().contains("Invalid resolution"));
+    }
+
+    @Test(timeout = 60000)
+    public void grantFreeResolutionCapacityAndForceFailuresDoNotAdmitTheOldAttempt() throws Exception {
+        var config = config();
+        createHealthyAllocatedEpoch(config, true);
+        runAbruptWriter("session-reopen-unused", config.directory(), 86, "SESSION_OPEN_WITHOUT_GRANT");
+        Path journal = config.directory().resolve("arena-control");
+        long before = Files.size(journal);
+        long originalCut;
+        try (var lock = SegmentDataFileLock.open(config.directory());
+                var arena = SegmentArenaControlLog.open(config, identity(), before + 159)) {
+            originalCut = arena.appliedThrough();
+            assertThrows(SegmentControlCapacityException.class, () -> arena.resolveUnclosedDataSession(lock));
+            assertTrue(arena.hasUnclosedDataSession());
+            assertEquals(originalCut, arena.appliedThrough());
+            assertEquals(before, Files.size(journal));
+        }
+        var io = new SegmentFileIo(160, -1, 1, false);
+        try (var lock = SegmentDataFileLock.open(config.directory());
+                var arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024, io)) {
+            assertThrows(IOException.class, () -> arena.resolveUnclosedDataSession(lock));
+            assertEquals(1, io.forces);
+            assertTrue(arena.hasUnclosedDataSession());
+            assertEquals(originalCut, arena.appliedThrough());
+            assertThrows(IOException.class, () -> arena.requireQuiescentRecovery(config, identity()));
+        }
+        assertEquals(before + 160, Files.size(journal));
+        try (var lock = SegmentDataFileLock.open(config.directory());
+                var arena = SegmentArenaControlLog.open(config, identity(), 1024 * 1024)) {
+            assertEquals(2, arena.dataSessionEpoch());
+            assertFalse(arena.hasUnclosedDataSession());
+            assertEquals(originalCut + 1, arena.appliedThrough());
+            assertThrows(IOException.class, () -> arena.resolveUnclosedDataSession(lock));
+            assertEquals(before + 160, Files.size(journal));
+        }
+    }
+
+    private void createHealthyAllocatedEpoch(IsolatedSegmentConfig config, boolean reclaim) throws Exception {
+        try (var storage = storage(config, 1, 6, 4)) {
+            storage.startNew();
+            installStorage(storage, install(1, (byte) 5), activate(2));
+            var result = storageWrite(storage, context(), 1);
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
+            if (reclaim) {
+                reclaimCrashFixtureEntry(storage, result, 20);
+            }
+        }
+        var closed = SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+        assertFalse(closed.sessionOpen());
+        assertEquals(1, closed.sessionEpoch());
+        assertEquals(reclaim ? 0 : 1, closed.currentAllocations());
+    }
+
+    private static void reclaimCrashFixtureEntry(IsolatedSegmentStorage storage,
+            SegmentDataPhysicalDriver.NormalResult written, int operation) throws Exception {
+        installStorage(storage, tombstone(written.context().ledgerId(), operation));
+        var reply = new CompletableFuture<IsolatedSegmentStorage.FreeResult>();
+        assertTrue(storage.reclaimAllocation(new UUID(0, operation + 1),
+                written.candidate().address().allocation(), new IsolatedSegmentStorage.FreeRequest((result, cause) -> {
+                    if (cause == null) {
+                        reply.complete(result);
+                    } else {
+                        reply.completeExceptionally(cause);
+                    }
+                })));
+        assertEquals(IsolatedSegmentStorage.FreeStatus.APPLIED_DURABLE, reply.get(5, TimeUnit.SECONDS).status());
+    }
+
     @Test
     public void unclosedSessionRejectsGraphRestartBeforeBookieAndIndexOpen() throws Exception {
         IsolatedSegmentConfig config = config();
@@ -12762,7 +12958,7 @@ public class SegmentBookieControlLogTest {
                 && !"append-after-restart".equals(args[0]) && !"session-force-error".equals(args[0])
                 && !"normal-clean-close".equals(args[0]) && !"session-open-unused".equals(args[0])
                 && !"session-reopen-unused".equals(args[0]) && !"session-resolved-before-reopen".equals(args[0])
-                && !"session-freed-unused".equals(args[0]))) {
+                && !"session-freed-unused".equals(args[0]) && !"session-reopen-then-free".equals(args[0]))) {
             throw new IllegalArgumentException("Expected abrupt writer phase and directory");
         }
         IsolatedSegmentConfig config = abruptWriterConfig(Path.of(args[1]));
@@ -12785,8 +12981,21 @@ public class SegmentBookieControlLogTest {
         if ("session-resolved-before-reopen".equals(args[0])) {
             try (SegmentDataFileLock lock = SegmentDataFileLock.open(config.directory());
                     SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024)) {
-                arena.resolveNeverAllocatedSession(lock);
+                arena.resolveUnclosedDataSession(lock);
                 System.out.println("SESSION_RESOLUTION_APPLIED");
+                System.out.flush();
+                Runtime.getRuntime().halt(86);
+            }
+        }
+        if ("session-reopen-then-free".equals(args[0])) {
+            var test = new SegmentBookieControlLogTest();
+            try (var storage = test.storage(config, 1, 6, 4)) {
+                storage.restart();
+                installStorage(storage, install(48, 21, (byte) 5), activate(48, 22));
+                var result = storageWrite(storage, context(48), 2);
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, result.status());
+                reclaimCrashFixtureEntry(storage, result, 40);
+                System.out.println("SESSION_WITH_FREED_GRANT");
                 System.out.flush();
                 Runtime.getRuntime().halt(86);
             }
