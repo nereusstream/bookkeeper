@@ -89,6 +89,7 @@ public final class SegmentClassicBootstrap {
     private final ClassicBootstrapStorage inventory = ClassicBootstrapStorage.prepare();
     private ClassicBootstrapSources sources;
     private SegmentClassicHandoffMaterials materials;
+    private SegmentClassicBootstrapClaims importer;
     private Thread checking;
     private Thread draining;
     private boolean attempted;
@@ -145,14 +146,7 @@ public final class SegmentClassicBootstrap {
     /** The caller retains the verified Arena, root and control owners until this scope actually drains. */
     void verifyEnabled(SegmentClassicRootBindings roots, SegmentClassicArenaBindings arenas,
             SegmentBookieControlLog.Owned control) throws IOException {
-        ClassicBootstrapSnapshot original;
-        synchronized (this) {
-            if (boundNative().binding().phase() != BookieRouteBinding.Phase.ENABLED || checking != null) {
-                throw new IOException("Classic bootstrap verification requires a bound ENABLED scope");
-            }
-            original = bound;
-            checking = Thread.currentThread();
-        }
+        var original = beginInventory(BookieRouteBinding.Phase.ENABLED);
         try {
             var bookie = control.log();
             var seal = original.nativeBinding().binding().seal().orElseThrow();
@@ -166,28 +160,73 @@ public final class SegmentClassicBootstrap {
                     throw new IOException("Original bootstrap cut does not include the claim for ledger " + ledger);
                 }
             });
-            var drained = inventory.closeAndDrain();
-            if (!drained.drained()) {
-                throw new IOException("Classic bootstrap inventory has unresolved resources", drained.closeFailure());
-            }
+            drainInventory();
             requireCurrentSources(original);
             arenas.requireVerified(original.nativeBinding().binding().manifest());
             if (before != bookie.requireSealedBootstrapCut(seal)) {
                 throw new IOException("Bookie control changed during the sealed Classic inventory");
             }
-            synchronized (this) {
-                requireOpen();
-                checking = null;
-            }
+            finishInventory();
         } catch (IOException | RuntimeException | Error failure) {
             fail(failure);
             throw failure;
         }
     }
 
+    /** The enclosing owner must hold the original old-writer fence, roots, Arena and control resources. */
+    void importPrepared(SegmentClassicRootBindings roots, SegmentClassicArenaBindings arenas,
+            SegmentBookieControlLog.Owned control, SegmentBookieControlDriver driver) throws IOException {
+        var claims = new SegmentClassicBootstrapClaims(control, driver);
+        ClassicBootstrapSnapshot original;
+        synchronized (this) {
+            original = beginInventory(BookieRouteBinding.Phase.PREPARED);
+            importer = claims;
+        }
+        try {
+            var bookie = control.log();
+            var binding = original.nativeBinding();
+            roots.verifyPreparedOwner(manager, binding, bookie);
+            arenas.requireVerified(binding.binding().manifest());
+            requireCurrentSources(original);
+            inventory.initialize(new InventorySession(this, roots.inventoryConfiguration()));
+            claims.importClaims(visitor -> {
+                inventory.scan(visitor::visit);
+                drainInventory();
+            });
+            requireCurrentSources(original);
+            arenas.requireVerified(binding.binding().manifest());
+            finishInventory();
+        } catch (IOException | RuntimeException | Error failure) {
+            fail(failure);
+            throw failure;
+        }
+    }
+
+    private synchronized ClassicBootstrapSnapshot beginInventory(BookieRouteBinding.Phase phase) throws IOException {
+        if (boundNative().binding().phase() != phase || checking != null) {
+            throw new IOException("Classic bootstrap inventory requires a bound " + phase + " scope");
+        }
+        checking = Thread.currentThread();
+        return bound;
+    }
+
+    private void drainInventory() throws IOException {
+        var drained = inventory.closeAndDrain();
+        if (!drained.drained()) {
+            throw new IOException("Classic bootstrap inventory has unresolved resources", drained.closeFailure());
+        }
+    }
+
+    private synchronized void finishInventory() throws IOException {
+        requireOpen();
+        importer = null;
+        checking = null;
+    }
+
     private synchronized void fail(Throwable failure) {
         initializationFailure = failure;
         bound = null;
+        importer = null;
         checking = null;
     }
 
@@ -259,6 +298,9 @@ public final class SegmentClassicBootstrap {
             Thread caller = Thread.currentThread();
             if (caller == checking || caller == draining) {
                 throw new IllegalStateException("Classic bootstrap preparation cannot drain its own activity");
+            }
+            if (importer != null) {
+                importer.stop(new IOException("Classic bootstrap preparation is closing"));
             }
             closing = true;
             bound = null;

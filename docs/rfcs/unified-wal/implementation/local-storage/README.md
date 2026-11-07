@@ -2418,3 +2418,13 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 真实 ZooKeeper 和文件夹具覆盖完整格式化的 Arena、独立 index 和两个 Journal。Journal 配置顺序与 manifest 排序不同，验证 `lastMark.1` 仍定位原第二个 Journal。新增实际文件打开挂起与首次关闭失败用例，使用独立进程观察 supervisor guard。首轮关闭夹具重复包装了 JDK 的两个 open 重载，修正后八类 118 项全部通过，Spotless 和 Checkstyle 通过。修正前同一生产源码的 301 项控制日志回归单独保留。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-reader-bridge-evidence-4faccb12`。
 
 当前接通包内 `ENABLED` 只读路径。Arena、Classic 根和 Bookie control 仍由调用方持有。完整公开启动还需装配这些资源的排空顺序和 supervisor 最终释放，并接入实时 Unix 采用、首次导入的写入门控、PREPARED 恢复和批准 Linux 验收。
+
+## PREPARED 的 Classic 清单与控制批次接线
+
+2026-11-07，基线 `b86b54cdfa`。包内 PREPARED 导入在持有原 Classic 根、原生绑定、完整标记、已核验 Arena 和未封口 Bookie control 时，使用同一 `ClassicBootstrapStorage` 逐项读取实际清单。外层负责旧写者隔离。导入仅使用与本次重开控制日志同一实例的 driver。批次在实际 force、顺序 apply 和 Ticket 终态后核对回执。最后不足一批的尾项在两个 reader 实际排空后提交。
+
+关闭请求停止接受后续批次，并保留在途 reader、已接纳的原控制操作和 supervisor guard 至其实际返回。坏记录后的健康重开用同一原回执跳过已持久前缀，并从真实文件重新读完清单。完成后复查原生来源、注册缺失、签名根及 Arena 状态。
+
+真实 ZooKeeper、独立 index、双 Journal 和单槽 control driver 夹具覆盖坏 Journal 后的持久前缀及重开补齐，以及实际 force 挂起期间关闭。检查原 UUID 和回执、未提交后续 claim、原数据文件字节与 `PREPARED` 状态。本地已封口而原生仍为 `PREPARED` 时，在读取前拒绝导入。首轮 120 项通过，样式发现一处测试行长问题。修正并补齐封口用例后，八类 121 项全部通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-prepared-import-evidence-b86b54cd`。
+
+当前交付首次导入的 claim 阶段。后续仍需接入保护范围的公开装配、重放及索引写入前的逐项 gate、严格 flush 到封口、已封口 `PREPARED` 的原生续接和批准 Linux 验收。

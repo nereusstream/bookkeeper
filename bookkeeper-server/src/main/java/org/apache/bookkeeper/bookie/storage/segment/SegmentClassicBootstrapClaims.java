@@ -65,7 +65,7 @@ final class SegmentClassicBootstrapClaims {
      * Called once on an external cold thread outside the owner loop and its I/O service. The enclosing scope keeps
      * the sources and both control resources exclusive and alive, including after stop, until they actually drain.
      */
-    void importClaims(LedgerSource indexes, LedgerSource journals) throws IOException {
+    void importClaims(LedgerSource inventory) throws IOException {
         if (driver.isOwnerThread()) {
             throw new IllegalStateException("Bookie control owner cannot wait for its own batch");
         }
@@ -83,10 +83,7 @@ final class SegmentClassicBootstrapClaims {
             var log = owned.log();
             driver.requireLog(log);
             int limit = log.unsealedBootstrapClaimLimit();
-            LedgerVisitor visitor = ledger -> visit(log, limit, ledger);
-            indexes.scan(visitor);
-            checkRunning();
-            journals.scan(visitor);
+            inventory.scan(ledger -> visit(log, limit, ledger));
             checkRunning();
             flush(log);
             log.unsealedBootstrapClaimLimit();

@@ -54,6 +54,8 @@
 
 共同 route 离线导入已有包内有界 claim 消费器。它从已初始化的原 Bookie control owner 借用同一 Driver，以原 `maxPendingEntries` 分批提交两类已验证清单的 ledger ID，在实际 Ticket 终态后复核原 claim 回执。真实 index 与多份 Journal 验证晚项坏记录、持久前缀、健康重开重扫及 force 在途期间的停止。最终 57 项定向回归和 Java 样式通过。完整受保护 bootstrap owner、受控重放与 flush、封口、ENABLED 和批准 Linux 验收仍待完成。详见 [local-storage](local-storage/README.md#离线-bootstrap-的有界-classic-claim-导入)。
 
+包内 `PREPARED` 首次导入已将实际持锁清单接到同一 Bookie control driver，使用原回执续接已持久前缀。关闭保留原已接纳批次直到实际终态。首次导入的 Classic 写入门控、封口与原生状态续接仍待接线。详见 [PREPARED 的清单与控制批次接线](local-storage/README.md#prepared-的-classic-清单与控制批次接线)。
+
 共同 route 离线导入的 Journal ID 清单已按固定页大小枚举，保留各 Journal 的原数字顺序及最大有效 lastMark。真实跨页、目录替换和 claim 续接回归已归档。受控历史 Bookie 的实际 V6 replay 随后接入同一分页，按文件实际关闭推进内存 lastMark。95 项定向回归通过。共同 scope 的受保护装配、重放 gate、flush 与封口仍待接线。详见 [Journal suffix 的只读清单](local-storage/README.md#离线-bootstrap-的-journal-suffix-只读清单)。
 
 受控历史 Bookie 现等待原 SyncThread 完成 replay flush 与全部 Journal lastMark checkpoint 后才启动写者。轮转期间的 entry-log flush 保留，源 Journal 的 mark 推进与裁剪等待相应边界。实际 lastMark 路径冲突已复现旧启动误报成功，修复后拒绝启动并保留原 I/O 错误。共同离线 bootstrap 的受保护接线与封口仍待完成。详见 [受控历史 Bookie 的启动 flush](local-storage/README.md#受控历史-bookie-的启动-flush)。

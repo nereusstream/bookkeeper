@@ -515,8 +515,10 @@ public class SegmentOwnedBookieControlLogTest {
 
     private record History(Path journal, Path ledger) {
         void scan(SegmentClassicBootstrapClaims importer) throws IOException {
-            importer.importClaims(visitor -> ClassicClaimTestHistory.readIndex(ledger, visitor::visit),
-                    visitor -> ClassicClaimTestHistory.readJournal(journal, ledger, visitor::visit));
+            importer.importClaims(visitor -> {
+                ClassicClaimTestHistory.readIndex(ledger, visitor::visit);
+                ClassicClaimTestHistory.readJournal(journal, ledger, visitor::visit);
+            });
         }
     }
 

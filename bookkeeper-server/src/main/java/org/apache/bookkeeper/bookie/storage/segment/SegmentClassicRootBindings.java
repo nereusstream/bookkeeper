@@ -190,15 +190,26 @@ final class SegmentClassicRootBindings implements AutoCloseable {
 
     synchronized long verifyEnabledOwner(ZKRegistrationManager sourceManager, BookieRouteBinding.Observation source,
             SegmentBookieControlLog bookie) throws IOException {
-        requireLive();
-        if (!locked || manager != sourceManager || !nativeBinding.equals(source)
-                || nativeBinding.binding().phase() != BookieRouteBinding.Phase.ENABLED) {
-            throw new IOException("Common owner does not hold the verified native ENABLED scope");
-        }
-        bookie.requireCommonBinding(nativeBinding.binding().bindingId(), manifest.identity());
+        requireOwner(sourceManager, source, BookieRouteBinding.Phase.ENABLED, bookie);
         long appliedThrough = bookie.requireSealedBootstrapCut(nativeBinding.binding().seal().orElseThrow());
         verifyExisting();
         return appliedThrough;
+    }
+
+    synchronized void verifyPreparedOwner(ZKRegistrationManager sourceManager, BookieRouteBinding.Observation source,
+            SegmentBookieControlLog bookie) throws IOException {
+        requireOwner(sourceManager, source, BookieRouteBinding.Phase.PREPARED, bookie);
+        bookie.unsealedBootstrapClaimLimit();
+        verifyExisting();
+    }
+
+    private void requireOwner(ZKRegistrationManager sourceManager, BookieRouteBinding.Observation source,
+            BookieRouteBinding.Phase phase, SegmentBookieControlLog bookie) throws IOException {
+        requireLive();
+        if (!locked || manager != sourceManager || !nativeBinding.equals(source) || source.binding().phase() != phase) {
+            throw new IOException("Common owner does not hold the verified native " + phase + " scope");
+        }
+        bookie.requireCommonBinding(nativeBinding.binding().bindingId(), manifest.identity());
     }
 
     /** Original configured order, using the canonical directories of the held scope. */

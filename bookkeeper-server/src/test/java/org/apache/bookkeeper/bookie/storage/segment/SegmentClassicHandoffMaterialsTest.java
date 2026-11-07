@@ -325,12 +325,18 @@ public class SegmentClassicHandoffMaterialsTest {
         assertTrue(client.getState().isAlive());
     }
 
-    private record SealedScope(NativeSources sources, IsolatedSegmentConfig control,
-                               SegmentBookieControlLog.RouteBinding route,
-                               BookieRouteBinding.BootstrapSeal localSeal,
-                               BookieRouteBinding.Observation enabled) { }
+    private record PreparedScope(NativeSources sources, IsolatedSegmentConfig control,
+                                 SegmentBookieControlLog.RouteBinding route) { }
 
-    private SealedScope sealScope(boolean exactSeal) throws Exception {
+    private record SealedScope(PreparedScope prepared,
+                               BookieRouteBinding.BootstrapSeal localSeal,
+                               BookieRouteBinding.Observation enabled) {
+        NativeSources sources() {
+            return prepared.sources();
+        }
+    }
+
+    private PreparedScope preparedScope(int batchLimit) throws Exception {
         Path controlRoot = manifest.controlDirectory();
         Files.delete(controlRoot.resolve("bookie-control.lock"));
         Files.delete(controlRoot);
@@ -354,11 +360,10 @@ public class SegmentClassicHandoffMaterialsTest {
         Files.write(ledger.resolve("lastMark.1"), ByteBuffer.allocate(16).putLong(1).putLong(markedOffset).array());
         ClassicClaimTestHistory.writeJournal(secondJournal.directory().resolve("current/7.txn"), 13);
         ClassicClaimTestHistory.writeIndex(index.directory().resolve("current"), 11);
-        var config = new IsolatedSegmentConfig(controlRoot, 1, 1, 1, 16384, 4096, 1024, 16,
+        var config = new IsolatedSegmentConfig(controlRoot, 1, 1, 1, 16384, 4096, 1024, batchLimit,
                 "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
         var route = new SegmentBookieControlLog.RouteBinding(nativeScope.binding().bindingId(), manifest.identity());
         var io = new SegmentFileIo();
-        BookieRouteBinding.BootstrapSeal seal;
         NativeSources sources;
         try (var bookie = SegmentBookieControlLog.createManifestControl(config, manifest, manifest.identity(), 32768,
                 new SecretKeySpec(filled(32, 10), "AES"), new ProfileDescriptorValidator((i, v) -> false,
@@ -378,23 +383,38 @@ public class SegmentClassicHandoffMaterialsTest {
                     nativeScope)) {
                 roots.openLocks(io);
                 roots.createMarkers(bookie, io);
-                var indexClaim = bookie.prepareBootstrapClaim(11).command();
-                var journalClaim = bookie.prepareBootstrapClaim(13).command();
-                var complete = new SegmentBookieControlLog.RouteChange(
-                        SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, 1, route, new UUID(0, 20));
-                var results = bookie.applyDurable(bookie.appendChangesDurably(List.of(indexClaim, journalClaim,
-                        complete)));
-                assertEquals(List.of(SegmentBookieControlLog.Status.APPLIED_DURABLE,
-                        SegmentBookieControlLog.Status.APPLIED_DURABLE,
-                        SegmentBookieControlLog.Status.APPLIED_DURABLE),
-                        results.stream().map(SegmentBookieControlLog.Result::status).toList());
-                seal = bookie.bootstrapSeal().orElseThrow();
             }
         }
+        return new PreparedScope(sources, config, route);
+    }
+
+    private SealedScope sealScope(boolean exactSeal) throws Exception {
+        var prepared = preparedScope(16);
+        var seal = sealControl(prepared);
         var published = exactSeal ? seal
                 : new BookieRouteBinding.BootstrapSeal(new UUID(0, 21), seal.sequence(), seal.appliedCut());
-        var enabled = sources.manager().completeBookieRouteBinding(nativeScope, published).observation().orElseThrow();
-        return new SealedScope(sources, config, route, seal, enabled);
+        var enabled = prepared.sources().manager().completeBookieRouteBinding(nativeScope, published)
+                .observation().orElseThrow();
+        return new SealedScope(prepared, seal, enabled);
+    }
+
+    private BookieRouteBinding.BootstrapSeal sealControl(PreparedScope prepared) throws Exception {
+        var owner = coldControl(prepared, new SegmentFileIo());
+        try {
+            owner.initialize();
+            var bookie = owner.log();
+            var indexClaim = bookie.prepareBootstrapClaim(11).command();
+            var journalClaim = bookie.prepareBootstrapClaim(13).command();
+            var complete = new SegmentBookieControlLog.RouteChange(
+                    SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, 1, prepared.route(), new UUID(0, 20));
+            var results = bookie.applyDurable(bookie.appendChangesDurably(List.of(indexClaim, journalClaim, complete)));
+            assertEquals(List.of(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    SegmentBookieControlLog.Status.APPLIED_DURABLE, SegmentBookieControlLog.Status.APPLIED_DURABLE),
+                    results.stream().map(SegmentBookieControlLog.Result::status).toList());
+            return bookie.bootstrapSeal().orElseThrow();
+        } finally {
+            assertTrue(owner.closeAndDrain().drained());
+        }
     }
 
     private static SegmentArenaManifest.ClassicRoot additionalClassicRoot(Path path,
@@ -404,7 +424,7 @@ public class SegmentClassicHandoffMaterialsTest {
         return new SegmentArenaManifest.ClassicRoot(path, Set.of(role));
     }
 
-    private SegmentBookieControlLog.Owned coldControl(SealedScope scope, SegmentFileIo io) throws IOException {
+    private SegmentBookieControlLog.Owned coldControl(PreparedScope scope, SegmentFileIo io) throws IOException {
         return SegmentBookieControlLog.ownedExisting(scope.control(), manifest, manifest.identity(), 32768,
                 new SecretKeySpec(filled(32, 10), "AES"), new ProfileDescriptorValidator((i, v) -> false,
                         (i, v) -> false), io, scope.route());
@@ -434,10 +454,14 @@ public class SegmentClassicHandoffMaterialsTest {
 
     private void withColdEnabled(SealedScope scope, SegmentClassicBootstrap preparation, ColdEnabledOperation action)
             throws Exception {
-        assertEquals(scope.enabled(), preparation.boundNative());
-        var io = new SegmentFileIo();
+        withColdScope(scope.prepared(), scope.enabled(), preparation, new SegmentFileIo(), action);
+    }
+
+    private void withColdScope(PreparedScope scope, BookieRouteBinding.Observation observation,
+            SegmentClassicBootstrap preparation, SegmentFileIo io, ColdEnabledOperation action) throws Exception {
+        assertEquals(observation, preparation.boundNative());
         try (var roots = new SegmentClassicRootBindings(classicConfiguration(), scope.sources().manager(), manifest,
-                preparation.boundNative())) {
+                observation)) {
             roots.openLocks(io);
             var control = coldControl(scope, io);
             var arenas = new SegmentClassicArenaBindings(manifest, manifest.identity(), 32768);
@@ -450,6 +474,162 @@ public class SegmentClassicHandoffMaterialsTest {
                 assertTrue(control.closeAndDrain().drained());
             }
         }
+    }
+
+    @FunctionalInterface
+    private interface ClaimDriverOperation {
+        void run(SegmentBookieControlDriver driver) throws Exception;
+    }
+
+    private static void withClaimDriver(SegmentBookieControlLog log, ClaimDriverOperation action) throws Exception {
+        var loop = new SegmentOwnerLoop(1, 1, 0, 1, 1);
+        var io = new SegmentIoExecutor(1, 1, 1, 1);
+        loop.start();
+        try {
+            action.run(new SegmentBookieControlDriver(loop, io, log));
+        } finally {
+            loop.stopAdmission();
+            io.shutdown();
+            assertTrue(io.awaitTermination(Duration.ofSeconds(5)));
+            assertTrue(loop.awaitTermination(Duration.ofSeconds(5)));
+            assertNull(loop.failure());
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void preparedImportReopensAndRetainsTheDurablePrefixAfterABadJournal() throws Exception {
+        var scope = preparedScope(1);
+        Path lateJournal = manifest.classicRoots().get(0).directory().resolve("current/1.txn");
+        Path otherJournal = manifest.classicRoots().get(3).directory().resolve("current/7.txn");
+        Path index = manifest.classicRoots().get(2).directory().resolve("current")
+                .resolve(IndexPersistenceMgr.getLedgerName(11));
+        byte[] originalLate = Files.readAllBytes(lateJournal);
+        byte[] originalIndex = Files.readAllBytes(index);
+        byte[] originalOther = Files.readAllBytes(otherJournal);
+        ClassicClaimTestHistory.writeBadRepeatedRecord(otherJournal, 13);
+        var first = prepare(scope.sources(), Duration.ofSeconds(5));
+        var prefix = new AtomicReference<SegmentBookieControlLog.BootstrapClaim>();
+        try {
+            first.initialize();
+            withColdScope(scope, nativeScope, first, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                var log = control.log();
+                withClaimDriver(log, driver -> {
+                    var failure = assertThrows(IOException.class, () -> first.importPrepared(roots, arenas, control,
+                            driver));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains("length"));
+                });
+                prefix.set(log.prepareBootstrapClaim(11));
+                assertEquals(0, prefix.get().applied().orElseThrow().sequence());
+                assertTrue(log.prepareBootstrapClaim(13).applied().isEmpty());
+                assertTrue(log.bootstrapSeal().isEmpty());
+            });
+        } finally {
+            assertTrue(first.closeAndDrain().drained());
+        }
+
+        Files.write(otherJournal, originalOther);
+        var reopened = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            reopened.initialize();
+            withColdScope(scope, nativeScope, reopened, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                var log = control.log();
+                assertEquals(prefix.get(), log.prepareBootstrapClaim(11));
+                withClaimDriver(log, driver -> reopened.importPrepared(roots, arenas, control, driver));
+                assertEquals(prefix.get(), log.prepareBootstrapClaim(11));
+                assertEquals(1, log.prepareBootstrapClaim(13).applied().orElseThrow().sequence());
+                assertTrue(log.prepareBootstrapClaim(97).applied().isEmpty());
+                assertTrue(log.bootstrapSeal().isEmpty());
+            });
+        } finally {
+            assertTrue(reopened.closeAndDrain().drained());
+        }
+        assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                .observation().orElseThrow());
+        assertArrayEquals(originalLate, Files.readAllBytes(lateJournal));
+        assertArrayEquals(originalOther, Files.readAllBytes(otherJournal));
+        assertArrayEquals(originalIndex, Files.readAllBytes(index));
+    }
+
+    @Test(timeout = 30000)
+    public void preparedImportCloseRetainsTheAcceptedForceAndStopsLaterClaims() throws Exception {
+        var scope = preparedScope(1);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var hold = new AtomicBoolean();
+        var io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            if (hold.compareAndSet(true, false)) {
+                entered.countDown();
+                try {
+                    assertTrue(release.await(10, TimeUnit.SECONDS));
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(failure);
+                }
+            }
+        });
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, io, (roots, arenas, control, ignored) -> {
+                var log = control.log();
+                withClaimDriver(log, driver -> {
+                    hold.set(true);
+                    var result = new FutureTask<Void>(() -> {
+                        preparation.importPrepared(roots, arenas, control, driver);
+                        return null;
+                    });
+                    var thread = new Thread(result, "held-prepared-claim-force");
+                    thread.start();
+                    try {
+                        assertTrue(entered.await(5, TimeUnit.SECONDS));
+                        assertFalse(preparation.closeAndDrain().drained());
+                        assertFalse(result.isDone());
+                        assertFalse(preparation.inputsBound());
+                        probe("HELD");
+                    } finally {
+                        release.countDown();
+                        thread.join(5000);
+                        assertFalse(thread.isAlive());
+                    }
+                    var failure = assertThrows(ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+                    assertTrue(failure.getCause().getMessage(), failure.getCause().getMessage().contains("closing"));
+                    assertEquals(0, log.prepareBootstrapClaim(11).applied().orElseThrow().sequence());
+                    assertTrue(log.prepareBootstrapClaim(13).applied().isEmpty());
+                    assertTrue(log.bootstrapSeal().isEmpty());
+                });
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void preparedImportRejectsAnAlreadySealedControlBeforeReadingClassicHistory() throws Exception {
+        var scope = preparedScope(16);
+        var seal = sealControl(scope);
+        Path journal = manifest.classicRoots().get(0).directory().resolve("current/1.txn");
+        Files.delete(journal);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            withColdScope(scope, nativeScope, preparation, new SegmentFileIo(), (roots, arenas, control, io) -> {
+                var log = control.log();
+                withClaimDriver(log, driver -> {
+                    var failure = assertThrows(IOException.class, () -> preparation.importPrepared(roots, arenas,
+                            control, driver));
+                    assertTrue(failure.getMessage(), failure.getMessage().contains("already sealed"));
+                });
+                assertEquals(Optional.of(seal), log.bootstrapSeal());
+                assertEquals(seal.sequence(), log.appliedThrough());
+                assertEquals(0, io.writes);
+            });
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        assertFalse(Files.exists(journal));
+        assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                .observation().orElseThrow());
     }
 
     @Test(timeout = 30000)
@@ -650,12 +830,12 @@ public class SegmentClassicHandoffMaterialsTest {
     @Test(timeout = 30000)
     public void enabledVerificationRejectsAClaimAppliedAfterTheOriginalSeal() throws Exception {
         var scope = sealScope(true);
-        var control = coldControl(scope, new SegmentFileIo());
+        var control = coldControl(scope.prepared(), new SegmentFileIo());
         try {
             control.initialize();
             var bookie = control.log();
             var late = new SegmentBookieControlLog.RouteChange(SegmentBookieControlLog.RouteAction.CLAIM_CLASSIC,
-                    19, scope.route(), new UUID(0, 23));
+                    19, scope.prepared().route(), new UUID(0, 23));
             var receipt = bookie.applyDurable(bookie.appendChangesDurably(List.of(late))).get(0);
             assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, receipt.status());
             assertTrue(receipt.sequence() > scope.localSeal().sequence());
