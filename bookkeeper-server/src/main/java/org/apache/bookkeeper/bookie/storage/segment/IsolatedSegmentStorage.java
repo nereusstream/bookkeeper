@@ -303,7 +303,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     }
 
     void startNew() throws IOException, InterruptedException {
-        start(false);
+        start(false, null, null);
     }
 
     /** Bind the real Profile registration attempt before opening this otherwise local-only graph. */
@@ -904,10 +904,16 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     }
 
     void restart() throws IOException, InterruptedException {
-        start(true);
+        restart(null, null);
     }
 
-    private void start(boolean existing) throws IOException, InterruptedException {
+    void restart(ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata)
+            throws IOException, InterruptedException {
+        start(true, reservations, metadata);
+    }
+
+    private void start(boolean existing, ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata)
+            throws IOException, InterruptedException {
         synchronized (closeGate) {
             synchronized (gate) {
                 if (startAttempted || closed) {
@@ -934,6 +940,10 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     arena.requireQuiescentRecovery(config, identity);
                 }
                 bookie = SegmentBookieControlLog.open(config, identity, limits.controlLogBytes(), key, validator);
+                if (existing) {
+                    SegmentClosedReconstruction.verifyFirstOpen(config, identity, startupLock, arena, bookie,
+                            reservations, metadata);
+                }
                 index = SegmentDerivedIndex.open(config, identity, limits.indexedEntries());
                 if (existing) {
                     files = IsolatedSegmentFiles.openForLocalResults(config, identity, arena, bookie,

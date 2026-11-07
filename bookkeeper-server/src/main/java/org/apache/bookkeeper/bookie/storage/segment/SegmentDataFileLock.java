@@ -57,6 +57,7 @@ final class SegmentDataFileLock implements AutoCloseable {
     private Throwable channelCloseFailure;
     private boolean aggregated;
     private Throwable closeFailure;
+    private SegmentOwnedFiles unresolvedReconstructionFiles;
 
     private SegmentDataFileLock(Path requested, boolean create, boolean control) {
         this.requested = requested.toAbsolutePath();
@@ -176,8 +177,16 @@ final class SegmentDataFileLock implements AutoCloseable {
                 new ReleaseResult(channel != null, channelCloseStarted, channelCloseReturned, channelCloseFailure));
     }
 
+    /** A failed original close cannot be retried or followed by a new in-process writer. */
+    synchronized void retainAfterUnresolvedReconstruction(SegmentOwnedFiles files) {
+        unresolvedReconstructionFiles = files;
+    }
+
     @Override
     public synchronized void close() throws IOException {
+        if (unresolvedReconstructionFiles != null) {
+            throw new IOException("Original reconstruction file close is unresolved: " + scope);
+        }
         if (initializingThread == Thread.currentThread() || closingThread == Thread.currentThread()) {
             throw new IllegalStateException("File lock activity cannot close itself");
         }

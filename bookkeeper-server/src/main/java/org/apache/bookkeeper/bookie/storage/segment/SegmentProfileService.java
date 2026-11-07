@@ -403,7 +403,7 @@ public final class SegmentProfileService implements AutoCloseable {
                     identity.incarnation());
             requireLive();
             if (existing) {
-                storage.restart();
+                storage.restart(startup.reservations(), startup.metadata());
             } else {
                 storage.startNew();
             }

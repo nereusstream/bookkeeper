@@ -134,19 +134,39 @@ public final class ProfileClosedReconstruction {
         }
     }
 
-    public record Ready(UUID operation, long admissionBirth, String admissionDigest, Image candidate) {
+    public record Ready(UUID operation, long admissionBirth, String admissionDigest, UUID shadow,
+                        long shadowBirth, int shadowVersion, Image candidate) {
         public Ready {
             requireId(operation);
-            if (admissionBirth <= 0) {
+            requireId(shadow);
+            if (admissionBirth <= 0 || shadowBirth != admissionBirth || shadowVersion < 1
+                    || shadowVersion == Integer.MAX_VALUE) {
                 throw new IllegalArgumentException("READY must bind the original admission birth");
             }
             requireDigest(admissionDigest);
             Objects.requireNonNull(candidate, "candidate");
         }
 
+        byte[] encode() throws IOException {
+            var bytes = new ByteArrayOutputStream();
+            try (var out = new DataOutputStream(bytes)) {
+                out.writeInt(READY);
+                out.writeInt(VERSION);
+                writeId(out, operation);
+                out.writeLong(admissionBirth);
+                writeDigest(out, admissionDigest);
+                writeId(out, shadow);
+                out.writeLong(shadowBirth);
+                out.writeInt(shadowVersion);
+                writeImage(out, candidate);
+            }
+            return bytes.toByteArray();
+        }
+
         static Ready decode(byte[] bytes) throws IOException {
             try (var in = input(bytes, READY)) {
-                var ready = new Ready(readId(in), in.readLong(), readDigest(in), readImage(in));
+                var ready = new Ready(readId(in), in.readLong(), readDigest(in), readId(in), in.readLong(),
+                        in.readInt(), readImage(in));
                 requireEnd(in);
                 return ready;
             }
@@ -155,6 +175,9 @@ public final class ProfileClosedReconstruction {
 
     public record Receipt(Admission admission, long admissionBirth, String admissionDigest,
                           Ready ready, long readyBirth, String readyDigest) { }
+
+    /** One actual native attempt fence, or the original READY that won before this attempt. */
+    public record Shadow(Receipt ready, UUID attempt, long birth, int version) { }
 
     public static String closedDigest(ZKProfileReservationStore.ReadOnlySnapshot snapshot,
             ZKProfileReservationStore.ClosedReconstructionSelf self) throws IOException {

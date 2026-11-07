@@ -1187,6 +1187,16 @@ public final class ZKProfileReservationStore {
         }
         requireMarker(marker(path, admission.operation()), birth, deadline);
         var published = reads.get(path + "/ready", deadline);
+        var shadow = reads.get(path + "/shadow", deadline);
+        int shadowState = reconstructionShadowState(shadow, birth);
+        if (shadow.stat().getVersion() == 0 && !Arrays.equals(shadow.bytes(),
+                reconstructionShadow(admission.operation(), 0))) {
+            throw new IOException("Reconstruction lost its original shadow initialization");
+        }
+        if (published.code() == Code.NONODE.intValue() && shadowState == 1) {
+            published = reads.get(path + "/ready", deadline);
+            requireFound(published);
+        }
         if (published.code() == Code.NONODE.intValue()) {
             return new ProfileClosedReconstruction.Receipt(admission, birth, digest, null, 0, null);
         }
@@ -1197,6 +1207,9 @@ public final class ZKProfileReservationStore {
         requireMarker(marker(path + "/ready", admission.operation()), readyBirth, deadline);
         if (!ready.operation().equals(admission.operation()) || ready.admissionBirth() != birth
                 || !ready.admissionDigest().equals(digest) || readyBirth <= birth
+                || shadow.stat().getCzxid() != ready.shadowBirth() || shadow.stat().getMzxid() != readyBirth
+                || shadow.stat().getVersion() != ready.shadowVersion() + 1
+                || !Arrays.equals(shadow.bytes(), reconstructionShadow(ready.shadow(), 1))
                 || !ready.candidate().sha256().equals(admission.original().sha256())
                 || ready.candidate().length() != admission.original().length()
                 || ready.candidate().object().device() != admission.original().object().device()
@@ -1222,6 +1235,8 @@ public final class ZKProfileReservationStore {
                 checks.add(Op.create(path, request.encode(), protectedChildAcls, CreateMode.PERSISTENT));
                 checks.add(Op.create(marker(path, request.operation()), new byte[0], immutableAcls,
                         CreateMode.PERSISTENT));
+                checks.add(Op.create(path + "/shadow", reconstructionShadow(request.operation(), 0),
+                        restoreDependencyAcls, CreateMode.PERSISTENT));
                 multi(checks, deadline);
             } catch (TimeoutException uncertain) {
                 // Only the exact immutable native record below can confirm an abandoned reply.
@@ -1234,6 +1249,148 @@ public final class ZKProfileReservationStore {
             throw new IOException("The original CLOSED reconstruction admission was not confirmed");
         }
         return prior;
+    }
+
+    /** Fence a previous JVM's outstanding READY CAS before its candidate inode may be discarded. */
+    public ProfileClosedReconstruction.Shadow beginClosedReconstructionShadow(
+            SegmentClosedReconstruction.PreparedAdmission prepared, ProfileClosedReconstruction.Receipt admitted)
+            throws IOException, InterruptedException {
+        var request = prepared.request();
+        if (!request.equals(admitted.admission())) {
+            throw new IOException("Shadow attempt requires its original admitted request");
+        }
+        var scope = request.scope();
+        String path = reconstructionPath(scope);
+        String shadowPath = path + "/shadow";
+        UUID attempt = UUID.randomUUID();
+        byte[] bytes = reconstructionShadow(attempt, 0);
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var prior = reads.get(shadowPath, deadline);
+            int state = reconstructionShadowState(prior, admitted.admissionBirth());
+            if (state == 1) {
+                var ready = readClosedReconstruction(scope);
+                if (ready != null && ready.ready() != null) {
+                    return new ProfileClosedReconstruction.Shadow(ready, null, 0, -1);
+                }
+            }
+            if (state != 0 || prior.stat().getVersion() >= Integer.MAX_VALUE - 1) {
+                throw new IOException("Original shadow fence is terminal or exhausted");
+            }
+            multi(List.of(Op.check(marker(path, request.operation()), 0),
+                    Op.setData(shadowPath, bytes, prior.stat().getVersion())), deadline);
+        } catch (TimeoutException uncertain) {
+            // No local candidate is touched until this exact native attempt is read back below.
+        } catch (IllegalArgumentException | IllegalStateException invalid) {
+            throw new IOException("Original shadow attempt was refused", invalid);
+        }
+        var current = readClosedReconstruction(scope);
+        if (current == null || current.admissionBirth() != admitted.admissionBirth()
+                || !current.admissionDigest().equals(admitted.admissionDigest())) {
+            throw new IOException("Original shadow attempt lost its admission");
+        }
+        if (current.ready() != null) {
+            return new ProfileClosedReconstruction.Shadow(current, null, 0, -1);
+        }
+        try {
+            var actual = reads.get(shadowPath, System.nanoTime() + timeoutNanos);
+            if (reconstructionShadowState(actual, admitted.admissionBirth()) != 0
+                    || !Arrays.equals(actual.bytes(), bytes)) {
+                throw new IOException("The exact reconstruction shadow fence was not confirmed");
+            }
+            return new ProfileClosedReconstruction.Shadow(null, attempt, actual.stat().getCzxid(),
+                    actual.stat().getVersion());
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException invalid) {
+            throw new IOException("Unable to confirm the exact shadow attempt", invalid);
+        }
+    }
+
+    private static byte[] reconstructionShadow(UUID attempt, int state) {
+        return ByteBuffer.allocate(20).putLong(attempt.getMostSignificantBits())
+                .putLong(attempt.getLeastSignificantBits()).putInt(state).array();
+    }
+
+    private static int reconstructionShadowState(ProfileZKReadClient.Node shadow, long birth) {
+        requireFound(shadow);
+        requirePersistent(shadow, false);
+        if (shadow.stat().getCzxid() != birth || shadow.bytes().length != 20) {
+            throw new IllegalArgumentException("Reconstruction shadow lost its protected admission birth");
+        }
+        ByteBuffer bytes = ByteBuffer.wrap(shadow.bytes());
+        var nonce = new UUID(bytes.getLong(), bytes.getLong());
+        int state = bytes.getInt();
+        if (nonce.equals(new UUID(0, 0)) || state < 0 || state > 2 || shadow.stat().getVersion() == 0 && state != 0) {
+            throw new IllegalArgumentException("Unknown reconstruction shadow state");
+        }
+        return state;
+    }
+
+    public void failClosedReconstructionShadow(SegmentClosedReconstruction.PreparedAdmission prepared,
+            ProfileClosedReconstruction.Shadow shadow) throws IOException, InterruptedException {
+        var request = prepared.request();
+        String path = reconstructionPath(request.scope());
+        String shadowPath = path + "/shadow";
+        long deadline = System.nanoTime() + timeoutNanos;
+        byte[] failure = reconstructionShadow(shadow.attempt(), 2);
+        try {
+            multi(List.of(Op.check(marker(path, request.operation()), 0),
+                    Op.setData(shadowPath, failure, shadow.version())), deadline);
+            var actual = reads.get(shadowPath, deadline);
+            requireFound(actual);
+            requirePersistent(actual, false);
+            if (actual.stat().getCzxid() != shadow.birth() || !Arrays.equals(actual.bytes(), failure)) {
+                throw new IOException("The observed shadow failure could not be recorded exactly");
+            }
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException invalid) {
+            throw new IOException("Unable to record the original observed shadow failure", invalid);
+        }
+    }
+
+    public ProfileClosedReconstruction.Receipt readyClosedReconstruction(ProfileLedgerMetadataStore metadata,
+            SegmentClosedReconstruction.PreparedReady prepared) throws IOException, InterruptedException {
+        var expected = prepared.expected();
+        var admitted = prepared.admitted();
+        var candidate = prepared.candidate();
+        var shadow = prepared.shadow();
+        var request = admitted.admission();
+        var scope = request.scope();
+        var ready = new ProfileClosedReconstruction.Ready(request.operation(), admitted.admissionBirth(),
+                admitted.admissionDigest(), shadow.attempt(), shadow.birth(), shadow.version(), candidate);
+        if (candidate.object().equals(request.original().object())
+                || candidate.object().device() != request.original().object().device()
+                || candidate.length() != request.original().length() || !candidate.sha256().equals(
+                        request.original().sha256())) {
+            throw new IOException("READY requires a different object with the complete ADMITTED bytes");
+        }
+        var current = readClosedReconstruction(scope);
+        if (current == null || !current.admission().equals(request)
+                || current.admissionBirth() != admitted.admissionBirth()
+                || !current.admissionDigest().equals(admitted.admissionDigest())) {
+            throw new IOException("READY requires the exact original native admission");
+        }
+        if (current.ready() == null) {
+            long deadline = System.nanoTime() + timeoutNanos;
+            try {
+                var checks = reconstructionChecks(metadata, expected, request, deadline);
+                String path = reconstructionPath(scope);
+                checks.add(Op.check(path, 0));
+                checks.add(Op.check(marker(path, request.operation()), 0));
+                checks.add(Op.setData(path + "/shadow", reconstructionShadow(shadow.attempt(), 1), shadow.version()));
+                checks.add(Op.create(path + "/ready", ready.encode(), protectedChildAcls, CreateMode.PERSISTENT));
+                checks.add(Op.create(marker(path + "/ready", request.operation()), new byte[0], immutableAcls,
+                        CreateMode.PERSISTENT));
+                multi(checks, deadline);
+            } catch (TimeoutException uncertain) {
+                // An uncertain publication never authorizes a replacement image.
+            } catch (IllegalArgumentException | IllegalStateException invalid) {
+                throw new IOException("CLOSED reconstruction READY was refused", invalid);
+            }
+            current = readClosedReconstruction(scope);
+        }
+        if (current == null || !ready.equals(current.ready())) {
+            throw new IOException("The exact reconstruction READY was not confirmed");
+        }
+        return current;
     }
 
     private List<Op> reconstructionChecks(ProfileLedgerMetadataStore metadata, ReadOnlySnapshot expected,

@@ -20,15 +20,20 @@ package org.apache.bookkeeper.bookie.storage.segment;
 import io.netty.channel.EventLoopGroup;
 import io.netty.handler.ssl.SslContext;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.HexFormat;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadPoolExecutor;
 import javax.crypto.SecretKey;
@@ -43,6 +48,12 @@ import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 
 /** Controlled offline recovery of one complete original CLOSED image. */
 public final class SegmentClosedReconstruction {
+    private static final int COPY_BYTES = 64 * 1024;
+    private static final String CANDIDATE = "image";
+    private static final String INTERRUPTED = "interrupted-image";
+    private static final String RETAINED = "retained-old";
+    private static final String FAILED = "image-failed";
+
     record Limits(long controlBytes, int controlRows, long dataBytes, int entries, Duration sourceTimeout) { }
 
     record Sources(ClientContext sdk, EventLoopGroup eventLoop, SslContext tls, ThreadPoolExecutor cold,
@@ -90,17 +101,92 @@ public final class SegmentClosedReconstruction {
         }
     }
 
+    /** Opaque image whose original first close and all required staging barriers returned successfully. */
+    public static final class PreparedReady {
+        private final ProfileClosedReconstruction.Receipt admitted;
+        private final ZKProfileReservationStore.ReadOnlySnapshot expected;
+        private final ProfileClosedReconstruction.Image candidate;
+        private final ProfileClosedReconstruction.Shadow shadow;
+
+        private PreparedReady(ProfileClosedReconstruction.Receipt admitted,
+                ZKProfileReservationStore.ReadOnlySnapshot expected, ProfileClosedReconstruction.Image candidate,
+                ProfileClosedReconstruction.Shadow shadow) {
+            this.admitted = admitted;
+            this.expected = expected;
+            this.candidate = candidate;
+            this.shadow = shadow;
+        }
+
+        public ProfileClosedReconstruction.Receipt admitted() {
+            return admitted;
+        }
+
+        public ZKProfileReservationStore.ReadOnlySnapshot expected() {
+            return expected;
+        }
+
+        public ProfileClosedReconstruction.Image candidate() {
+            return candidate;
+        }
+
+        public ProfileClosedReconstruction.Shadow shadow() {
+            return shadow;
+        }
+    }
+
+    /** Issued only under the original guards after the READY image is active and staging has been removed. */
+    static final class PublishedImage {
+        private final ProfileClosedReconstruction.Receipt receipt;
+
+        private PublishedImage(ProfileClosedReconstruction.Receipt receipt) {
+            this.receipt = receipt;
+        }
+
+        ProfileClosedReconstruction.Receipt receipt() {
+            return receipt;
+        }
+    }
+
     static ProfileClosedReconstruction.Receipt admit(IsolatedSegmentConfig config, SegmentFileHeader identity,
             SecretKey key, ProfileDescriptorValidator validator, NativeIO nativeIo, Limits limits,
             ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations, Sources sources,
             ZKProfileReservationStore.ReadOnlySnapshot expected, OldPublisher stoppedPublisher, long epoch,
             UUID operation) throws Exception {
+        return run(config, identity, key, validator, nativeIo, limits, metadata, reservations, sources,
+                expected, stoppedPublisher, epoch, operation, null, null);
+    }
+
+    static ProfileClosedReconstruction.Receipt reconstruct(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SecretKey key, ProfileDescriptorValidator validator, NativeIO nativeIo, Limits limits,
+            ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations, Sources sources,
+            ZKProfileReservationStore.ReadOnlySnapshot expected, OldPublisher stoppedPublisher, long epoch,
+            UUID operation, SegmentFileIo imageIo, SegmentFileIo controlIo) throws Exception {
+        return run(config, identity, key, validator, nativeIo, limits, metadata, reservations, sources,
+                expected, stoppedPublisher, epoch, operation, java.util.Objects.requireNonNull(imageIo),
+                java.util.Objects.requireNonNull(controlIo));
+    }
+
+    private static ProfileClosedReconstruction.Receipt run(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SecretKey key, ProfileDescriptorValidator validator, NativeIO nativeIo, Limits limits,
+            ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations, Sources sources,
+            ZKProfileReservationStore.ReadOnlySnapshot expected, OldPublisher stoppedPublisher, long epoch,
+            UUID operation, SegmentFileIo imageIo, SegmentFileIo controlIo) throws Exception {
+        if (config.dataFiles() != 1 || operation == null || operation.equals(new UUID(0, 0))) {
+            throw new IllegalArgumentException("Reconstruction requires one DATA file and an exact operation");
+        }
         var scope = new ProfileClosedReconstruction.Scope(identity.bookieId().toString(), identity.incarnation(),
                 identity.arenaId(), epoch);
         return SegmentStorageInspector.withRecoveryLocks(config, identity, (root, data, arena, bookie, locks) -> {
             var existing = reservations.readClosedReconstruction(scope);
             if (existing != null && !existing.admission().operation().equals(operation)) {
                 throw new IOException("The original managed epoch already has a different reconstruction operation");
+            }
+            if (existing != null && existing.ready() != null) {
+                if (imageIo != null) {
+                    finishReady(config, identity, key, validator, nativeIo, limits, root, data, arena, bookie, locks,
+                            existing, controlIo);
+                }
+                return existing;
             }
             if (existing == null && (stoppedPublisher == null || !identity.equals(stoppedPublisher.identity)
                     || stoppedPublisher.process.isAlive())) {
@@ -116,7 +202,7 @@ public final class SegmentClosedReconstruction {
             SegmentStorageInspector.requireClosedReconstructionScope(config, deps, self);
             var closed = expected.closed().metadata().metadata().getValue();
             var files = new SegmentOwnedFiles(locks);
-            try (AutoCloseable cleanup = () -> requireDrained(files)) {
+            try (AutoCloseable cleanup = () -> requireDrained(files, data)) {
                 var originalPath = root.resolve("data-0");
                 var rootObject = observeDirectory(files, nativeIo, root);
                 var pathObject = requireOriginalFile(originalPath, config.bytesPerFile());
@@ -135,6 +221,7 @@ public final class SegmentClosedReconstruction {
                 if (!requireOriginalFile(originalPath, image.bytes()).equals(pathObject)) {
                     throw new IOException("Original DATA path object changed during its complete audit");
                 }
+                ProfileClosedReconstruction.Receipt receipt;
                 try (var peers = ProfileClosedReconstructionSources.open(sources.sdk(), sources.eventLoop(),
                         sources.tls(), sources.registry(), sources.cold(), expected, identity.bookieId(),
                         config.maxPayloadBytes() + SegmentBatchFormat.ENTRY_OVERHEAD, limits.sourceTimeout())) {
@@ -147,7 +234,7 @@ public final class SegmentClosedReconstruction {
                     if (!deps.equals(current) || !requireOriginalFile(originalPath, image.bytes()).equals(pathObject)) {
                         throw new IOException("Original scope changed before CLOSED reconstruction admission");
                     }
-                    var stage = root.resolve(".closed-reconstruction-" + operation);
+                    var stage = staging(root, operation);
                     if (existing == null) {
                         Files.createDirectory(stage, PosixFilePermissions.asFileAttribute(
                                 PosixFilePermissions.fromString("rwx------")));
@@ -180,10 +267,350 @@ public final class SegmentClosedReconstruction {
                                     image.sha256()), dependencyDigest(deps),
                             ProfileClosedReconstruction.closedDigest(expected, self), peers.revalidate());
                     files.requireHealthy();
-                    return reservations.admitClosedReconstruction(metadata, new PreparedAdmission(request, expected));
+                    var admission = new PreparedAdmission(request, expected);
+                    receipt = reservations.admitClosedReconstruction(metadata, admission);
+                    if (imageIo != null) {
+                        if (present(stage.resolve(FAILED))) {
+                            throw new IOException("The original reconstruction retained an observed image failure");
+                        }
+                        var shadow = reservations.beginClosedReconstructionShadow(admission, receipt);
+                        if (shadow.ready() != null) {
+                            receipt = shadow.ready();
+                        } else {
+                            ProfileClosedReconstruction.Image candidate;
+                            try {
+                                candidate = freshImage(files, nativeIo, root, stage, receipt, imageIo);
+                            } catch (IOException failure) {
+                                try {
+                                    reservations.failClosedReconstructionShadow(admission, shadow);
+                                } catch (Exception recordFailure) {
+                                    if (recordFailure instanceof InterruptedException) {
+                                        Thread.currentThread().interrupt();
+                                    }
+                                    failure.addSuppressed(recordFailure);
+                                }
+                                throw failure;
+                            }
+                            var beforeReady = SegmentStorageInspector.readRecoveryDependencies(config, identity,
+                                    limits.controlBytes(), limits.controlRows(), key, validator, arena, bookie, locks);
+                            if (!deps.equals(beforeReady) || !request.sources().equals(peers.revalidate())
+                                    || !requireOriginalFile(originalPath, image.bytes()).equals(pathObject)
+                                    || !observeDirectory(files, nativeIo, stage).equals(stageObject)) {
+                                throw new IOException("Reconstruction bindings changed before READY");
+                            }
+                            files.requireHealthy();
+                            receipt = reservations.readyClosedReconstruction(metadata,
+                                    new PreparedReady(receipt, expected, candidate, shadow));
+                        }
+                    }
                 }
+                if (imageIo != null) {
+                    finishReady(config, identity, key, validator, nativeIo, limits, root, data, arena, bookie, locks,
+                            receipt, controlIo);
+                }
+                return receipt;
             }
         });
+    }
+
+    private static Path staging(Path root, UUID operation) {
+        return root.resolve(".closed-reconstruction-" + operation);
+    }
+
+    private static ProfileClosedReconstruction.Image freshImage(SegmentOwnedFiles files, NativeIO nativeIo,
+            Path root, Path stage, ProfileClosedReconstruction.Receipt receipt, SegmentFileIo io) throws Exception {
+        var admitted = receipt.admission();
+        var original = admitted.original();
+        Path originalPath = root.resolve("data-0");
+        Path candidate = stage.resolve(CANDIDATE);
+        Path interrupted = stage.resolve(INTERRUPTED);
+        if (present(stage.resolve(FAILED)) || present(stage.resolve(RETAINED))) {
+            throw new IOException("ADMITTED staging has an observed failure or an unpublished retained file");
+        }
+        try (var children = files.openDirectory(stage)) {
+            for (Path path : children) {
+                if (!path.equals(candidate) && !path.equals(interrupted)) {
+                    throw new IOException("Unrecognized file in the original reconstruction staging");
+                }
+            }
+        }
+        if (present(interrupted)) {
+            requirePartialImage(interrupted, stage, original);
+        }
+        if (present(candidate)) {
+            requirePartialImage(candidate, stage, original);
+            Files.deleteIfExists(interrupted);
+            // Keep this inode linked until the next original candidate descriptor has actually closed.
+            rename(nativeIo, candidate, interrupted);
+            SegmentOwnedFiles.syncDirectory(files, stage);
+        }
+        try {
+            var permissions = Files.getPosixFilePermissions(originalPath, LinkOption.NOFOLLOW_LINKS);
+            NativeIO.FileIdentity fresh;
+            try (var input = SegmentOwnedFiles.openRegularReadOnly(files, originalPath);
+                    var output = SegmentOwnedFiles.open(files, candidate,
+                            Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.READ, StandardOpenOption.WRITE,
+                                    LinkOption.NOFOLLOW_LINKS), PosixFilePermissions.asFileAttribute(permissions))) {
+                fresh = files.fileIdentity(output, nativeIo);
+                if (!files.fileIdentity(input, nativeIo).equals(original.object()) || input.size() != original.length()
+                        || fresh.equals(original.object()) || fresh.device() != original.object().device()) {
+                    throw new IOException("Reconstruction copy descriptors do not match their exact roles");
+                }
+                var digest = MessageDigest.getInstance("SHA-256");
+                ByteBuffer buffer = ByteBuffer.allocate(COPY_BYTES);
+                for (long offset = 0; offset < original.length();) {
+                    int count = (int) Math.min(buffer.capacity(), original.length() - offset);
+                    buffer.clear().limit(count);
+                    SegmentFileIo.readFully(input, buffer, offset);
+                    io.writeFully(output, buffer, offset);
+                    digest.update(buffer);
+                    offset += count;
+                }
+                if (!original.sha256().equals(HexFormat.of().formatHex(digest.digest()))) {
+                    throw new IOException("Original DATA changed while generating the complete fresh image");
+                }
+                io.force(output, true);
+                if (!original.sha256().equals(hash(output, original.length()))) {
+                    throw new IOException("Fresh DATA readback differs from the complete original image");
+                }
+            }
+            files.requireHealthy();
+            if (!requireOriginalFile(candidate, original.length()).equals(fresh)) {
+                throw new IOException("Fresh DATA path changed during its original first close");
+            }
+            Files.deleteIfExists(interrupted);
+            SegmentOwnedFiles.syncDirectory(files, stage);
+            return new ProfileClosedReconstruction.Image(fresh, original.length(), original.sha256());
+        } catch (IOException failure) {
+            try {
+                Files.createFile(stage.resolve(FAILED), PosixFilePermissions.asFileAttribute(
+                        PosixFilePermissions.fromString("rw-------")));
+                SegmentOwnedFiles.syncDirectory(null, stage);
+            } catch (IOException markerFailure) {
+                failure.addSuppressed(markerFailure);
+            }
+            throw failure;
+        }
+    }
+
+    private static void requirePartialImage(Path path, Path stage, ProfileClosedReconstruction.Image original)
+            throws IOException {
+        var prior = SegmentClassicHandoffPaths.loadingIdentity(path);
+        if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || prior.links() != 1
+                || prior.device() != original.object().device() || prior.inode() == original.object().inode()
+                || prior.size() > original.length() || !Files.getOwner(path, LinkOption.NOFOLLOW_LINKS)
+                        .equals(Files.getOwner(stage, LinkOption.NOFOLLOW_LINKS))) {
+            throw new IOException("Interrupted staging file does not belong to this operation");
+        }
+    }
+
+    private static String hash(java.nio.channels.FileChannel file, long length) throws Exception {
+        if (file.size() != length) {
+            throw new IOException("Reconstruction file length differs from its native binding");
+        }
+        var digest = MessageDigest.getInstance("SHA-256");
+        ByteBuffer buffer = ByteBuffer.allocate(COPY_BYTES);
+        for (long offset = 0; offset < length;) {
+            int count = (int) Math.min(buffer.capacity(), length - offset);
+            buffer.clear().limit(count);
+            SegmentFileIo.readFully(file, buffer, offset);
+            digest.update(buffer);
+            offset += count;
+        }
+        return HexFormat.of().formatHex(digest.digest());
+    }
+
+    private static boolean present(Path path) throws IOException {
+        try {
+            Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            return true;
+        } catch (NoSuchFileException absent) {
+            return false;
+        }
+    }
+
+    private static void finishReady(IsolatedSegmentConfig config, SegmentFileHeader identity, SecretKey key,
+            ProfileDescriptorValidator validator, NativeIO nativeIo, Limits limits, Path root,
+            SegmentDataFileLock data, SegmentDataFileLock arena, SegmentDataFileLock bookie, List<Path> locks,
+            ProfileClosedReconstruction.Receipt receipt, SegmentFileIo controlIo) throws Exception {
+        var admitted = receipt.admission();
+        var fresh = receipt.ready().candidate();
+        Path active = root.resolve("data-0");
+        Path stage = staging(root, admitted.operation());
+        Path candidate = stage.resolve(CANDIDATE);
+        Path retained = stage.resolve(RETAINED);
+        var files = new SegmentOwnedFiles(locks);
+        try (AutoCloseable cleanup = () -> requireDrained(files, data)) {
+            if (!root.toString().equals(admitted.directory())
+                    || !observeDirectory(files, nativeIo, root).equals(admitted.directoryObject())) {
+                throw new IOException("READY cannot publish into a replacement directory");
+            }
+            boolean stagePresent = present(stage);
+            if (stagePresent) {
+                if (!observeDirectory(files, nativeIo, stage).equals(admitted.stagingObject())) {
+                    throw new IOException("READY staging was replaced");
+                }
+                try (var children = files.openDirectory(stage)) {
+                    for (Path path : children) {
+                        if (!path.equals(candidate) && !path.equals(retained)) {
+                            throw new IOException("READY staging contains an unexpected object");
+                        }
+                    }
+                }
+            }
+            boolean haveCandidate = stagePresent && present(candidate);
+            boolean haveRetained = stagePresent && present(retained);
+            if (present(active)) {
+                var deps = SegmentStorageInspector.readRecoveryDependencies(config, identity, limits.controlBytes(),
+                        limits.controlRows(), key, validator, arena, bookie, locks);
+                if (deps.arena().cut().sessionEpoch() > admitted.scope().epoch()) {
+                    if (stagePresent) {
+                        throw new IOException("Advanced Arena has unexpected historical reconstruction staging");
+                    }
+                    SegmentArenaControlLog.requireReconstructionApplied(config, identity, limits.controlBytes(),
+                            arena, files, receipt);
+                    return;
+                }
+                requireReadyCuts(deps, admitted);
+                if (!deps.arena().cut().sessionOpen()) {
+                    if (stagePresent) {
+                        throw new IOException("Closed Arena has unexpected reconstruction staging");
+                    }
+                    SegmentArenaControlLog.requireReconstructionApplied(config, identity, limits.controlBytes(),
+                            arena, files, receipt);
+                    verifyImage(files, nativeIo, config, identity, active, fresh);
+                    return;
+                }
+                var object = requireOriginalFile(active, admitted.original().length());
+                if (object.equals(admitted.original().object()) && haveCandidate && !haveRetained) {
+                    verifyImage(files, nativeIo, config, identity, active, admitted.original());
+                    verifyImage(files, nativeIo, config, identity, candidate, fresh);
+                    rename(nativeIo, active, retained);
+                    SegmentOwnedFiles.syncDirectory(files, root);
+                    SegmentOwnedFiles.syncDirectory(files, stage);
+                    haveRetained = true;
+                } else if (!object.equals(fresh.object()) || haveCandidate) {
+                    throw new IOException("Active DATA is outside the original READY publication sequence");
+                }
+            }
+            if (!present(active)) {
+                if (!haveRetained || !haveCandidate) {
+                    throw new IOException("Incomplete READY switch lost an exact old or new object");
+                }
+                verifyImage(files, nativeIo, config, identity, retained, admitted.original());
+                verifyImage(files, nativeIo, config, identity, candidate, fresh);
+                SegmentOwnedFiles.syncDirectory(files, root);
+                SegmentOwnedFiles.syncDirectory(files, stage);
+                rename(nativeIo, candidate, active);
+                SegmentOwnedFiles.syncDirectory(files, root);
+                SegmentOwnedFiles.syncDirectory(files, stage);
+            }
+            verifyImage(files, nativeIo, config, identity, active, fresh);
+            var deps = SegmentStorageInspector.readRecoveryDependencies(config, identity, limits.controlBytes(),
+                    limits.controlRows(), key, validator, arena, bookie, locks);
+            requireReadyCuts(deps, admitted);
+            if (!deps.arena().cut().sessionOpen()) {
+                throw new IOException("READY installation no longer has the original OPEN epoch");
+            }
+            if (stagePresent) {
+                SegmentOwnedFiles.syncDirectory(files, root);
+                SegmentOwnedFiles.syncDirectory(files, stage);
+                if (haveRetained) {
+                    verifyImage(files, nativeIo, config, identity, retained, admitted.original());
+                    Files.delete(retained);
+                    SegmentOwnedFiles.syncDirectory(files, stage);
+                }
+                Files.delete(stage);
+            }
+            SegmentOwnedFiles.syncDirectory(files, root);
+            files.requireHealthy();
+            SegmentArenaControlLog.resolveReconstruction(config, identity, limits.controlBytes(), controlIo,
+                    arena, files, new PublishedImage(receipt));
+        }
+    }
+
+    private static void requireReadyCuts(SegmentStorageInspector.RecoveryDependencies deps,
+            ProfileClosedReconstruction.Admission admitted) throws Exception {
+        if (deps.arena().cut().sessionEpoch() != admitted.scope().epoch()) {
+            throw new IOException("READY lost the original managed epoch");
+        }
+        if (deps.arena().cut().sessionOpen() && (admitted.arenaCut() != deps.arena().cut().appliedSequence()
+                || admitted.bookieCut() != deps.bookie().observedSequence()
+                || !admitted.dependencies().equals(dependencyDigest(deps)))) {
+            throw new IOException("READY control dependencies changed before original epoch resolution");
+        }
+    }
+
+    static void verifyFirstOpen(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SegmentDataFileLock dataLock, SegmentArenaControlLog arena, SegmentBookieControlLog bookie,
+            ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata)
+            throws IOException, InterruptedException {
+        var pending = arena.pendingReconstruction();
+        if (pending == null) {
+            return;
+        }
+        if (reservations == null || metadata == null || pending.binding().bookieCut() != bookie.appliedThrough()) {
+            throw new IOException("First reconstructed OPEN requires the original Bookie cut and current metadata");
+        }
+        var scope = new ProfileClosedReconstruction.Scope(identity.bookieId().toString(), identity.incarnation(),
+                identity.arenaId(), pending.epoch());
+        var receipt = reservations.readClosedReconstruction(scope);
+        if (receipt == null || receipt.ready() == null
+                || !receipt.admission().operation().equals(pending.operation())) {
+            throw new IOException("First reconstructed OPEN lost its original native READY");
+        }
+        Path root = config.directory().toRealPath();
+        dataLock.requireHeld(root.resolve("isolated.lock"));
+        var files = new SegmentOwnedFiles(List.of(root.resolve("isolated.lock"), root.resolve("arena-control.lock"),
+                root.resolve("bookie-control.lock")));
+        var nativeIo = new org.apache.bookkeeper.common.util.nativeio.NativeIOImpl();
+        try (AutoCloseable cleanup = () -> requireDrained(files, dataLock)) {
+            if (!root.toString().equals(receipt.admission().directory())
+                    || !observeDirectory(files, nativeIo, root).equals(receipt.admission().directoryObject())
+                    || present(staging(root, pending.operation()))) {
+                throw new IOException("First reconstructed OPEN requires the original published and cleaned scope");
+            }
+            verifyImage(files, nativeIo, config, identity, root.resolve("data-0"), receipt.ready().candidate());
+        } catch (IOException | InterruptedException failure) {
+            throw failure;
+        } catch (Exception failure) {
+            throw new IOException("First reconstructed OPEN could not verify the complete published image", failure);
+        }
+        var snapshot = reservations.readClosedForOpen(metadata, receipt.admission().ledger()).snapshot();
+        if (snapshot == null) {
+            throw new IOException("First reconstructed OPEN requires its current CLOSED lifecycle and membership");
+        }
+        var self = reservations.readClosedReconstructionSelf(metadata, snapshot, scope.bookie(),
+                scope.incarnation().value());
+        if (!receipt.admission().closed().equals(ProfileClosedReconstruction.closedDigest(snapshot, self))) {
+            throw new IOException("Original CLOSED snapshot changed before first reconstructed OPEN");
+        }
+        arena.verifyFirstReconstructionOpen(pending, receipt);
+    }
+
+    private static void verifyImage(SegmentOwnedFiles files, NativeIO nativeIo, IsolatedSegmentConfig config,
+            SegmentFileHeader identity, Path path, ProfileClosedReconstruction.Image image) throws Exception {
+        if (!requireOriginalFile(path, image.length()).equals(image.object())) {
+            throw new IOException("Reconstruction path does not name the exact READY object");
+        }
+        try (var file = SegmentOwnedFiles.openRegularReadOnly(files, path)) {
+            if (!files.fileIdentity(file, nativeIo).equals(image.object())
+                    || !image.sha256().equals(hash(file, image.length()))) {
+                throw new IOException("Reconstruction object does not match the exact READY image");
+            }
+            ByteBuffer header = ByteBuffer.allocate(config.alignment());
+            SegmentFileIo.readFully(file, header, 0);
+            identity.validate(header, config, 0);
+        }
+        if (!requireOriginalFile(path, image.length()).equals(image.object())) {
+            throw new IOException("Reconstruction image path changed after its original close");
+        }
+    }
+
+    private static void rename(NativeIO nativeIo, Path source, Path target) throws IOException {
+        if (nativeIo.renameNoReplace(source.toString(), target.toString()) != 0) {
+            throw new IOException("Native reconstruction rename did not report success");
+        }
     }
 
     private static NativeIO.FileIdentity observeDirectory(SegmentOwnedFiles files, NativeIO nativeIo, Path path)
@@ -222,9 +649,16 @@ public final class SegmentClosedReconstruction {
                 .digest(binding.getBytes(StandardCharsets.US_ASCII)));
     }
 
-    private static void requireDrained(SegmentOwnedFiles files) throws Exception {
-        var result = files.drain();
+    private static void requireDrained(SegmentOwnedFiles files, SegmentDataFileLock guard) throws Exception {
+        SegmentOwnedFiles.Result result;
+        try {
+            result = files.drain();
+        } catch (InterruptedException failure) {
+            guard.retainAfterUnresolvedReconstruction(files);
+            throw failure;
+        }
         if (!result.drained()) {
+            guard.retainAfterUnresolvedReconstruction(files);
             throw new IOException("Reconstruction readers did not drain", result.closeFailure());
         }
     }

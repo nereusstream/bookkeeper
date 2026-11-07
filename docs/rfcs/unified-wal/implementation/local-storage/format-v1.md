@@ -122,7 +122,20 @@ action 4 仅由既有 graph restart 在持原作用域 DATA 锁、完整 Arena �
 
 action 5 使用同一启动锁和控制前置条件。当前 OPEN 的前驱须是受管终态，由健康 CLOSE 或已验证的解析记录建立。应用该 OPEN 时须无存续 grant，从该 OPEN 至原切点也不得成功应用 ALLOC 或 ALLOC_POOL。失败命令与幂等读回保留原结果。已经 FREE 的 grant 仍计入其所在 epoch，继承的 grant 也使本 epoch 不具备解析资格。重放从有序业务记录重建该事实，checkpoint 和 rotation 保留原记录和结果。全生命周期无 grant 的运行时分支优先使用 action 4。
 
-两个解析记录均在 force 和 apply 后结束旧 epoch，保留 epoch 数值及原控制历史。解析动作不产生 CLOSE 尾界或新的 allocation/FREE 事实。新 owner 只重放完整有效记录，原 write/force 结果未确认的尝试保持失败。原重开完成必要 DATA 核验、同步与状态重建后，以普通 OPEN 开启下一 epoch。
+action 4/5 均在 force 和 apply 后结束旧 epoch，保留 epoch 数值及原控制历史。解析动作不产生 CLOSE 尾界或新的 allocation/FREE 事实。新 owner 只重放完整有效记录，原 write/force 结果未确认的尝试保持失败。原重开完成必要 DATA 核验、同步与状态重建后，以普通 OPEN 开启下一 epoch。
+
+单文件 CLOSED 重建使用独立 `DEVICE_STATE` v2 action 6，固定 208 字节大端 body，完整控制记录 352 字节。外层 UUID 为原 native operation，operation generation 和 expected generation 都是旧 DATA epoch。body 如下。
+
+| 偏移 | 字段 |
+|---|---|
+| 0 / 4 | version u32=2 / action u32=6 |
+| 8 / 16 | 旧 epoch u64 / ledger id u64 |
+| 24 / 32 | 原 Arena predecessor sequence u64 / Bookie cut u64 |
+| 40 / 48 | 原 ADMITTED birth zxid u64 / READY birth zxid u64 |
+| 56 / 64 / 72 | 完整 DATA 长度 u64 / native dev 原始位 u64 / native ino 原始位 u64 |
+| 80 / 112 / 144 / 176 | 控制历史绑定 / ADMITTED / READY / 完整 DATA 的 SHA-256，各 32 字节 |
+
+action 6 只接受原发布 owner 清理完成后构造的运行时凭据。首次 apply 要求同一已授权 OPEN、相邻的 Arena predecessor cut、无隔离和相同文件长度。它结束原 epoch 并记录禁止续写的 allocation order 上界，保留旧 grant 的读取与合法回收。checkpoint/rotation 通过原有序业务记录重建该上界。首次后继 OPEN 重新核对原 native READY、已切换对象和清理结果，以及当前 CLOSED/成员资格。后续合法新 OPEN 和 DATA 写入沿用普通规则。[运行顺序与证据](README.md#单-data-文件的-closed-重建发布与重开)
 
 文件隔离后续 ALLOC 条件失败，原 grant 和 stream 起点仍保留。实际故障可先设置易失准入 gate，只有日志中的 DEVICE_STATE 改变重放状态。持久隔离和无法解析的 OPEN 在控制重放后阻止物理重开。缺少隔离记录或后续 DATA sync 成功均无法解除该限制。实际 driver 和生命周期验证见[本地状态](README.md)。
 

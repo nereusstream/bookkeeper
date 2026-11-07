@@ -12433,6 +12433,44 @@ public class SegmentBookieControlLogTest {
         throw new AssertionError("Incomplete control scope reached the dependency observer");
     }
 
+    @Test(timeout = 60000)
+    public void closedReconstructionRejectsASecondAppliedRecoveryGrantAfterRotation() throws Exception {
+        var config = config();
+        try (var storage = storage(config, 1, 6, 4)) {
+            storage.startNew();
+            installStorage(storage, install(1, (byte) 5), activate(2));
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE,
+                    storageWrite(storage, context(), 1).status());
+        }
+        long maxBytes = 1024 * 1024;
+        try (var lock = SegmentDataFileLock.open(config.directory());
+                var log = SegmentBookieControlLog.open(config, identity(), maxBytes, key((byte) 3), VALIDATOR)) {
+            assertTrue(lock.lock().isValid());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.submitRecoveryGrant(recoveryGrant(11, 3, 7, 9)).status());
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                    log.submitRecoveryGrant(recoveryGrant(12, 4, 1, 10)).status());
+            assertEquals(SegmentBookieControlLog.RecoveryCloseStatus.APPLIED_DURABLE,
+                    log.submitRecoveryClose(terminalClose(13, 11)));
+            log.rotate();
+        }
+        runAbruptWriter("session-reopen-unused", config.directory(), 86, "SESSION_OPEN_WITHOUT_GRANT");
+        SegmentStorageInspector.withRecoveryDependencies(config, identity(), maxBytes, 16, key((byte) 3),
+                VALIDATOR, observed -> {
+                    assertTrue(observed.arena().cut().sessionOpen());
+                    assertFalse(observed.arena().grants().isEmpty());
+                    assertTrue(observed.arena().reconstructionCapacity());
+                    assertEquals(1, observed.bookie().ledgers().size());
+                    assertEquals(2, observed.bookie().appliedRecoveryGrants());
+                    var grants = observed.bookie().ledgers().get(0).recoveryGrants();
+                    assertEquals(1, grants.stream().filter(SegmentBookieControlLog.ObservedRecoveryGrant
+                            ::committedReadable).count());
+                    assertThrows(IOException.class,
+                            () -> SegmentStorageInspector.requireClosedReconstructionScope(config, observed, null));
+                    return null;
+                });
+    }
+
     private void assertManagedDataHalt(String phase, int exit, String marker) throws Exception {
         var config = abruptWriterConfig(temporary.getRoot().toPath().resolve(phase));
         runAbruptWriter(phase, config.directory(), exit, marker);

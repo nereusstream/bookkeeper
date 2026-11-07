@@ -68,6 +68,7 @@ public final class SegmentStorageInspector {
         var arena = dependencies.arena();
         var bookie = dependencies.bookie();
         if (config.dataFiles() != 1 || !arena.cut().sessionOpen() || arena.grants().isEmpty()
+                || !arena.reconstructionCapacity()
                 || !arena.cut().recordedQuarantineFiles().isEmpty() || arena.relocationOrReuseHistory()
                 || !arena.selections().isEmpty() || !arena.retiredSlots().isEmpty() || !arena.retiredRanges().isEmpty()
                 || bookie.classicHistory() || bookie.ledgers().size() != 1 || bookie.appliedRecoveryGrants() != 1

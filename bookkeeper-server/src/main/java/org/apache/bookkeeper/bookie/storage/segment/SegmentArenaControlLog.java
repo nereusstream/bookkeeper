@@ -41,6 +41,8 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO.FileIdentity;
+import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
 
 /** Isolated single-Arena allocation and MOVE authority; no production Bookie access. */
 final class SegmentArenaControlLog implements AutoCloseable {
@@ -50,13 +52,88 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private static final int QUARANTINE_RECORD_BYTES = 128 + 16 + 16;
 
     sealed interface Command permits Allocation, Free, FileQuarantine, DataSession, ResolveNeverAllocatedSession,
-            ResolveGrantFreeSession, CheckpointCommit, SegmentArenaMove {
+            ResolveGrantFreeSession, ResolveClosedReconstruction, CheckpointCommit, SegmentArenaMove {
         SegmentControlFormat.Type type();
         UUID operationId();
         Generation operationGeneration();
         long expectedGeneration();
         ByteBuffer body();
     }
+
+    record ReconstructionBinding(long ledger, long arenaCut, long bookieCut, long admissionBirth, long readyBirth,
+                                 ProfileClosedReconstruction.Image image, String dependencies, String admissionDigest,
+                                 String readyDigest) {
+        ReconstructionBinding {
+            if (ledger < 0 || arenaCut < 0 || bookieCut < 0 || admissionBirth <= 0 || readyBirth <= admissionBirth
+                    || !dependencies.matches("[0-9a-f]{64}") || !admissionDigest.matches("[0-9a-f]{64}")
+                    || !readyDigest.matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException("Invalid CLOSED reconstruction cut or native birth");
+            }
+            Objects.requireNonNull(image, "image");
+        }
+    }
+
+    private record ResolveClosedReconstruction(UUID operationId, Generation operationGeneration,
+                                               ReconstructionBinding binding) implements Command {
+        private static final int BYTES = 208;
+
+        ResolveClosedReconstruction {
+            if (operationId.equals(new UUID(0, 0)) || operationGeneration.value() <= 0) {
+                throw new IllegalArgumentException("Invalid CLOSED reconstruction operation or epoch");
+            }
+        }
+
+        @Override
+        public SegmentControlFormat.Type type() {
+            return SegmentControlFormat.Type.DEVICE_STATE;
+        }
+
+        @Override
+        public long expectedGeneration() {
+            return operationGeneration.value();
+        }
+
+        @Override
+        public ByteBuffer body() {
+            var image = binding.image();
+            var hex = HexFormat.of();
+            return ByteBuffer.allocate(BYTES).putInt(2).putInt(6).putLong(expectedGeneration())
+                    .putLong(binding.ledger()).putLong(binding.arenaCut()).putLong(binding.bookieCut())
+                    .putLong(binding.admissionBirth()).putLong(binding.readyBirth()).putLong(image.length())
+                    .putLong(image.object().device()).putLong(image.object().inode())
+                    .put(hex.parseHex(binding.dependencies())).put(hex.parseHex(binding.admissionDigest()))
+                    .put(hex.parseHex(binding.readyDigest())).put(hex.parseHex(image.sha256())).flip();
+        }
+
+        private static ResolveClosedReconstruction decode(SegmentControlParser.Command parsed, ByteBuffer body) {
+            long epoch = body.getLong();
+            if (epoch != parsed.expectedGeneration() || epoch != parsed.operationGeneration().value()) {
+                throw new IllegalArgumentException("CLOSED reconstruction epoch differs from its framing");
+            }
+            long ledger = body.getLong();
+            long arena = body.getLong();
+            long bookie = body.getLong();
+            long admitted = body.getLong();
+            long ready = body.getLong();
+            long bytes = body.getLong();
+            var object = new FileIdentity(body.getLong(), body.getLong());
+            String dependencies = readDigest(body);
+            String admissionDigest = readDigest(body);
+            String readyDigest = readDigest(body);
+            return new ResolveClosedReconstruction(parsed.operationId(), parsed.operationGeneration(),
+                    new ReconstructionBinding(ledger, arena, bookie, admitted, ready,
+                            new ProfileClosedReconstruction.Image(object, bytes, readDigest(body)),
+                            dependencies, admissionDigest, readyDigest));
+        }
+
+        private static String readDigest(ByteBuffer input) {
+            byte[] bytes = new byte[32];
+            input.get(bytes);
+            return HexFormat.of().formatHex(bytes);
+        }
+    }
+
+    record PendingReconstruction(UUID operation, long epoch, ReconstructionBinding binding) { }
 
     private record CheckpointCommit(UUID operationId, SegmentControlCheckpoint.Reference reference) implements Command {
         @Override
@@ -464,6 +541,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
     private long sessionEpoch;
     private boolean sessionOpen;
     private boolean grantFreeSession;
+    private long reconstructionNoAppendThrough = -1;
+    private PendingReconstruction pendingReconstruction;
+    private boolean verifiedReconstruction;
     private boolean sessionCloseReserved;
     private final boolean[] spacePressure;
     private IsolatedSegmentFiles sessionOwner;
@@ -533,6 +613,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
         long resolutionCommand = Math.max(layout.object(ResolveNeverAllocatedSession.class),
                 layout.object(ResolveGrantFreeSession.class));
         long resolution = SegmentControlCapacity.sum(history, resolutionCommand);
+        long reconstruction = SegmentControlCapacity.sum(history, layout.object(ResolveClosedReconstruction.class),
+                layout.object(ReconstructionBinding.class), layout.object(PendingReconstruction.class),
+                layout.object(ProfileClosedReconstruction.Image.class), layout.object(FileIdentity.class),
+                SegmentControlCapacity.times(4, layout.string(64)));
         long tail = SegmentControlCapacity.sum(layout.object(AllocationTail.class), 8);
         long moveGraph = SegmentControlCapacity.sum(layout.object(SegmentArenaMove.class), layout.list());
         long moveRowGraph = SegmentControlCapacity.sum(layout.object(SegmentArenaMove.Entry.class),
@@ -553,6 +637,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
         perWire = Math.max(perWire, SegmentControlCapacity.slope(free, 272));
         perWire = Math.max(perWire, SegmentControlCapacity.slope(session, 160));
         perWire = Math.max(perWire, SegmentControlCapacity.slope(resolution, 160));
+        perWire = Math.max(perWire,
+                SegmentControlCapacity.slope(reconstruction, 144 + ResolveClosedReconstruction.BYTES));
         perWire = Math.max(perWire, SegmentControlCapacity.slope(tail, 24));
         perWire = Math.max(perWire, SegmentControlCapacity.slope(
                 SegmentControlCapacity.sum(history, moveGraph), 160));
@@ -630,7 +716,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     record ObservedRetirement(UUID operationId, Generation generation, FreeFacts facts) { }
 
     record RecoveryDependencies(Inspection cut, long allocationHighWatermark, long retiredBookieCut,
-                                boolean relocationOrReuseHistory, String historyDigest,
+                                boolean relocationOrReuseHistory, boolean reconstructionCapacity, String historyDigest,
                                 List<ObservedGrant> grants, List<ObservedStream> streams,
                                 List<ObservedSelection> selections,
                                 List<ObservedRetirement> retiredSlots, List<RetiredRange> retiredRanges) { }
@@ -658,6 +744,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                         .map(CheckpointOperation::new).toList());
         var result = new RecoveryDependencies(observed.inspection(), observed.allocationHighWatermark,
                 observed.retiredBookieCut, relocationOrReuse,
+                maxLogBytes - observed.nextOffset - observed.rotationReserveBytes()
+                        >= 144 + ResolveClosedReconstruction.BYTES,
                 SegmentControlCheckpoint.reference(1, 0, history, maxLogBytes).digest(),
                 observed.currentAllocations.values().stream()
                         .map(grant -> new ObservedGrant(grant.command(), grant.allocationOrder()))
@@ -795,7 +883,12 @@ final class SegmentArenaControlLog implements AutoCloseable {
                         && command != preparedSessionEnd) {
                     throw new IOException("Reused allocation tails require the actual healthy writer close");
                 }
-                if ((command instanceof ResolveNeverAllocatedSession || command instanceof ResolveGrantFreeSession)
+                if (command instanceof DataSession session && session.open() && pendingReconstruction != null
+                        && (!verifiedReconstruction || sessionOwner == null)) {
+                    throw new IOException("First OPEN requires the verified original reconstruction and writer");
+                }
+                if ((command instanceof ResolveNeverAllocatedSession || command instanceof ResolveGrantFreeSession
+                        || command instanceof ResolveClosedReconstruction)
                         && command != preparedSessionEnd) {
                     throw new IOException("DATA session resolution requires the original DATA lock");
                 }
@@ -871,6 +964,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                         ? command instanceof Allocation allocation ? allocation.generation()
                                 : command instanceof SegmentArenaMove || command instanceof ResolveNeverAllocatedSession
                                         || command instanceof ResolveGrantFreeSession
+                                        || command instanceof ResolveClosedReconstruction
                                         ? command.operationGeneration().value()
                                         : command.expectedGeneration() + 1 : 0;
                 results.add(new Result(status, command.operationId(), sequence, generation,
@@ -1092,7 +1186,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
             Allocation allocation = grant.command();
             if (allocation.ownerShard() == shard && dataFileAvailable(allocation.file())) {
                 long candidate = grant.allocationOrder();
-                if (candidate > order) {
+                if (candidate > order && permitsAllocationAppend(candidate)) {
                     latest = allocation;
                     order = candidate;
                 }
@@ -1583,7 +1677,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
         synchronized (this) {
             requireQuiescentRecovery(writer.config(), writer.identity());
             if (sessionOwner != null || sessionEpoch == Long.MAX_VALUE
-                    || (sessionEpoch == 0 && !allocations.isEmpty())) {
+                    || (sessionEpoch == 0 && !allocations.isEmpty())
+                    || pendingReconstruction != null && !verifiedReconstruction) {
                 throw new IOException("DATA session cannot adopt an active or legacy allocated writer");
             }
             command = new DataSession(UUID.randomUUID(), new Generation(sessionEpoch + 1), sessionEpoch, true);
@@ -1659,6 +1754,87 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     synchronized boolean hasUnclosedDataSession() {
         return sessionOpen;
+    }
+
+    static void resolveReconstruction(IsolatedSegmentConfig config, SegmentFileHeader identity, long maxLogBytes,
+            SegmentFileIo io, SegmentDataFileLock guard, SegmentOwnedFiles files,
+            SegmentClosedReconstruction.PublishedImage publication) throws IOException {
+        try (var arena = reconstructionReplay(config, identity, maxLogBytes, io, guard, files, false)) {
+            var command = reconstructionCommand(publication.receipt());
+            if (arena.hasExactReconstruction(command)) {
+                return;
+            }
+            if (!arena.canResolveSession() || arena.sessionEpoch != command.expectedGeneration()
+                    || arena.appliedThrough != command.binding().arenaCut()
+                    || arena.durableThrough != arena.appliedThrough) {
+                throw new IOException("READY cannot resolve any other Arena epoch or cut");
+            }
+            arena.preparedSessionEnd = command;
+            if (arena.submitBatch(List.of(command)).get(0).status() != Status.APPLIED_DURABLE) {
+                throw new IOException("Original CLOSED reconstruction resolution did not apply");
+            }
+        }
+    }
+
+    static void requireReconstructionApplied(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SegmentDataFileLock guard, SegmentOwnedFiles files,
+            ProfileClosedReconstruction.Receipt receipt) throws IOException {
+        try (var arena = reconstructionReplay(config, identity, maxLogBytes, new SegmentFileIo(), guard, files,
+                true)) {
+            if (!arena.hasExactReconstruction(reconstructionCommand(receipt))) {
+                throw new IOException("Advanced Arena does not retain the exact original resolution");
+            }
+        }
+    }
+
+    private static SegmentArenaControlLog reconstructionReplay(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SegmentFileIo io, SegmentDataFileLock guard, SegmentOwnedFiles files,
+            boolean inspection) throws IOException {
+        guard.requireHeld(config.directory().toRealPath().resolve("arena-control.lock"));
+        Path path = config.directory().resolve("arena-control");
+        FileChannel original = inspection ? SegmentOwnedFiles.openRegularReadOnly(files, path)
+                : SegmentOwnedFiles.open(files, path, StandardOpenOption.READ, StandardOpenOption.WRITE,
+                        LinkOption.NOFOLLOW_LINKS);
+        var log = new SegmentArenaControlLog(config, identity, maxLogBytes, io, original, null, inspection, files);
+        try {
+            log.validateStorageFiles(identity);
+            log.recover(identity);
+            return log;
+        } catch (IOException | RuntimeException | Error failure) {
+            try {
+                log.close();
+            } catch (IOException cleanup) {
+                failure.addSuppressed(cleanup);
+            }
+            throw failure;
+        }
+    }
+
+    private static ResolveClosedReconstruction reconstructionCommand(ProfileClosedReconstruction.Receipt receipt) {
+        var admitted = receipt.admission();
+        return new ResolveClosedReconstruction(admitted.operation(), new Generation(admitted.scope().epoch()),
+                new ReconstructionBinding(admitted.ledger(), admitted.arenaCut(), admitted.bookieCut(),
+                        receipt.admissionBirth(), receipt.readyBirth(), receipt.ready().candidate(),
+                        admitted.dependencies(), receipt.admissionDigest(), receipt.readyDigest()));
+    }
+
+    private boolean hasExactReconstruction(ResolveClosedReconstruction command) {
+        var existing = appliedOperations.get(command.operationId());
+        return existing != null && existing.status() == Status.APPLIED_DURABLE && existing.command().equals(command);
+    }
+
+    synchronized PendingReconstruction pendingReconstruction() {
+        return pendingReconstruction;
+    }
+
+    synchronized void verifyFirstReconstructionOpen(PendingReconstruction expected,
+            ProfileClosedReconstruction.Receipt receipt) throws IOException {
+        if (!Objects.equals(expected, pendingReconstruction)
+                || !expected.binding().equals(reconstructionCommand(receipt).binding())
+                || !hasExactReconstruction(reconstructionCommand(receipt))) {
+            throw new IOException("First OPEN must match the original verified reconstruction resolution");
+        }
+        verifiedReconstruction = true;
     }
 
     /** Only startup under the original DATA lock may settle an OPEN epoch without DATA write authority. */
@@ -1916,6 +2092,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return grant.allocationOrder();
     }
 
+    synchronized boolean permitsAllocationAppend(long order) {
+        return order > reconstructionNoAppendThrough;
+    }
+
     /** Earliest whole-batch applied pool in control order; does not reserve or refill space. */
     synchronized Optional<SegmentBatchFormat.Address> appendAddress(int file, long minimumOrder,
                                                                    long minimumOffset, long rawFloor, int bytes,
@@ -1932,7 +2112,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 continue;
             }
             long order = grant.allocationOrder();
-            if (order < minimumOrder) {
+            if (order < minimumOrder || !permitsAllocationAppend(order)) {
                 continue;
             }
             long offset = Math.max(command.offset(), order == minimumOrder ? minimumOffset : rawFloor);
@@ -2309,6 +2489,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
         sessionEpoch = 0;
         sessionOpen = false;
         grantFreeSession = false;
+        reconstructionNoAppendThrough = -1;
+        pendingReconstruction = null;
+        verifiedReconstruction = false;
         checkpointGeneration = 0;
         publishedCheckpoint = null;
         appliedThrough = -1;
@@ -2402,6 +2585,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
             }
             int version = body.getInt();
             int action = body.getInt();
+            if (version == 2 && action == 6 && body.remaining() == ResolveClosedReconstruction.BYTES - 8) {
+                try {
+                    return ResolveClosedReconstruction.decode(parsed, body);
+                } catch (IllegalArgumentException invalid) {
+                    throw new IOException("Invalid CLOSED reconstruction resolution", invalid);
+                }
+            }
             if (version == 2 && action == 3 && body.remaining() >= 16) {
                 long epoch = body.getLong();
                 int count = body.getInt();
@@ -2635,6 +2825,22 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     new AppliedOperation(command, Status.APPLIED_DURABLE, appliedThrough));
             return Status.APPLIED_DURABLE;
         }
+        if (command instanceof ResolveClosedReconstruction resolution) {
+            var binding = resolution.binding();
+            if (sessionEpoch != resolution.expectedGeneration() || !canResolveSession()
+                    || binding.arenaCut() != appliedThrough - 1 || config.dataFiles() != 1
+                    || currentAllocations.isEmpty() || binding.image().length() != config.bytesPerFile()
+                    || binding.arenaCut() <= reconstructionNoAppendThrough) {
+                throw new IOException("Invalid resolution of the original CLOSED reconstruction epoch");
+            }
+            sessionOpen = false;
+            grantFreeSession = false;
+            reconstructionNoAppendThrough = binding.arenaCut();
+            pendingReconstruction = new PendingReconstruction(resolution.operationId(), sessionEpoch, binding);
+            appliedOperations.put(command.operationId(), new AppliedOperation(command, Status.APPLIED_DURABLE,
+                    appliedThrough));
+            return Status.APPLIED_DURABLE;
+        }
         if (command instanceof DataSession session) {
             boolean allowed = session.expectedGeneration() == sessionEpoch
                     && (session.open() ? !sessionOpen && (sessionEpoch != 0 || allocations.isEmpty()) : sessionOpen);
@@ -2660,6 +2866,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
                         && allocations.isEmpty() && currentAllocations.isEmpty();
                 sessionEpoch = session.operationGeneration().value();
                 sessionOpen = session.open();
+                if (session.open()) {
+                    pendingReconstruction = null;
+                    verifiedReconstruction = false;
+                }
                 if (!session.open()) {
                     session.tails().forEach(tail -> sealedTails.put(tail.allocationId(), tail));
                 }
@@ -2899,13 +3109,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 first.addSuppressed(failure);
             }
         }
-        try {
-            writerLock.close();
-        } catch (IOException failure) {
-            if (first == null) {
-                first = failure;
-            } else {
-                first.addSuppressed(failure);
+        if (writerLock != null) {
+            try {
+                writerLock.close();
+            } catch (IOException failure) {
+                if (first == null) {
+                    first = failure;
+                } else {
+                    first.addSuppressed(failure);
+                }
             }
         }
         // A closed service may retain this owner, but replay needs a new owner and the durable files.

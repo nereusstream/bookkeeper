@@ -207,7 +207,8 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                     long order = authority.appliedAllocationOrder(address);
                     Stream stream = new Stream(address.shard(), address.streamGeneration().value());
                     AppendCursor cursor = owner.streamOffsets.get(stream);
-                    if (owner.sessionAuthority != authority || !owner.sessionReady || order < 0
+                    if (owner.sessionAuthority != authority || !owner.sessionReady
+                            || !authority.permitsAllocationAppend(order)
                             || cursor != null && (cursor.allocationOrder() > order
                                     || cursor.allocationOrder() == order && cursor.offset() != tail.offset())) {
                         throw new IOException("Retained compaction tail differs from the current managed writer");
@@ -734,14 +735,16 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             throw new IOException("DATA admission is closed by whole-allocation verification");
         }
         SegmentBatchFormat.Address address = batch.address();
+        long order = authority.appliedAllocationOrder(address);
         if (!authority.matchesScope(config, identity) || !authority.permitsDataWriter(this)
                 || !authority.dataFileAvailable(address.fileIndex())
+                || !authority.permitsAllocationAppend(order)
                 || !authority.hasAppliedGrant(address.fileIndex(), address.offset(), batch.bytes().remaining(),
                 address.shard(), address.streamGeneration().value(), address.allocation(),
                 address.generation().value())) {
             throw new IOException("DATA batch has no applied Arena allocation grant");
         }
-        return reservePhysical(batch, true, authority.appliedAllocationOrder(address));
+        return reservePhysical(batch, true, order);
     }
 
     /** Select a whole batch in one applied pool; skips remain consumed when the reservation advances the stream. */

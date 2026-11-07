@@ -29,6 +29,8 @@ final class SegmentFileIo {
     private final int failForce;
     private final boolean zeroWrites;
     private final Runnable beforeForce;
+    private final Runnable beforeWrite;
+    private final Runnable afterForce;
     int writes;
     int forces;
 
@@ -41,6 +43,11 @@ final class SegmentFileIo {
     }
 
     SegmentFileIo(int maxWrite, int failWrite, int failForce, boolean zeroWrites, Runnable beforeForce) {
+        this(maxWrite, failWrite, failForce, zeroWrites, beforeForce, null, null);
+    }
+
+    SegmentFileIo(int maxWrite, int failWrite, int failForce, boolean zeroWrites, Runnable beforeForce,
+                  Runnable beforeWrite, Runnable afterForce) {
         if (maxWrite <= 0) {
             throw new IllegalArgumentException("Positive transfer bound required");
         }
@@ -49,6 +56,8 @@ final class SegmentFileIo {
         this.failForce = failForce;
         this.zeroWrites = zeroWrites;
         this.beforeForce = beforeForce;
+        this.beforeWrite = beforeWrite;
+        this.afterForce = afterForce;
     }
 
     void writeFully(FileChannel channel, ByteBuffer input, long offset) throws IOException {
@@ -58,6 +67,9 @@ final class SegmentFileIo {
         }
         int zeroProgress = 0;
         while (bytes.hasRemaining()) {
+            if (beforeWrite != null) {
+                beforeWrite.run();
+            }
             if (++writes == failWrite) {
                 throw new IOException("Injected write failure");
             }
@@ -88,6 +100,9 @@ final class SegmentFileIo {
             throw new IOException("Injected force failure");
         }
         channel.force(metadata);
+        if (afterForce != null) {
+            afterForce.run();
+        }
     }
 
     static void readFully(FileChannel channel, ByteBuffer target, long offset) throws IOException {

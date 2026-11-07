@@ -932,9 +932,23 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 基线 `e96bd97d6d`。原受控 publisher 的 PID、进程出生与注册 session 在其运行期间取得，等待进程实际退出。原三把锁下完整重放控制历史。仅支持一个已安装、fenced 且 normal-inactive 的 ledger，一个 DATA 文件和当前单 fragment `3/3/3` CLOSED。旧 target 仍是原成员，保留在原删除目标历史。原 Bookie 的唯一已应用 recovery grant 须与当前 native SELF intent、commit birth、完整 close scope 和本地 terminal 应用精确对应。旧准入要求 grant 列表为空的断言在真实非空 close 上失败，重放实际返回一条已关闭的 `[0,1]` SELF grant。其他已应用 grant、额外本地 context、MOVE、FREE、复用和删除状态拒绝。
 
-完整 DATA 扫描核对所有页、物理地址、Arena allocation、stream、批次、CRC、精确 ledger 坐标和累计长度。普通与 recovery 写入共用 `ENTRY_DATA` 格式，准入依赖完整 Bookie 授权历史。每个坐标的有效内容须与两份当前 digest-valid 的 mTLS 来源相同，重复副本须字节一致。文件的原始描述符身份、长度、完整摘要与本地控制、当前 CLOSED、来源注册和空 staging 目录绑定。原生 ZK 以 target/Arena/旧 epoch 为固定槽位，在完整 CLOSED 与 lifecycle 条件下原子创建 ADMITTED 和同出生保护子节点。同一操作按原请求取回，另一操作拒绝。此阶段验证只生成空 staging 和 native ADMITTED，原 DATA 与控制文件保持。尚待 READY、文件切换、旧尾禁写及持久 resolution 的真实崩溃验证。
+完整 DATA 扫描核对所有页、物理地址、Arena allocation、stream、批次、CRC、精确 ledger 坐标和累计长度。普通与 recovery 写入共用 `ENTRY_DATA` 格式，准入依赖完整 Bookie 授权历史。每个坐标的有效内容须与两份当前 digest-valid 的 mTLS 来源相同，重复副本须字节一致。文件的原始描述符身份、长度、完整摘要与本地控制、当前 CLOSED、来源注册和空 staging 目录绑定。原生 ZK 以 target/Arena/旧 epoch 为固定槽位，在完整 CLOSED 与 lifecycle 条件下原子创建 ADMITTED 和同出生保护子节点。同一操作按原请求取回，另一操作拒绝。仅执行准入时生成空 staging 和 native ADMITTED，原 DATA 与控制文件保持。
 
 58 项定向回归及 Spotless、Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/closed-reconstruction-e96bd97d`，包括空 grant 准入的真实失败和确认原生 ADMITTED 出生的最终结果。
+
+### 单 DATA 文件的 CLOSED 重建发布与重开
+
+基线 `2b7cf9baf5`。ADMITTED 同事务建立受保护的 shadow guard，guard 缺失或出生不符时拒绝。每次写入 fresh inode 前，原锁下以精确版本 CAS 认领 shadow 并读回实际 nonce 和出生。原候选即使可读也须重新完整写入。READY 在同一原生事务内将这个 shadow 版本终结，创建不可变 READY 及同出生见证。此前提交的迟到 READY 和后继 shadow 认领竞争同一版本。失败的写入、force 或首次 close 使当前 shadow 失败，保留本地失败标记和原 native 状态。原 close 未解决时保留本进程的 DATA 锁。
+
+新候选逐字节写入、文件 force、完整 readback、原描述符首次 close 及目录同步成功后才提交 READY。确认 READY 后使用 native no-replace rename，将原 active 移入本操作的 retained-old，再安装同一 READY 候选。分别同步涉及的目录，核对新 active 的实际 dev/ino、header、长度和摘要，删除原 retained-old 与空 staging 并同步。重启按 READY 和实际对象识别切换的已执行前缀。历史 READY 只继续此物理发布，首次后继 OPEN 仍核对原绑定、当前 CLOSED、成员和 Bookie cut。文件和目录的持久屏障独立。[Linux fsync 手册](https://man7.org/linux/man-pages/man2/fsync.2.html)
+
+发布完成后，Arena 追加并 force 独立 `DEVICE_STATE` v2 action 6，结束旧 epoch，保留旧 grants，禁止按原 Arena cut 及更早的 allocation order 继续追加。普通追加、直接授权写和 retained compaction tail 都核对截止，已退休 extent 经合法 FREE 后可重新分配。首次后继 OPEN 前校验新文件与清理，随后恢复原启动、索引和注册顺序。合法新 OPEN 后文件继续按现有写入合同演进。[字节合同](format-v1.md#控制记录)
+
+真实 macOS 文件、ZooKeeper 和 mTLS 场景以同一 UUID 跨独立 JVM 续接。实际退出覆盖部分候选写入、旧 READY 提交被扣住、获胜 READY 丢回复、原文件已移动、active 已持久安装，以及 resolution force 返回后尚未 apply。旧 READY 的原始 multi 在新认领暂停期间提交，实际得到 `BADVERSION`。去掉该 CAS 版本后旧事务实际获准。去掉 retained-tail 筛选后，实际重开选回旧 grant。恢复两个条件后，重开读回原 `CLOSED(1, 35)`，写入新 grant 并健康关闭，轮转后再次冷启。父版本 reader 在原日志和轮转后都拒绝 action 6，当前 reader 均能重放。
+
+最终 67 项定向 JUnit 全部通过，Spotless 和 Checkstyle 通过。另覆盖原生 ADMITTED 和 shadow 认领丢回复、额外无 payload ledger、额外已应用 grant、完整快照失效、候选 force 和原首次 close 失败。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/closed-reconstruction-e96bd97d`，包括实际 action 6 文件与父版本读取结果。
+
+该证据覆盖进程退出与新文件的实际屏障。旧 writer 的写回错误仍独立于新描述符的结果。批准 Linux D2、真实掉电和完整生产资格保持 OPEN。更广的已授权 OPEN 仍须单独冻结恢复合同。[Linux errseq 文档](https://docs.kernel.org/core-api/errseq.html)
 
 ## Profile 普通 Add 的真实接线
 

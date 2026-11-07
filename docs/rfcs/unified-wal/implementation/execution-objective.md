@@ -30,7 +30,7 @@
 
 步骤 7/12/14 补充已授权 OPEN 的原 scope 控制清单。在原 DATA、Arena、Bookie 锁下只读重放，保留没有 DATA payload 的已安装 ledger。已确认 3/3/3 的原 Bookie JVM 退出后，替换前的两个当前存活来源经真实注册和 mTLS 逐条验证 CLOSED 数据。实际替换保留 P/L 并使旧完整快照失效。详见 [已授权 OPEN 的只读控制依赖与 CLOSED 来源](local-storage/README.md#已授权-open-的只读控制依赖与-closed-来源)。
 
-单 DATA 文件的 CLOSED 重建已接通完整映像验证和原生 ADMITTED。真实非空 close 保留一条精确 SELF grant，原范围、Bookie terminal close 与 native commit 核对后才允许绑定空 staging。原文件切换与旧 epoch 的持久解析仍待交付。详见 [单 DATA 文件的 CLOSED 重建准入](local-storage/README.md#单-data-文件的-closed-重建准入)。
+步骤 7/12/14 接通单 Arena、单 DATA 文件、单个当前 CLOSED ledger 的同身份重建。完整原映像与两份当前来源一致，且原 Bookie 的唯一已关闭 grant 与 native SELF 和 terminal close 精确对应时，原生准入才允许写入新文件。READY 与 shadow 版本终结同事务，完成两次名称切换和清理后以 action 6 终结旧 epoch 并持久禁止旧 allocation 续写。实际进程退出后可用原目录与身份重开、写入新 grant、健康关闭和再次冷启。缺失或损坏的数据、多 ledger、复用和搬迁历史仍在该分支准入范围之外。详见 [单 DATA 文件的 CLOSED 重建发布与重开](local-storage/README.md#单-data-文件的-closed-重建发布与重开)。
 
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
