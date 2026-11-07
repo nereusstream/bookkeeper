@@ -62,7 +62,7 @@
 
 本地已有封口的 `PREPARED` 现可在包内完成原生续接。条件 multi 和确认读随同一 supervisor 与 callback owner 排空。真实 ZooKeeper 丢回复后，新的 scope 可用同一出生与封口进行 `ENABLED` 冷读核验。[已封口 PREPARED 的原生续接](local-storage/README.md#已封口-prepared-的原生续接)
 
-包内 `PREPARED` 恢复已绑定原导入 applied cut，通过同一控制日志在 `.rloc` 写入和 V6 replay 副作用前核对原 CLASSIC 回执。严格 flush、目录同步、lastMark 和 Bookie 实际排空后，原 driver 才提交首个本地封口。冷开以该原回执续接同一原生出生并核验 `ENABLED`。公开资源装配、实时 Unix 采用、实际崩溃与掉电恢复及批准 Linux 验收仍 OPEN。详见 [PREPARED 恢复后的首次本地封口](local-storage/README.md#prepared-恢复后的首次本地封口)。
+包内 `PREPARED` 恢复已绑定原导入 applied cut，通过同一控制日志在 `.rloc` 写入和 V6 replay 副作用前核对原 CLASSIC 回执。严格 flush、目录同步、lastMark 和 Bookie 实际排空后，原 driver 才提交首个本地封口。Darwin 验证了封口完成后持锁恢复 JVM 直接退出，另一 JVM 以新 ZooKeeper session 冷开原封口，续接同一原生出生并核验 `ENABLED` 和原 entry。公开资源装配、实时 Unix 采用、其他崩溃窗口、掉电恢复及批准 Linux 验收仍 OPEN。详见 [PREPARED 本地封口后的跨 JVM 续接](local-storage/README.md#prepared-本地封口后的跨-jvm-续接)。
 
 交接材料读取、发布及包内 Classic preparation 已接入实时 ACL 复核。绑定输入、导入 claim 和实际 replay 前，逐项核验签名根下的保留树，包括未参与 replay 的旧 entry log。原目标身份下的目录搜索及既有文件读写权限已接入。本机真实 replay 已验证索引改名、entry-log 创建及 `lastId` 链接拒绝后的冷重开。旧 UID 进程与 fd 排除、挂载别名隔离及批准 Linux 交接仍 OPEN。[目标身份访问检查](startup-readiness/README.md#classic-交接目标身份的访问检查) · [实际写入验证](local-storage/README.md#classic-replay-的-lastid-实际打开保护)
 

@@ -2467,7 +2467,17 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 真实 ZooKeeper、双 Journal 和独立 index 用例核对封口紧接原 applied cut。挂起实际 force 时，已读到落盘的 `lastMark`，控制尚未 apply 封口，独立进程仍观察到 supervisor guard。父源码复现缺少封口、未进入封口 force。修复后验证原封口的冷开续接、`ENABLED` 冷读，以及 force 失败的原始异常和原生状态。最终九类 458 项定向回归零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-local-seal-evidence-01baa40e`。
 
-根锁、Arena 和控制 driver 由包内调用方持有。公开资源装配、实际进程崩溃与掉电恢复、实时 Unix 采用及批准 Linux 验收继续待完成。
+根锁、Arena 和控制 driver 由包内调用方持有。下节覆盖本地封口完成后、原生提交之前的进程退出。公开资源装配、其他崩溃窗口、掉电恢复、实时 Unix 采用及批准 Linux 验收继续待完成。
+
+## PREPARED 本地封口后的跨 JVM 续接
+
+2026-11-08，基线 `3c506d2bf4`。Darwin 上的独立恢复 JVM 使用真实 ZooKeeper session、原签名材料和双 Journal。它实际导入 claim、回放 V6 entry、同步索引和两个 `lastMark`，并等待原 control driver 持久应用 `BOOTSTRAP_COMPLETE`。恢复返回后，进程仍持有 supervisor、Classic 根、Arena 和 Bookie control owner，直接 `halt(23)`。独立观察确认原生绑定仍为原 `PREPARED`，出生、版本及 commissioned requirements 保持原值。磁盘已恢复原 `.rloc` inode，并可从实际索引和 entry log 读回固定 entry。
+
+第二个 JVM 用新 ZooKeeper session 从同一控制日志冷读封口，按原条件提交完成 `PREPARED → ENABLED`。原 birthId 和 czxid 保留，版本推进一次，原 seal 的操作 UUID、序号及 applied cut 进入原生绑定。新的只读 owner 从 `ENABLED` 核验原 claim。控制日志、恢复索引、entry log 和两个 `lastMark` 在续接前后字节一致，最终独立进程可再次取得 supervisor guard。
+
+证据范围限定为持久本地封口与原生完成之间的进程异常退出。掉电、批准 Linux、实时 Unix 采用、公开服务装配及曾授予 DATA 的异常重开继续待验收。
+
+新增双 JVM 用例在原生产实现上通过。相关回归 64 项通过、2 项 Linux 专用用例跳过，Spotless 和 Checkstyle 通过。补充 entry-log 摘要核对后，新增用例复验通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-prepared-halt-evidence-3c506d2b`。
 
 ## Classic replay 的 lastId 实际打开保护
 

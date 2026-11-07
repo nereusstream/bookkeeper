@@ -51,16 +51,21 @@ import java.nio.file.Path;
 import java.nio.file.SecureDirectoryStream;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.KeyFactory;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.MessageDigest;
 import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -79,6 +84,7 @@ import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.util.nativeio.NativeIO;
@@ -107,6 +113,8 @@ import org.mockito.MockedStatic;
 
 /** Handoff material I/O and cold native source binding under the original supervisor guard. */
 public class SegmentClassicHandoffMaterialsTest {
+    private static final String REQUIREMENTS_ROOT = "/ledgers/commissioned-test";
+
     @Rule
     public final TemporaryFolder temporary = new TemporaryFolder();
     private long uid;
@@ -284,9 +292,8 @@ public class SegmentClassicHandoffMaterialsTest {
                         nativeCookie.getCzxid(), nativeCookie.getVersion(), digest),
                 BookieRouteBinding.Phase.PREPARED, Optional.empty());
         nativeScope = manager.prepareBookieRouteBinding(binding).observation().orElseThrow();
-        String requirementsRoot = ledgers + "/commissioned-test";
-        client.create(requirementsRoot, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-        var store = new ZKProfileStartupRequirementsStore(client, requirementsRoot, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+        client.create(REQUIREMENTS_ROOT, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var store = new ZKProfileStartupRequirementsStore(client, REQUIREMENTS_ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE,
                 Duration.ofSeconds(5));
         var one = new Generation(1);
         var compatibility = new BookieCompatibilityFact(manifest.bookieId().toString(), manifest.incarnation(),
@@ -540,8 +547,7 @@ public class SegmentClassicHandoffMaterialsTest {
         Files.write(ledger.resolve("lastMark.1"), ByteBuffer.allocate(16).putLong(1).putLong(markedOffset).array());
         ClassicClaimTestHistory.writeJournal(secondJournal.directory().resolve("current/7.txn"), 13);
         ClassicClaimTestHistory.writeIndex(index.directory().resolve("current"), 11);
-        var config = new IsolatedSegmentConfig(controlRoot, 1, 1, 1, 16384, 4096, 1024, batchLimit,
-                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        var config = preparedControl(batchLimit);
         var route = new SegmentBookieControlLog.RouteBinding(nativeScope.binding().bindingId(), manifest.identity());
         var io = new SegmentFileIo();
         NativeSources sources;
@@ -566,6 +572,11 @@ public class SegmentClassicHandoffMaterialsTest {
             }
         }
         return new PreparedScope(sources, config, route);
+    }
+
+    private IsolatedSegmentConfig preparedControl(int batchLimit) {
+        return new IsolatedSegmentConfig(manifest.controlDirectory(), 1, 1, 1, 16384, 4096, 1024, batchLimit,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
     }
 
     private SealedScope sealScope(boolean exactSeal) throws Exception {
@@ -1144,6 +1155,196 @@ public class SegmentClassicHandoffMaterialsTest {
             verifyColdEnabled(enabledScope.get(), verify);
         } finally {
             assertTrue(verify.closeAndDrain().drained());
+        }
+    }
+
+    @Test(timeout = 90000)
+    public void haltedRecoveryJvmLeavesItsSealForAnotherJvmToCompleteTheOriginalPreparedBirth() throws Exception {
+        assumeTrue(SystemUtils.IS_OS_MAC_OSX);
+        var scope = preparedScope(16);
+        Path index = manifest.classicRoots().get(2).directory().resolve("current");
+        Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
+        Path relocatedIndex = index.resolve(IndexPersistenceMgr.getLedgerName(11));
+        Path relocation = Files.move(relocatedIndex, Path.of(relocatedIndex + ".rloc"));
+        Object originalInode = Files.getAttribute(relocation, "unix:ino");
+        byte[] originalIndex = Files.readAllBytes(relocation);
+        Path journal = manifest.classicRoots().get(3).directory().resolve("current/8.txn");
+        byte[] entry = ClassicClaimTestHistory.writeJournalWithEntry(journal, 19);
+        Path replayedIndex = index.resolve(IndexPersistenceMgr.getLedgerName(19));
+        Path firstMark = ledger.resolve("lastMark.0");
+        Path secondMark = ledger.resolve("lastMark.1");
+        Path control = manifest.controlDirectory().resolve("bookie-control");
+        var requirements = scope.sources().requirements();
+        String bookieId = manifest.bookieId().toString();
+        var originalRequirements = requirements.read(bookieId).observation().orElseThrow().sourceIdentity();
+
+        String crash = runRecoveryProbe("recover", RecoveryCrashProbe.HALT_EXIT);
+        assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                .observation().orElseThrow());
+        assertEquals(originalRequirements, requirements.read(bookieId).observation().orElseThrow().sourceIdentity());
+        probe("AVAILABLE");
+        assertFalse(Files.exists(relocation));
+        assertEquals(originalInode, Files.getAttribute(relocatedIndex, "unix:ino"));
+        assertArrayEquals(originalIndex, Files.readAllBytes(relocatedIndex));
+        assertArrayEquals(entry, ClassicClaimTestHistory.readFirstEntry(replayedIndex, ledger));
+        byte[] firstCut = ByteBuffer.allocate(16).putLong(8).putLong(Files.size(journal)).array();
+        Path originalJournal = manifest.classicRoots().get(0).directory().resolve("current/1.txn");
+        byte[] secondCut = ByteBuffer.allocate(16).putLong(1).putLong(Files.size(originalJournal)).array();
+        assertArrayEquals(firstCut, Files.readAllBytes(firstMark));
+        assertArrayEquals(secondCut, Files.readAllBytes(secondMark));
+        byte[] sealedControl = Files.readAllBytes(control);
+        byte[] recoveredIndex = Files.readAllBytes(replayedIndex);
+        var recoveredLogs = entryLogDigests(ledger);
+
+        String resume = runRecoveryProbe("resume", 0);
+        var enabled = scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                .observation().orElseThrow();
+        var seal = enabled.binding().seal().orElseThrow();
+        assertPreparedCompletion(nativeScope, seal, enabled);
+        assertTrue(crash, crash.contains(RecoveryCrashProbe.SEAL_PREFIX + seal));
+        assertTrue(resume, resume.contains(RecoveryCrashProbe.SEAL_PREFIX + seal));
+        assertEquals(originalRequirements, requirements.read(bookieId).observation().orElseThrow().sourceIdentity());
+
+        var verify = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            verify.initialize();
+            verifyColdEnabled(new SealedScope(scope, seal, enabled), verify);
+        } finally {
+            assertTrue(verify.closeAndDrain().drained());
+        }
+        assertArrayEquals(sealedControl, Files.readAllBytes(control));
+        assertArrayEquals(firstCut, Files.readAllBytes(firstMark));
+        assertArrayEquals(secondCut, Files.readAllBytes(secondMark));
+        assertArrayEquals(recoveredIndex, Files.readAllBytes(replayedIndex));
+        assertEquals(recoveredLogs, entryLogDigests(ledger));
+        assertArrayEquals(entry, ClassicClaimTestHistory.readFirstEntry(replayedIndex, ledger));
+        assertEquals(originalInode, Files.getAttribute(relocatedIndex, "unix:ino"));
+        probe("AVAILABLE");
+    }
+
+    private static Map<Path, SegmentClassicHandoff.Digest> entryLogDigests(Path directory) throws IOException {
+        var digests = new HashMap<Path, SegmentClassicHandoff.Digest>();
+        try (var files = Files.newDirectoryStream(directory, "*.log")) {
+            for (Path file : files) {
+                digests.put(file, SegmentClassicHandoff.digest(Files.readAllBytes(file)));
+            }
+        }
+        return digests;
+    }
+
+    private static void assertPreparedCompletion(BookieRouteBinding.Observation prepared,
+            BookieRouteBinding.BootstrapSeal seal, BookieRouteBinding.Observation enabled) {
+        assertEquals(prepared.binding().enabled(seal), enabled.binding());
+        assertEquals(prepared.birthId(), enabled.birthId());
+        assertEquals(prepared.birthZxid(), enabled.birthZxid());
+        assertEquals(prepared.version() + 1, enabled.version());
+        assertTrue(enabled.modifiedZxid() > prepared.modifiedZxid());
+    }
+
+    private String runRecoveryProbe(String mode, int exit) throws Exception {
+        Path output = temporary.newFile(mode + "-jvm.log").toPath();
+        var command = new ArrayList<String>();
+        command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+        String nativeLibrary = System.getProperty("bookkeeper.native.io.library.path");
+        if (nativeLibrary != null) {
+            command.add("-Dbookkeeper.native.io.library.path=" + nativeLibrary);
+        }
+        command.addAll(List.of("-cp", System.getProperty("java.class.path"), RecoveryCrashProbe.class.getName(),
+                mode, cluster.getZooKeeperConnectString(), manifest.path().toString(), manifest.identity().toString(),
+                references.directory().toString(), HexFormat.of().formatHex(signing.getPublic().getEncoded()),
+                Long.toString(oldUid)));
+        var process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(output.toFile()).start();
+        try {
+            assertTrue(mode + " recovery JVM timed out", process.waitFor(25, TimeUnit.SECONDS));
+            try (var input = Files.newInputStream(output)) {
+                byte[] bytes = input.readNBytes(256 * 1024 + 1);
+                assertTrue("Unbounded recovery JVM output", bytes.length <= 256 * 1024);
+                String transcript = new String(bytes, StandardCharsets.UTF_8);
+                assertEquals(transcript, exit, process.exitValue());
+                return transcript;
+            }
+        } finally {
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                assertTrue(process.waitFor(5, TimeUnit.SECONDS));
+            }
+            process.getOutputStream().close();
+        }
+    }
+
+    public static final class RecoveryCrashProbe {
+        private static final int HALT_EXIT = 23;
+        private static final String SEAL_PREFIX = "Retained recovery seal ";
+
+        public static void main(String[] args) throws Exception {
+            boolean recover = "recover".equals(args[0]);
+            assertTrue(recover || "resume".equals(args[0]));
+            var fixture = new SegmentClassicHandoffMaterialsTest();
+            var hex = HexFormat.of();
+            var manifest = SegmentArenaManifest.read(Path.of(args[2]), new ManifestIdentity(hex.parseHex(args[3])));
+            fixture.manifest = manifest;
+            Path materials = Path.of(args[4]);
+            var signer = KeyFactory.getInstance("Ed25519").generatePublic(new X509EncodedKeySpec(
+                    hex.parseHex(args[5])));
+            long uid = new UnixSystem().getUid();
+            var trust = new SegmentClassicBootstrap.Trust("deployment", digest(8), digest(9), signer,
+                    Long.parseLong(args[6]), uid, uid);
+            var references = new SegmentClassicHandoffMaterials.References(materials, materials.resolve("proof"),
+                    materials.resolve("policy"), materials.resolve("key"));
+            var connected = new CountDownLatch(1);
+            try (var zk = new ZooKeeper(args[1], 10000, event -> {
+                if (event.getState() == Watcher.Event.KeeperState.SyncConnected) {
+                    connected.countDown();
+                }
+            })) {
+                assertTrue(connected.await(5, TimeUnit.SECONDS));
+                var manager = new ZKRegistrationManager(fixture.classicConfiguration(), zk, "/ledgers");
+                var requirements = new ZKProfileStartupRequirementsStore(zk, REQUIREMENTS_ROOT,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var prepared = manager.readBookieRouteBinding(manifest.bookieId()).observation().orElseThrow();
+                assertEquals(BookieRouteBinding.Phase.PREPARED, prepared.binding().phase());
+                var route = new SegmentBookieControlLog.RouteBinding(prepared.binding().bindingId(),
+                        manifest.identity());
+                var scope = new PreparedScope(new NativeSources(manager, requirements), fixture.preparedControl(16),
+                        route);
+                var preparation = new SegmentClassicBootstrap(manager, requirements, manifest, references, trust,
+                        Duration.ofSeconds(5));
+                try {
+                    preparation.initialize();
+                    fixture.withColdScope(scope, prepared, preparation, new SegmentFileIo(),
+                            (roots, arenas, control, io) -> {
+                                var log = control.log();
+                                if (recover) {
+                                    assertTrue(log.bootstrapSeal().isEmpty());
+                                    withClaimDriver(log, driver -> {
+                                        preparation.importPrepared(roots, arenas, control, driver);
+                                        long cut = log.unsealedBootstrapCut();
+                                        preparation.recoverPrepared();
+                                        var seal = log.bootstrapSeal().orElseThrow();
+                                        assertEquals(cut, seal.appliedCut());
+                                        assertEquals(cut + 1, seal.sequence());
+                                        assertEquals(seal.sequence(), log.appliedThrough());
+                                        System.out.println(SEAL_PREFIX + seal);
+                                        System.out.flush();
+                                        Runtime.getRuntime().halt(HALT_EXIT);
+                                    });
+                                } else {
+                                    var seal = log.bootstrapSeal().orElseThrow();
+                                    var claim = log.prepareBootstrapClaim(19).applied().orElseThrow();
+                                    assertEquals(seal.appliedCut() + 1, seal.sequence());
+                                    assertEquals(seal.sequence(), log.appliedThrough());
+                                    var enabled = preparation.completePrepared(roots, arenas, control);
+                                    assertPreparedCompletion(prepared, seal, enabled);
+                                    assertEquals(claim, log.prepareBootstrapClaim(19).applied().orElseThrow());
+                                    assertEquals(seal.sequence(), log.appliedThrough());
+                                    assertEquals(0, io.writes);
+                                    System.out.println(SEAL_PREFIX + seal);
+                                }
+                            });
+                } finally {
+                    assertTrue(preparation.closeAndDrain().drained());
+                }
+            }
         }
     }
 
