@@ -139,6 +139,8 @@ action 6 只接受原发布 owner 清理完成后构造的运行时凭据。首�
 
 原生 ADMITTED 的 v1 单成员和 v2 全非空集合维持原字节，成员按 `NONEMPTY_SELF` 解释。混合集合使用 ADMITTED v3，共用 v2 的前缀和 2～16 成员计数。每项在原 60 字节 context、32 字节 CLOSED 摘要和 32 字节来源摘要前增加一个 kind byte，`1=NONEMPTY_SELF`，`2=EMPTY_TERMINAL`。至少一项属于每种类型，ledger ID 严格递增，总记录上限 8192 字节。EMPTY 的关闭摘要绑定原 activated page 出生、selection 和精确 grantless terminal，来源摘要以独立域记录其无 payload 来源审核。v1/v2 reader 读取 v3 ADMITTED 即拒绝。READY、shadow、action 6 及 DATA 保持原编码。
 
+固定单 Arena 多文件使用原生 ADMITTED v4 和 READY v2。原 `Image` 位置改为 `count u32` 和顺序文件向量。每项为 `fileIndex u32`、原 56 字节 `Image`（dev/ino/长度/SHA-256），索引连续 `0..count-1`，`2≤count≤64`。v4 成员向量沿用 v3 的 typed 行，允许 1～16 项且至少一项 `NONEMPTY_SELF`，每项包含完整 context。记录上限仍为 8192 字节。READY v2 的候选向量绑定原 ADMITTED birth/digest 和同一个 shadow 版本，与 v4 逐项比对长度和摘要，原与新对象不得交叉别名。单文件 ADMITTED v1/v2/v3 与 READY v1 保持原字节。
+
 文件隔离后续 ALLOC 条件失败，原 grant 和 stream 起点仍保留。实际故障可先设置易失准入 gate，只有日志中的 DEVICE_STATE 改变重放状态。持久隔离和无法解析的 OPEN 在控制重放后阻止物理重开。缺少隔离记录或后续 DATA sync 成功均无法解除该限制。实际 driver 和生命周期验证见[本地状态](README.md)。
 
 实际绑定的DATA合批路径在I/O前为该记录共享预留每文件160字节逻辑控制日志容量（128-byte header、16-byte body、16-byte footer）及原owner通知完成槽。普通控制追加不能占用这份容量，未知结果不释放实际I/O资源；成功DATA不写故障记录，只在I/O/owner终结后归还预留。控制忙时每文件保留一条通知并按原序执行，停收仍使用原ticket排空；预留不足先背压，Arena关闭/物理重开拒绝未终结通知。这不预分配实际文件系统空间，也不证明记录落盘前退出、实际控制I/O或owner失败已可跨重启解析。

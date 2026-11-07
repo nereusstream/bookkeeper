@@ -12466,7 +12466,7 @@ public class SegmentBookieControlLogTest {
                     assertEquals(1, grants.stream().filter(SegmentBookieControlLog.ObservedRecoveryGrant
                             ::committedReadable).count());
                     assertThrows(IOException.class,
-                            () -> SegmentStorageInspector.requireClosedReconstructionScope(config, observed, null));
+                            () -> SegmentStorageInspector.requireClosedReconstructionScope(observed, null));
                     return null;
                 });
     }

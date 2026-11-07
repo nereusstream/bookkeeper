@@ -15932,6 +15932,11 @@ public class SegmentProfileInitialSocketClientTest {
 
         PublicProfileReadonlyEpisode(int cohortSize, boolean createClosed, int ackQuorum, boolean ownsResources)
                 throws Exception {
+            this(cohortSize, createClosed, ackQuorum, ownsResources, 1);
+        }
+
+        PublicProfileReadonlyEpisode(int cohortSize, boolean createClosed, int ackQuorum, boolean ownsResources,
+                int files) throws Exception {
             fixture = new Fixture(false, false, true, cohortSize, ackQuorum, true, true);
             try {
                 sdk = sdk(fixture);
@@ -15939,11 +15944,12 @@ public class SegmentProfileInitialSocketClientTest {
                 for (int target = 0; target < cohortSize; target++) {
                     var original = files(fixture.nodes.get(target)).config();
                     var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("sdk-readonly"),
-                            1, 1, 1, original.bytesPerFile(), 4096, 1024, 16,
+                            1, files, files, original.bytesPerFile(), 4096, 1024, 16,
                             "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
                     var policy = servicePolicy(config, fixture.identities.get(target), 1);
                     var episode = new ServiceEpisode(fixture, target, config, policy, policy.compatibility(),
-                            new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup, false, ownsResources);
+                            new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup, false, ownsResources,
+                            files == 1 ? 0 : serviceRestartHeadroom(config));
                     episodes.add(episode);
                     episode.replaceNode(fixture, target, false);
                     if (!createClosed) {
@@ -18905,6 +18911,16 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void closedReconstructionAdmitsBothRequiredDataFiles() throws Exception {
+        runAckedBookieJvmHalt(ReconstructionEpisode.MULTIFILE_ADMIT);
+    }
+
+    @Test
+    public void closedReconstructionRequiresTheOriginalFileEvenWithoutAnAllocation() throws Exception {
+        runAckedBookieJvmHalt(ReconstructionEpisode.MULTIFILE_UNUSED);
+    }
+
+    @Test
     public void closedReconstructionReadyRejectsAnEmptyMemberDeleteBeforeTheNativeMulti() throws Exception {
         runAckedBookieJvmHalt(ReconstructionEpisode.MIXED_READY_RACE);
     }
@@ -18954,9 +18970,11 @@ public class SegmentProfileInitialSocketClientTest {
         runAckedBookieJvmHalt(ReconstructionEpisode.EXTRA_CONTEXT);
     }
 
+    private static final String MULTIFILE_PARENT_CLASSES = "bookkeeper.reconstruction.multifile.parent.classes";
+
     private enum ReconstructionEpisode { OBSERVE, ADMIT, COHORT, COHORT_RACE, COHORT_READY_RACE, COHORT_REOPEN,
         COHORT_DELETE, MIXED_ADMIT, MIXED_READY_RACE, MIXED_REOPEN, MIXED_DELETE, SWITCH, DELETE_AFTER_READY,
-        DELETE_BEFORE_READY,
+        DELETE_BEFORE_READY, MULTIFILE_ADMIT, MULTIFILE_UNUSED,
         FORCE_ERROR, CLOSE_ERROR, EXTRA_CONTEXT;
 
         boolean emptyFirst() {
@@ -18968,7 +18986,9 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     private void runAckedBookieJvmHalt(ReconstructionEpisode mode) throws Exception {
-        try (var episode = new PublicProfileReadonlyEpisode(4, false, 3, true)) {
+        int fileCount = mode == ReconstructionEpisode.MULTIFILE_ADMIT || mode == ReconstructionEpisode.MULTIFILE_UNUSED
+                ? 2 : 1;
+        try (var episode = new PublicProfileReadonlyEpisode(4, false, 3, true, fileCount)) {
             var fixture = episode.fixture;
             var sdk = episode.sdk;
             int failedSlot = 2;
@@ -19005,7 +19025,7 @@ public class SegmentProfileInitialSocketClientTest {
                         : null;
                 boolean cohort = switch (mode) {
                     case COHORT, COHORT_RACE, COHORT_READY_RACE, COHORT_REOPEN, COHORT_DELETE,
-                         MIXED_ADMIT, MIXED_READY_RACE, MIXED_REOPEN, MIXED_DELETE -> true;
+                         MIXED_ADMIT, MIXED_READY_RACE, MIXED_REOPEN, MIXED_DELETE, MULTIFILE_ADMIT -> true;
                     default -> false;
                 };
                 boolean emptyFirst = mode.emptyFirst();
@@ -19091,11 +19111,21 @@ public class SegmentProfileInitialSocketClientTest {
                     assertReconstructionFailure(episode, prepared, metadata, original, oldIdentity, oldPublisher, mode);
                     return;
                 }
+                if (mode == ReconstructionEpisode.MULTIFILE_UNUSED) {
+                    assertMultifileReconstructionAdmission(episode, prepared, metadata, oldIdentity,
+                            oldPublisher, List.of(original));
+                    return;
+                }
                 if (cohort) {
                     var companion = fixture.reservations.readClosedForOpen(metadata, 45).snapshot();
                     assertNotNull(companion);
                     assertEquals(1, companion.closed().metadata().metadata().getValue().getLastEntryId());
                     assertEquals(33, companion.closed().metadata().metadata().getValue().getLength());
+                    if (fileCount > 1) {
+                        assertMultifileReconstructionAdmission(episode, prepared, metadata, oldIdentity,
+                                oldPublisher, List.of(original, companion));
+                        return;
+                    }
                     var admitted = assertClosedReconstructionCohort(episode, prepared, metadata, original, companion,
                             oldIdentity, oldPublisher, mode);
                     boolean deleting = mode == ReconstructionEpisode.COHORT_DELETE
@@ -19271,6 +19301,83 @@ public class SegmentProfileInitialSocketClientTest {
         return admitted;
     }
 
+    private void assertMultifileReconstructionAdmission(PublicProfileReadonlyEpisode episode, ServiceEpisode prepared,
+            ProfileLedgerMetadataStore metadata, SegmentFileHeader identity,
+            SegmentClosedReconstruction.OldPublisher publisher,
+            List<ZKProfileReservationStore.ReadOnlySnapshot> members) throws Exception {
+        var fixture = episode.fixture;
+        var config = prepared.config;
+        var key = new SecretKeySpec(bytes(32, 7), "AES");
+        SegmentStorageInspector.withRecoveryDependencies(config, identity, ServiceEpisode.CONTROL_LOG_BYTES, 64,
+                key, VALIDATOR, dependencies -> {
+                    var expected = members.size() == 1 ? Set.of(0) : Set.of(0, 1);
+                    assertEquals(expected, Set.copyOf(dependencies.arena().grants().stream()
+                            .map(grant -> grant.allocation().file()).toList()));
+                    for (var grant : dependencies.arena().grants()) {
+                        var allocation = grant.allocation();
+                        var file = IsolatedSegmentFiles.dataPath(config, allocation.file());
+                        var header = java.nio.ByteBuffer.allocate(config.alignment());
+                        try (var data = SegmentOwnedFiles.openRegularReadOnly(null, file)) {
+                            SegmentFileIo.readFully(data, header, 0);
+                            identity.validate(header, config, allocation.file());
+                            SegmentFileIo.readFully(data, header.clear(), allocation.offset());
+                            var address = new SegmentBatchFormat.Address(allocation.file(), allocation.ownerShard(),
+                                    allocation.allocationId(), new Generation(allocation.generation()),
+                                    allocation.ownerGeneration(), header.getLong(56), allocation.offset());
+                            var batch = SegmentBatchParser.parse(header, address, data.size());
+                            assertTrue(batch.records().stream().anyMatch(record -> record.context().equals(
+                                    members.get(allocation.file()).context().ledger())));
+                        }
+                    }
+                    return null;
+                });
+        var limits = new SegmentClosedReconstruction.Limits(ServiceEpisode.CONTROL_LOG_BYTES, 64,
+                Math.multiplyExact(config.bytesPerFile(), config.dataFiles()), 64, Duration.ofSeconds(15));
+        var sources = new SegmentClosedReconstruction.Sources(episode.sdk.getClientCtx(), fixture.clientGroup,
+                fixture.peerTls, fixture.cold, episode.episodes.get(0).persistent);
+        var nativeIo = new org.apache.bookkeeper.common.util.nativeio.NativeIOImpl();
+        var scope = new ProfileClosedReconstruction.Scope(identity.bookieId().toString(), identity.incarnation(),
+                identity.arenaId(), 2);
+        var operation = UUID.randomUUID();
+        var before = recoveryObservationFileDigests(config.directory());
+        if (members.size() == 1) {
+            Path second = IsolatedSegmentFiles.dataPath(config, 1);
+            Path held = temporary.newFolder().toPath().resolve("required-empty-file");
+            Files.move(second, held);
+            try {
+                assertThrows(IOException.class, () -> SegmentClosedReconstruction.admitCohort(config, identity, key,
+                        VALIDATOR, nativeIo, limits, metadata, fixture.reservations, sources, members, publisher, 2,
+                        operation));
+                assertNull(fixture.reservations.readClosedReconstruction(scope));
+            } finally {
+                Files.move(held, second);
+            }
+        }
+        var limited = new SegmentClosedReconstruction.Limits(ServiceEpisode.CONTROL_LOG_BYTES, 64,
+                config.bytesPerFile(), 64, Duration.ofSeconds(15));
+        assertThrows(IOException.class, () -> SegmentClosedReconstruction.admitCohort(config, identity, key,
+                VALIDATOR, nativeIo, limited, metadata, fixture.reservations, sources, members, publisher, 2,
+                operation));
+        assertNull(fixture.reservations.readClosedReconstruction(scope));
+        var admitted = SegmentClosedReconstruction.admitCohort(config, identity, key, VALIDATOR, nativeIo,
+                limits, metadata, fixture.reservations, sources, members, publisher, 2, operation);
+        assertEquals(List.of(0, 1), admitted.admission().originals().stream()
+                .map(ProfileClosedReconstruction.FileImage::index).toList());
+        assertEquals(members.stream().map(member -> member.context().ledger()).toList(),
+                admitted.admission().members().stream().map(ProfileClosedReconstruction.Member::context).toList());
+        for (var file : admitted.admission().originals()) {
+            assertEquals(before.get(Path.of("data-" + file.index())), file.image().sha256());
+        }
+        assertNull(admitted.ready());
+        assertEquals(admitted, fixture.reservations.readClosedReconstruction(scope));
+        assertEquals(before, recoveryObservationFileDigests(config.directory()));
+        if (System.getProperty(MULTIFILE_PARENT_CLASSES) != null && members.size() == 2) {
+            runReconstructionChild(fixture, config, identity, operation, "parent-reads-v4");
+            assertEquals(admitted, fixture.reservations.readClosedReconstruction(scope));
+            assertEquals(before, recoveryObservationFileDigests(config.directory()));
+        }
+    }
+
     private static void assertEmptyReconstructionEvidence(IsolatedSegmentConfig config, SegmentFileHeader identity,
             ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata,
             ZKProfileReservationStore.ReadOnlySnapshot empty, ZKProfileReservationStore.ReadOnlySnapshot nonempty)
@@ -19282,7 +19389,7 @@ public class SegmentProfileInitialSocketClientTest {
         var self = reservations.readClosedReconstructionSelf(metadata, nonempty, target, incarnation);
         SegmentStorageInspector.withRecoveryDependencies(config, identity, ServiceEpisode.CONTROL_LOG_BYTES, 64,
                 new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, dependencies -> {
-                    SegmentStorageInspector.requireClosedReconstructionScope(config, dependencies,
+                    SegmentStorageInspector.requireClosedReconstructionScope(dependencies,
                             List.of(proof, self));
                     assertEquals(1, dependencies.bookie().appliedRecoveryGrants());
                     var local = dependencies.bookie().ledgers().get(0);
@@ -20143,7 +20250,9 @@ public class SegmentProfileInitialSocketClientTest {
             command.add("-Dbookkeeper.native.io.library.path=" + nativeLibrary);
         }
         String classpath = System.getProperty("java.class.path");
-        if (phase.startsWith("parent-rejects-")) {
+        if (phase.equals("parent-reads-v4")) {
+            classpath = System.getProperty(MULTIFILE_PARENT_CLASSES) + File.pathSeparator + classpath;
+        } else if (phase.startsWith("parent-rejects-")) {
             classpath = System.getProperty("bookkeeper.reconstruction.parent.classes") + File.pathSeparator + classpath;
         }
         command.addAll(List.of("-cp", classpath,
@@ -20184,7 +20293,7 @@ public class SegmentProfileInitialSocketClientTest {
             if (phase.equals("ready-lost")) {
                 assertTrue(log, log.contains("UW_CLOSED_RECONSTRUCTION_SHADOW_REPLY_LOST " + operation));
             }
-            if (phase.startsWith("parent-rejects-")) {
+            if (phase.startsWith("parent-rejects-") || phase.equals("parent-reads-v4")) {
                 assertTrue(log, log.contains("UW_OLD_ADMISSION_READER_REFUSED " + operation));
             }
             if (phase.equals("parent-rejects-settled-mixed")) {
@@ -20299,6 +20408,15 @@ public class SegmentProfileInitialSocketClientTest {
                     }, null);
                     var controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, null,
                             phase.equals("installed") ? halt : null, phase.equals("resolution-forced") ? halt : null);
+                    if (phase.equals("parent-reads-v4")) {
+                        var scope = new ProfileClosedReconstruction.Scope(identity.bookieId().toString(),
+                                identity.incarnation(), identity.arenaId(), 2);
+                        var rejected = assertThrows(IOException.class, () -> reservations.readClosedReconstruction(
+                                scope));
+                        assertTrue(rejected.getMessage().contains("Unknown reconstruction admission version"));
+                        System.out.println("UW_OLD_ADMISSION_READER_REFUSED " + operation);
+                        halt.run();
+                    }
                     if (phase.startsWith("parent-rejects-")) {
                         var rejected = assertThrows(IOException.class, () -> SegmentClosedReconstruction
                                 .reconstructCohort(config, identity, new SecretKeySpec(bytes(32, 7), "AES"),
@@ -20530,12 +20648,12 @@ public class SegmentProfileInitialSocketClientTest {
                                     original.incarnation().value())));
                     var self = fixture.reservations.readClosedReconstructionSelf(metadata, frozen,
                             original.bookieId().toString(), original.incarnation().value());
-                    SegmentStorageInspector.requireClosedReconstructionScope(prepared.config, dependencies,
+                    SegmentStorageInspector.requireClosedReconstructionScope(dependencies,
                             List.of(self));
                     var incompatible = new ZKProfileReservationStore.ClosedReconstructionSelf(self.repair(),
                             self.reference(), self.commitBirth(), self.repair().intent().grantScope());
                     assertThrows(IOException.class, () -> SegmentStorageInspector.requireClosedReconstructionScope(
-                            prepared.config, dependencies, List.of(incompatible)));
+                            dependencies, List.of(incompatible)));
                     var dataPath = IsolatedSegmentFiles.dataPath(prepared.config, 0);
                     var closed = frozen.closed().metadata().metadata().getValue();
                     SegmentDataRecovery.ClosedImage image;

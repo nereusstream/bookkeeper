@@ -38,6 +38,8 @@
 
 步骤 7/12/14/15 的单文件集合接通原生 EMPTY 重建及删除。ADMITTED v3 区分原 SELF 和 grantless terminal，验证 `CLOSED(-1,0)` 的原 activated page、selection、本地 type 12 和整文件无该 context entry。父版在 v3 ADMITTED、READY 改名中途及 action 6 后的续接和首次 OPEN 拒绝。当前版重开读回 EMPTY 边界和非空数据。READY 后只删 EMPTY 时，追赶后发布并结算原目标回执，非空 allocation 和原 DATA 字节在冷启后保持。详见 [非空与 EMPTY CLOSED 混合集合](local-storage/README.md#非空与-empty-closed-混合集合) 和 [EMPTY 成员恢复和删除](profile-wire/README.md#empty-closed-成员恢复和删除)。
 
+步骤 7/12/14 增加固定单 Arena 多 DATA 文件准入。全组共享物理 stream 检查和累计额度，包含没有 grant 的必需文件。v4 ADMITTED 绑定完整文件和成员向量，已验证真实两文件输入及父版 native reader 的拒绝。跨文件发布与重开继续验证。详见 [多 DATA 文件准入](local-storage/README.md#固定单-arena-的多-data-文件准入)。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。

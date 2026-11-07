@@ -18,8 +18,10 @@ package org.apache.bookkeeper.discover.profile;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -85,7 +87,7 @@ public class ProfileClosedReconstructionTest {
         ByteBuffer.wrap(tooMany).putInt(firstRow - Integer.BYTES, ProfileClosedReconstruction.MAX_MEMBERS + 1);
         assertThrows(IOException.class, () -> ProfileClosedReconstruction.Admission.decode(tooMany));
         byte[] unknown = encoded.clone();
-        ByteBuffer.wrap(unknown).putInt(4, 4);
+        ByteBuffer.wrap(unknown).putInt(4, 5);
         assertThrows(IOException.class, () -> ProfileClosedReconstruction.Admission.decode(unknown));
         assertThrows(IOException.class, () -> ProfileClosedReconstruction.Admission.decode(
                 Arrays.copyOf(encoded, 8193)));
@@ -104,6 +106,12 @@ public class ProfileClosedReconstructionTest {
         int first = encoded.length - 2 * rowBytes;
         assertEquals(2, encoded[first]);
         assertEquals(1, encoded[first + rowBytes]);
+        byte[] previous = admission(List.of(original, member(45))).encode();
+        var golden = ByteBuffer.allocate(previous.length + 2).put(previous, 0, first);
+        golden.putInt(4, 3);
+        golden.put((byte) 2).put(previous, first, rowBytes - 1)
+                .put((byte) 1).put(previous, first + rowBytes - 1, rowBytes - 1);
+        assertArrayEquals(golden.array(), encoded);
         byte[] unknown = encoded.clone();
         unknown[first] = 3;
         assertThrows(IOException.class, () -> ProfileClosedReconstruction.Admission.decode(unknown));
@@ -115,6 +123,59 @@ public class ProfileClosedReconstructionTest {
         assertThrows(IllegalArgumentException.class, () -> ProfileClosedReconstruction.Admission.decode(onlyEmpty));
         assertThrows(IllegalArgumentException.class, () -> ProfileClosedReconstruction.Admission.decode(
                 Arrays.copyOf(encoded, encoded.length - 1)));
+    }
+
+    @Test
+    public void readyOneRetainsItsExactNativeBytes() throws Exception {
+        var ready = ready(List.of(file(0, 4, 11)));
+        byte[] golden = ByteBuffer.allocate(148).putInt(0x55574359).putInt(1)
+                .putLong(0).putLong(2).putLong(16).put(bytes(32, 9)).putLong(0).putLong(3)
+                .putLong(16).putInt(1).putLong(1).putLong(4).putLong(4096).put(bytes(32, 11)).array();
+        assertArrayEquals(golden, ready.encode());
+        assertEquals(ready, ProfileClosedReconstruction.Ready.decode(golden));
+    }
+
+    @Test
+    public void fileVectorsRequireEveryOrderedDistinctMatchingObject() throws Exception {
+        var original0 = file(0, 3, 11);
+        var original1 = file(1, 4, 12);
+        var originals = List.of(original0, original1);
+        var base = admission(List.of(new ProfileClosedReconstruction.Member(44, null,
+                "01".repeat(32), "02".repeat(32))));
+        var admission = new ProfileClosedReconstruction.Admission(base.scope(), base.operation(), base.arenaCut(),
+                base.bookieCut(), base.publisherPid(), base.publisherStartMillis(), base.publisherSession(),
+                base.directory(), base.directoryObject(), base.stagingObject(), originals, base.dependencies(),
+                List.of(member(44)));
+        byte[] encoded = admission.encode();
+        assertEquals(4, ByteBuffer.wrap(encoded).getInt(4));
+        assertEquals(admission, ProfileClosedReconstruction.Admission.decode(encoded));
+        byte[] tooFew = encoded.clone();
+        int vectorCountOffset = legacyBytes().length - 64 - 32 - 56 - Long.BYTES;
+        ByteBuffer.wrap(tooFew).putInt(vectorCountOffset, 1);
+        assertThrows(IOException.class, () -> ProfileClosedReconstruction.Admission.decode(tooFew));
+
+        var fresh0 = file(0, 5, 11);
+        var fresh1 = file(1, 6, 12);
+        var ready = ready(List.of(fresh0, fresh1));
+        assertEquals(2, ByteBuffer.wrap(ready.encode()).getInt(4));
+        assertEquals(ready, ProfileClosedReconstruction.Ready.decode(ready.encode()));
+        assertTrue(admission.matchesCandidates(ready.candidates()));
+        assertFalse(admission.matchesCandidates(List.of(fresh0)));
+        assertFalse(admission.matchesCandidates(List.of(fresh0, file(1, 3, 12))));
+        assertFalse(admission.matchesCandidates(List.of(fresh0, file(1, 6, 11))));
+        assertThrows(IllegalArgumentException.class, () -> ready(List.of(fresh1, fresh0)));
+        assertThrows(IllegalArgumentException.class, () -> ready(List.of(fresh0, file(1, 5, 12))));
+    }
+
+    private static ProfileClosedReconstruction.Ready ready(List<ProfileClosedReconstruction.FileImage> files) {
+        return new ProfileClosedReconstruction.Ready(new UUID(0, 2), 16, "09".repeat(32),
+                new UUID(0, 3), 16, 1, files);
+    }
+
+    private static ProfileClosedReconstruction.FileImage file(int index, long inode, int digestByte) {
+        var image = new ProfileClosedReconstruction.Image(new FileIdentity(1, inode), 4096,
+                HexFormat.of().formatHex(bytes(32, digestByte)));
+        return new ProfileClosedReconstruction.FileImage(index, image);
     }
 
     private static ProfileClosedReconstruction.Member member(long ledger) {

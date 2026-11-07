@@ -33,6 +33,7 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -110,15 +111,16 @@ public final class SegmentClosedReconstruction {
     public static final class PreparedReady {
         private final ProfileClosedReconstruction.Receipt admitted;
         private final List<ZKProfileReservationStore.ReadOnlySnapshot> expected;
-        private final ProfileClosedReconstruction.Image candidate;
+        private final List<ProfileClosedReconstruction.FileImage> candidates;
         private final ProfileClosedReconstruction.Shadow shadow;
 
         private PreparedReady(ProfileClosedReconstruction.Receipt admitted,
-                List<ZKProfileReservationStore.ReadOnlySnapshot> expected, ProfileClosedReconstruction.Image candidate,
+                List<ZKProfileReservationStore.ReadOnlySnapshot> expected,
+                List<ProfileClosedReconstruction.FileImage> candidates,
                 ProfileClosedReconstruction.Shadow shadow) {
             this.admitted = admitted;
             this.expected = expected;
-            this.candidate = candidate;
+            this.candidates = List.copyOf(candidates);
             this.shadow = shadow;
         }
 
@@ -130,8 +132,8 @@ public final class SegmentClosedReconstruction {
             return expected;
         }
 
-        public ProfileClosedReconstruction.Image candidate() {
-            return candidate;
+        public List<ProfileClosedReconstruction.FileImage> candidates() {
+            return candidates;
         }
 
         public ProfileClosedReconstruction.Shadow shadow() {
@@ -195,8 +197,11 @@ public final class SegmentClosedReconstruction {
             ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations, Sources sources,
             List<ZKProfileReservationStore.ReadOnlySnapshot> expected, OldPublisher stoppedPublisher, long epoch,
             UUID operation, SegmentFileIo imageIo, SegmentFileIo controlIo) throws Exception {
-        if (config.dataFiles() != 1 || operation == null || operation.equals(new UUID(0, 0))) {
-            throw new IllegalArgumentException("Reconstruction requires one DATA file and an exact operation");
+        if (operation == null || operation.equals(new UUID(0, 0))) {
+            throw new IllegalArgumentException("Reconstruction requires an exact operation");
+        }
+        if (imageIo != null && config.dataFiles() > 1) {
+            throw new IOException("Multi-file reconstruction publication is not yet available");
         }
         var scope = new ProfileClosedReconstruction.Scope(identity.bookieId().toString(), identity.incarnation(),
                 identity.arenaId(), epoch);
@@ -204,6 +209,9 @@ public final class SegmentClosedReconstruction {
             var existing = reservations.readClosedReconstruction(scope);
             if (existing != null && !existing.admission().operation().equals(operation)) {
                 throw new IOException("The original managed epoch already has a different reconstruction operation");
+            }
+            if (existing != null && existing.admission().originals().size() != config.dataFiles()) {
+                throw new IOException("Reconstruction DATA file count differs from the original admission");
             }
             if (existing != null && existing.ready() != null) {
                 if (imageIo != null) {
@@ -242,26 +250,14 @@ public final class SegmentClosedReconstruction {
                 imageMembers.add(new SegmentDataRecovery.ClosedImageMember(ledger, closed.getLastEntryId(),
                         closed.getLength()));
             }
-            SegmentStorageInspector.requireClosedReconstructionScope(config, deps, proofs);
+            SegmentStorageInspector.requireClosedReconstructionScope(deps, proofs);
             var files = new SegmentOwnedFiles(locks);
             try (AutoCloseable cleanup = () -> requireDrained(files, data)) {
-                var originalPath = root.resolve("data-0");
                 var rootObject = observeDirectory(files, nativeIo, root);
-                var pathObject = requireOriginalFile(originalPath, config.bytesPerFile());
-                SegmentDataRecovery.ClosedImage image;
-                try (var file = SegmentOwnedFiles.openRegularReadOnly(files, originalPath)) {
-                    if (!files.fileIdentity(file, nativeIo).equals(pathObject)) {
-                        throw new IOException("Opened original DATA differs from its path object");
-                    }
-                    image = SegmentDataRecovery.auditClosedImage(file, config, identity, deps.arena(),
-                            imageMembers, limits.dataBytes(), limits.entries());
-                    if (!files.fileIdentity(file, nativeIo).equals(pathObject)) {
-                        throw new IOException("Original DATA descriptor changed during its complete audit");
-                    }
-                }
-                if (!requireOriginalFile(originalPath, image.bytes()).equals(pathObject)) {
-                    throw new IOException("Original DATA path object changed during its complete audit");
-                }
+                var audit = new SegmentDataRecovery.ClosedImageAudit(config, identity, deps.arena(), imageMembers,
+                        limits.dataBytes(), limits.entries());
+                var originals = auditOriginals(config, root, rootObject, files, nativeIo, audit);
+                var imageEntries = audit.finish();
                 Duration timeout = limits.sourceTimeout();
                 if (timeout.isZero() || timeout.isNegative() || timeout.compareTo(Duration.ofMinutes(1)) > 0) {
                     throw new IllegalArgumentException("CLOSED source audit requires a bounded deadline");
@@ -283,22 +279,24 @@ public final class SegmentClosedReconstruction {
                     try (var peers = ProfileClosedReconstructionSources.open(sources.sdk(), sources.eventLoop(),
                             sources.tls(), sources.registry(), sources.cold(), member, identity.bookieId(),
                             config.maxPayloadBytes() + SegmentBatchFormat.ENTRY_OVERHEAD, sourceDeadline)) {
-                        var entries = image.entries().get(context);
+                        var entries = imageEntries.get(context);
                         for (int entry = 0; entry < entries.size(); entry++) {
                             var local = entries.get(entry);
                             peers.verify(entry, local.cumulativeLength(), local.payloadLength(), local.payloadSha256());
                         }
                         String sourceDigest = peers.revalidate();
                         members.add(new ProfileClosedReconstruction.Member(context.ledgerId(),
-                                cohort.size() == 1 ? null : context, closedDigest, sourceDigest));
+                                cohort.size() == 1 && config.dataFiles() == 1 ? null : context,
+                                closedDigest, sourceDigest));
                         observations.put(peers, sourceDigest);
                     }
                 }
                 var current = SegmentStorageInspector.readRecoveryDependencies(config, identity,
                         limits.controlBytes(), limits.controlRows(), key, validator, arena, bookie, locks);
-                if (!deps.equals(current) || !requireOriginalFile(originalPath, image.bytes()).equals(pathObject)) {
+                if (!deps.equals(current)) {
                     throw new IOException("Original scope changed before CLOSED reconstruction admission");
                 }
+                verifyOriginalPaths(root, originals);
                 var stage = staging(root, operation);
                 if (existing == null) {
                     Files.createDirectory(stage, PosixFilePermissions.asFileAttribute(
@@ -327,10 +325,7 @@ public final class SegmentClosedReconstruction {
                         existing == null ? stoppedPublisher.startMillis
                                 : existing.admission().publisherStartMillis(),
                         existing == null ? stoppedPublisher.session : existing.admission().publisherSession(),
-                        root.toString(),
-                        rootObject, stageObject, new ProfileClosedReconstruction.Image(pathObject, image.bytes(),
-                                image.sha256()), dependencyDigest(deps),
-                        members);
+                        root.toString(), rootObject, stageObject, originals, dependencyDigest(deps), members);
                 files.requireHealthy();
                 verifySourceRegistrations(observations);
                 var admission = new PreparedAdmission(request, cohort);
@@ -360,14 +355,15 @@ public final class SegmentClosedReconstruction {
                         var beforeReady = SegmentStorageInspector.readRecoveryDependencies(config, identity,
                                 limits.controlBytes(), limits.controlRows(), key, validator, arena, bookie, locks);
                         if (!deps.equals(beforeReady)
-                                || !requireOriginalFile(originalPath, image.bytes()).equals(pathObject)
                                 || !observeDirectory(files, nativeIo, stage).equals(stageObject)) {
                             throw new IOException("Reconstruction bindings changed before READY");
                         }
+                        verifyOriginalPaths(root, originals);
                         files.requireHealthy();
                         verifySourceRegistrations(observations);
                         receipt = reservations.readyClosedReconstruction(metadata,
-                                new PreparedReady(receipt, cohort, candidate, shadow));
+                                new PreparedReady(receipt, cohort,
+                                        List.of(new ProfileClosedReconstruction.FileImage(0, candidate)), shadow));
                     }
                 }
                 if (imageIo != null) {
@@ -377,6 +373,55 @@ public final class SegmentClosedReconstruction {
                 return receipt;
             }
         });
+    }
+
+    private static List<ProfileClosedReconstruction.FileImage> auditOriginals(IsolatedSegmentConfig config,
+            Path root, NativeIO.FileIdentity rootObject, SegmentOwnedFiles files, NativeIO nativeIo,
+            SegmentDataRecovery.ClosedImageAudit audit) throws Exception {
+        var objects = new HashSet<NativeIO.FileIdentity>();
+        objects.add(rootObject);
+        try (var names = files.openDirectory(root)) {
+            for (Path path : names) {
+                String name = path.getFileName().toString();
+                if (name.equals("isolated.lock") || name.startsWith("arena-control")
+                        || name.startsWith("bookie-control") || name.startsWith("superblock-")) {
+                    var identity = SegmentClassicHandoffPaths.loadingIdentity(path);
+                    objects.add(new NativeIO.FileIdentity(identity.device(), identity.inode()));
+                }
+            }
+        }
+        var originals = new ArrayList<ProfileClosedReconstruction.FileImage>(config.dataFiles());
+        for (int index = 0; index < config.dataFiles(); index++) {
+            Path path = root.resolve("data-" + index);
+            var object = requireOriginalFile(path, config.bytesPerFile());
+            if (object.device() != rootObject.device() || !objects.add(object)) {
+                throw new IOException("Original DATA aliases a required object or crosses the original filesystem");
+            }
+            String digest;
+            try (var file = SegmentOwnedFiles.openRegularReadOnly(files, path)) {
+                if (!files.fileIdentity(file, nativeIo).equals(object)) {
+                    throw new IOException("Opened original DATA differs from its path object");
+                }
+                digest = audit.scan(file, index);
+                if (!files.fileIdentity(file, nativeIo).equals(object)) {
+                    throw new IOException("Original DATA descriptor changed during its complete audit");
+                }
+            }
+            originals.add(new ProfileClosedReconstruction.FileImage(index,
+                    new ProfileClosedReconstruction.Image(object, config.bytesPerFile(), digest)));
+        }
+        verifyOriginalPaths(root, originals);
+        return List.copyOf(originals);
+    }
+
+    private static void verifyOriginalPaths(Path root, List<ProfileClosedReconstruction.FileImage> originals)
+            throws IOException {
+        for (var file : originals) {
+            var image = file.image();
+            if (!requireOriginalFile(root.resolve("data-" + file.index()), image.length()).equals(image.object())) {
+                throw new IOException("Original DATA path object changed during its complete audit");
+            }
+        }
     }
 
     private static void verifySourceRegistrations(Map<ProfileClosedReconstructionSources, String> observations)

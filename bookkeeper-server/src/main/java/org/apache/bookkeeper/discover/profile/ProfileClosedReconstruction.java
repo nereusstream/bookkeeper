@@ -26,6 +26,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
@@ -38,15 +39,18 @@ import org.apache.bookkeeper.common.util.nativeio.NativeIO.FileIdentity;
 import org.apache.bookkeeper.meta.LedgerMetadataSerDe;
 import org.apache.bookkeeper.versioning.LongVersion;
 
-/** Native historical bindings for the single-file CLOSED reconstruction. Neither record admits a writer. */
+/** Native historical bindings for the complete CLOSED reconstruction. Neither record admits a writer. */
 public final class ProfileClosedReconstruction {
     private static final int ADMISSION = 0x55574341;
     private static final int READY = 0x55574359;
     private static final int VERSION = 1;
     private static final int COHORT_VERSION = 2;
     private static final int MIXED_VERSION = 3;
+    private static final int FILE_VECTOR_VERSION = 4;
+    private static final int READY_VECTOR_VERSION = 2;
     private static final int MAX_BYTES = 8192;
     public static final int MAX_MEMBERS = 16;
+    private static final int MAX_FILES = 64;
 
     public record Scope(String bookie, StorageIncarnation incarnation, UUID arena, long epoch) {
         public Scope {
@@ -77,6 +81,15 @@ public final class ProfileClosedReconstruction {
         }
     }
 
+    public record FileImage(int index, Image image) {
+        public FileImage {
+            if (index < 0 || index >= MAX_FILES) {
+                throw new IllegalArgumentException("Invalid reconstruction DATA file index");
+            }
+            Objects.requireNonNull(image, "image");
+        }
+    }
+
     public enum Kind { NONEMPTY_SELF, EMPTY_TERMINAL }
 
     /** Legacy v1 stores just the ledger ID here, with its complete identity bound by the CLOSED digest. */
@@ -103,22 +116,35 @@ public final class ProfileClosedReconstruction {
     public record Admission(Scope scope, UUID operation, long arenaCut, long bookieCut,
                             long publisherPid, long publisherStartMillis, long publisherSession,
                             String directory, FileIdentity directoryObject, FileIdentity stagingObject,
-                            Image original, String dependencies, List<Member> members) {
+                            List<FileImage> originals, String dependencies, List<Member> members) {
+        public Admission(Scope scope, UUID operation, long arenaCut, long bookieCut, long publisherPid,
+                long publisherStartMillis, long publisherSession, String directory, FileIdentity directoryObject,
+                FileIdentity stagingObject, Image original, String dependencies, List<Member> members) {
+            this(scope, operation, arenaCut, bookieCut, publisherPid, publisherStartMillis, publisherSession,
+                    directory, directoryObject, stagingObject, List.of(new FileImage(0, original)), dependencies,
+                    members);
+        }
+
         public Admission {
             Objects.requireNonNull(scope, "scope");
             requireId(operation);
             Objects.requireNonNull(directoryObject, "directoryObject");
             Objects.requireNonNull(stagingObject, "stagingObject");
-            Objects.requireNonNull(original, "original");
+            originals = canonicalFiles(originals);
             Path root = Path.of(directory);
             if (arenaCut < 0 || bookieCut < 0 || publisherPid <= 0 || publisherStartMillis <= 0
                     || publisherSession == 0 || directory.length() > 4096
                     || !root.isAbsolute() || !root.normalize().equals(root)
                     || directoryObject.device() != stagingObject.device()
-                    || directoryObject.device() != original.object().device()
-                    || directoryObject.equals(stagingObject) || directoryObject.equals(original.object())
-                    || stagingObject.equals(original.object())) {
+                    || directoryObject.equals(stagingObject)) {
                 throw new IllegalArgumentException("Invalid original reconstruction scope or staging");
+            }
+            for (var file : originals) {
+                var object = file.image().object();
+                if (directoryObject.device() != object.device() || directoryObject.equals(object)
+                        || stagingObject.equals(object)) {
+                    throw new IllegalArgumentException("Original DATA aliases another reconstruction role");
+                }
             }
             requireDigest(dependencies);
             if (members.isEmpty() || members.size() > MAX_MEMBERS) {
@@ -127,8 +153,9 @@ public final class ProfileClosedReconstruction {
             members = List.copyOf(members);
             long previous = -1;
             boolean nonempty = false;
+            boolean legacy = originals.size() == 1 && members.size() == 1;
             for (var member : members) {
-                if (member.ledger() <= previous || (member.context() == null) != (members.size() == 1)) {
+                if (member.ledger() <= previous || (member.context() == null) != legacy) {
                     throw new IllegalArgumentException("CLOSED reconstruction members are not canonical");
                 }
                 nonempty |= member.kind() == Kind.NONEMPTY_SELF;
@@ -139,13 +166,39 @@ public final class ProfileClosedReconstruction {
             }
         }
 
+        public Image original() {
+            return singleImage(originals);
+        }
+
+        boolean matchesCandidates(List<FileImage> candidates) {
+            if (candidates.size() != originals.size()) {
+                return false;
+            }
+            var originalObjects = new HashSet<FileIdentity>();
+            originals.forEach(file -> originalObjects.add(file.image().object()));
+            for (int index = 0; index < originals.size(); index++) {
+                var original = originals.get(index).image();
+                var file = candidates.get(index);
+                var candidate = file.image();
+                if (file.index() != index || candidate.length() != original.length()
+                        || !candidate.sha256().equals(original.sha256())
+                        || candidate.object().device() != original.object().device()
+                        || originalObjects.contains(candidate.object()) || directoryObject.equals(candidate.object())
+                        || stagingObject.equals(candidate.object())) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         byte[] encode() throws IOException {
             var bytes = new ByteArrayOutputStream();
             try (var out = new DataOutputStream(bytes)) {
                 out.writeInt(ADMISSION);
-                boolean legacy = members.size() == 1;
+                boolean vector = originals.size() > 1;
+                boolean legacy = !vector && members.size() == 1;
                 boolean mixed = members.stream().anyMatch(member -> member.kind() == Kind.EMPTY_TERMINAL);
-                out.writeInt(legacy ? VERSION : mixed ? MIXED_VERSION : COHORT_VERSION);
+                out.writeInt(vector ? FILE_VECTOR_VERSION : legacy ? VERSION : mixed ? MIXED_VERSION : COHORT_VERSION);
                 writeScope(out, scope);
                 writeId(out, operation);
                 if (legacy) {
@@ -159,7 +212,11 @@ public final class ProfileClosedReconstruction {
                 out.writeUTF(directory);
                 writeObject(out, directoryObject);
                 writeObject(out, stagingObject);
-                writeImage(out, original);
+                if (vector) {
+                    writeFiles(out, originals);
+                } else {
+                    writeImage(out, original());
+                }
                 writeDigest(out, dependencies);
                 if (legacy) {
                     writeDigest(out, members.get(0).closed());
@@ -167,7 +224,7 @@ public final class ProfileClosedReconstruction {
                 } else {
                     out.writeInt(members.size());
                     for (var member : members) {
-                        if (mixed) {
+                        if (mixed || vector) {
                             out.writeByte(member.kind() == Kind.NONEMPTY_SELF ? 1 : 2);
                         }
                         out.write(member.context().encode());
@@ -185,7 +242,8 @@ public final class ProfileClosedReconstruction {
         static Admission decode(byte[] bytes) throws IOException {
             try (var in = input(bytes, ADMISSION)) {
                 int version = in.readInt();
-                if (version != VERSION && version != COHORT_VERSION && version != MIXED_VERSION) {
+                if (version != VERSION && version != COHORT_VERSION && version != MIXED_VERSION
+                        && version != FILE_VECTOR_VERSION) {
                     throw new IOException("Unknown reconstruction admission version");
                 }
                 var scope = new Scope(in.readUTF(), new StorageIncarnation(in.readNBytes(16)), readId(in),
@@ -200,20 +258,21 @@ public final class ProfileClosedReconstruction {
                 String directory = in.readUTF();
                 var directoryObject = readObject(in);
                 var stagingObject = readObject(in);
-                var original = readImage(in);
+                boolean vector = version == FILE_VECTOR_VERSION;
+                var originals = vector ? readFiles(in) : List.of(new FileImage(0, readImage(in)));
                 String dependencies = readDigest(in);
                 List<Member> members;
                 if (version == VERSION) {
                     members = List.of(new Member(legacyLedger, null, readDigest(in), readDigest(in)));
                 } else {
                     int count = in.readInt();
-                    if (count < 2 || count > MAX_MEMBERS) {
+                    if (count < (vector ? 1 : 2) || count > MAX_MEMBERS) {
                         throw new IOException("Invalid reconstruction cohort size");
                     }
                     members = new ArrayList<>(count);
                     boolean empty = false;
                     for (int index = 0; index < count; index++) {
-                        Kind kind = version == MIXED_VERSION ? readKind(in) : Kind.NONEMPTY_SELF;
+                        Kind kind = version == MIXED_VERSION || vector ? readKind(in) : Kind.NONEMPTY_SELF;
                         var context = ProfileLedgerContext.decode(ByteBuffer.wrap(
                                 in.readNBytes(ProfileLedgerContext.ENCODED_LENGTH)));
                         members.add(new Member(context.ledgerId(), context, readDigest(in), readDigest(in), kind));
@@ -225,7 +284,7 @@ public final class ProfileClosedReconstruction {
                 }
                 requireEnd(in);
                 return new Admission(scope, operation, arenaCut, bookieCut, pid, start, session, directory,
-                        directoryObject, stagingObject, original, dependencies, members);
+                        directoryObject, stagingObject, originals, dependencies, members);
             }
         }
 
@@ -239,7 +298,13 @@ public final class ProfileClosedReconstruction {
     }
 
     public record Ready(UUID operation, long admissionBirth, String admissionDigest, UUID shadow,
-                        long shadowBirth, int shadowVersion, Image candidate) {
+                        long shadowBirth, int shadowVersion, List<FileImage> candidates) {
+        public Ready(UUID operation, long admissionBirth, String admissionDigest, UUID shadow,
+                long shadowBirth, int shadowVersion, Image candidate) {
+            this(operation, admissionBirth, admissionDigest, shadow, shadowBirth, shadowVersion,
+                    List.of(new FileImage(0, candidate)));
+        }
+
         public Ready {
             requireId(operation);
             requireId(shadow);
@@ -248,34 +313,49 @@ public final class ProfileClosedReconstruction {
                 throw new IllegalArgumentException("READY must bind the original admission birth");
             }
             requireDigest(admissionDigest);
-            Objects.requireNonNull(candidate, "candidate");
+            candidates = canonicalFiles(candidates);
+        }
+
+        public Image candidate() {
+            return singleImage(candidates);
         }
 
         byte[] encode() throws IOException {
             var bytes = new ByteArrayOutputStream();
             try (var out = new DataOutputStream(bytes)) {
                 out.writeInt(READY);
-                out.writeInt(VERSION);
+                out.writeInt(candidates.size() == 1 ? VERSION : READY_VECTOR_VERSION);
                 writeId(out, operation);
                 out.writeLong(admissionBirth);
                 writeDigest(out, admissionDigest);
                 writeId(out, shadow);
                 out.writeLong(shadowBirth);
                 out.writeInt(shadowVersion);
-                writeImage(out, candidate);
+                if (candidates.size() == 1) {
+                    writeImage(out, candidate());
+                } else {
+                    writeFiles(out, candidates);
+                }
             }
             return bytes.toByteArray();
         }
 
         static Ready decode(byte[] bytes) throws IOException {
             try (var in = input(bytes, READY)) {
-                if (in.readInt() != VERSION) {
+                int version = in.readInt();
+                if (version != VERSION && version != READY_VECTOR_VERSION) {
                     throw new IOException("Unknown reconstruction READY version");
                 }
-                var ready = new Ready(readId(in), in.readLong(), readDigest(in), readId(in), in.readLong(),
-                        in.readInt(), readImage(in));
+                var operation = readId(in);
+                long admissionBirth = in.readLong();
+                String admissionDigest = readDigest(in);
+                var shadow = readId(in);
+                long shadowBirth = in.readLong();
+                int shadowVersion = in.readInt();
+                var candidates = version == VERSION ? List.of(new FileImage(0, readImage(in))) : readFiles(in);
                 requireEnd(in);
-                return ready;
+                return new Ready(operation, admissionBirth, admissionDigest, shadow, shadowBirth, shadowVersion,
+                        candidates);
             }
         }
     }
@@ -397,6 +477,47 @@ public final class ProfileClosedReconstruction {
 
     private static Image readImage(DataInputStream in) throws IOException {
         return new Image(readObject(in), in.readLong(), readDigest(in));
+    }
+
+    private static Image singleImage(List<FileImage> files) {
+        if (files.size() != 1) {
+            throw new IllegalStateException("A reconstruction file vector requires complete verification");
+        }
+        return files.get(0).image();
+    }
+
+    private static List<FileImage> canonicalFiles(List<FileImage> files) {
+        if (files.isEmpty() || files.size() > MAX_FILES) {
+            throw new IllegalArgumentException("Invalid reconstruction DATA file count");
+        }
+        files = List.copyOf(files);
+        var objects = new HashSet<FileIdentity>();
+        for (int index = 0; index < files.size(); index++) {
+            if (files.get(index).index() != index || !objects.add(files.get(index).image().object())) {
+                throw new IllegalArgumentException("Reconstruction DATA files are not canonical and distinct");
+            }
+        }
+        return files;
+    }
+
+    private static void writeFiles(DataOutputStream out, List<FileImage> files) throws IOException {
+        out.writeInt(files.size());
+        for (var file : files) {
+            out.writeInt(file.index());
+            writeImage(out, file.image());
+        }
+    }
+
+    private static List<FileImage> readFiles(DataInputStream in) throws IOException {
+        int count = in.readInt();
+        if (count < 2 || count > MAX_FILES) {
+            throw new IOException("Invalid reconstruction DATA file vector count");
+        }
+        var files = new ArrayList<FileImage>(count);
+        for (int index = 0; index < count; index++) {
+            files.add(new FileImage(in.readInt(), readImage(in)));
+        }
+        return files;
     }
 
     private static void writeDigest(DataOutputStream out, String hex) throws IOException {

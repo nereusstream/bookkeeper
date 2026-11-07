@@ -65,13 +65,13 @@ public final class SegmentStorageInspector {
                 List<Path> locks) throws Exception;
     }
 
-    static void requireClosedReconstructionScope(IsolatedSegmentConfig config, RecoveryDependencies dependencies,
+    static void requireClosedReconstructionScope(RecoveryDependencies dependencies,
             List<? extends ZKProfileReservationStore.ClosedReconstructionProof> members) throws IOException {
         var arena = dependencies.arena();
         var bookie = dependencies.bookie();
         long nonempty = members == null ? 0 : members.stream()
                 .filter(ZKProfileReservationStore.ClosedReconstructionSelf.class::isInstance).count();
-        if (config.dataFiles() != 1 || !arena.cut().sessionOpen() || arena.grants().isEmpty()
+        if (!arena.cut().sessionOpen() || arena.grants().isEmpty()
                 || !arena.reconstructionCapacity()
                 || !arena.cut().recordedQuarantineFiles().isEmpty() || arena.relocationOrReuseHistory()
                 || !arena.selections().isEmpty() || !arena.retiredSlots().isEmpty() || !arena.retiredRanges().isEmpty()

@@ -974,6 +974,12 @@ Native ADMITTED v2 按 ledger ID 严格递增编码完整 context、原 CLOSED �
 
 父版真实重建入口在 READY 已移动旧 active、以及 action 6 已持久两个切点均在读 admission 时拒绝。action 6 后的父版 storage 首次 OPEN 也拒绝。对照比较原 native 回执、名称、inode 和控制字节，均保持。当前版完成原物理续接、同身份重开及混合集合的 EMPTY 删除。[重开与删除证据](../profile-wire/README.md#empty-closed-成员恢复和删除)
 
+### 固定单 Arena 的多 DATA 文件准入
+
+以 `e315c7d389` 为基线。按原有效文件头和固定 config 读取 `data-0..data-(N-1)`，包括只有 header 和零页的必需文件。原三把锁下核对每个文件的对象、长度、file index 和所属 filesystem；文件集合和控制对象不得别名。全组共享原 stream/entry 状态、总 DATA 字节上限和累计 entry 上限，每个文件完整扫描一次。非空成员的来源审核按 ledger 进行，全部原文件、成员和来源绑定进入一次 v4 ADMITTED。READY v2 的向量编码已接通，跨文件发布和首次重开继续单独验证。[字节合同](format-v1.md#控制记录)
+
+真实 3/3/3 SDK 两个账本分别写入 shard/file 0 和 1，原 Bookie JVM 退出。父版在两文件入口拒绝。新版完整准入，并验证总 DATA 字节超限、没有 grant 的必需文件缺失和文件向量错序、缺项、别名均拒绝。父版类文件在原 native read 入口拒绝 v4。五项编码和四项 socket 回归通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-multifile-evidence-e315c7d3`。
+
 ## Profile 普通 Add 的真实接线
 
 2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。

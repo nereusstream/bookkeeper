@@ -1277,10 +1277,7 @@ public final class ZKProfileReservationStore {
                 || shadow.stat().getCzxid() != ready.shadowBirth() || shadow.stat().getMzxid() != readyBirth
                 || shadow.stat().getVersion() != ready.shadowVersion() + 1
                 || !Arrays.equals(shadow.bytes(), reconstructionShadow(ready.shadow(), 1))
-                || !ready.candidate().sha256().equals(admission.original().sha256())
-                || ready.candidate().length() != admission.original().length()
-                || ready.candidate().object().device() != admission.original().object().device()
-                || ready.candidate().object().equals(admission.original().object())) {
+                || !admission.matchesCandidates(ready.candidates())) {
             throw new IOException("Reconstruction READY lost its exact ADMITTED image and birth");
         }
         return new ProfileClosedReconstruction.Receipt(admission, birth, digest, ready, readyBirth,
@@ -1417,17 +1414,14 @@ public final class ZKProfileReservationStore {
             SegmentClosedReconstruction.PreparedReady prepared) throws IOException, InterruptedException {
         var expected = prepared.expected();
         var admitted = prepared.admitted();
-        var candidate = prepared.candidate();
+        var candidates = prepared.candidates();
         var shadow = prepared.shadow();
         var request = admitted.admission();
         var scope = request.scope();
         var ready = new ProfileClosedReconstruction.Ready(request.operation(), admitted.admissionBirth(),
-                admitted.admissionDigest(), shadow.attempt(), shadow.birth(), shadow.version(), candidate);
-        if (candidate.object().equals(request.original().object())
-                || candidate.object().device() != request.original().object().device()
-                || candidate.length() != request.original().length() || !candidate.sha256().equals(
-                        request.original().sha256())) {
-            throw new IOException("READY requires a different object with the complete ADMITTED bytes");
+                admitted.admissionDigest(), shadow.attempt(), shadow.birth(), shadow.version(), candidates);
+        if (!request.matchesCandidates(ready.candidates())) {
+            throw new IOException("READY requires distinct new objects with all ADMITTED DATA bytes");
         }
         var current = readClosedReconstruction(scope);
         if (current == null || !current.admission().equals(request)
