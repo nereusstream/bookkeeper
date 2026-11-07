@@ -2242,6 +2242,8 @@ floor 适用于显式 commissioning 的 G1 scope。既有 assignment 的升级�
 
 2026-11-07，基线 `f99be93f59`。在真实 ZooKeeper、文件与 mTLS 路径验证 DATA/EMPTY 准入、floor 竞争回滚、回复丢失后的单行接续、原输出未排空、DELETE 前后的历史结算，以及证据损坏时拒绝。只移除枚举末尾重验时，并发准入使测试实际观察到错误的 `COMPLETE` 空集。恢复重验后三类 37 项通过，零失败、错误或跳过。观察预算测试分别暂停一次真实读到超时，以及在隔离 namespace 中构造超过 256 行的高水位。测试方法折行后复跑相关两项，Spotless 和 Checkstyle 通过。原始日志、源码差异及回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/restore-dependency-coverage-evidence-f99be93f`。
 
+同日以 `a69ef2ea1e` 为基线，两个独立 coordinator JVM 使用原镜像和同一 canonical intent。首进程在目标 CLOSE 回复丢失后实际退出，ZooKeeper 留下一个未结算 ordinal；新进程复制 0 条，原 admission 行的 czxid 与高水位保持相同，并提交该次 CLOSE 的回执。另在恢复目标首次启动中，目标完成自己的 snapshot 与实际 suffix，并续接 readiness 和 writable 丢回复。源 scope 仍能独立观察原结算，目标的旧格式 assignment 返回 `UNCOVERED`。两项 JUnit 和 Java 样式通过，证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/restore-dependency-process-evidence-a69ef2ea`。
+
 ## 恢复目标的首次 service bootstrap 组合验证
 
 2026-10-23，父源码 `389b49fadaa265ba4d2b03afab0699372948caf2`。复用原ServiceEpisode、SegmentProfileService与ZK startup requirements/assignment/head/readiness/registration，在上一节真实镜像copy测试中补入两个恢复专属生命周期；不新增生产入口、控制协议或第二套bootstrap。目标使用原新BookieId/incarnation/目录，镜像仍只作历史source；通过当前repair获得的数据在目标本地恢复后，由目标自己的当前authority决定服务资格。

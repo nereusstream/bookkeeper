@@ -10,7 +10,7 @@
 
 步骤 15 的已结算恢复现可在源删除事件证明不可读时，只读核对同一镜像和原生回执。当前 CLOSED 与成员、源 G1 和原 floor revision 仍须精确匹配。原生回执明确缺失时进入未结算路径，保留完整源事件校验。真实基线反例及最终 34 项定向测试已归档，Spotless 与 Checkstyle 通过。详见 [profile-wire](profile-wire/README.md#已结算镜像恢复的精确重试)。
 
-步骤 15 已为显式 commissioning 的新生 G1 源接入完整 restore admission 依赖。DATA 与 EMPTY 同原 admission 事务追加，精确续接核对原 ordinal。只读观察复核原生切点，按原 CLOSE 回执结算。真实版本栅栏反例及三类 37 项回归已归档。旧目标终态、跨 assignment、历史 GC 和生产 Gate 仍开放。详见 [profile-wire](profile-wire/README.md#g1-源的恢复准入依赖)。
+步骤 15 已为显式 commissioning 的新生 G1 源接入完整 restore admission 依赖。DATA 与 EMPTY 同原 admission 事务追加，精确续接核对原 ordinal。只读观察复核原生切点，按原 CLOSE 回执结算。真实版本栅栏反例及三类 37 项回归已归档。独立 coordinator JVM 退出和恢复目标首次注册的两项组合验证随后通过。旧目标终态、跨 assignment、历史 GC 和生产 Gate 仍开放。详见 [profile-wire](profile-wire/README.md#g1-源的恢复准入依赖)。
 
 步骤 14→15 的组合验证覆盖实际承载 3/3/3 已确认数据的 Bookie JVM 退出。临时注册自然消失后，原 auditor 产生任务，worker 将 CLOSED 账本修复到另一 BookieId/incarnation，保留原 CLOSED 边界并通过公开 SDK 读回。旧目录的原 owned restart 拒绝。后续逻辑删除包含原三个及新目标的确切义务，旧离线 incarnation 的物理终结回执仍缺失。详见 [profile-wire](profile-wire/README.md#已确认-data-的-bookie-jvm-退出后修复与删除)。
 

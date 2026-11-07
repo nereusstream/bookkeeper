@@ -10899,6 +10899,11 @@ public class SegmentProfileInitialSocketClientTest {
         fixture.faultTarget.set(3);
         fixture.replyFault.set(18);
         int copiedForces = -1;
+        long admissionBirth = -1;
+        var source = restoreSourceTarget(fixture, 0);
+        String history = actualDeleteStreamPath(fixture, source) + "/restore-dependencies";
+        String row = history + "/admission-1";
+        String receipt = TEST_RESTORE_REPAIR + "/restore-completed";
         for (String phase : List.of("halt", "resume")) {
             Path output = work.resolve(phase + ".log");
             var child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
@@ -10914,7 +10919,19 @@ public class SegmentProfileInitialSocketClientTest {
                 assertTrue(log, log.contains(restoreCoordinatorMarker(inputs, phase, child.pid())));
                 assertTrue(fixture.listeners.get(3).isActive());
                 assertFalse(fixture.normal(3));
-                if (phase.equals("halt")) {
+                boolean halted = phase.equals("halt");
+                var observation = fixture.reservations.readRestoreDependencies(source);
+                assertEquals(RestoreDependencyStatus.COMPLETE, observation.status());
+                assertEquals(List.of(new ZKProfileReservationStore.RestoreDependency(1, prepared, 0, !halted)),
+                        observation.dependencies());
+                var highWater = fixture.zk.exists(history, false);
+                assertEquals(1, highWater.getVersion());
+                assertEquals(2, highWater.getNumChildren());
+                if (halted) {
+                    admissionBirth = fixture.zk.exists(row, false).getCzxid();
+                    assertEquals(admissionBirth,
+                            fixture.zk.exists(TEST_RESTORE_REPAIR + "/admitted", false).getCzxid());
+                    assertNull(fixture.zk.exists(receipt, false));
                     assertEquals(1, fixture.lostDurableRecoveryCloseReplies.get());
                     assertEquals(fixture.identities.get(3).bookieId(), fixture.manager.readLedgerMetadata(44)
                             .get(5, TimeUnit.SECONDS).getValue().getAllEnsembles().get(0L).get(2));
@@ -10922,6 +10939,8 @@ public class SegmentProfileInitialSocketClientTest {
                     assertTrue(copiedForces > 0);
                     fixture.replyFault.set(0);
                 } else {
+                    assertEquals(admissionBirth, fixture.zk.exists(row, false).getCzxid());
+                    assertTrue(fixture.zk.exists(receipt, false).getCzxid() > admissionBirth);
                     assertEquals(copiedForces, files(fixture.nodes.get(3)).dataIo.forces);
                 }
             } finally {
@@ -11102,7 +11121,7 @@ public class SegmentProfileInitialSocketClientTest {
                 var sourceIdentity = fixture.identities.get(0);
                 var sourceTarget = new ProfileDeleteRecord.Target(sourceIdentity.bookieId().toString(),
                         sourceIdentity.incarnation().value());
-                boolean tracksDependencies = scenario == 28 || scenario >= 32;
+                boolean tracksDependencies = scenario == 16 || scenario == 17 || scenario == 28 || scenario >= 32;
                 var assignment = tracksDependencies
                         ? fixture.reservations.createInitialDeleteAssignmentWithRestoreDependencies(sourceTarget)
                         : scenario >= 24
@@ -11115,7 +11134,7 @@ public class SegmentProfileInitialSocketClientTest {
                         initialDependencies.status());
                 assertTrue(initialDependencies.dependencies().isEmpty());
                 if (scenario == 18 || scenario == 19 || scenario == 24 || scenario == 26
-                        || tracksDependencies && scenario != 28 && scenario != 35) {
+                        || scenario >= 32 && scenario != 35) {
                     prepareSnapshotLedger(fixture, sdk, metadata, 45, false, data);
                     var delivery = fixture.reservations.readDeleteDelivery(metadata, sourceTarget, 1);
                     assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED, delivery.status());
@@ -11730,6 +11749,12 @@ public class SegmentProfileInitialSocketClientTest {
                                     var publication = (HeldServicePublicationClient) episode.client;
                                     assertEquals(1, publication.lostReadinessReplies.get());
                                     assertEquals(1, publication.lostWritableReplies.get());
+                                    var history = fixture.reservations.readRestoreDependencies(sourceTarget);
+                                    assertEquals(RestoreDependencyStatus.COMPLETE, history.status());
+                                    assertEquals(List.of(new ZKProfileReservationStore.RestoreDependency(
+                                            1, prepared, 0, true)), history.dependencies());
+                                    assertEquals(RestoreDependencyStatus.UNCOVERED,
+                                            fixture.reservations.readRestoreDependencies(deleteTarget).status());
                                 }
                             } else {
                                 var reopened = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
