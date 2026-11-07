@@ -2467,7 +2467,7 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 真实 ZooKeeper、双 Journal 和独立 index 用例核对封口紧接原 applied cut。挂起实际 force 时，已读到落盘的 `lastMark`，控制尚未 apply 封口，独立进程仍观察到 supervisor guard。父源码复现缺少封口、未进入封口 force。修复后验证原封口的冷开续接、`ENABLED` 冷读，以及 force 失败的原始异常和原生状态。最终九类 458 项定向回归零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-local-seal-evidence-01baa40e`。
 
-根锁、Arena 和控制 driver 由包内调用方持有。下节覆盖本地封口完成后、原生提交之前的进程退出。公开资源装配、其他崩溃窗口、掉电恢复、实时 Unix 采用及批准 Linux 验收继续待完成。
+根锁、Arena 和控制 driver 由包内调用方持有。下两节分别覆盖本地封口完成后和封口首次写入前的进程退出。公开资源装配、其他崩溃窗口、掉电恢复、实时 Unix 采用及批准 Linux 验收继续待完成。
 
 ## PREPARED 本地封口后的跨 JVM 续接
 
@@ -2478,6 +2478,18 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 证据范围限定为持久本地封口与原生完成之间的进程异常退出。掉电、批准 Linux、实时 Unix 采用、公开服务装配及曾授予 DATA 的异常重开继续待验收。
 
 新增双 JVM 用例在原生产实现上通过。相关回归 64 项通过、2 项 Linux 专用用例跳过，Spotless 和 Checkstyle 通过。补充 entry-log 摘要核对后，新增用例复验通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-prepared-halt-evidence-3c506d2b`。
+
+## PREPARED 封口首次写入前的跨 JVM 恢复
+
+2026-11-08，基线 `aa6f84a185`。Darwin 上首个独立 JVM 完成实际 claim 导入、V6 replay、历史 Bookie 排空及两个 `lastMark` 持久化。测试只拦截原 Bookie control 的写入，按原 cut、操作 UUID、记录类型和实际追加位置识别 `BOOTSTRAP_COMPLETE`。在首字节交给 FileChannel 之前，JVM 持原 supervisor、Classic 根、Arena 和控制 owner 直接 `halt(23)`。
+
+退出后独立观察确认 ZooKeeper 保留原 `PREPARED` 出生、版本和 commissioned requirements。冷开控制日志读到原 claim 和 applied cut，封口仍为空。退出后的日志摘要和长度与本次封口开始写入前的持久前缀相符。原 `.rloc` 已恢复为同一 inode，从实际索引和 entry log 可读回原 entry，两个 `lastMark` 均指向原 Journal 的实际末尾。
+
+第二个 JVM 从同一磁盘和新 ZooKeeper session 重走原 import/recover，保留每条原 claim 的操作 UUID 与序号。控制日志只追加一条封口，操作 UUID 符合原 cut 的派生规则，序号恰接原 cut。随后原生条件提交以同一出生进入 `ENABLED`，另一冷 owner 核验原封口及 claim。实际索引、entry log、两个 `lastMark` 与退出后的观察一致。
+
+本节限定为首字节写入前的进程退出。封口部分写入、已追加后 force 结果未知、掉电、批准 Linux 以及已授予 DATA 的异常重开继续待验收。
+
+新增双 JVM 用例在原生产实现上通过。相关回归 65 项通过、2 项 Linux 专用用例跳过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-prepared-preseal-halt-evidence-aa6f84a1`。
 
 ## Classic replay 的 lastId 实际打开保护
 

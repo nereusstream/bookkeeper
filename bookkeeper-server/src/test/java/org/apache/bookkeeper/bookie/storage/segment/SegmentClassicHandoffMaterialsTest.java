@@ -29,6 +29,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -653,7 +654,7 @@ public class SegmentClassicHandoffMaterialsTest {
         assertEquals(observation, preparation.boundNative());
         try (var roots = new SegmentClassicRootBindings(classicConfiguration(), scope.sources().manager(), manifest,
                 observation)) {
-            roots.openLocks(io);
+            roots.openLocks(new SegmentFileIo());
             var control = coldControl(scope, io);
             var arenas = new SegmentClassicArenaBindings(manifest, manifest.identity(), 32768);
             try {
@@ -1160,6 +1161,16 @@ public class SegmentClassicHandoffMaterialsTest {
 
     @Test(timeout = 90000)
     public void haltedRecoveryJvmLeavesItsSealForAnotherJvmToCompleteTheOriginalPreparedBirth() throws Exception {
+        verifyRecoveryCrash(false);
+    }
+
+    @Test(timeout = 90000)
+    public void haltBeforeTheFirstSealWriteLetsAnotherJvmReuseClaimsAndSealTheOriginalPreparedBirth()
+            throws Exception {
+        verifyRecoveryCrash(true);
+    }
+
+    private void verifyRecoveryCrash(boolean beforeSeal) throws Exception {
         assumeTrue(SystemUtils.IS_OS_MAC_OSX);
         var scope = preparedScope(16);
         Path index = manifest.classicRoots().get(2).directory().resolve("current");
@@ -1178,7 +1189,8 @@ public class SegmentClassicHandoffMaterialsTest {
         String bookieId = manifest.bookieId().toString();
         var originalRequirements = requirements.read(bookieId).observation().orElseThrow().sourceIdentity();
 
-        String crash = runRecoveryProbe("recover", RecoveryCrashProbe.HALT_EXIT);
+        var crashMode = beforeSeal ? RecoveryProbeMode.HALT_BEFORE_SEAL : RecoveryProbeMode.HALT_AFTER_SEAL;
+        String crash = runRecoveryProbe(crashMode, RecoveryCrashProbe.HALT_EXIT);
         assertEquals(nativeScope, scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
                 .observation().orElseThrow());
         assertEquals(originalRequirements, requirements.read(bookieId).observation().orElseThrow().sourceIdentity());
@@ -1192,16 +1204,26 @@ public class SegmentClassicHandoffMaterialsTest {
         byte[] secondCut = ByteBuffer.allocate(16).putLong(1).putLong(Files.size(originalJournal)).array();
         assertArrayEquals(firstCut, Files.readAllBytes(firstMark));
         assertArrayEquals(secondCut, Files.readAllBytes(secondMark));
-        byte[] sealedControl = Files.readAllBytes(control);
+        byte[] retainedControl = Files.readAllBytes(control);
+        BookieRouteBinding.BootstrapSeal unwrittenSeal = null;
+        if (beforeSeal) {
+            unwrittenSeal = observeUnwrittenSeal(scope);
+            assertTrue(crash, crash.contains(beforeSealReport(unwrittenSeal, retainedControl)));
+        }
         byte[] recoveredIndex = Files.readAllBytes(replayedIndex);
         var recoveredLogs = entryLogDigests(ledger);
 
-        String resume = runRecoveryProbe("resume", 0);
+        var resumeMode = beforeSeal ? RecoveryProbeMode.RETRY_UNSEALED : RecoveryProbeMode.COMPLETE_SEALED;
+        String resume = runRecoveryProbe(resumeMode, 0);
         var enabled = scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
                 .observation().orElseThrow();
         var seal = enabled.binding().seal().orElseThrow();
         assertPreparedCompletion(nativeScope, seal, enabled);
-        assertTrue(crash, crash.contains(RecoveryCrashProbe.SEAL_PREFIX + seal));
+        if (beforeSeal) {
+            assertEquals(unwrittenSeal, seal);
+        } else {
+            assertTrue(crash, crash.contains(RecoveryCrashProbe.SEAL_PREFIX + seal));
+        }
         assertTrue(resume, resume.contains(RecoveryCrashProbe.SEAL_PREFIX + seal));
         assertEquals(originalRequirements, requirements.read(bookieId).observation().orElseThrow().sourceIdentity());
 
@@ -1212,7 +1234,14 @@ public class SegmentClassicHandoffMaterialsTest {
         } finally {
             assertTrue(verify.closeAndDrain().drained());
         }
-        assertArrayEquals(sealedControl, Files.readAllBytes(control));
+        byte[] completedControl = Files.readAllBytes(control);
+        if (beforeSeal) {
+            assertArrayEquals(retainedControl, Arrays.copyOf(completedControl, retainedControl.length));
+            assertSealRecord(ByteBuffer.wrap(completedControl, retainedControl.length,
+                    completedControl.length - retainedControl.length), seal);
+        } else {
+            assertArrayEquals(retainedControl, completedControl);
+        }
         assertArrayEquals(firstCut, Files.readAllBytes(firstMark));
         assertArrayEquals(secondCut, Files.readAllBytes(secondMark));
         assertArrayEquals(recoveredIndex, Files.readAllBytes(replayedIndex));
@@ -1232,6 +1261,51 @@ public class SegmentClassicHandoffMaterialsTest {
         return digests;
     }
 
+    private BookieRouteBinding.BootstrapSeal observeUnwrittenSeal(PreparedScope scope)
+            throws IOException, InterruptedException {
+        var control = coldControl(scope, new SegmentFileIo());
+        try {
+            control.initialize();
+            var log = control.log();
+            assertTrue(log.bootstrapSeal().isEmpty());
+            var claims = retainedCrashClaims(log);
+            long cut = log.unsealedBootstrapCut();
+            assertEquals(claims.size() - 1L, cut);
+            return pendingSeal(log, cut);
+        } finally {
+            assertTrue(control.closeAndDrain().drained());
+        }
+    }
+
+    private static List<SegmentBookieControlLog.Result> retainedCrashClaims(SegmentBookieControlLog log)
+            throws IOException {
+        return List.of(log.prepareBootstrapClaim(11).applied().orElseThrow(),
+                log.prepareBootstrapClaim(13).applied().orElseThrow(),
+                log.prepareBootstrapClaim(19).applied().orElseThrow());
+    }
+
+    private static BookieRouteBinding.BootstrapSeal pendingSeal(SegmentBookieControlLog log, long cut)
+            throws IOException {
+        return new BookieRouteBinding.BootstrapSeal(log.prepareBootstrapSeal(cut).operationId(), cut + 1, cut);
+    }
+
+    private static void assertSealRecord(ByteBuffer record, BookieRouteBinding.BootstrapSeal seal)
+            throws IOException {
+        var command = SegmentControlParser.parse(record, SegmentControlFormat.Owner.BOOKIE, new Generation(1),
+                seal.sequence());
+        assertEquals(SegmentControlFormat.Type.ROUTE, command.type());
+        assertEquals(seal.operationId(), command.operationId());
+        var body = command.body();
+        assertEquals(1, body.getInt());
+        assertEquals(SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE.code, body.getInt());
+        assertEquals(seal.appliedCut(), body.getLong());
+    }
+
+    private static String beforeSealReport(BookieRouteBinding.BootstrapSeal seal, byte[] prefix) {
+        return "Before the first seal write " + seal + " at " + prefix.length + " after "
+                + HexFormat.of().formatHex(SegmentClassicHandoff.digest(prefix).value());
+    }
+
     private static void assertPreparedCompletion(BookieRouteBinding.Observation prepared,
             BookieRouteBinding.BootstrapSeal seal, BookieRouteBinding.Observation enabled) {
         assertEquals(prepared.binding().enabled(seal), enabled.binding());
@@ -1241,7 +1315,11 @@ public class SegmentClassicHandoffMaterialsTest {
         assertTrue(enabled.modifiedZxid() > prepared.modifiedZxid());
     }
 
-    private String runRecoveryProbe(String mode, int exit) throws Exception {
+    private enum RecoveryProbeMode {
+        HALT_BEFORE_SEAL, HALT_AFTER_SEAL, RETRY_UNSEALED, COMPLETE_SEALED
+    }
+
+    private String runRecoveryProbe(RecoveryProbeMode mode, int exit) throws Exception {
         Path output = temporary.newFile(mode + "-jvm.log").toPath();
         var command = new ArrayList<String>();
         command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
@@ -1250,7 +1328,8 @@ public class SegmentClassicHandoffMaterialsTest {
             command.add("-Dbookkeeper.native.io.library.path=" + nativeLibrary);
         }
         command.addAll(List.of("-cp", System.getProperty("java.class.path"), RecoveryCrashProbe.class.getName(),
-                mode, cluster.getZooKeeperConnectString(), manifest.path().toString(), manifest.identity().toString(),
+                mode.name(), cluster.getZooKeeperConnectString(), manifest.path().toString(),
+                manifest.identity().toString(),
                 references.directory().toString(), HexFormat.of().formatHex(signing.getPublic().getEncoded()),
                 Long.toString(oldUid)));
         var process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(output.toFile()).start();
@@ -1276,9 +1355,29 @@ public class SegmentClassicHandoffMaterialsTest {
         private static final int HALT_EXIT = 23;
         private static final String SEAL_PREFIX = "Retained recovery seal ";
 
+        private record ArmedSeal(BookieRouteBinding.BootstrapSeal seal, byte[] prefix) { }
+
+        private static SegmentFileIo haltBeforeSealWrite(AtomicReference<ArmedSeal> armed) throws IOException {
+            var io = spy(new SegmentFileIo());
+            doAnswer(write -> {
+                var expected = armed.get();
+                if (expected == null) {
+                    return write.callRealMethod();
+                }
+                FileChannel channel = write.getArgument(0);
+                assertEquals(expected.prefix().length, channel.size());
+                assertEquals(expected.prefix().length, (long) write.getArgument(2));
+                assertSealRecord(write.getArgument(1), expected.seal());
+                System.out.println(beforeSealReport(expected.seal(), expected.prefix()));
+                System.out.flush();
+                Runtime.getRuntime().halt(HALT_EXIT);
+                throw new AssertionError("Recovery JVM returned from halt");
+            }).when(io).writeFully(any(FileChannel.class), any(ByteBuffer.class), anyLong());
+            return io;
+        }
+
         public static void main(String[] args) throws Exception {
-            boolean recover = "recover".equals(args[0]);
-            assertTrue(recover || "resume".equals(args[0]));
+            var mode = RecoveryProbeMode.valueOf(args[0]);
             var fixture = new SegmentClassicHandoffMaterialsTest();
             var hex = HexFormat.of();
             var manifest = SegmentArenaManifest.read(Path.of(args[2]), new ManifestIdentity(hex.parseHex(args[3])));
@@ -1309,37 +1408,57 @@ public class SegmentClassicHandoffMaterialsTest {
                         route);
                 var preparation = new SegmentClassicBootstrap(manager, requirements, manifest, references, trust,
                         Duration.ofSeconds(5));
+                var armed = new AtomicReference<ArmedSeal>();
+                var controlIo = mode == RecoveryProbeMode.HALT_BEFORE_SEAL
+                        ? haltBeforeSealWrite(armed) : new SegmentFileIo();
                 try {
                     preparation.initialize();
-                    fixture.withColdScope(scope, prepared, preparation, new SegmentFileIo(),
+                    fixture.withColdScope(scope, prepared, preparation, controlIo,
                             (roots, arenas, control, io) -> {
                                 var log = control.log();
-                                if (recover) {
+                                if (mode != RecoveryProbeMode.COMPLETE_SEALED) {
                                     assertTrue(log.bootstrapSeal().isEmpty());
                                     withClaimDriver(log, driver -> {
+                                        boolean retry = mode == RecoveryProbeMode.RETRY_UNSEALED;
+                                        long priorCut = log.unsealedBootstrapCut();
+                                        var priorClaims = retry ? retainedCrashClaims(log) : List.of();
                                         preparation.importPrepared(roots, arenas, control, driver);
                                         long cut = log.unsealedBootstrapCut();
+                                        if (retry) {
+                                            assertEquals(priorCut, cut);
+                                            assertEquals(priorClaims, retainedCrashClaims(log));
+                                        }
+                                        var expected = pendingSeal(log, cut);
+                                        if (mode == RecoveryProbeMode.HALT_BEFORE_SEAL) {
+                                            byte[] prefix = Files.readAllBytes(
+                                                    manifest.controlDirectory().resolve("bookie-control"));
+                                            armed.set(new ArmedSeal(expected, prefix));
+                                        }
                                         preparation.recoverPrepared();
+                                        assertNotEquals(RecoveryProbeMode.HALT_BEFORE_SEAL, mode);
                                         var seal = log.bootstrapSeal().orElseThrow();
-                                        assertEquals(cut, seal.appliedCut());
-                                        assertEquals(cut + 1, seal.sequence());
+                                        assertEquals(expected, seal);
                                         assertEquals(seal.sequence(), log.appliedThrough());
-                                        System.out.println(SEAL_PREFIX + seal);
-                                        System.out.flush();
-                                        Runtime.getRuntime().halt(HALT_EXIT);
+                                        if (mode == RecoveryProbeMode.HALT_AFTER_SEAL) {
+                                            System.out.println(SEAL_PREFIX + seal);
+                                            System.out.flush();
+                                            Runtime.getRuntime().halt(HALT_EXIT);
+                                        }
+                                        assertEquals(priorClaims, retainedCrashClaims(log));
                                     });
-                                } else {
-                                    var seal = log.bootstrapSeal().orElseThrow();
-                                    var claim = log.prepareBootstrapClaim(19).applied().orElseThrow();
-                                    assertEquals(seal.appliedCut() + 1, seal.sequence());
-                                    assertEquals(seal.sequence(), log.appliedThrough());
-                                    var enabled = preparation.completePrepared(roots, arenas, control);
-                                    assertPreparedCompletion(prepared, seal, enabled);
-                                    assertEquals(claim, log.prepareBootstrapClaim(19).applied().orElseThrow());
-                                    assertEquals(seal.sequence(), log.appliedThrough());
-                                    assertEquals(0, io.writes);
-                                    System.out.println(SEAL_PREFIX + seal);
                                 }
+                                var seal = log.bootstrapSeal().orElseThrow();
+                                var claims = retainedCrashClaims(log);
+                                assertEquals(seal.appliedCut() + 1, seal.sequence());
+                                assertEquals(seal.sequence(), log.appliedThrough());
+                                var enabled = preparation.completePrepared(roots, arenas, control);
+                                assertPreparedCompletion(prepared, seal, enabled);
+                                assertEquals(claims, retainedCrashClaims(log));
+                                assertEquals(seal.sequence(), log.appliedThrough());
+                                if (mode == RecoveryProbeMode.COMPLETE_SEALED) {
+                                    assertEquals(0, io.writes);
+                                }
+                                System.out.println(SEAL_PREFIX + seal);
                             });
                 } finally {
                     assertTrue(preparation.closeAndDrain().drained());

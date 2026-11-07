@@ -64,6 +64,8 @@
 
 包内 `PREPARED` 恢复已绑定原导入 applied cut，通过同一控制日志在 `.rloc` 写入和 V6 replay 副作用前核对原 CLASSIC 回执。严格 flush、目录同步、lastMark 和 Bookie 实际排空后，原 driver 才提交首个本地封口。Darwin 验证了封口完成后持锁恢复 JVM 直接退出，另一 JVM 以新 ZooKeeper session 冷开原封口，续接同一原生出生并核验 `ENABLED` 和原 entry。公开资源装配、实时 Unix 采用、其他崩溃窗口、掉电恢复及批准 Linux 验收仍 OPEN。详见 [PREPARED 本地封口后的跨 JVM 续接](local-storage/README.md#prepared-本地封口后的跨-jvm-续接)。
 
+Darwin 另已验证历史 Bookie 排空和两个 lastMark 持久化之后、封口首字节写入前的进程退出。第二个 JVM 冷开原未封口控制日志，重走 import/recover 并复用原 claim，只追加一条封口。原生绑定保留同一出生进入 `ENABLED`，原 entry 与两个 lastMark 均经读回复核。详见 [PREPARED 封口首次写入前的跨 JVM 恢复](local-storage/README.md#prepared-封口首次写入前的跨-jvm-恢复)。
+
 交接材料读取、发布及包内 Classic preparation 已接入实时 ACL 复核。绑定输入、导入 claim 和实际 replay 前，逐项核验签名根下的保留树，包括未参与 replay 的旧 entry log。原目标身份下的目录搜索及既有文件读写权限已接入。本机真实 replay 已验证索引改名、entry-log 创建及 `lastId` 链接拒绝后的冷重开。旧 UID 进程与 fd 排除、挂载别名隔离及批准 Linux 交接仍 OPEN。[目标身份访问检查](startup-readiness/README.md#classic-交接目标身份的访问检查) · [实际写入验证](local-storage/README.md#classic-replay-的-lastid-实际打开保护)
 
 Linux 离线 Classic 准备在冷开时持有每个签名根的原 fd，并在保留树检查、原生来源重读和完成条件前后复验其 ext4 挂载观察。每个枚举成员从原根 fd 相对解析并核对设备、inode、类型及 mount ID，目录枚举还核对原目录流的实际 file key。批准 Linux 实跑和持续隔离仍待验收。[Classic 保留树的 Linux 同挂载核验](startup-readiness/README.md#classic-保留树的-linux-同挂载核验)
