@@ -899,6 +899,8 @@ all historical targets acknowledged or durably decommissioned
 
 已经结算的精确重试先核对原生完成回执与当前 CLOSED、源 assignment 和原 floor revision。源删除事件证明由已结算的原 witness 绑定，重试无需再发目标 CLOSE。未结算恢复继续核对完整事件证明。详见 [已结算镜像恢复的精确重试](implementation/profile-wire/README.md#已结算镜像恢复的精确重试)。
 
+选择依赖覆盖模式的新生 G1 源从 commissioning 起为每次 DATA 和 EMPTY restore admission 保留同事务不可变行。可完整观察的切点须覆盖全部 ordinal，并对原 publication 与 CLOSE 回执区分已结算和未结算。legacy、floor-only、跨 assignment 或证据不全的观察缺乏完整覆盖。历史回收仍需要独立的原生条件、旧目标终态和 retention 权威。详见 [G1 源的恢复准入依赖](implementation/profile-wire/README.md#g1-源的恢复准入依赖)。
+
 恢复专属最小验收复用真实文件/ZK/mTLS/SDK/restart fixture：备份后删除不复活；ledgerId reuse 不混淆 instance；delete 与 admission/writable 两种先后均保留目标和 required-through；缺页/断 suffix/错误 scope 或 generation/recreated birth/旧权限重放 fail closed；copy force、cursor/readiness 与 registration 的 crash/lost-reply 重试幂等且 actual I/O 先排空；旧目标 offline、窗口已到期且新目标已恢复时，旧义务仍保留。未知 authority/timeout/UNKNOWN 不证明无义务，必要数据不足或历史不完整保持隔离/RECOVERING、不发布 writable。既有等价覆盖复用，不按场景数重复扩矩阵。
 
 ## 16. 安全不变量

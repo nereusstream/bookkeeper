@@ -2226,9 +2226,21 @@ floor 适用于显式 commissioning 的 G1 scope。既有 assignment 的升级�
 
 只读核对保留当前 CLOSED、ledger/instance、metadata/lifecycle birth 和当前成员位置的要求，并再次读取实际 membership 与 lifecycle。原 `/committed` 的内容与出生、要求的受保护 guard、精确 CLOSE ID/authority/payload、EMPTY 选择及边界、`UWRE` 和 `/birth` 均须一致。已有回执成功返回 copy 0，不发目标 INSTALL、DATA 或 CLOSE，不改写 metadata 或回执。调用入口继续验证 supplied peer 身份，服务启动与注册沿用自身当前权威。
 
-未结算的恢复仍依赖完整源历史。新生 scope 的活跃依赖覆盖、旧目标终态、跨 assignment 和历史回收继续各自验收，生产 Gate 为 OPEN。
+未结算的恢复仍依赖完整源历史。显式新建 G1 scope 的覆盖见 [G1 源的恢复准入依赖](#g1-源的恢复准入依赖)。旧目标终态、跨 assignment 和历史回收继续各自验收，生产 Gate 为 OPEN。
 
 2026-11-05，基线 `9729b5a7d4`。在真实文件、ZooKeeper 与 mTLS fixture 中先结算非零源进度的恢复，再仅在隔离测试中移除源事件及索引。旧实现将精确 DATA 重试判为 QUARANTINED，触发定向反例。最终 DATA 与 EMPTY 重试均确认同一原生回执和 copy 0，目标控制计数与 DATA 写入计数保持稳定。另验证 floor 从 1 推进到 2、原 revision 缺失、同条件未结算请求、换镜像或 CLOSE ID、坏回执、同字节 committed 重建，以及 DELETE 先赢。初轮五项通过，最终三类 34 项定向测试通过，零失败、错误或跳过。Spotless 和 Checkstyle 通过。各阶段 1460 项输入、原命令和回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/settled-restore-replay-evidence-9729b5a7`。Linux、掉电、正式性能和 canary 本轮未执行。
+
+## G1 源的恢复准入依赖
+
+受保护的 ZooKeeper store 提供显式入口 `createInitialDeleteAssignmentWithRestoreDependencies`。只对新建源 BookieId/incarnation 的 G1 assignment 发行 `UWFA` v2。同一原生事务创建 head、stream birth、初始 assignment、floor/revision 0 和 `/restore-dependencies` 及其零值 `/birth`。读回校验原生出生与模式。普通 commissioning 和 floor-only 入口分别继续写入 legacy 和 `UWFA` v1。两种旧格式的依赖观察均为 `UNCOVERED`，旧 scope 无升级入口。跨 assignment 的观察也不具备 G1 覆盖。
+
+`/restore-dependencies` 是 28 字节 big-endian `UWDI` v1，含原 stream ID 与 ordinal 高水位。根 ACL 只保留读、写与创建能力，首个不可变子节点保护根出生。每次 DATA 或 EMPTY 准入在原有 source/head/floor、ledger/lifecycle 和 intent 出生检查下，同事务按 dataVersion 推进高水位，创建连续的 `admission-<hex>`、`/admitted`、admission guard 和受保护 `/restore-source/birth`。128 字节的 `UWDR` v1 行绑定 ordinal、ledger/instance/slot、intent 出生与 store version、intent 和源 witness 摘要。292 字节的 `UWRS` v3 在 v2 后追加 ordinal，保留源 target/incarnation、封存进度、原 head/event 或 index 出生及 floor revision。提交回复未知时按原生出生和同一精确镜像、intent 读回。已结算的精确重试凭原 ordinal 定位自己的依赖行，并复核原 witness 出生。
+
+`readRestoreDependencies` 使用一个 store deadline。它核对根的原生出生、dataVersion、子节点计数、cversion、mzxid/pzxid、零值出生和最后一行边界，逐条验证连续 ordinal 及其出生，再复核源 assignment 和高水位。覆盖且完整的切点返回 `COMPLETE`，包括可证明的空集合。并发准入使原观察失效。上限为 256 行，仅约束观察，超限返回 `LIMIT`。超时、坏记录或证据不可读返回非成功，结果没有部分列表。完整观察只描述该切点，历史 GC 仍须建立自己的原生条件事务。
+
+依赖保留到原 admission 有精确完成证据。观察以原生 `UWRE` 与其同出生摘要、原 admission 和 witness、受保护 publication proof 及原 CLOSE scope 为准。EMPTY 还须验证同一 membership 事务的 `/empty-boundary`，用于重建原 CLOSE。无回执的行保持未结算，包括已发布但 CLOSE 或原输出尚未排空的请求。后来 DELETE 或 membership 前进不撤销有效历史回执，也不结算无回执行。并发结算允许观察暂时保留未结算状态。观察本身只读，独立于源事件、镜像文件和目标在线状态。旧目标退役、历史 GC 与生产 Gate 继续开放。
+
+2026-11-07，基线 `f99be93f59`。在真实 ZooKeeper、文件与 mTLS 路径验证 DATA/EMPTY 准入、floor 竞争回滚、回复丢失后的单行接续、原输出未排空、DELETE 前后的历史结算，以及证据损坏时拒绝。只移除枚举末尾重验时，并发准入使测试实际观察到错误的 `COMPLETE` 空集。恢复重验后三类 37 项通过，零失败、错误或跳过。观察预算测试分别暂停一次真实读到超时，以及在隔离 namespace 中构造超过 256 行的高水位。测试方法折行后复跑相关两项，Spotless 和 Checkstyle 通过。原始日志、源码差异及回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/restore-dependency-coverage-evidence-f99be93f`。
 
 ## 恢复目标的首次 service bootstrap 组合验证
 

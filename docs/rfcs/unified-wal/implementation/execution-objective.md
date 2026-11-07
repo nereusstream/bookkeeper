@@ -1,6 +1,6 @@
-目标：按已经确认并写入现有文档的 Unified WAL 16 步施工顺序，在本会话持续实施、验证并同步文档，逐步达到首个可保留数据生产候选的可审查交付。先实施步骤1～4，紧接步骤5～7形成真实写入—点读—重启恢复闭环，再按依赖推进8～10索引/回收/长期运行、11～15网络/MetadataStore/客户端/恢复/删除/rejoin，以及16综合验收与运维交付。不要只给建议或再次整理计划，也不要在完成一个小模块后自行停止整个目标。
+目标按既定 Unified WAL 16 步施工顺序持续实施、验证并同步文档，达到首个可保留数据生产候选的可审查交付。保留步骤 1～4 本地基础、5～7 写入/点读/重启恢复、8～10 索引/回收/长期运行、11～15 网络/MetadataStore/客户端/恢复/删除/rejoin，以及 16 综合验收与运维交付的全部合同。由已验证源码接续未完成项，完整验收后才结束持续目标。
 
-规划协调：按用户最新指示，后续范围、公共接口与数据语义的判断取舍由[规划 Unified WAL 实施决策](thread://01a1a6a1-894f-7cf0-a08b-bc1332179d93?hostId=local)会话协调决定，实施会话按已冻结结论继续，不再逐项请求用户人工确认；原总体规划会话保留历史结论，实施与发布/部署的原授权边界保持。
+2026-11-07 的实施入口为 [Unified WAL 实施会话](thread://01a1b602-1f60-7742-b241-93ad1c4ee260?hostId=local)，按用户指定使用 `gpt-6.1-sol` / `xhigh`，从 `f99be93f59` 及原工作区 WIP 接续。后续设计取舍和只读检查归 [Unified WAL 规划会话](thread://01a1b5ff-8d6e-7342-aa91-573846b31324?hostId=local)，按用户指定使用 `gpt-6-astra` / `xhigh`。此前规划结论继续适用，原实施会话和其他编码入口停用。
 
 步骤 15 的离线镜像导入在原 DATA 排他锁内先检查 marker、外部 reference、manifest 摘要和预期 scope，来源无效时在可写控制 owner 和 DATA 恢复同步前拒绝。实际恢复仍复核控制 cut、实例清单、文件摘要和 marker。详见 [local-storage](local-storage/README.md#离线镜像来源预检)。
 
@@ -9,6 +9,8 @@
 步骤 15 的镜像恢复已把精确目标 CLOSE 及原 RPC 实际排空接入不可变 ZooKeeper 完成回执。新 membership 发布原子记录受保护的 committed 出生，旧发布按当前原生版本与出生窄校验。实际 CLOSE 输出反例、ZooKeeper callback 超时后原回执续接及 32 项定向测试已归档，Spotless 和 Checkstyle 通过。完整依赖枚举、旧目标退役及历史 GC 仍开放。详见 [profile-wire](profile-wire/README.md#镜像恢复的目标完成回执)。
 
 步骤 15 的已结算恢复现可在源删除事件证明不可读时，只读核对同一镜像和原生回执。当前 CLOSED 与成员、源 G1 和原 floor revision 仍须精确匹配。原生回执明确缺失时进入未结算路径，保留完整源事件校验。真实基线反例及最终 34 项定向测试已归档，Spotless 与 Checkstyle 通过。详见 [profile-wire](profile-wire/README.md#已结算镜像恢复的精确重试)。
+
+步骤 15 已为显式 commissioning 的新生 G1 源接入完整 restore admission 依赖。DATA 与 EMPTY 同原 admission 事务追加，精确续接核对原 ordinal。只读观察复核原生切点，按原 CLOSE 回执结算。真实版本栅栏反例及三类 37 项回归已归档。旧目标终态、跨 assignment、历史 GC 和生产 Gate 仍开放。详见 [profile-wire](profile-wire/README.md#g1-源的恢复准入依赖)。
 
 步骤 14→15 的组合验证覆盖实际承载 3/3/3 已确认数据的 Bookie JVM 退出。临时注册自然消失后，原 auditor 产生任务，worker 将 CLOSED 账本修复到另一 BookieId/incarnation，保留原 CLOSED 边界并通过公开 SDK 读回。旧目录的原 owned restart 拒绝。后续逻辑删除包含原三个及新目标的确切义务，旧离线 incarnation 的物理终结回执仍缺失。详见 [profile-wire](profile-wire/README.md#已确认-data-的-bookie-jvm-退出后修复与删除)。
 
@@ -270,7 +272,7 @@ Linux alias逐组件修复：父3cdcfd3fc8上修正声明resolver及原trust own
 
 规划决策授权：用户2026-11-01明确要求后续规划、判断和取舍统一交原规划会话决定，无须用户逐项确认；本实施入口据其只读裁决继续执行。该会话已重核RFC-0004 §15.1：首版backup/restore仅接受新BookieId、新storage incarnation、新目录的verified export/rebuild；由当前未回滚集群授予新目标自己的assignment/inactive install/RepairIntent/recovery-only copy/membership，完成完整snapshot＋无洞suffix、required-through及持久apply，不复活备份权限或降低frontier，源incarnation删除义务保留。原地restore、同BookieId切换和MetadataStore回滚继续disabled。systemd最新裁决为唯一launcher service＋批准target；新kind/方向关系须用新LinuxDeployment schema，旧constraint1及向量不补认缺失关系；实际安装链接、Wants/WantedBy、Triggers/TriggeredBy、Upholds/UpheldBy及其他启动/停止/reload影响须核验，socket/timer/path或其他service启动来源首版UNSUPPORTED。该新schema尚未实施，不由当前单文件观察补认。
 
-运行方式：按当前持续目标的执行约束，本会话是唯一实施入口，使用 `gpt-6.1-sol` / `xhigh`（极高）；不启动子agent、explorer/worker、第二编码CLI或另一实施会话，不恢复旧实施会话编码。2026-10-25的多agent授权保留为历史，当前执行按本条收束。可以运行普通构建、测试和必要的并发测试进程。现规划会话`01a1a6a1-894f-7cf0-a08b-bc1332179d93`仅做总体规划、设计取舍与只读检查，按用户指定使用`gpt-6-astra` / `xhigh`；原`01a0c84a-11d9-7951-80a4-8f2a6933c139`的既有冻结与回执保留为历史，规划裁决不构成第二实施入口。保持一个持续目标，按真实证据推进，不能把里程碑完成或上下文压缩当作总目标完成。
+运行方式沿用页首的唯一实施与规划分工。实施在原工作区使用普通构建、测试和必要的并发测试进程。保持一个持续目标，完整验收以 owner 文档和实际证据为准。
 
 SDK接入方式：按用户2026-10-25答复，首版采用显式 Profile create/open，先接CLOSED只读open与实际排空。默认Classic行为和缺少可信Profile环境时的拒绝保持；这不授予same-ledger writer takeover。继续实现public create时，必须持有自身取得的原子fresh reservation/lifecycle birth，不把control的matching READY续接当作新writer发行。
 
@@ -280,7 +282,7 @@ SDK接入方式：按用户2026-10-25答复，首版采用显式 Profile create/
 - 交接快照目录：/var/folders/vk/l_r0z80j1dj93fsrjx3zqv4r0000gn/T/unified-wal-implementation-handoff-8k5_iuhq。其中 handoff.json 记录原始源码commit、三份文档的 SHA-256；planning-docs.patch 是仅针对三份文档的补丁，目录中还保存三份完整文档。
 - 2026-09-22 用户更新执行位置：直接在原仓库 /Users/liusinan/apps/ideaproject/nereusstream/bookkeeper 的 turbo-bk 分支实施，不使用worktree。规划文档已提交为 e75c67f3514d1627ea790d052e2c9226e593aa3c，基于原源码基线 e8b162076fd8cfa84a11351a82caac8c5ac1f939；无需重复导入。已有变化先辨明归属，不能 reset --hard、clean、stash 或覆盖不明变更。
 - 后续源码和docs直接在原仓库 turbo-bk 同步，供规划会话检查。保留未跟踪的 BtrLog Low-Latency Logging.pdf，不复制、纳入提交或删除它。旧worktree的六个输入文件在应用迁移后全部通过快照SHA-256核验；旧安排仅为历史，不再约束执行位置。
-- 当前用户授权实现和隔离验证，没有授权push、创建/更新PR或对外发消息；不要做这些发布动作。不要加 Assisted-by: OpenAI Codex trailer；用户已授权按可审查的小里程碑本地提交，只暂存本模块明确路径，不用 git add .，保持正常可审查的小变更。
+- 用户于 2026-11-07 授权对可审查且验证过的里程碑按明确路径暂存、正常提交，并适时 fast-forward push 到 `origin/turbo-bk`。首次推送复核远端地址、引用、祖先关系及完整待推送范围。授权限于该分支的正常提交与推送。
 
 实施依据与范围：
 1. 以导入后的 docs/rfcs/unified-wal/implementation/README.md 为施工清单，docs/turbo-bk.md §10/§11 为导航和Gate，docs/rfcs/unified-wal/implementation/manifest.json 的 plannedWork 为规划信息；详细合同由 RFC-0001、RFC-0003、RFC-0004、RFC-0005、Spike A/B/C及Round 7拥有。步骤号只表示顺序，沿用CLIENT-1/2、UW-1～UW-7，不新增RFC、Maven模块或平行工作项体系。
