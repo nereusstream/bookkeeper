@@ -173,6 +173,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
         private final ZooKeeperWatcherBase watcherManager;
         private final AtomicInteger state = new AtomicInteger(); // 0 pending, 1 open, 2 permanently retired.
         private volatile WritableRegistration openedRegistration;
+        private volatile WritableRegistration firstOpenedRegistration;
         private volatile long openedAssignmentGeneration;
 
         private Admission(ZooKeeperWatcherBase watcherManager) {
@@ -206,6 +207,23 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
             return deleteDelivery == source && incarnation.equals(deleteIncarnation) && getAsBoolean();
         }
 
+        /** Successful first admission is permanent for this episode, independent of later live write admission. */
+        public boolean hasCompletedFirstOpen(StorageIncarnation incarnation) {
+            var opened = firstOpenedRegistration;
+            return opened != null && opened.storageIncarnation().equals(incarnation);
+        }
+
+        /** This exact pre-bound startup may catch up deletes while every external admission remains closed. */
+        public boolean allowsPendingDeleteStartup(ZKProfileReservationStore source, String localBookie,
+                StorageIncarnation incarnation) {
+            if (state.get() != 0 || deleteDelivery != source || !bookieId.equals(localBookie)
+                    || !incarnation.equals(deleteIncarnation)) {
+                return false;
+            }
+            requirePublishingSession();
+            return state.get() == 0;
+        }
+
         /** Cold-path final reconciliation after local startup checks; read failures retire and propagate. */
         public synchronized boolean openAfterReconciliation(WritableRegistration expected) {
             Objects.requireNonNull(expected, "expected");
@@ -234,7 +252,11 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
                 }
                 openedAssignmentGeneration = current.envelope().record().effectiveAssignmentGeneration().value();
                 openedRegistration = expected;
-                return state.compareAndSet(0, 1) && getAsBoolean();
+                if (state.compareAndSet(0, 1) && getAsBoolean()) {
+                    firstOpenedRegistration = expected;
+                    return true;
+                }
+                return false;
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 close();

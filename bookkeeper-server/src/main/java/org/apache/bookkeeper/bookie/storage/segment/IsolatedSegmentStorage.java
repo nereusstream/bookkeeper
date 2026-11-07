@@ -242,6 +242,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     private boolean startAttempted;
     private boolean accepting;
     private ZKProfileEphemeralRegistrationStore.Admission profileAdmission;
+    private volatile ZKProfileEphemeralRegistrationStore.Admission ownedStartupAdmission;
     private SegmentProfileDeleteFollower deleteFollower;
     private boolean closed;
     private IndexCheckpoint indexCheckpoint;
@@ -308,6 +309,14 @@ final class IsolatedSegmentStorage implements AutoCloseable {
 
     /** Bind the real Profile registration attempt before opening this otherwise local-only graph. */
     void bindProfileRegistration(ZKProfileEphemeralRegistrationStore.Admission admission) {
+        bindProfileRegistration(admission, false);
+    }
+
+    void bindOwnedProfileRegistration(ZKProfileEphemeralRegistrationStore.Admission admission) {
+        bindProfileRegistration(admission, true);
+    }
+
+    private void bindProfileRegistration(ZKProfileEphemeralRegistrationStore.Admission admission, boolean owned) {
         synchronized (gate) {
             if (startAttempted || closed || profileAdmission != null) {
                 throw new IllegalStateException("Profile registration must be bound once before startup");
@@ -316,6 +325,9 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 throw new IllegalArgumentException("Profile registration belongs to another Bookie");
             }
             profileAdmission = admission;
+            if (owned) {
+                ownedStartupAdmission = admission;
+            }
         }
     }
 
@@ -903,6 +915,11 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 || profileAdmission.allows(identity.bookieId().toString(), identity.incarnation());
     }
 
+    boolean ownedStartupAllowsRequests() {
+        var startup = ownedStartupAdmission;
+        return startup == null || startup.hasCompletedFirstOpen(identity.incarnation());
+    }
+
     void restart() throws IOException, InterruptedException {
         restart(null, null);
     }
@@ -942,7 +959,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 bookie = SegmentBookieControlLog.open(config, identity, limits.controlLogBytes(), key, validator);
                 if (existing) {
                     SegmentClosedReconstruction.verifyFirstOpen(config, identity, startupLock, arena, bookie,
-                            reservations, metadata);
+                            reservations, metadata, ownedStartupAdmission);
                 }
                 index = SegmentDerivedIndex.open(config, identity, limits.indexedEntries());
                 if (existing) {

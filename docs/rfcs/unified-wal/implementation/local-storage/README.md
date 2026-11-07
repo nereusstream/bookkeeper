@@ -940,7 +940,7 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 基线 `2b7cf9baf5`。ADMITTED 同事务建立受保护的 shadow guard，guard 缺失或出生不符时拒绝。每次写入 fresh inode 前，原锁下以精确版本 CAS 认领 shadow 并读回实际 nonce 和出生。原候选即使可读也须重新完整写入。READY 在同一原生事务内将这个 shadow 版本终结，创建不可变 READY 及同出生见证。此前提交的迟到 READY 和后继 shadow 认领竞争同一版本。失败的写入、force 或首次 close 使当前 shadow 失败，保留本地失败标记和原 native 状态。原 close 未解决时保留本进程的 DATA 锁。
 
-新候选逐字节写入、文件 force、完整 readback、原描述符首次 close 及目录同步成功后才提交 READY。确认 READY 后使用 native no-replace rename，将原 active 移入本操作的 retained-old，再安装同一 READY 候选。分别同步涉及的目录，核对新 active 的实际 dev/ino、header、长度和摘要，删除原 retained-old 与空 staging 并同步。重启按 READY 和实际对象识别切换的已执行前缀。历史 READY 只继续此物理发布，首次后继 OPEN 仍核对原绑定、当前 CLOSED、成员和 Bookie cut。文件和目录的持久屏障独立。[Linux fsync 手册](https://man7.org/linux/man-pages/man2/fsync.2.html)
+新候选逐字节写入、文件 force、完整 readback、原描述符首次 close 及目录同步成功后才提交 READY。确认 READY 后使用 native no-replace rename，将原 active 移入本操作的 retained-old，再安装同一 READY 候选。分别同步涉及的目录，核对新 active 的实际 dev/ino、header、长度和摘要，删除原 retained-old 与空 staging 并同步。重启按 READY 和实际对象识别切换的已执行前缀。首次后继 OPEN 仍核对原绑定、成员和 Bookie cut，通常取当前 CLOSED；遇到已提交的 DELETE 时，仅 owned service 可按下节所述的原生后继证明和启动门继续。文件和目录的持久屏障独立。[Linux fsync 手册](https://man7.org/linux/man-pages/man2/fsync.2.html)
 
 发布完成后，Arena 追加并 force 独立 `DEVICE_STATE` v2 action 6，结束旧 epoch，保留旧 grants，禁止按原 Arena cut 及更早的 allocation order 继续追加。普通追加、直接授权写和 retained compaction tail 都核对截止，已退休 extent 经合法 FREE 后可重新分配。首次后继 OPEN 前校验新文件与清理，随后恢复原启动、索引和注册顺序。合法新 OPEN 后文件继续按现有写入合同演进。[字节合同](format-v1.md#控制记录)
 
@@ -949,6 +949,12 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 最终 67 项定向 JUnit 全部通过，Spotless 和 Checkstyle 通过。另覆盖原生 ADMITTED 和 shadow 认领丢回复、额外无 payload ledger、额外已应用 grant、完整快照失效、候选 force 和原首次 close 失败。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/closed-reconstruction-e96bd97d`，包括实际 action 6 文件与父版本读取结果。
 
 该证据覆盖进程退出与新文件的实际屏障。旧 writer 的写回错误仍独立于新描述符的结果。批准 Linux D2、真实掉电和完整生产资格保持 OPEN。更广的已授权 OPEN 仍须单独冻结恢复合同。[Linux errseq 文档](https://docs.kernel.org/core-api/errseq.html)
+
+### READY 后逻辑删除的同身份重开
+
+以 `ed424a680b2b` 为基线。READY 已获胜并将原 active 移入 retained-old 后，即使原 ledger 提交逻辑 DELETE，续接仍按同一 READY、原 inode、控制 cut 和 operation 完成文件发布及 action 6。若只有 ADMITTED，当前 CLOSED 失效后拒绝新 READY。
+
+原 owned service 首次重开时，从真实 DELETE 反向核对原 CLOSED、metadata 与 lifecycle 出生、SELF、保留成员及 READY 摘要，并确认原 BookieId/incarnation 在 manifest 中具有当前 stream/assignment 下的精确已提交事件。原注册尝试仍处于待发布状态时才准许内部 OPEN。listener 绑定后，外部请求仍受原注册门约束。原连续追赶实际 force 并应用 tombstone 和 cursor，随后在当前删除头和 assignment 下发布 writable。借用资源的启动入口仍须当前 CLOSED。现有物理删除路径以原 allocation 作合法回收源，完成实际 FREE 后保存该目标回执。详见 [Profile 删除闭环](../profile-wire/README.md#重建-ready-后的原-incarnation-删除闭环)。
 
 ## Profile 普通 Add 的真实接线
 

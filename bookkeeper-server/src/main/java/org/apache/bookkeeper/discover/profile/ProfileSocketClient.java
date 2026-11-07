@@ -1211,11 +1211,13 @@ final class ProfileSocketClient implements AutoCloseable {
                     Outcome refusal = switch (status.statusClass()) {
                         case BAD_REQUEST -> Outcome.BAD_REQUEST;
                         case UNAUTHORIZED -> Outcome.DENIED;
-                        case TRANSIENT_UNAVAILABLE -> Outcome.TRANSIENT_RECONCILING;
+                        case TRANSIENT_UNAVAILABLE, PROFILE_NOT_READY_OR_STALE -> Outcome.TRANSIENT_RECONCILING;
                         case UNSUPPORTED_PROTOCOL_OPCODE_CAPABILITY_ENGINE -> Outcome.UNSUPPORTED;
                         default -> throw invalidReply();
                     };
-                    if (!status.equals(ProfileInitialControlCodec.status(refusal))) {
+                    var canonical = status.statusClass() == ProfileStatus.StatusClass.PROFILE_NOT_READY_OR_STALE
+                            ? ProfileStatus.notReadyOrStale() : ProfileInitialControlCodec.status(refusal);
+                    if (!status.equals(canonical)) {
                         throw invalidReply();
                     }
                     received = result(held.scope, refusal);

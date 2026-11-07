@@ -397,7 +397,11 @@ public final class SegmentProfileService implements AutoCloseable {
             synchronized (gate) {
                 requireLive();
                 admission = startup.publisher().watchAdmission(startup.watcher());
-                storage.bindProfileRegistration(admission);
+                if (ownedResources == null) {
+                    storage.bindProfileRegistration(admission);
+                } else {
+                    storage.bindOwnedProfileRegistration(admission);
+                }
             }
             startup.publisher().requireStartupStores(admission, startup.persistent(), startup.reservations(),
                     identity.incarnation());

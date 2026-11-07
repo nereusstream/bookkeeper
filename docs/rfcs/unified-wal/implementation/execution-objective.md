@@ -32,6 +32,8 @@
 
 步骤 7/12/14 接通单 Arena、单 DATA 文件、单个当前 CLOSED ledger 的同身份重建。完整原映像与两份当前来源一致，且原 Bookie 的唯一已关闭 grant 与 native SELF 和 terminal close 精确对应时，原生准入才允许写入新文件。READY 与 shadow 版本终结同事务，完成两次名称切换和清理后以 action 6 终结旧 epoch 并持久禁止旧 allocation 续写。实际进程退出后可用原目录与身份重开、写入新 grant、健康关闭和再次冷启。缺失或损坏的数据、多 ledger、复用和搬迁历史仍在该分支准入范围之外。详见 [单 DATA 文件的 CLOSED 重建发布与重开](local-storage/README.md#单-data-文件的-closed-重建发布与重开)。
 
+步骤 7→12→15 接通 READY 后的逻辑 DELETE。原文件已移动时，后继 JVM 按同一 READY 续接，原 owned service 以精确原生 DELETE 后继和原 incarnation 事件进入内部恢复。删除追赶实际应用后才发布 writable，已删除 entry 持续拒绝。原物理路径完成该 incarnation 的实际 FREE 和持久回执，其他目标义务仍待结算。详见 [重建 READY 后的原 incarnation 删除闭环](profile-wire/README.md#重建-ready-后的原-incarnation-删除闭环)。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。

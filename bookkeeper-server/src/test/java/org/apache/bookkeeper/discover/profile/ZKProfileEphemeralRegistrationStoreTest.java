@@ -179,12 +179,15 @@ public class ZKProfileEphemeralRegistrationStoreTest extends ProfileZKTestBase {
         ZKProfileEphemeralRegistrationStore publisher = publisher(first);
         try (var admission = publisher.watchAdmission(first.watcherManager)) {
             assertFalse(admission.getAsBoolean());
+            assertFalse(admission.hasCompletedFirstOpen(projection.storageIncarnation()));
             assertThrows(IllegalStateException.class, () -> publisher.watchAdmission(first.watcherManager));
             assertEquals(PublicationStatus.APPLIED, publisher.publishServiceInfo(projection).status());
             assertEquals(PublicationStatus.APPLIED, publisher.registerWritable(writable(projection)).status());
             assertFalse(admission.getAsBoolean());
             assertTrue(admission.openAfterReconciliation(writable(projection)));
             assertTrue(admission.allows(BOOKIE, projection.storageIncarnation()));
+            assertTrue(admission.hasCompletedFirstOpen(projection.storageIncarnation()));
+            assertFalse(admission.hasCompletedFirstOpen(storage(2)));
             assertFalse(admission.allows("another-bookie", projection.storageIncarnation()));
             assertFalse(admission.allows(BOOKIE, storage(2)));
             int reads = first.reads.get();
@@ -194,6 +197,7 @@ public class ZKProfileEphemeralRegistrationStoreTest extends ProfileZKTestBase {
             assertEquals(reads, first.reads.get());
             publisher.demote(BOOKIE);
             assertFalse(admission.getAsBoolean());
+            assertTrue(admission.hasCompletedFirstOpen(projection.storageIncarnation()));
             assertFalse(admission.openAfterReconciliation(writable(projection)));
         }
         assertTrue(first.getState().isConnected());
@@ -261,6 +265,7 @@ public class ZKProfileEphemeralRegistrationStoreTest extends ProfileZKTestBase {
             first.lateReadReply.getAndSet(null).run();
             assertFalse(opening.get(5, TimeUnit.SECONDS));
             assertFalse(admission.getAsBoolean());
+            assertFalse(admission.hasCompletedFirstOpen(projection.storageIncarnation()));
             assertNotNull(second.exists(path() + "/writable", false));
         }
     }

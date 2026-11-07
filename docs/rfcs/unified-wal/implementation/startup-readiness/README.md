@@ -460,6 +460,8 @@ archive `/Users/liusinan/.codex/artifacts/unified-wal/profile-bootstrap-evidence
 
 当前 TLS ownership 增量见[Owned Profile TLS 的 native 引用与服务终态](#owned-profile-tls-的-native-引用与服务终态)；下述2026-10-12回执保留原实现及输入绑定。
 
+owned service 的 listener 从 bind 起可执行 mTLS/HELLO，首次实际 admission 之前拒绝其余请求。每次启动以本 episode 的原 session/registration reconciliation 为准，包括内部 OPEN 健康关闭后的重试。首次开放事实由 `Admission` 在原 CAS 成功且实时检查通过后记录。之后继续使用各操作的原有运行期校验。[READY 后 DELETE 的验证](../profile-wire/README.md#重建-ready-后的原-incarnation-删除闭环)
+
 2026-10-12，`SegmentProfileService.withOwnedResources` 在原参数快照后返回一个尚未打开资源的 owner。`start` 才初始化同一次 `SegmentProfileOwnedResources`：一个 native ZooKeeper/原 watcher manager，原 ZKMetadataClientDriver/ledger-manager factory/AbstractZkLedgerManager，bounded cold executor、delete scheduler 和独立 acceptor/worker loops。原 driver 显式借用该 exact ZK client，后续 requirements/persistent/publisher/reservation/metadata store 全用同一 client 与 namespace；没有构造 Classic registration manager、目录、cookie 或 LedgerStorage。Metadata URI/session timeout 使用原配置，三个 Profile namespaces/ACL、实际 startup policy、有限 worker/queue/poll bounds 由明确 Settings 提供；required source/delete assignment 必须已 commissioned，不在启动中补造。
 
 控制路径复用原 install/activation/replacement/repair/delete authority readers，按原 purpose 选取，沿用 caller 的 static/exact Authorizer 与 nonblocking read policy；不是 auth-only 或 caller enum 授权。原 owner 的 native root/header/recovery/catch-up/Harness/registration/admission/consumer/SDK 路径继续使用。TLS factory 仍明确借用，receive budget 归这个 listener episode；secret key与physical/old-service proof仍来自外部 issuer。没有新重试层、每 entry MetadataStore 或另一套 control/data 格式。

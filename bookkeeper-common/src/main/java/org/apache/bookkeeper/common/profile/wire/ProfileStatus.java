@@ -152,6 +152,11 @@ public record ProfileStatus(
                 0);
     }
 
+    public static ProfileStatus notReadyOrStale() {
+        return new ProfileStatus(StatusClass.PROFILE_NOT_READY_OR_STALE,
+                RetryDisposition.AFTER_CONTROL_RECONCILIATION, DurableResult.NONE, 0);
+    }
+
     private static <T extends Enum<T> & WireEnum> Map<Integer, T> index(T[] values) {
         Map<Integer, T> indexed = new HashMap<>();
         for (T value : values) {

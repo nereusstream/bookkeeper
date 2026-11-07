@@ -54,12 +54,14 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -123,6 +125,7 @@ import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.BookieRouteBinding;
 import org.apache.bookkeeper.discover.ZKRegistrationManager;
+import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileDeletePhysicalReceipt;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
@@ -18882,6 +18885,16 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void closedReconstructionCatchesUpDeleteCommittedAfterTheOldImageWasMoved() throws Exception {
+        runAckedBookieJvmHalt(ReconstructionEpisode.DELETE_AFTER_READY);
+    }
+
+    @Test
+    public void closedReconstructionWithOnlyAdmissionCannotPublishAfterDelete() throws Exception {
+        runAckedBookieJvmHalt(ReconstructionEpisode.DELETE_BEFORE_READY);
+    }
+
+    @Test
     public void closedReconstructionRefusesAShadowForceFailure() throws Exception {
         runAckedBookieJvmHalt(ReconstructionEpisode.FORCE_ERROR);
     }
@@ -18896,7 +18909,8 @@ public class SegmentProfileInitialSocketClientTest {
         runAckedBookieJvmHalt(ReconstructionEpisode.EXTRA_CONTEXT);
     }
 
-    private enum ReconstructionEpisode { OBSERVE, ADMIT, SWITCH, FORCE_ERROR, CLOSE_ERROR, EXTRA_CONTEXT }
+    private enum ReconstructionEpisode { OBSERVE, ADMIT, SWITCH, DELETE_AFTER_READY, DELETE_BEFORE_READY,
+        FORCE_ERROR, CLOSE_ERROR, EXTRA_CONTEXT }
 
     private void runAckedBookieJvmHalt(ReconstructionEpisode mode) throws Exception {
         try (var episode = new PublicProfileReadonlyEpisode(4, false, 3, true)) {
@@ -18988,10 +19002,15 @@ public class SegmentProfileInitialSocketClientTest {
                     return;
                 }
                 observeCrashedScopeAndClosedSources(episode, prepared, metadata, original, oldIdentity, first, second);
-                if (mode == ReconstructionEpisode.SWITCH) {
+                if (mode == ReconstructionEpisode.DELETE_BEFORE_READY) {
+                    assertAdmissionCannotPublishAfterDelete(episode, prepared, metadata, original, oldIdentity,
+                            oldPublisher);
+                    return;
+                }
+                if (mode == ReconstructionEpisode.SWITCH || mode == ReconstructionEpisode.DELETE_AFTER_READY) {
                     assertCrashedDataServiceCannotRestart(episode, prepared, failedSlot, address);
                     reconstructAndReopen(episode, prepared, metadata, original, oldIdentity, oldPublisher, failedSlot,
-                            address, first, second);
+                            address, first, second, mode == ReconstructionEpisode.DELETE_AFTER_READY, oldPeer);
                     return;
                 }
                 if (mode == ReconstructionEpisode.FORCE_ERROR || mode == ReconstructionEpisode.CLOSE_ERROR) {
@@ -19067,6 +19086,32 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private void assertAdmissionCannotPublishAfterDelete(PublicProfileReadonlyEpisode episode, ServiceEpisode prepared,
+            ProfileLedgerMetadataStore metadata, ZKProfileReservationStore.ReadOnlySnapshot original,
+            SegmentFileHeader identity, SegmentClosedReconstruction.OldPublisher publisher) throws Exception {
+        var fixture = episode.fixture;
+        var key = new SecretKeySpec(bytes(32, 7), "AES");
+        var limits = new SegmentClosedReconstruction.Limits(ServiceEpisode.CONTROL_LOG_BYTES, 64,
+                prepared.config.bytesPerFile(), 64, Duration.ofSeconds(15));
+        var sources = new SegmentClosedReconstruction.Sources(episode.sdk.getClientCtx(), fixture.clientGroup,
+                fixture.peerTls, fixture.cold, episode.episodes.get(0).persistent);
+        var operation = UUID.randomUUID();
+        var nativeIo = new org.apache.bookkeeper.common.util.nativeio.NativeIOImpl();
+        var admitted = SegmentClosedReconstruction.admit(prepared.config, identity, key, VALIDATOR, nativeIo, limits,
+                metadata, fixture.reservations, sources, original, publisher, 2, operation);
+        var before = recoveryObservationFileDigests(prepared.config.directory());
+        var deletion = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold)
+                .beginDelete(44, bytes(16, 101), episode.sdk.getClientCtx(), Duration.ofSeconds(30));
+        assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED,
+                deletion.result().get(35, TimeUnit.SECONDS).status());
+        deletion.completion().get(5, TimeUnit.SECONDS);
+        assertThrows(IOException.class, () -> SegmentClosedReconstruction.reconstruct(prepared.config, identity, key,
+                VALIDATOR, nativeIo, limits, metadata, fixture.reservations, sources, original, null, 2, operation,
+                new SegmentFileIo(), new SegmentFileIo()));
+        assertEquals(admitted, fixture.reservations.readClosedReconstruction(admitted.admission().scope()));
+        assertEquals(before, recoveryObservationFileDigests(prepared.config.directory()));
+    }
+
     private void assertReconstructionFailure(PublicProfileReadonlyEpisode episode, ServiceEpisode prepared,
             ProfileLedgerMetadataStore metadata, ZKProfileReservationStore.ReadOnlySnapshot original,
             SegmentFileHeader identity, SegmentClosedReconstruction.OldPublisher publisher, ReconstructionEpisode mode)
@@ -19116,7 +19161,8 @@ public class SegmentProfileInitialSocketClientTest {
     private void reconstructAndReopen(PublicProfileReadonlyEpisode episode, ServiceEpisode prepared,
             ProfileLedgerMetadataStore metadata, ZKProfileReservationStore.ReadOnlySnapshot original,
             SegmentFileHeader identity, SegmentClosedReconstruction.OldPublisher publisher, int slot,
-            InetSocketAddress address, byte[] first, byte[] second) throws Exception {
+            InetSocketAddress address, byte[] first, byte[] second, boolean deleteAfterReady,
+            ZKProfileRegistrationStore.RegisteredPeer oldPeer) throws Exception {
         var fixture = episode.fixture;
         var registry = episode.episodes.get(0).persistent;
         var key = new SecretKeySpec(bytes(32, 7), "AES");
@@ -19153,6 +19199,37 @@ public class SegmentProfileInitialSocketClientTest {
         assertFalse(Files.exists(active));
         assertTrue(Files.isRegularFile(candidate));
         assertTrue(Files.isRegularFile(retained));
+        ProfileDeleteRecord.Manifest manifest = null;
+        if (deleteAfterReady) {
+            var coordinator = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+            var deletion = coordinator.beginDelete(44, bytes(16, 101), episode.sdk.getClientCtx(),
+                    Duration.ofSeconds(30));
+            var deleted = deletion.result().get(35, TimeUnit.SECONDS);
+            deletion.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, deleted.status());
+            manifest = deleted.manifest();
+            var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
+            assertEquals(Set.of(target,
+                    new ProfileDeleteRecord.Target(fixture.identities.get(0).bookieId().toString(),
+                            fixture.identities.get(0).incarnation().value()),
+                    new ProfileDeleteRecord.Target(fixture.identities.get(1).bookieId().toString(),
+                            fixture.identities.get(1).incarnation().value())), Set.copyOf(manifest.targets()));
+            assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED,
+                    fixture.reservations.readLedgerDeleteDelivery(metadata, 44, target).status());
+            assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.ABSENT,
+                    fixture.reservations.readPhysicalDeleteReceipt(metadata, deleted.manifest(), target).status());
+            for (int survivor : List.of(0, 1)) {
+                var node = episode.episodes.get(survivor);
+                var control = bookie(node.storage());
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                while (!control.hasTerminalTombstone(manifest.ledger()) && System.nanoTime() < deadline) {
+                    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+                }
+                assertTrue(control.hasTerminalTombstone(manifest.ledger()));
+                var peer = registry.readPeer(fixture.identities.get(survivor).bookieId().toString()).peer();
+                assertDeletedReconstructedReads(fixture, registry, peer, manifest.ledger());
+            }
+        }
         runReconstructionChild(fixture, prepared.config, identity, operation, "installed");
         assertFalse(Files.exists(stage));
         assertTrue(SegmentArenaControlLog.inspect(prepared.config, identity, ServiceEpisode.CONTROL_LOG_BYTES)
@@ -19172,9 +19249,26 @@ public class SegmentProfileInitialSocketClientTest {
                 ServiceEpisode.CONTROL_LOG_BYTES));
         captureReconstructionVector(prepared.config.directory(), "original-log");
         var policy = servicePolicy(prepared.config, identity, 6);
+        if (deleteAfterReady) {
+            try (var borrowed = new ServiceEpisode(fixture, slot, prepared.config, policy, null, address,
+                    episode.sdk.getClientCtx().getScheduler(), false, false, serviceRestartHeadroom(prepared.config))) {
+                var refused = assertThrows(IOException.class, () -> borrowed.replaceNode(fixture, slot, true));
+                assertTrue(refused.getMessage().contains("requires its current CLOSED lifecycle"));
+                assertEquals(resolution, SegmentArenaControlLog.inspect(prepared.config, identity,
+                        ServiceEpisode.CONTROL_LOG_BYTES));
+            }
+        }
         var restarted = new ServiceEpisode(fixture, slot, prepared.config, policy, null, address,
                 episode.sdk.getClientCtx().getScheduler(), false, true, serviceRestartHeadroom(prepared.config));
         episode.episodes.add(restarted);
+        if (deleteAfterReady) {
+            stopReconstructionBeforeCatchUp(fixture, restarted, manifest, slot, address, identity);
+            var retry = new ServiceEpisode(fixture, slot, prepared.config, policy, null, address,
+                    episode.sdk.getClientCtx().getScheduler(), false, true, serviceRestartHeadroom(prepared.config));
+            episode.episodes.add(retry);
+            verifyReconstructedDelete(episode, retry, metadata, identity, oldPeer, manifest, slot, address, receipt);
+            return;
+        }
         restarted.replaceNode(fixture, slot, true);
         var arenaField = IsolatedSegmentStorage.class.getDeclaredField("arena");
         arenaField.setAccessible(true);
@@ -19225,6 +19319,241 @@ public class SegmentProfileInitialSocketClientTest {
         assertTrue(fixture.reservations.retainedActivationTargets(44).targets().stream().anyMatch(target ->
                 target.scope().targetBookie().equals(identity.bookieId().toString())
                         && Arrays.equals(target.scope().targetStorageIncarnation(), identity.incarnation().value())));
+    }
+
+    private static void stopReconstructionBeforeCatchUp(Fixture fixture, ServiceEpisode restarting,
+            ProfileDeleteRecord.Manifest manifest, int slot, InetSocketAddress address, SegmentFileHeader identity)
+            throws Exception {
+        var beforeCatchUp = new CountDownLatch(1);
+        var startCatchUp = new CountDownLatch(1);
+        var starting = CompletableFuture.supplyAsync(() -> {
+            try (var preCatchUp = holdReconstructedCatchUp(restarting.service, beforeCatchUp, startCatchUp)) {
+                return assertThrows(IOException.class, () -> restarting.replaceNode(fixture, slot, true));
+            } catch (ReflectiveOperationException failure) {
+                throw new AssertionError(failure);
+            }
+        }, fixture.cold);
+        try {
+            assertTrue(beforeCatchUp.await(10, TimeUnit.SECONDS));
+            var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
+            assertReadRefusedBeforeReconstructedRegistration(fixture, manifest, target, address);
+            assertNull(bookie(restarting.storage()).deleteAppliedCursor());
+            assertFalse(restarting.service.close(Duration.ofSeconds(2)));
+        } finally {
+            startCatchUp.countDown();
+            starting.handle((ignored, failure) -> null).get(10, TimeUnit.SECONDS);
+        }
+        assertTrue(starting.get(1, TimeUnit.SECONDS).getMessage().contains("Profile service not writable"));
+        restarting.service.close();
+        restarting.assertOwnedResourcesTerminal(true);
+        var closed = SegmentArenaControlLog.inspect(restarting.config, identity, ServiceEpisode.CONTROL_LOG_BYTES);
+        assertFalse(closed.sessionOpen());
+        assertEquals(3, closed.sessionEpoch());
+    }
+
+    private static org.mockito.MockedStatic<IsolatedSegmentStorage> holdReconstructedCatchUp(
+            SegmentProfileService service, CountDownLatch entered, CountDownLatch release)
+            throws ReflectiveOperationException {
+        var listener = SegmentProfileService.class.getDeclaredField("listener");
+        listener.setAccessible(true);
+        return org.mockito.Mockito.mockStatic(IsolatedSegmentStorage.class, invocation -> {
+            if (invocation.getMethod().getName().equals("startupDeviceManifestIdentity")
+                    && listener.get(service) != null) {
+                entered.countDown();
+                assertTrue(release.await(10, TimeUnit.SECONDS));
+            }
+            return invocation.callRealMethod();
+        });
+    }
+
+    private void verifyReconstructedDelete(PublicProfileReadonlyEpisode episode, ServiceEpisode restarting,
+            ProfileLedgerMetadataStore metadata, SegmentFileHeader identity,
+            ZKProfileRegistrationStore.RegisteredPeer old, ProfileDeleteRecord.Manifest manifest, int slot,
+            InetSocketAddress address, ProfileClosedReconstruction.Receipt reconstruction) throws Exception {
+        var fixture = episode.fixture;
+        var registry = episode.episodes.get(0).persistent;
+        var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
+        var event = fixture.reservations.readLedgerDeleteDelivery(metadata, manifest.ledger().ledgerId(), target)
+                .event();
+        assertNotNull(event);
+        Path journal = restarting.config.directory().resolve("bookie-control").toRealPath();
+        long originalLength = Files.size(journal);
+        var beforeCatchUp = new CountDownLatch(1);
+        var startCatchUp = new CountDownLatch(1);
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var wrapped = new AtomicBoolean();
+        var starting = CompletableFuture.runAsync(() -> {
+            try (var opener = org.mockito.Mockito.mockStatic(java.nio.channels.FileChannel.class, invocation -> {
+                Object actual = invocation.callRealMethod();
+                if (invocation.getMethod().getName().equals("open")
+                        && ((Path) invocation.getArgument(0)).getFileName().toString().equals("bookie-control")
+                        && ((Path) invocation.getArgument(0)).toRealPath().equals(journal)
+                        && Arrays.asList(invocation.getArguments()).contains(StandardOpenOption.WRITE)
+                        && wrapped.compareAndSet(false, true)) {
+                    var held = new SegmentDataFileLockTest.FaultChannel((java.nio.channels.FileChannel) actual);
+                    held.beforeForce = () -> {
+                        try {
+                            if (held.actual.size() > originalLength) {
+                                entered.countDown();
+                                assertTrue(release.await(10, TimeUnit.SECONDS));
+                            }
+                        } catch (IOException | InterruptedException failure) {
+                            throw new AssertionError(failure);
+                        }
+                    };
+                    return held;
+                }
+                return actual;
+            }); var preCatchUp = holdReconstructedCatchUp(restarting.service, beforeCatchUp, startCatchUp)) {
+                restarting.replaceNode(fixture, slot, true);
+            } catch (Exception failure) {
+                throw new java.util.concurrent.CompletionException(failure);
+            }
+        }, fixture.cold);
+        try {
+            assertTrue(beforeCatchUp.await(10, TimeUnit.SECONDS));
+            assertFalse(bookie(restarting.storage()).hasTerminalTombstone(manifest.ledger()));
+            assertNull(bookie(restarting.storage()).deleteAppliedCursor());
+            assertEquals(ProfileRegistrationStore.ReadStatus.NOT_FOUND, registry.readPeer(target.bookie()).status());
+            assertReadRefusedBeforeReconstructedRegistration(fixture, manifest, target, address);
+            var log = bookie(restarting.storage());
+            long bookieCut = log.appliedThrough();
+            try (var direct = ProfileInitialControlClient.connect(fixture.clientGroup, fixture.peerTls, address,
+                    "apache.bookkeeper.org", target.bookie(), target.incarnation(), 2, Duration.ofSeconds(2))
+                    .get(2, TimeUnit.SECONDS)) {
+                assertEquals(Outcome.TRANSIENT_RECONCILING,
+                        direct.deleteApply(event.deleteApply("ledger-profile")).get(2, TimeUnit.SECONDS).outcome());
+            }
+            assertEquals(bookieCut, log.appliedThrough());
+            assertNull(log.deleteAppliedCursor());
+            awaitProfileConnectionDrain(restarting.budget);
+            startCatchUp.countDown();
+            if (!entered.await(10, TimeUnit.SECONDS)) {
+                if (starting.isDone()) {
+                    starting.get(1, TimeUnit.SECONDS);
+                }
+                throw new AssertionError("Owned startup did not reach the DELETE_APPLY force (wrapped="
+                        + wrapped.get() + ")");
+            }
+            assertFalse(starting.isDone());
+            assertEquals(ProfileRegistrationStore.ReadStatus.NOT_FOUND, registry.readPeer(target.bookie()).status());
+            assertNull(fixture.zk.exists(serviceReadinessPath(target.bookie()) + "/writable", false));
+            assertFalse(bookie(restarting.storage()).hasTerminalTombstone(manifest.ledger()));
+            assertNull(bookie(restarting.storage()).deleteAppliedCursor());
+            assertReadRefusedBeforeReconstructedRegistration(fixture, manifest, target, address);
+        } finally {
+            startCatchUp.countDown();
+            release.countDown();
+            starting.handle((ignored, failure) -> null).get(10, TimeUnit.SECONDS);
+        }
+        starting.get(10, TimeUnit.SECONDS);
+        var registered = registry.readPeer(target.bookie()).peer();
+        assertNotNull(registered);
+        assertNull(registry.revalidatePeer(old).peer());
+        assertNotEquals(old.publisherSession(), registered.publisherSession());
+        assertTrue(bookie(restarting.storage()).hasTerminalTombstone(manifest.ledger()));
+        assertEquals(event.sequence(), bookie(restarting.storage()).deleteAppliedCursor().sequence());
+        assertDeletedReconstructedReads(fixture, registry, registered, manifest.ledger());
+        assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.ABSENT,
+                fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, target).status());
+
+        var control = ProfileInitialControlClient.connectRegistered(fixture.clientGroup, fixture.peerTls, registry,
+                registered, fixture.cold, 2, Duration.ofSeconds(5));
+        try {
+            var coordinator = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+            var attempt = coordinator.beginAwaitPhysicalDeletion(manifest,
+                    Map.of(target, control.completion().get(5, TimeUnit.SECONDS)), episode.sdk.getClientCtx(),
+                    64, 8, Duration.ofSeconds(15));
+            var result = attempt.result().get(20, TimeUnit.SECONDS);
+            attempt.completion().get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileDeleteCoordinator.PhysicalStatus.PENDING, result.status());
+            var reply = result.targets().get(target).reply();
+            assertEquals(ProfilePhysicalDeleteCodec.Outcome.REUSABLE, reply.outcome());
+            assertTrue(reply.freedAllocations() > 0);
+        } finally {
+            control.closeAsync().join();
+        }
+        assertColdReconstructedReceipt(episode, metadata, manifest, target);
+        assertEquals(reconstruction, fixture.reservations.readClosedReconstruction(reconstruction.admission().scope()));
+        assertFalse(Files.exists(restarting.config.directory().resolve(".closed-reconstruction-"
+                + reconstruction.admission().operation())));
+        long dataBytes = Files.size(IsolatedSegmentFiles.dataPath(restarting.config, 0));
+        restarting.service.close();
+        restarting.assertOwnedResourcesTerminal(true);
+        var coldPolicy = servicePolicy(restarting.config, identity, 7);
+        var reopened = new ServiceEpisode(fixture, slot, restarting.config, coldPolicy, null, address,
+                episode.sdk.getClientCtx().getScheduler(), false, true,
+                serviceRestartHeadroom(restarting.config));
+        episode.episodes.add(reopened);
+        reopened.replaceNode(fixture, slot, true);
+        assertTrue(bookie(reopened.storage()).hasTerminalTombstone(manifest.ledger()));
+        assertEquals(dataBytes, Files.size(IsolatedSegmentFiles.dataPath(reopened.config, 0)));
+        assertDeletedReconstructedReads(fixture, registry, registry.readPeer(target.bookie()).peer(),
+                manifest.ledger());
+    }
+
+    private static void assertReadRefusedBeforeReconstructedRegistration(Fixture fixture,
+            ProfileDeleteRecord.Manifest manifest, ProfileDeleteRecord.Target target, InetSocketAddress address)
+            throws Exception {
+        try (var direct = ProfileNormalDataClient.connect(fixture.clientGroup, fixture.peerTls, address,
+                "apache.bookkeeper.org", target.bookie(), target.incarnation(), 2, 1060, Duration.ofSeconds(2))
+                .get(2, TimeUnit.SECONDS)) {
+            var reply = direct.readEntry(manifest.ledger(), 0).get(2, TimeUnit.SECONDS);
+            assertEquals(ProfileReadEntryReplyCodec.Outcome.REFUSED, reply.outcome());
+            assertEquals(ProfileStatus.notReadyOrStale(), reply.status());
+        }
+    }
+
+    private static void assertDeletedReconstructedReads(Fixture fixture, ZKProfileRegistrationStore registry,
+            ZKProfileRegistrationStore.RegisteredPeer registered, ProfileLedgerContext context) throws Exception {
+        assertNotNull(registered);
+        var connection = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls, registry,
+                registered, fixture.cold, 2, 1060, Duration.ofSeconds(5));
+        try {
+            var client = connection.completion().get(5, TimeUnit.SECONDS);
+            for (long entry : List.of(0L, 1L)) {
+                assertEquals(ProfileReadEntryReplyCodec.Outcome.REFUSED,
+                        client.readEntry(context, entry).get(5, TimeUnit.SECONDS).outcome());
+            }
+        } finally {
+            connection.closeAsync().join();
+        }
+    }
+
+    private static void assertColdReconstructedReceipt(PublicProfileReadonlyEpisode episode,
+            ProfileLedgerMetadataStore metadata, ProfileDeleteRecord.Manifest manifest,
+            ProfileDeleteRecord.Target target) throws Exception {
+        var fixture = episode.fixture;
+        var committed = fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, target);
+        assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.FOUND, committed.status());
+        var watcher = new ZooKeeperWatcherBase(10000, false);
+        String connect = fixture.cluster.getZooKeeperConnectString();
+        try (var zk = new ZooKeeper(connect, 10000, watcher)) {
+            watcher.waitForConnection();
+            try (var factory = profileWriterCrashMetadataFactory(profileWriterCrashClientConfig(connect), zk);
+                    var manager = (AbstractZkLedgerManager) factory.newLedgerManager()) {
+                var cold = new ProfileLedgerMetadataStore(zk, manager, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                        Duration.ofSeconds(5));
+                var reservations = new ZKProfileReservationStore(zk, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                        Duration.ofSeconds(5));
+                var restarted = new ProfileDeleteCoordinator(reservations, cold, fixture.cold);
+                var attempt = restarted.beginAwaitPhysicalDeletion(manifest, Map.of(), episode.sdk.getClientCtx(),
+                        64, 8, Duration.ofSeconds(10));
+                var result = attempt.result().get(15, TimeUnit.SECONDS);
+                attempt.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(ProfileDeleteCoordinator.PhysicalStatus.PENDING, result.status());
+                assertEquals(ProfilePhysicalDeleteCodec.Outcome.REUSABLE, result.targets().get(target).outcome());
+                assertArrayEquals(committed.receipt().encode(),
+                        reservations.readPhysicalDeleteReceipt(cold, manifest, target).receipt().encode());
+                for (var other : manifest.targets()) {
+                    if (!target.equals(other)) {
+                        assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.ABSENT,
+                                reservations.readPhysicalDeleteReceipt(cold, manifest, other).status());
+                    }
+                }
+            }
+        }
     }
 
     private static void captureReconstructionVector(Path directory, String name) throws IOException {
@@ -19402,7 +19731,9 @@ public class SegmentProfileInitialSocketClientTest {
                     var controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, null,
                             phase.equals("installed") ? halt : null, phase.equals("resolution-forced") ? halt : null);
                     var original = reservations.readClosedForOpen(metadata, 44).snapshot();
-                    assertNotNull(original);
+                    if (!phase.equals("installed") && !phase.equals("resolution-forced")) {
+                        assertNotNull(original);
+                    }
                     org.junit.function.ThrowingRunnable reconstruct = () -> SegmentClosedReconstruction.reconstruct(
                             config, identity, new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, nativeIo, limits,
                             metadata, reservations, sources, original, null, 2, operation, imageIo, controlIo);

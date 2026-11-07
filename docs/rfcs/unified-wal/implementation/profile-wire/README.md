@@ -2866,3 +2866,15 @@ Spotless/Checkstyle实际exit0；独立RAT实际exit1，仍为父982a18dad9既�
 两个组件对照通过。首轮组合到达 repair 任务移除和旧目录拒绝重开后，测试错误地只期待一个 repair 引用。普通关闭已留三条 SELF 引用。修正后逐字节核对原引用，并验证唯一新增的替换引用。完整场景通过，最终与未授权 DATA 的 service rejoin、原 auditor watch、CLOSED repair 和离线删除回执共五项定向回归通过，零失败、错误或跳过。Spotless 与 Checkstyle 通过。各阶段 1460 项输入、实际 child 输出、原失败和最终回执保存在 `/Users/liusinan/.codex/artifacts/unified-wal/profile-acked-target-loss-evidence-fd4c86fd`。
 
 此次证据覆盖同主机、同版本、单 Arena 的已确认副本进程退出、不同身份修复和逻辑删除。已有 grant 的同身份异常恢复、全目标物理终结、永久退役、历史 GC 和跨版本验收仍待完成。批准 Linux、掉电、正式性能和 canary 本轮未执行，生产 Gate 保持 OPEN。
+
+## 重建 READY 后的原 incarnation 删除闭环
+
+以 `ed424a680b2b` 为基线。真实 3/3/3 SDK 关闭后，原 Bookie 子 JVM 退出，重建子 JVM 确认原生 READY 并在移动 active 后退出。原删除协调器提交逻辑 DELETE，原三个 incarnation 均保留在 manifest 中。存活来源实际应用 tombstone 并拒绝两条 entry。后继 JVM 按同一 READY 完成文件发布和 action 6，原 ADMITTED/READY 证据保留。只有 ADMITTED 时，逻辑删除后的重建拒绝发布 READY。[本地发布与启动条件](../local-storage/README.md#ready-后逻辑删除的同身份重开)
+
+每次 owned service 启动，包括健康关闭后的重试，在首次原生 writable admission 成功前只开放 mTLS/HELLO。READ、CONTROL 和其他请求收到 `PROFILE_NOT_READY_OR_STALE`，既有本地追赶可独立推进。首次真实 admission 之后，读和控制沿用各自的权限与删除检查，写路径继续检查实时准入。
+
+测试在原 owned service 的内部 OPEN 后、本地追赶前停止启动并完成健康 CLOSE。下一次 owned 启动已越过原 reconstruction OPEN，仍在追赶前及实际 `DELETE_APPLY` force 前保持拒绝。两处均无 writable，cursor 未前进。释放后 tombstone 和 cursor 实际应用，新 session 注册，原观察失效，已删 entry 持续拒绝。注册 CONTROL 仅对原目标执行真实 FREE 并保存物理回执。独立 ZooKeeper session 的冷协调器在没有 peer 的情况下读回相同回执。其他目标仍无物理回执，全局状态为 `PENDING`。健康关闭与冷启后，原 ledger 仍拒绝点读，DATA 长度保持。
+
+真实反例先复现旧首次 OPEN 拒绝，再复现 bound listener 在首次启动及健康清理后的重试中返回 `FOUND`。修复后的真实 mTLS 探针核对 READ 拒绝、已获原生授权的 DELETE_APPLY 拒绝、控制 cut 和 cursor 保持及连接额度归还。最终 32 项定向 JUnit 全部通过，Spotless 和 Checkstyle 通过。日志与原始回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-delete-evidence-ed424a68`。
+
+验收范围是单 Arena、单 DATA 文件、单个非空 CLOSED ledger 和同版本进程退出。批准 Linux、真实掉电、一般异常恢复、全目标物理终结、永久退役和历史 GC 保持未验收，生产 Gate 保持 OPEN。

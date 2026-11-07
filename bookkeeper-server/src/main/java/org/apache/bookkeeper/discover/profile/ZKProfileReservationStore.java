@@ -45,6 +45,7 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus;
 import org.apache.bookkeeper.meta.LedgerManager;
+import org.apache.bookkeeper.meta.LedgerMetadataSerDe;
 import org.apache.bookkeeper.versioning.Versioned;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.CreateOptions;
@@ -996,8 +997,12 @@ public final class ZKProfileReservationStore {
     /** Resolve only matching standard CLOSED, including its complete retained recovery origin. Never reopen. */
     public ClosedRecoveryResult readClosedRecovery(ProfileLedgerMetadataStore metadata,
             ProfileRecoveryContext context) {
+        return readClosedRecovery(metadata, context, System.nanoTime() + timeoutNanos);
+    }
+
+    private ClosedRecoveryResult readClosedRecovery(ProfileLedgerMetadataStore metadata,
+            ProfileRecoveryContext context, long deadline) {
         requireRecoveryClient(metadata);
-        long deadline = System.nanoTime() + timeoutNanos;
         try {
             var root = read(context.ledger().ledgerId(), deadline);
             var member = metadata.readMembership(context.ledger().ledgerId(), deadline);
@@ -1065,11 +1070,7 @@ public final class ZKProfileReservationStore {
         /** Compare a new cold observation against the original CLOSED cut and authorized sources. */
         public boolean sameObservation(ReadOnlySnapshot current) {
             return current != null && context.equals(current.context)
-                    && closed.metadata().birthZxid() == current.closed.metadata().birthZxid()
-                    && closed.metadata().metadata().getVersion().equals(
-                            current.closed.metadata().metadata().getVersion())
-                    && ProfileLedgerMetadataStore.sameMetadata(closed.metadata().metadata().getValue(),
-                            current.closed.metadata().metadata().getValue())
+                    && sameMembership(closed.metadata(), current.closed.metadata())
                     && sources.equals(current.sources);
         }
     }
@@ -1431,6 +1432,107 @@ public final class ZKProfileReservationStore {
         return root + "/closed-reconstruction-" + scope.key();
     }
 
+    /** Prove the current logical DELETE is the exact native successor of this historical READY's CLOSED cut. */
+    public void verifyDeletedReconstructionPredecessor(ProfileLedgerMetadataStore metadata,
+            ProfileClosedReconstruction.Receipt ready) throws IOException, InterruptedException {
+        requireRecoveryClient(metadata);
+        var admitted = ready.admission();
+        var scope = admitted.scope();
+        long ledger = admitted.ledger();
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var root = read(ledger, deadline).snapshot();
+            var membership = metadata.readMembership(ledger, deadline).snapshot();
+            if (ready.ready() == null || root == null || membership == null
+                    || root.lifecycle().state() != ProfileLifecycleHead.State.DELETE_INTENT) {
+                throw new IOException("Reconstructed startup requires the current committed logical DELETE");
+            }
+            var logical = readLogicalDeletion(metadata, ledger, root.lifecycle().operationId(), deadline);
+            var manifest = logical.manifest();
+            var target = new ProfileDeleteRecord.Target(scope.bookie(), scope.incarnation().value());
+            if (logical.status() != DeleteStatus.LOGICALLY_DELETED || manifest == null
+                    || !manifest.targets().contains(target)) {
+                throw new IOException("Logical DELETE does not retain the original reconstruction target");
+            }
+            var projected = deleteProjection(metadata, root, membership, deadline);
+            var stripped = projected.metadata().getValue();
+            // CLOSED publication orders its custom fields. READY bound the native reader's decoded representation.
+            var serde = new LedgerMetadataSerDe();
+            var value = serde.parseConfig(serde.serialize(stripped), ledger, Optional.of(stripped.getCtime()));
+            var predecessor = new ProfileLedgerMetadataStore.MembershipSnapshot(projected.birthZxid(),
+                    new Versioned<>(value, projected.metadata().getVersion()));
+            var context = ProfileRecoveryContext.decode(value.getCustomMetadata().get(ProfileRecoveryContext.KEY));
+            var reference = ProfileDeleteRecord.Reference.decode(membership.metadata().getValue()
+                    .getCustomMetadata().get(ProfileDeleteRecord.TOMBSTONE_KEY));
+            if (reference.publicationId() == null || context.lifecycleSequence() != 2
+                    || !context.ledger().equals(manifest.ledger()) || !closedAfterDelete(context, root)) {
+                throw new IOException("Logical DELETE is outside the original READY membership lineage");
+            }
+            var closed = readClosedRecovery(metadata, context, deadline);
+            if (closed.metadata() == null || !sameMembership(closed.metadata(), membership)) {
+                throw new IOException("Unable to verify the native CLOSED predecessor and original births");
+            }
+            var retained = retainedActivationTargets(ledger, deadline);
+            if (retained.status() != ReadStatus.FOUND) {
+                throw new IOException("Original CLOSED sources no longer have complete retained history");
+            }
+            var historical = new ReadOnlySnapshot(context, new ClosedRecoveryResult(closed.outcome(), predecessor,
+                    closed.selection()), closedSources(value, retained.targets()));
+            var self = closedReconstructionSelf(historical, scope.bookie(), scope.incarnation().value(), deadline);
+            if (!admitted.closed().equals(ProfileClosedReconstruction.closedDigest(historical, self))) {
+                throw new IOException("Logical DELETE predecessor differs from the exact READY CLOSED observation");
+            }
+            var delivery = readLedgerDeleteDelivery(metadata, ledger, target, deadline);
+            var head = deleteHead(target, deadline);
+            var event = delivery.event();
+            if (delivery.status() != DeliveryStatus.COMMITTED || event == null || head == null
+                    || !event.ledger().equals(manifest.ledger())
+                    || !Arrays.equals(event.tombstone().encode(), reference.encode())
+                    || !Arrays.equals(event.requestId(), manifest.seal().requestId())
+                    || event.deleteEpoch() != manifest.seal().epoch() || !event.target().equals(target)
+                    || !Arrays.equals(event.streamId(), head.head().streamId())
+                    || event.streamGeneration() != head.head().streamGeneration()
+                    || event.assignmentGeneration() != head.head().assignmentGeneration()
+                    || event.sequence() > head.head().committedThrough()
+                    || !root.equals(read(ledger, deadline).snapshot())
+                    || !sameMembership(membership, metadata.readMembership(ledger, deadline).snapshot())) {
+                throw new IOException("Original target has no exact committed DELETE delivery in the current stream");
+            }
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException invalid) {
+            throw new IOException("Unable to verify the original committed reconstruction DELETE", invalid);
+        }
+    }
+
+    private static boolean sameMembership(ProfileLedgerMetadataStore.MembershipSnapshot left,
+            ProfileLedgerMetadataStore.MembershipSnapshot right) {
+        return right != null && left.birthZxid() == right.birthZxid()
+                && left.metadata().getVersion().equals(right.metadata().getVersion())
+                && ProfileLedgerMetadataStore.sameMetadata(left.metadata().getValue(), right.metadata().getValue());
+    }
+
+    private static List<ProfileInstallReceipt> closedSources(LedgerMetadata value,
+            List<ProfileInstallReceipt> retained) {
+        var members = new java.util.HashSet<String>();
+        value.getAllEnsembles().values().forEach(ensemble ->
+                ensemble.forEach(bookie -> members.add(bookie.toString())));
+        var sources = new LinkedHashMap<String, ProfileInstallReceipt>();
+        for (var receipt : retained) {
+            String name = receipt.scope().targetBookie();
+            if (!members.contains(name)) {
+                continue;
+            }
+            var prior = sources.putIfAbsent(name, receipt);
+            if (prior != null && !Arrays.equals(prior.scope().targetStorageIncarnation(),
+                    receipt.scope().targetStorageIncarnation())) {
+                throw new IllegalArgumentException("CLOSED member has multiple retained incarnations");
+            }
+        }
+        if (!sources.keySet().containsAll(members)) {
+            throw new IllegalArgumentException("CLOSED member lacks a retained incarnation");
+        }
+        return List.copyOf(sources.values());
+    }
+
     /** Independent open: derive the token from actual CLOSED, never adopt a historical close after DELETE. */
     public ReadOnlyRead readClosedForOpen(ProfileLedgerMetadataStore metadata, long ledger) {
         requireRecoveryClient(metadata);
@@ -1469,24 +1571,7 @@ public final class ZKProfileReservationStore {
                 return new ReadOnlyRead(retained.status() == ReadStatus.UNAVAILABLE
                         ? ReadOnlyStatus.UNAVAILABLE : ReadOnlyStatus.QUARANTINED, null);
             }
-            var members = new java.util.HashSet<String>();
-            closed.metadata().metadata().getValue().getAllEnsembles().values().forEach(ensemble ->
-                    ensemble.forEach(bookie -> members.add(bookie.toString())));
-            var sources = new java.util.LinkedHashMap<String, ProfileInstallReceipt>();
-            for (var receipt : retained.targets()) {
-                String name = receipt.scope().targetBookie();
-                if (!members.contains(name)) {
-                    continue;
-                }
-                var prior = sources.putIfAbsent(name, receipt);
-                if (prior != null && !Arrays.equals(prior.scope().targetStorageIncarnation(),
-                        receipt.scope().targetStorageIncarnation())) {
-                    return new ReadOnlyRead(ReadOnlyStatus.QUARANTINED, null);
-                }
-            }
-            if (!sources.keySet().containsAll(members)) {
-                return new ReadOnlyRead(ReadOnlyStatus.QUARANTINED, null);
-            }
+            var sources = closedSources(closed.metadata().metadata().getValue(), retained.targets());
             var afterRoot = read(ledger, deadline);
             var after = metadata.readMembership(ledger, deadline);
             if (afterRoot.status() != ReadStatus.FOUND || after.status() != ReadStatus.FOUND) {
@@ -1505,7 +1590,7 @@ public final class ZKProfileReservationStore {
                 return new ReadOnlyRead(ReadOnlyStatus.CONFLICT, null);
             }
             return new ReadOnlyRead(ReadOnlyStatus.READABLE_CLOSED,
-                    new ReadOnlySnapshot(context, closed, List.copyOf(sources.values())));
+                    new ReadOnlySnapshot(context, closed, sources));
         } catch (IllegalStateException unavailable) {
             return new ReadOnlyRead(ReadOnlyStatus.UNAVAILABLE, null);
         } catch (IllegalArgumentException invalid) {
@@ -6985,7 +7070,10 @@ public final class ZKProfileReservationStore {
 
     /** Bounded discovery only: it grants neither activation nor delete/physical completion. */
     public RetainedTargets retainedActivationTargets(long ledger) {
-        long deadline = System.nanoTime() + timeoutNanos;
+        return retainedActivationTargets(ledger, System.nanoTime() + timeoutNanos);
+    }
+
+    private RetainedTargets retainedActivationTargets(long ledger, long deadline) {
         try {
             var read = read(ledger, deadline);
             if (read.status() != ReadStatus.FOUND) {

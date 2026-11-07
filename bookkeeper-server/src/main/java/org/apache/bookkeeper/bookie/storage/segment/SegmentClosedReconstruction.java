@@ -43,6 +43,7 @@ import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstructionSources;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 
@@ -543,7 +544,8 @@ public final class SegmentClosedReconstruction {
 
     static void verifyFirstOpen(IsolatedSegmentConfig config, SegmentFileHeader identity,
             SegmentDataFileLock dataLock, SegmentArenaControlLog arena, SegmentBookieControlLog bookie,
-            ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata)
+            ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata,
+            ZKProfileEphemeralRegistrationStore.Admission ownedStartup)
             throws IOException, InterruptedException {
         var pending = arena.pendingReconstruction();
         if (pending == null) {
@@ -576,7 +578,17 @@ public final class SegmentClosedReconstruction {
         } catch (Exception failure) {
             throw new IOException("First reconstructed OPEN could not verify the complete published image", failure);
         }
-        var snapshot = reservations.readClosedForOpen(metadata, receipt.admission().ledger()).snapshot();
+        var current = reservations.readClosedForOpen(metadata, receipt.admission().ledger());
+        if (current.status() == ZKProfileReservationStore.ReadOnlyStatus.DELETED && ownedStartup != null
+                && ownedStartup.allowsPendingDeleteStartup(reservations, scope.bookie(), scope.incarnation())) {
+            reservations.verifyDeletedReconstructionPredecessor(metadata, receipt);
+            if (!ownedStartup.allowsPendingDeleteStartup(reservations, scope.bookie(), scope.incarnation())) {
+                throw new IOException("Original owned startup retired before reconstructed DELETE catch-up");
+            }
+            arena.verifyFirstReconstructionOpen(pending, receipt);
+            return;
+        }
+        var snapshot = current.snapshot();
         if (snapshot == null) {
             throw new IOException("First reconstructed OPEN requires its current CLOSED lifecycle and membership");
         }

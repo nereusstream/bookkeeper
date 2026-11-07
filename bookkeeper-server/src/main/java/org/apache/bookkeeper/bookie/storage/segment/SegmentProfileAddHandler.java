@@ -316,6 +316,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 write(ctx, request, null, body);
             } else if (!established) {
                 ctx.close();
+            } else if (!storage.ownedStartupAllowsRequests()) {
+                write(ctx, request, ProfileStatus.notReadyOrStale(), null);
             } else if (frame.header().operation() == ProfileOperation.OPERATION_STATUS) {
                 physicalDelete(ctx, request);
             } else if (ProfileInitialControlCodec.supported(frame.header().operation())) {
@@ -441,8 +443,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             return;
         }
         if (!storage.profileReadVisible(query.context(), query.entryId())) {
-            write(ctx, request, status(StatusClass.PROFILE_NOT_READY_OR_STALE,
-                    RetryDisposition.AFTER_CONTROL_RECONCILIATION, DurableResult.NONE), null);
+            write(ctx, request, ProfileStatus.notReadyOrStale(), null);
             return;
         }
         request.beginRead();
