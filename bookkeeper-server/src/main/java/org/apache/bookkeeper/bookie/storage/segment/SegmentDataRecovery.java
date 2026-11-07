@@ -643,6 +643,108 @@ final class SegmentDataRecovery {
     record Scan(long batches, long records, long validatedBytes, long zeroPages,
                 long readBytes, long coveredBatches, long skippedBodyBytes) { }
 
+    record ClosedImageEntry(long cumulativeLength, int payloadLength, String payloadSha256, String entrySha256) { }
+
+    record ClosedImage(long bytes, String sha256, List<ClosedImageEntry> entries) { }
+
+    /** Complete single-file audit. No index, retired extent or locally unreadable coordinate can skip bytes. */
+    static ClosedImage auditClosedImage(FileChannel data, IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SegmentArenaControlLog.RecoveryDependencies arena, ProfileLedgerContext ledger,
+            long prefix, long length, long maximumDataBytes, int maximumEntries) throws IOException {
+        long bytes = config.bytesPerFile();
+        if (config.dataFiles() != 1 || bytes > maximumDataBytes || data.size() != bytes || length < 0
+                || prefix < 0 || prefix >= maximumEntries || maximumEntries > 65536) {
+            throw new IOException("CLOSED reconstruction image exceeds its scope or bounds");
+        }
+        var imageDigest = sha256();
+        var entryDigest = sha256();
+        var entries = new ClosedImageEntry[(int) prefix + 1];
+        var grants = new HashMap<Long, SegmentArenaControlLog.Allocation>();
+        for (var grant : arena.grants()) {
+            grants.put(grant.allocation().allocationId(), grant.allocation());
+        }
+        var nextSequence = new HashMap<StreamKey, Long>();
+        for (var stream : arena.streams()) {
+            nextSequence.put(new StreamKey(stream.shard(), new Generation(stream.generation())),
+                    stream.firstSequence());
+        }
+        ByteBuffer page = ByteBuffer.allocate(config.alignment());
+        SegmentFileIo.readFully(data, page, 0);
+        identity.validate(page, config, 0);
+        imageDigest.update(page.rewind());
+        for (long offset = config.alignment(); offset < bytes;) {
+            page.clear();
+            SegmentFileIo.readFully(data, page, offset);
+            if (allZero(page)) {
+                imageDigest.update(page);
+                offset += config.alignment();
+                continue;
+            }
+            var address = address(page, offset);
+            int batchLength = SegmentBatchParser.batchLength(page, address, bytes);
+            var grant = grants.get(address.allocation());
+            var stream = new StreamKey(address.shard(), address.streamGeneration());
+            if (grant == null || address.fileIndex() != 0 || grant.file() != 0
+                    || grant.ownerShard() != address.shard()
+                    || !grant.ownerGeneration().equals(address.streamGeneration())
+                    || grant.generation() != address.generation().value() || offset < grant.offset()
+                    || batchLength > grant.offset() + grant.blocks() * SegmentArenaControlLog.BLOCK_BYTES - offset
+                    || address.sequence() != nextSequence.getOrDefault(stream, -1L)
+                    || address.sequence() == Long.MAX_VALUE) {
+                throw new IOException("CLOSED reconstruction batch has no exact grant or continuous stream");
+            }
+            nextSequence.put(stream, address.sequence() + 1);
+            ByteBuffer content = page;
+            if (batchLength > page.remaining()) {
+                content = ByteBuffer.allocate(batchLength);
+                content.put(page);
+                SegmentFileIo.readFully(data, content, offset + config.alignment());
+            }
+            var batch = SegmentBatchParser.parse(content, address, bytes);
+            imageDigest.update(content);
+            for (var record : batch.records()) {
+                long entry = record.entryId();
+                if (!ledger.equals(record.context()) || record.origin() != SegmentBatchFormat.ENTRY_DATA
+                        || SegmentOwnerLoop.shardFor(ledger.ledgerId(), config.logicalShards()) != address.shard()
+                        || entry > prefix) {
+                    throw new IOException("CLOSED reconstruction DATA has a foreign coordinate");
+                }
+                entryDigest.update(record.entry());
+                String rawDigest = HexFormat.of().formatHex(entryDigest.digest());
+                ByteBuffer payload = record.entry().position(SegmentBatchFormat.ENTRY_OVERHEAD);
+                int payloadBytes = payload.remaining();
+                entryDigest.update(payload);
+                var observed = new ClosedImageEntry(record.ledgerLength(), payloadBytes,
+                        HexFormat.of().formatHex(entryDigest.digest()), rawDigest);
+                if (entries[(int) entry] != null && !entries[(int) entry].equals(observed)) {
+                    throw new IOException("CLOSED reconstruction DATA has a conflicting duplicate");
+                }
+                entries[(int) entry] = observed;
+            }
+            offset += batchLength;
+        }
+        long cumulative = 0;
+        for (var entry : entries) {
+            if (entry == null || entry.payloadLength() > length - cumulative
+                    || entry.cumulativeLength() != cumulative + entry.payloadLength()) {
+                throw new IOException("CLOSED reconstruction DATA has a missing entry or inconsistent length");
+            }
+            cumulative = entry.cumulativeLength();
+        }
+        if (cumulative != length || data.size() != bytes) {
+            throw new IOException("CLOSED reconstruction DATA does not match the complete file and prefix length");
+        }
+        return new ClosedImage(bytes, HexFormat.of().formatHex(imageDigest.digest()), List.of(entries));
+    }
+
+    private static MessageDigest sha256() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new AssertionError(impossible);
+        }
+    }
+
     record StreamCoverage(int shard, Generation generation, long firstSequence, long through) { }
 
     /** Synced physical evidence only; it does not grant Bookie selection, success or writable recovery. */

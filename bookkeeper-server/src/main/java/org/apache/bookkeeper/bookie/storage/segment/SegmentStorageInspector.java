@@ -24,6 +24,7 @@ import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +33,7 @@ import java.util.UUID;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
+import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.net.BookieId;
 
 /** Offline experimental file observation. Does not sync, repair, accept a restore or open service authority. */
@@ -55,6 +57,42 @@ public final class SegmentStorageInspector {
         T observe(RecoveryDependencies dependencies) throws Exception;
     }
 
+    @FunctionalInterface
+    interface LockedScope<T> {
+        T run(Path scope, SegmentDataFileLock data, SegmentDataFileLock arena, SegmentDataFileLock bookie,
+                List<Path> locks) throws Exception;
+    }
+
+    static void requireClosedReconstructionScope(IsolatedSegmentConfig config, RecoveryDependencies dependencies,
+            ZKProfileReservationStore.ClosedReconstructionSelf self) throws IOException {
+        var arena = dependencies.arena();
+        var bookie = dependencies.bookie();
+        if (config.dataFiles() != 1 || !arena.cut().sessionOpen() || arena.grants().isEmpty()
+                || !arena.cut().recordedQuarantineFiles().isEmpty() || arena.relocationOrReuseHistory()
+                || !arena.selections().isEmpty() || !arena.retiredSlots().isEmpty() || !arena.retiredRanges().isEmpty()
+                || bookie.classicHistory() || bookie.ledgers().size() != 1 || bookie.appliedRecoveryGrants() != 1
+                || !bookie.tombstones().isEmpty() || bookie.deleteApplied() != null
+                || bookie.deleteHandoff() || bookie.deleteEffective()) {
+            throw new IOException("Original scope has unsupported CLOSED reconstruction dependencies");
+        }
+        var intent = self.repair().intent();
+        var local = bookie.ledgers().get(0);
+        if (!local.context().equals(intent.recovery().ledger()) || !local.fenced() || local.normalActive()
+                || !Objects.equals(local.terminalPrefix(), intent.range().lastEntryId())
+                || local.recoveryGrants().size() != 1) {
+            throw new IOException("Original Bookie has another ledger, grant or terminal boundary");
+        }
+        var grant = local.recoveryGrants().get(0);
+        if (!grant.committedReadable() || !grant.scope().equals(intent.grantScope())
+                || !grant.intentId().equals(HexFormat.of().formatHex(intent.intentId()))
+                || grant.intentGeneration() != intent.intentGeneration()
+                || grant.grantGeneration() != intent.grantGeneration() || grant.grantSequence() < 0
+                || grant.terminalSequence() <= grant.grantSequence()
+                || !self.closeScope().equals(grant.terminalScope())) {
+            throw new IOException("Original Bookie recovery grant and terminal result differ from current native SELF");
+        }
+    }
+
     /**
      * Observe the original single-Arena control scope without recovery barriers. The observer must finish using
      * its evidence before returning. No control owner, descriptor or write authority is exposed.
@@ -65,11 +103,23 @@ public final class SegmentStorageInspector {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(validator, "validator");
         Objects.requireNonNull(observer, "observer");
+        return withRecoveryLocks(config, identity, (scope, data, arena, bookie, locks) -> {
+            var before = readRecoveryDependencies(config, identity, maximumControlBytes, maximumRows,
+                    key, validator, arena, bookie, locks);
+            T result = observer.observe(before);
+            data.requireHeld(scope.resolve("isolated.lock"));
+            if (!before.equals(readRecoveryDependencies(config, identity, maximumControlBytes, maximumRows,
+                    key, validator, arena, bookie, locks))) {
+                throw new IOException("Recovery control dependencies changed during observation");
+            }
+            return result;
+        });
+    }
+
+    static <T> T withRecoveryLocks(IsolatedSegmentConfig config, SegmentFileHeader identity, LockedScope<T> action)
+            throws Exception {
         if (identity.manifest() != null) {
             throw new IOException("Recovery dependency observation requires an isolated single-Arena scope");
-        }
-        if (maximumControlBytes < 6144 || maximumRows < 1 || maximumRows > 65536) {
-            throw new IllegalArgumentException("Recovery dependency observation requires bounded control and rows");
         }
         if (Files.isSymbolicLink(config.directory())) {
             throw new IOException("Recovery dependency observation requires the original canonical scope");
@@ -87,22 +137,17 @@ public final class SegmentStorageInspector {
                 var bookie = SegmentDataFileLock.openExistingControl(bookiePath)) {
             var locks = List.of(dataPath, arenaPath, bookiePath);
             data.requireHeld(dataPath);
-            var before = readRecoveryDependencies(config, identity, maximumControlBytes, maximumRows,
-                    key, validator, arena, bookie, locks);
-            T result = observer.observe(before);
-            data.requireHeld(dataPath);
-            if (!before.equals(readRecoveryDependencies(config, identity, maximumControlBytes, maximumRows,
-                    key, validator, arena, bookie, locks))) {
-                throw new IOException("Recovery control dependencies changed during observation");
-            }
-            return result;
+            return action.run(scope, data, arena, bookie, locks);
         }
     }
 
-    private static RecoveryDependencies readRecoveryDependencies(IsolatedSegmentConfig config,
+    static RecoveryDependencies readRecoveryDependencies(IsolatedSegmentConfig config,
             SegmentFileHeader identity, long maximumControlBytes, int maximumRows, SecretKey key,
             ProfileDescriptorValidator validator, SegmentDataFileLock arena, SegmentDataFileLock bookie,
             List<Path> locks) throws Exception {
+        if (maximumControlBytes < 6144 || maximumRows < 1 || maximumRows > 65536) {
+            throw new IllegalArgumentException("Recovery dependency observation requires bounded control and rows");
+        }
         var files = new SegmentOwnedFiles(locks);
         try (AutoCloseable cleanup = () -> {
             var result = files.drain();

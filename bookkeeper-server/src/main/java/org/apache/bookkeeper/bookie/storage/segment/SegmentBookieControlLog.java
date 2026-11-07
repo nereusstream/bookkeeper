@@ -33,6 +33,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -469,6 +470,15 @@ final class SegmentBookieControlLog implements AutoCloseable {
                     && Arrays.equals(publicSemanticPayloadIdentity, scope.publicSemanticPayloadIdentity())
                     && Objects.equals(exactRange, scope.exactRange());
         }
+
+        private ProfileControlScope observation() {
+            return new ProfileControlScope(operation, operation.purpose(), context.ledgerId(),
+                    context.ledgerInstanceId(), ProfileDescriptorIdentity.fromBytes(context.descriptorIdentity()),
+                    target.bookieId().toString(), target.incarnation().value(), authorityDomain, authorityGeneration,
+                    ByteBuffer.allocate(16).putLong(operationId.getMostSignificantBits())
+                            .putLong(operationId.getLeastSignificantBits()).array(),
+                    publicSemanticPayloadIdentity, exactRange);
+        }
     }
 
     private static final class Command {
@@ -783,14 +793,16 @@ final class SegmentBookieControlLog implements AutoCloseable {
         this.inspectionOnly = inspectionOnly;
     }
 
-    record ObservedRecoveryGrant(UUID operationId, long authorityGeneration, ProfileExactRange range,
-                                 boolean committedReadable) { }
+    record ObservedRecoveryGrant(ProfileControlScope scope, String intentId, long intentGeneration,
+                                 long grantGeneration, long grantSequence, boolean committedReadable,
+                                 ProfileControlScope terminalScope, long terminalSequence) { }
 
     record ObservedLedger(ProfileLedgerContext context, long installGeneration, long activationGeneration,
                           long localGeneration, boolean normalActive, boolean fenced, Long terminalPrefix,
                           List<ObservedRecoveryGrant> recoveryGrants) { }
 
     record RecoveryDependencies(long physicalGeneration, long observedSequence, long checkpointGeneration,
+                                long appliedRecoveryGrants, boolean classicHistory, String historyDigest,
                                 List<ObservedLedger> ledgers, Map<Long, ProfileLedgerContext> tombstones,
                                 ProfileControlRequest.DeleteBinding deleteApplied, boolean deleteHandoff,
                                 boolean deleteEffective) { }
@@ -816,18 +828,46 @@ final class SegmentBookieControlLog implements AutoCloseable {
                 state.context.ledgerId())).map(state -> new ObservedLedger(state.context, state.localInstallGeneration,
                         state.activationGeneration, state.localGeneration, state.active, state.fenced,
                         state.terminalPrefix,
-                        state.recoveryGrants.values().stream().map(grant -> new ObservedRecoveryGrant(
-                                grant.command.operationId(), grant.command.scope.authorityGeneration,
-                                grant.command.scope.exactRange, grant.committedReadable))
-                                .sorted(Comparator.comparing(ObservedRecoveryGrant::operationId)).toList())).toList();
+                        state.recoveryGrants.values().stream().map(observed::observeGrant)
+                                .sorted(Comparator.comparingLong(ObservedRecoveryGrant::grantSequence))
+                                .toList())).toList();
+        long appliedGrants = observed.operations.values().stream().filter(operation ->
+                operation.outcome() == Status.APPLIED_DURABLE
+                        && operation.command().type == SegmentControlFormat.Type.RECOVERY_GRANT).count();
+        List<SegmentControlCheckpoint.ImageRecord> records = new ArrayList<>(observed.operations.values());
+        observed.checkpointState.forEach((id, operation) -> {
+            if (!observed.operations.containsKey(id)) {
+                records.add(operation);
+            }
+        });
+        records.addAll(observed.checkpointLacs.values());
+        records.sort(Comparator.comparingLong(SegmentControlCheckpoint.ImageRecord::sequence));
+        var history = new SegmentControlCheckpoint.Snapshot(observed.appliedThrough, observed.appliedOffset, records);
         var result = new RecoveryDependencies(observed.physicalGeneration.value(), observed.appliedThrough,
-                observed.checkpointGeneration, ledgers, Map.copyOf(observed.tombstones), observed.deleteApplied,
+                observed.checkpointGeneration, appliedGrants, !observed.classicRoutes.isEmpty(),
+                SegmentControlCheckpoint.reference(1, 0, history, maxLogBytes).digest(), ledgers,
+                Map.copyOf(observed.tombstones), observed.deleteApplied,
                 observed.deleteHandoff != null, observed.deleteEffective != null);
         if (observed.channel != original) {
             observed.channel.close();
         }
         original.close();
         return result;
+    }
+
+    private ObservedRecoveryGrant observeGrant(GrantState grant) {
+        Command command = grant.command;
+        AppliedOperation applied = operations.get(command.operationId());
+        AppliedOperation terminal = operations.get(grant.pendingClose);
+        boolean matchingTerminal = terminal != null && terminal.outcome() == Status.APPLIED_DURABLE
+                && terminal.command().type == SegmentControlFormat.Type.RECOVERY_TERMINAL_CLOSE
+                && command.operationId().equals(terminal.command().closedGrantId)
+                && matchesClose(terminal.command(), command);
+        return new ObservedRecoveryGrant(command.scope.observation(), HexFormat.of().formatHex(command.grant.intentId),
+                command.grant.intentGeneration, command.grant.grantGeneration,
+                applied != null && applied.outcome() == Status.APPLIED_DURABLE ? applied.sequence() : -1,
+                grant.committedReadable, matchingTerminal ? terminal.command().scope.observation() : null,
+                matchingTerminal ? terminal.sequence() : -1);
     }
 
     record OwnedResult(boolean drained, Throwable initializationFailure, Throwable lifecycleFailure,

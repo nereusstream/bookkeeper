@@ -926,7 +926,15 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 复用已有 3/3/3 已确认写入和 `CLOSED(1, 35)` 的 Bookie 子 JVM 退出用例。原目录仍有 OPEN 与 grant。本地 Bookie control 的 fenced terminal prefix 为 1。原 Bookie 的临时注册自然消失后，在替换前取当前 ZooKeeper CLOSED 快照。两个原存活目标经各自当前注册、session 和实际 mTLS DATA 连接，逐条通过原 SDK digest 校验并对齐 payload 与累计长度。原目标返回 unavailable。使用无 fencing flag 的读取，校验前后注册与完整 CLOSED 快照。连接实际排空后才离开原 scope 锁。原文件摘要与存活侧控制 cut 保持一致。原 worker 的实际替换保留 RecoveryContext、CLOSE 和 P/L，旧完整快照因 metadata 版本、ensemble 与授权来源变化而失效。另一个跨 rotation 的场景验证第二个已安装但无 payload 的 ledger 仍在原 scope 清单内。
 
-58 项定向回归通过，Spotless 与 Checkstyle 通过。观察结果只用于后续判断。原已授权 OPEN 的正常启动仍拒绝。CLOSED 重建准入、旧尾界处理、持久决议、Linux 资格与真实掉电仍待验收。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/closed-open-recovery-evidence-0064ecfc`。
+58 项定向回归通过，Spotless 与 Checkstyle 通过。观察结果用于后续重建准入。原已授权 OPEN 的正常启动仍拒绝。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/closed-open-recovery-evidence-0064ecfc`。
+
+### 单 DATA 文件的 CLOSED 重建准入
+
+基线 `e96bd97d6d`。原受控 publisher 的 PID、进程出生与注册 session 在其运行期间取得，等待进程实际退出。原三把锁下完整重放控制历史。仅支持一个已安装、fenced 且 normal-inactive 的 ledger，一个 DATA 文件和当前单 fragment `3/3/3` CLOSED。旧 target 仍是原成员，保留在原删除目标历史。原 Bookie 的唯一已应用 recovery grant 须与当前 native SELF intent、commit birth、完整 close scope 和本地 terminal 应用精确对应。旧准入要求 grant 列表为空的断言在真实非空 close 上失败，重放实际返回一条已关闭的 `[0,1]` SELF grant。其他已应用 grant、额外本地 context、MOVE、FREE、复用和删除状态拒绝。
+
+完整 DATA 扫描核对所有页、物理地址、Arena allocation、stream、批次、CRC、精确 ledger 坐标和累计长度。普通与 recovery 写入共用 `ENTRY_DATA` 格式，准入依赖完整 Bookie 授权历史。每个坐标的有效内容须与两份当前 digest-valid 的 mTLS 来源相同，重复副本须字节一致。文件的原始描述符身份、长度、完整摘要与本地控制、当前 CLOSED、来源注册和空 staging 目录绑定。原生 ZK 以 target/Arena/旧 epoch 为固定槽位，在完整 CLOSED 与 lifecycle 条件下原子创建 ADMITTED 和同出生保护子节点。同一操作按原请求取回，另一操作拒绝。此阶段验证只生成空 staging 和 native ADMITTED，原 DATA 与控制文件保持。尚待 READY、文件切换、旧尾禁写及持久 resolution 的真实崩溃验证。
+
+58 项定向回归及 Spotless、Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/closed-reconstruction-e96bd97d`，包括空 grant 准入的真实失败和确认原生 ADMITTED 出生的最终结果。
 
 ## Profile 普通 Add 的真实接线
 

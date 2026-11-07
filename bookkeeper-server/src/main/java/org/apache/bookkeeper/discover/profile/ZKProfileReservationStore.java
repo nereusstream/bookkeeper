@@ -30,6 +30,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
 import java.util.function.BooleanSupplier;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentClosedReconstruction;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileBackup.VerifiedSource;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileDeleteAdoption;
 import org.apache.bookkeeper.client.BKException;
@@ -1080,6 +1081,197 @@ public final class ZKProfileReservationStore {
                 throw new IllegalArgumentException("Only proved readonly admission carries its snapshot");
             }
         }
+    }
+
+    /** The native immutable SELF publication for the still-current original CLOSED target. */
+    public record ClosedReconstructionSelf(RepairSnapshot repair, ProfileRepairCommit.Reference reference,
+                                            long commitBirth, ProfileControlScope closeScope) { }
+
+    public ClosedReconstructionSelf readClosedReconstructionSelf(ProfileLedgerMetadataStore metadata,
+            ReadOnlySnapshot expected, String targetBookie, byte[] targetIncarnation)
+            throws IOException, InterruptedException {
+        requireRecoveryClient(metadata);
+        long ledger = expected.context().ledger().ledgerId();
+        if (!expected.sameObservation(readClosedForOpen(metadata, ledger).snapshot())) {
+            throw new IOException("CLOSED reconstruction lost the original current snapshot");
+        }
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var self = closedReconstructionSelf(expected, targetBookie, targetIncarnation, deadline);
+            if (!expected.sameObservation(readClosedForOpen(metadata, ledger).snapshot())) {
+                throw new IOException("CLOSED reconstruction changed during SELF observation");
+            }
+            return self;
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException invalid) {
+            throw new IOException("CLOSED reconstruction SELF evidence is incomplete", invalid);
+        }
+    }
+
+    private ClosedReconstructionSelf closedReconstructionSelf(ReadOnlySnapshot snapshot, String targetBookie,
+            byte[] targetIncarnation, long deadline) throws IOException, InterruptedException, TimeoutException {
+        var closed = snapshot.closed().metadata().metadata().getValue();
+        var ensemble = closed.getAllEnsembles().get(0L);
+        if (closed.getEnsembleSize() != 3 || closed.getWriteQuorumSize() != 3 || closed.getAckQuorumSize() != 3
+                || closed.getAllEnsembles().size() != 1 || ensemble == null || closed.getLastEntryId() < 0
+                || ensemble.stream().noneMatch(member -> member.toString().equals(targetBookie))
+                || snapshot.sources().stream().noneMatch(source ->
+                        source.scope().targetBookie().equals(targetBookie)
+                        && Arrays.equals(source.scope().targetStorageIncarnation(), targetIncarnation))) {
+            throw new IOException("CLOSED reconstruction requires the original current retained 3/3/3 target");
+        }
+        ClosedReconstructionSelf selected = null;
+        for (var reference : ProfileRepairCommit.head(closed.getCustomMetadata().get(ProfileRepairCommit.KEY))) {
+            long ledger = closed.getLedgerId();
+            var repair = readRepair(ledger, reference.slot(), deadline);
+            if (repair == null || !repair.birth().equals(reference.intentBirth())
+                    || repair.storeVersion() != reference.intentStoreVersion()
+                    || !repair.intent().recovery().equals(snapshot.context())) {
+                throw new IOException("CLOSED reconstruction lost a referenced repair intent");
+            }
+            var intent = repair.intent();
+            if (!intent.install().targetBookie().equals(targetBookie)) {
+                continue;
+            }
+            String path = repairPath(ledger, reference.slot());
+            var node = reads.get(path + "/committed", deadline);
+            var commit = repairCommit(node);
+            var admission = reads.get(path + "/admitted", deadline);
+            requireFound(admission);
+            validateRepairAdmission(repair, admission, deadline);
+            if (selected != null || intent.empty() || intent.fragmentStart() != 0
+                    || intent.range().firstEntryId() != 0 || intent.range().lastEntryId() != closed.getLastEntryId()
+                    || !ensemble.get(intent.replacedMemberSlot()).toString().equals(targetBookie)
+                    || !commit.oldBookie().equals(targetBookie) || commit.restoreGuardRequired()
+                    || !Arrays.equals(intent.install().targetStorageIncarnation(), targetIncarnation)
+                    || !Arrays.equals(reference.digest(), ProfileRepairIntent.digest(node.bytes()))
+                    || node.stat().getCzxid() <= admission.stat().getCzxid()) {
+                throw new IOException("CLOSED reconstruction SELF does not match its exact original target and cut");
+            }
+            selected = new ClosedReconstructionSelf(repair, reference, node.stat().getCzxid(),
+                    intent.closeScope(commit.closeOperationId(), commit.closeGeneration()));
+        }
+        if (selected == null) {
+            throw new IOException("CLOSED reconstruction target has no exact current SELF publication");
+        }
+        return selected;
+    }
+
+    /** Resolve only the fixed native slot. A historical READY may outlive current membership. */
+    public ProfileClosedReconstruction.Receipt readClosedReconstruction(ProfileClosedReconstruction.Scope scope)
+            throws IOException, InterruptedException {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            if (reads.sync(root, deadline) != Code.OK.intValue()) {
+                throw new IOException("Reconstruction scope sync is unavailable");
+            }
+            return readClosedReconstruction(scope, deadline);
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException invalid) {
+            throw new IOException("Unable to resolve the original reconstruction slot", invalid);
+        }
+    }
+
+    private ProfileClosedReconstruction.Receipt readClosedReconstruction(ProfileClosedReconstruction.Scope scope,
+            long deadline) throws IOException, InterruptedException, TimeoutException {
+        String path = reconstructionPath(scope);
+        var node = reads.get(path, deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            return null;
+        }
+        requireFound(node);
+        requirePersistent(node, true);
+        var admission = ProfileClosedReconstruction.Admission.decode(node.bytes());
+        long birth = node.stat().getCzxid();
+        String digest = ProfileClosedReconstruction.digest(node.bytes());
+        if (!admission.scope().equals(scope)) {
+            throw new IOException("Reconstruction scope differs from its fixed native slot");
+        }
+        requireMarker(marker(path, admission.operation()), birth, deadline);
+        var published = reads.get(path + "/ready", deadline);
+        if (published.code() == Code.NONODE.intValue()) {
+            return new ProfileClosedReconstruction.Receipt(admission, birth, digest, null, 0, null);
+        }
+        requireFound(published);
+        requirePersistent(published, true);
+        var ready = ProfileClosedReconstruction.Ready.decode(published.bytes());
+        long readyBirth = published.stat().getCzxid();
+        requireMarker(marker(path + "/ready", admission.operation()), readyBirth, deadline);
+        if (!ready.operation().equals(admission.operation()) || ready.admissionBirth() != birth
+                || !ready.admissionDigest().equals(digest) || readyBirth <= birth
+                || !ready.candidate().sha256().equals(admission.original().sha256())
+                || ready.candidate().length() != admission.original().length()
+                || ready.candidate().object().device() != admission.original().object().device()
+                || ready.candidate().object().equals(admission.original().object())) {
+            throw new IOException("Reconstruction READY lost its exact ADMITTED image and birth");
+        }
+        return new ProfileClosedReconstruction.Receipt(admission, birth, digest, ready, readyBirth,
+                ProfileClosedReconstruction.digest(published.bytes()));
+    }
+
+    public ProfileClosedReconstruction.Receipt admitClosedReconstruction(ProfileLedgerMetadataStore metadata,
+            SegmentClosedReconstruction.PreparedAdmission prepared)
+            throws IOException, InterruptedException {
+        var request = prepared.request();
+        var expected = prepared.expected();
+        var scope = request.scope();
+        var prior = readClosedReconstruction(scope);
+        if (prior == null) {
+            long deadline = System.nanoTime() + timeoutNanos;
+            try {
+                var checks = reconstructionChecks(metadata, expected, request, deadline);
+                String path = reconstructionPath(scope);
+                checks.add(Op.create(path, request.encode(), protectedChildAcls, CreateMode.PERSISTENT));
+                checks.add(Op.create(marker(path, request.operation()), new byte[0], immutableAcls,
+                        CreateMode.PERSISTENT));
+                multi(checks, deadline);
+            } catch (TimeoutException uncertain) {
+                // Only the exact immutable native record below can confirm an abandoned reply.
+            } catch (IllegalArgumentException | IllegalStateException invalid) {
+                throw new IOException("CLOSED reconstruction admission was refused", invalid);
+            }
+            prior = readClosedReconstruction(scope);
+        }
+        if (prior == null || !prior.admission().equals(request)) {
+            throw new IOException("The original CLOSED reconstruction admission was not confirmed");
+        }
+        return prior;
+    }
+
+    private List<Op> reconstructionChecks(ProfileLedgerMetadataStore metadata, ReadOnlySnapshot expected,
+            ProfileClosedReconstruction.Admission request, long deadline)
+            throws IOException, InterruptedException, TimeoutException {
+        requireRecoveryClient(metadata);
+        long ledger = request.ledger();
+        if (ledger != expected.context().ledger().ledgerId()
+                || !expected.sameObservation(readClosedForOpen(metadata, ledger).snapshot())) {
+            throw new IOException("Reconstruction requires its unchanged current CLOSED snapshot");
+        }
+        var scope = request.scope();
+        var self = closedReconstructionSelf(expected, scope.bookie(), scope.incarnation().value(), deadline);
+        if (!request.closed().equals(ProfileClosedReconstruction.closedDigest(expected, self))) {
+            throw new IOException("Reconstruction request differs from its current native CLOSED evidence");
+        }
+        var root = read(ledger, deadline);
+        if (root.status() != ReadStatus.FOUND || !expected.context().matchesRoot(root.snapshot())) {
+            throw new IOException("Reconstruction lost its original lifecycle");
+        }
+        var source = root.snapshot();
+        verifyRecoveryRootGuard(source, deadline);
+        var checks = new ArrayList<>(metadata.checksForMembership(expected.closed().metadata()));
+        checks.add(Op.check(path(ledger), source.rootDataVersion()));
+        checks.add(Op.check(headPath(ledger), source.lifecycleDataVersion()));
+        checks.add(Op.check(marker(headPath(ledger), source.lifecycle().birthId()), 0));
+        checks.add(Op.check(headPath(ledger) + "/recovery-birth-" + Long.toHexString(source.birthZxid()), 0));
+        checks.add(Op.check(boundaryPath(ledger), 0));
+        checks.add(Op.check(boundaryBirthGuard(ledger, expected.closed().selection().birthZxid()), 0));
+        String selfPath = repairPath(ledger, self.reference().slot());
+        checks.add(Op.check(marker(selfPath, self.repair().birth()), 0));
+        checks.add(Op.check(selfPath + "/committed", 0));
+        checks.add(Op.check(repairAdmissionGuardPath(self.repair()), 0));
+        return checks;
+    }
+
+    private String reconstructionPath(ProfileClosedReconstruction.Scope scope) throws IOException {
+        return root + "/closed-reconstruction-" + scope.key();
     }
 
     /** Independent open: derive the token from actual CLOSED, never adopt a historical close after DELETE. */

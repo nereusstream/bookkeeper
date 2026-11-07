@@ -106,6 +106,18 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
         public long publisherSession() {
             return identity.service().owner();
         }
+
+        byte[] reconstructionIdentity() {
+            var out = java.nio.ByteBuffer.allocate(32 + 4 * 28);
+            out.putLong(identity.readinessBirth().getMostSignificantBits())
+                    .putLong(identity.readinessBirth().getLeastSignificantBits())
+                    .putLong(identity.nonce().getMostSignificantBits())
+                    .putLong(identity.nonce().getLeastSignificantBits());
+            for (var node : List.of(identity.readiness(), identity.service(), identity.writable(), identity.marker())) {
+                out.putLong(node.birth()).putLong(node.modified()).putInt(node.version()).putLong(node.owner());
+            }
+            return out.array();
+        }
     }
 
     public record PeerReadResult(ReadStatus status, RegisteredPeer peer) {

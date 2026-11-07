@@ -630,6 +630,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     record ObservedRetirement(UUID operationId, Generation generation, FreeFacts facts) { }
 
     record RecoveryDependencies(Inspection cut, long allocationHighWatermark, long retiredBookieCut,
+                                boolean relocationOrReuseHistory, String historyDigest,
                                 List<ObservedGrant> grants, List<ObservedStream> streams,
                                 List<ObservedSelection> selections,
                                 List<ObservedRetirement> retiredSlots, List<RetiredRange> retiredRanges) { }
@@ -648,8 +649,17 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 + observed.retiredSlots.size() + observed.retiredRanges.size() > maximumRows) {
             throw new IOException("Arena recovery dependency observation exceeds its row limit");
         }
+        boolean relocationOrReuse = observed.appliedOperations.values().stream().anyMatch(operation ->
+                operation.command() instanceof SegmentArenaMove || operation.command() instanceof Free
+                        || operation.command() instanceof Allocation allocation && allocation.expectedGeneration() > 0);
+        var history = new SegmentControlCheckpoint.Snapshot(observed.appliedThrough, observed.appliedOffset,
+                observed.appliedOperations.values().stream()
+                        .sorted(Comparator.comparingLong(AppliedOperation::sequence))
+                        .map(CheckpointOperation::new).toList());
         var result = new RecoveryDependencies(observed.inspection(), observed.allocationHighWatermark,
-                observed.retiredBookieCut, observed.currentAllocations.values().stream()
+                observed.retiredBookieCut, relocationOrReuse,
+                SegmentControlCheckpoint.reference(1, 0, history, maxLogBytes).digest(),
+                observed.currentAllocations.values().stream()
                         .map(grant -> new ObservedGrant(grant.command(), grant.allocationOrder()))
                         .sorted(Comparator.comparingLong(ObservedGrant::controlSequence)).toList(),
                 observed.streamStarts.entrySet().stream().map(entry -> new ObservedStream(entry.getKey().shard(),
