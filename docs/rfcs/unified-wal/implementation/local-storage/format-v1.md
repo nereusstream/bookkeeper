@@ -137,6 +137,8 @@ action 4/5 均在 force 和 apply 后结束旧 epoch，保留 epoch 数值及原
 
 action 6 只接受原发布 owner 清理完成后构造的运行时凭据。首次 apply 要求同一已授权 OPEN、相邻的 Arena predecessor cut、无隔离和相同文件长度。它结束原 epoch 并记录禁止续写的 allocation order 上界，保留旧 grant 的读取与合法回收。checkpoint/rotation 通过原有序业务记录重建该上界。完整成员向量由原生 ADMITTED 摘要绑定。首次后继 OPEN 重新核对原 native READY、已切换对象和清理结果，以及全体成员各自的 CLOSED 或精确 DELETE 后继。后续合法新 OPEN 和 DATA 写入沿用普通规则。[运行顺序与证据](README.md#单-data-文件的-closed-重建发布与重开)
 
+原生 ADMITTED 的 v1 单成员和 v2 全非空集合维持原字节，成员按 `NONEMPTY_SELF` 解释。混合集合使用 ADMITTED v3，共用 v2 的前缀和 2～16 成员计数。每项在原 60 字节 context、32 字节 CLOSED 摘要和 32 字节来源摘要前增加一个 kind byte，`1=NONEMPTY_SELF`，`2=EMPTY_TERMINAL`。至少一项属于每种类型，ledger ID 严格递增，总记录上限 8192 字节。EMPTY 的关闭摘要绑定原 activated page 出生、selection 和精确 grantless terminal，来源摘要以独立域记录其无 payload 来源审核。v1/v2 reader 读取 v3 ADMITTED 即拒绝。READY、shadow、action 6 及 DATA 保持原编码。
+
 文件隔离后续 ALLOC 条件失败，原 grant 和 stream 起点仍保留。实际故障可先设置易失准入 gate，只有日志中的 DEVICE_STATE 改变重放状态。持久隔离和无法解析的 OPEN 在控制重放后阻止物理重开。缺少隔离记录或后续 DATA sync 成功均无法解除该限制。实际 driver 和生命周期验证见[本地状态](README.md)。
 
 实际绑定的DATA合批路径在I/O前为该记录共享预留每文件160字节逻辑控制日志容量（128-byte header、16-byte body、16-byte footer）及原owner通知完成槽。普通控制追加不能占用这份容量，未知结果不释放实际I/O资源；成功DATA不写故障记录，只在I/O/owner终结后归还预留。控制忙时每文件保留一条通知并按原序执行，停收仍使用原ticket排空；预留不足先背压，Arena关闭/物理重开拒绝未终结通知。这不预分配实际文件系统空间，也不证明记录落盘前退出、实际控制I/O或owner失败已可跨重启解析。

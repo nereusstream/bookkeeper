@@ -34,7 +34,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -225,7 +227,7 @@ public final class SegmentClosedReconstruction {
             }
             var cohort = expected.stream()
                     .sorted(Comparator.comparingLong(value -> value.context().ledger().ledgerId())).toList();
-            var selves = new ArrayList<ZKProfileReservationStore.ClosedReconstructionSelf>(cohort.size());
+            var proofs = new ArrayList<ZKProfileReservationStore.ClosedReconstructionProof>(cohort.size());
             var imageMembers = new ArrayList<SegmentDataRecovery.ClosedImageMember>(cohort.size());
             long previousLedger = -1;
             for (var member : cohort) {
@@ -235,12 +237,12 @@ public final class SegmentClosedReconstruction {
                 }
                 previousLedger = ledger.ledgerId();
                 var closed = member.closed().metadata().metadata().getValue();
-                selves.add(reservations.readClosedReconstructionSelf(metadata, member, scope.bookie(),
+                proofs.add(reservations.readClosedReconstructionProof(metadata, member, scope.bookie(),
                         scope.incarnation().value()));
                 imageMembers.add(new SegmentDataRecovery.ClosedImageMember(ledger, closed.getLastEntryId(),
                         closed.getLength()));
             }
-            SegmentStorageInspector.requireClosedReconstructionScope(config, deps, selves);
+            SegmentStorageInspector.requireClosedReconstructionScope(config, deps, proofs);
             var files = new SegmentOwnedFiles(locks);
             try (AutoCloseable cleanup = () -> requireDrained(files, data)) {
                 var originalPath = root.resolve("data-0");
@@ -265,11 +267,19 @@ public final class SegmentClosedReconstruction {
                     throw new IllegalArgumentException("CLOSED source audit requires a bounded deadline");
                 }
                 long sourceDeadline = System.nanoTime() + timeout.toNanos();
-                var observations = new ArrayList<ProfileClosedReconstructionSources>(cohort.size());
+                var observations = new LinkedHashMap<ProfileClosedReconstructionSources, String>();
                 var members = new ArrayList<ProfileClosedReconstruction.Member>(cohort.size());
                 for (int index = 0; index < cohort.size(); index++) {
                     var member = cohort.get(index);
                     var context = member.context().ledger();
+                    var proof = proofs.get(index);
+                    var kind = ProfileClosedReconstruction.kind(proof);
+                    String closedDigest = ProfileClosedReconstruction.closedDigest(member, proof);
+                    if (kind == ProfileClosedReconstruction.Kind.EMPTY_TERMINAL) {
+                        members.add(new ProfileClosedReconstruction.Member(context.ledgerId(), context, closedDigest,
+                                ProfileClosedReconstruction.emptySourceDigest(closedDigest), kind));
+                        continue;
+                    }
                     try (var peers = ProfileClosedReconstructionSources.open(sources.sdk(), sources.eventLoop(),
                             sources.tls(), sources.registry(), sources.cold(), member, identity.bookieId(),
                             config.maxPayloadBytes() + SegmentBatchFormat.ENTRY_OVERHEAD, sourceDeadline)) {
@@ -278,11 +288,10 @@ public final class SegmentClosedReconstruction {
                             var local = entries.get(entry);
                             peers.verify(entry, local.cumulativeLength(), local.payloadLength(), local.payloadSha256());
                         }
+                        String sourceDigest = peers.revalidate();
                         members.add(new ProfileClosedReconstruction.Member(context.ledgerId(),
-                                cohort.size() == 1 ? null : context,
-                                ProfileClosedReconstruction.closedDigest(member, selves.get(index)),
-                                peers.revalidate()));
-                        observations.add(peers);
+                                cohort.size() == 1 ? null : context, closedDigest, sourceDigest));
+                        observations.put(peers, sourceDigest);
                     }
                 }
                 var current = SegmentStorageInspector.readRecoveryDependencies(config, identity,
@@ -323,7 +332,7 @@ public final class SegmentClosedReconstruction {
                                 image.sha256()), dependencyDigest(deps),
                         members);
                 files.requireHealthy();
-                verifySourceRegistrations(request, observations);
+                verifySourceRegistrations(observations);
                 var admission = new PreparedAdmission(request, cohort);
                 var receipt = reservations.admitClosedReconstruction(metadata, admission);
                 if (imageIo != null) {
@@ -356,7 +365,7 @@ public final class SegmentClosedReconstruction {
                             throw new IOException("Reconstruction bindings changed before READY");
                         }
                         files.requireHealthy();
-                        verifySourceRegistrations(request, observations);
+                        verifySourceRegistrations(observations);
                         receipt = reservations.readyClosedReconstruction(metadata,
                                 new PreparedReady(receipt, cohort, candidate, shadow));
                     }
@@ -370,11 +379,11 @@ public final class SegmentClosedReconstruction {
         });
     }
 
-    private static void verifySourceRegistrations(ProfileClosedReconstruction.Admission request,
-            List<ProfileClosedReconstructionSources> observations) throws Exception {
-        for (int index = 0; index < observations.size(); index++) {
+    private static void verifySourceRegistrations(Map<ProfileClosedReconstructionSources, String> observations)
+            throws Exception {
+        for (var observation : observations.entrySet()) {
             // Each pair of source connections has already drained. Only its exact registration observations remain.
-            if (!request.members().get(index).sources().equals(observations.get(index).revalidate())) {
+            if (!observation.getValue().equals(observation.getKey().revalidate())) {
                 throw new IOException("CLOSED reconstruction source registration changed before publication");
             }
         }
@@ -657,9 +666,9 @@ public final class SegmentClosedReconstruction {
             if (snapshot == null || !member.matchesContext(snapshot.context().ledger())) {
                 throw new IOException("First reconstructed OPEN requires its current CLOSED lifecycle and membership");
             }
-            var self = reservations.readClosedReconstructionSelf(metadata, snapshot, scope.bookie(),
+            var proof = reservations.readClosedReconstructionProof(metadata, snapshot, scope.bookie(),
                     scope.incarnation().value());
-            if (!member.closed().equals(ProfileClosedReconstruction.closedDigest(snapshot, self))) {
+            if (!ProfileClosedReconstruction.matchesEvidence(member, snapshot, proof)) {
                 throw new IOException("Original CLOSED snapshot changed before first reconstructed OPEN");
             }
         }

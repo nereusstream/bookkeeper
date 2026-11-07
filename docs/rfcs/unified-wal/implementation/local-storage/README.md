@@ -960,9 +960,17 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 以 `e3cc807442` 为基线。原 DATA、Arena、Bookie 锁下的完整重放决定成员集合。各成员须为非空 CLOSED，与本地完整 context、唯一已应用 SELF grant 和 terminal close 对应。总计至多 16 个成员，受原控制行、整文件大小和累计 entry 数上限约束。文件只扫描一次，按完整 context 和 entry ID 核对各成员 P/L 和字节，同时维持共享物理 stream 的批次连续性。每个成员使用其两份实际注册来源，逐对排空，使用同一个绝对截止时间。
 
-Native ADMITTED v2 按 ledger ID 严格递增编码完整 context、原 CLOSED 摘要和来源绑定。全体成员的原生检查随同一个 ADMITTED 或 READY 事务提交，继续使用同一 shadow 版本和 operation。ADMITTED 上限仍为 8192 字节。v1 单成员回执保持原编码和出生，READY 仍通过完整 ADMITTED 摘要绑定全部成员。后继首次 OPEN 遍历全体，逐项校验原 CLOSED 或精确已提交 DELETE 后继。已安装但遗漏的 context、空 CLOSED、未关闭账本、损坏数据、多文件、已有 MOVE/FREE 或复用历史仍拒绝。
+Native ADMITTED v2 按 ledger ID 严格递增编码完整 context、原 CLOSED 摘要和来源绑定。全体成员的原生检查随同一个 ADMITTED 或 READY 事务提交，继续使用同一 shadow 版本和 operation。ADMITTED 上限仍为 8192 字节。v1 单成员回执保持原编码和出生，READY 仍通过完整 ADMITTED 摘要绑定全部成员。后继首次 OPEN 遍历全体，逐项校验原 CLOSED 或精确已提交 DELETE 后继。已安装但遗漏的 context、未关闭账本、损坏数据、多文件、已有 MOVE/FREE 或复用历史仍拒绝。v1/v2 支持非空 CLOSED，混合集合的 EMPTY 约束见下节。
 
 真实 3/3/3 两账本交错写入并 CLOSED 后，原 Bookie JVM 退出，旧版在完整控制依赖准入处拒绝。新版确认一个原生 v2 ADMITTED，遗漏、重复、累计 entry 超限和第二成员的实际 mTLS 来源拒绝均阻止准入。扣住实际 ADMITTED multi，在第二成员提交逻辑 DELETE 后发出原包。省略第二成员检查时实际获准，恢复全体检查后 ZooKeeper 返回 `BADVERSION`，原 scope 仍无 ADMITTED。实际 READY multi 的相同竞争也返回 `BADVERSION`，原 ADMITTED、active inode、摘要和旧 OPEN 保留。两项编码及七项准入相关 socket 回归通过，后续整组重开见 [共享 allocation 删除](../profile-wire/README.md#同一-allocation-的-closed-成员恢复和删除)。
+
+### 非空与 EMPTY CLOSED 混合集合
+
+以 `1d7463508b` 为基线。新增原生 ADMITTED v3 记录成员证明类型，沿用原单文件扫描和全体成员原生事务。EMPTY 限原 3/3/3、首 fragment 从 0 开始且整账本 `CLOSED(-1,0)`。原 activated page、实际选择的边界和本地成功应用的 type 12 `RECOVERY_TERMINAL_BOUNDARY` 必须精确对应。原 Bookie 的 EMPTY context 没有 recovery grant，整个历史的成功 grants 由非空成员的 SELF 逐一覆盖。完整扫描中该 EMPTY context 有任意实际 entry 都拒绝，即使用户 payload 长度为零。EMPTY 来源字段绑定原生 grantless 证明及无 payload 审核，非空成员继续使用原两份当前注册来源。
+
+旧 reader 对历史 READY 可以直接执行物理续接。v3 使它在读 admission 时明确拒绝，避免进入 rename 或 action 6。v1/v2 固定字节和原读取语义保持。仅在同一集合至少有一个非空 CLOSED 时允许原生 EMPTY；纯 EMPTY、非空历史的 empty-last、替换后的 EMPTY repair 和既有其他不支持历史仍拒绝。[字节合同](format-v1.md#控制记录)
+
+真实 SDK 关闭 `CLOSED(-1,0)` 后，父版准入在旧 SELF 条件拒绝。当前版本确认混合集合 v3 ADMITTED。原生 EMPTY 的逻辑 DELETE 在 READY multi 之前获准时，ZooKeeper 实际拒绝原 READY，active 对象和原 OPEN 保留。父版类文件运行原重建入口，读取 v3 ADMITTED 即拒绝，原回执、文件和控制 cut 保持。三项编码和四项定向 socket 回归通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-empty-evidence-1d746350`。
 
 ## Profile 普通 Add 的真实接线
 

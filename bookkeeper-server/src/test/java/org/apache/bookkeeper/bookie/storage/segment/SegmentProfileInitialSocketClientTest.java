@@ -18900,6 +18900,16 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void closedReconstructionAdmitsANativeEmptyMemberAlongsideData() throws Exception {
+        runAckedBookieJvmHalt(ReconstructionEpisode.MIXED_ADMIT);
+    }
+
+    @Test
+    public void closedReconstructionReadyRejectsAnEmptyMemberDeleteBeforeTheNativeMulti() throws Exception {
+        runAckedBookieJvmHalt(ReconstructionEpisode.MIXED_READY_RACE);
+    }
+
+    @Test
     public void closedReconstructionReclaimsADeletedCohortMemberWithoutLosingItsNeighbor() throws Exception {
         runAckedBookieJvmHalt(ReconstructionEpisode.COHORT_DELETE);
     }
@@ -18935,7 +18945,13 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     private enum ReconstructionEpisode { OBSERVE, ADMIT, COHORT, COHORT_RACE, COHORT_READY_RACE, COHORT_REOPEN,
-        COHORT_DELETE, SWITCH, DELETE_AFTER_READY, DELETE_BEFORE_READY, FORCE_ERROR, CLOSE_ERROR, EXTRA_CONTEXT }
+        COHORT_DELETE, MIXED_ADMIT, MIXED_READY_RACE, SWITCH, DELETE_AFTER_READY, DELETE_BEFORE_READY,
+        FORCE_ERROR, CLOSE_ERROR, EXTRA_CONTEXT;
+
+        boolean emptyFirst() {
+            return this == MIXED_ADMIT || this == MIXED_READY_RACE;
+        }
+    }
 
     private void runAckedBookieJvmHalt(ReconstructionEpisode mode) throws Exception {
         try (var episode = new PublicProfileReadonlyEpisode(4, false, 3, true)) {
@@ -18974,9 +18990,11 @@ public class SegmentProfileInitialSocketClientTest {
                         ? new SegmentClosedReconstruction.OldPublisher(oldIdentity, child.child.toHandle(), oldPeer)
                         : null;
                 boolean cohort = switch (mode) {
-                    case COHORT, COHORT_RACE, COHORT_READY_RACE, COHORT_REOPEN, COHORT_DELETE -> true;
+                    case COHORT, COHORT_RACE, COHORT_READY_RACE, COHORT_REOPEN, COHORT_DELETE,
+                         MIXED_ADMIT, MIXED_READY_RACE -> true;
                     default -> false;
                 };
+                boolean emptyFirst = mode.emptyFirst();
                 sdk.enableProfile(episode.initializer, episode.coordinator, VALIDATOR, episode.pool, 4,
                         cohort ? 2 : 1);
                 var writer = (ProfileLedgerHandle) sdk.createProfileLedger(publicCreateRequest(fixture))
@@ -18990,9 +19008,13 @@ public class SegmentProfileInitialSocketClientTest {
                         var companion = (ProfileLedgerHandle) sdk.createProfileLedger(request)
                                 .get(10, TimeUnit.SECONDS);
                         try {
-                            assertEquals(0, writer.addEntry(first));
+                            if (!emptyFirst) {
+                                assertEquals(0, writer.addEntry(first));
+                            }
                             assertEquals(0, companion.addEntry(bytes(15, 38)));
-                            assertEquals(1, writer.addEntry(second));
+                            if (!emptyFirst) {
+                                assertEquals(1, writer.addEntry(second));
+                            }
                             assertEquals(1, companion.addEntry(bytes(18, 39)));
                             companion.closeAsync().get(30, TimeUnit.SECONDS);
                         } finally {
@@ -19002,8 +19024,8 @@ public class SegmentProfileInitialSocketClientTest {
                         assertEquals(0, writer.addEntry(first));
                         assertEquals(1, writer.addEntry(second));
                     }
-                    assertEquals(1, writer.getLastAddConfirmed());
-                    assertEquals(first.length + second.length, writer.getLength());
+                    assertEquals(emptyFirst ? -1 : 1, writer.getLastAddConfirmed());
+                    assertEquals(emptyFirst ? 0 : first.length + second.length, writer.getLength());
                     writer.closeAsync().get(30, TimeUnit.SECONDS);
                 } finally {
                     writer.stopLocalWrites().get(5, TimeUnit.SECONDS);
@@ -19017,8 +19039,8 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(3, closed.getWriteQuorumSize());
                 assertEquals(3, closed.getAckQuorumSize());
                 assertEquals(oldBookie, closed.getEnsembleAt(0).get(failedSlot));
-                assertEquals(1, closed.getLastEntryId());
-                assertEquals(first.length + second.length, closed.getLength());
+                assertEquals(emptyFirst ? -1 : 1, closed.getLastEntryId());
+                assertEquals(emptyFirst ? 0 : first.length + second.length, closed.getLength());
                 if (mode == ReconstructionEpisode.EXTRA_CONTEXT) {
                     var extra = (ProfileLedgerHandle) sdk.createProfileLedger(publicCreateRequest(fixture, 45))
                             .get(10, TimeUnit.SECONDS);
@@ -19031,8 +19053,10 @@ public class SegmentProfileInitialSocketClientTest {
                         registry, oldPeer, fixture.cold, 4, 1060, Duration.ofSeconds(5));
                 try {
                     var peer = connection.completion().get(5, TimeUnit.SECONDS);
-                    assertReadPayload(peer, fixture.context(), 0, first);
-                    assertReadPayload(peer, fixture.context(), 1, second);
+                    if (!emptyFirst) {
+                        assertReadPayload(peer, fixture.context(), 0, first);
+                        assertReadPayload(peer, fixture.context(), 1, second);
+                    }
                     if (cohort) {
                         assertReadPayload(peer, fixture.additionalReadContext, 0, bytes(15, 38));
                         assertReadPayload(peer, fixture.additionalReadContext, 1, bytes(18, 39));
@@ -19180,8 +19204,9 @@ public class SegmentProfileInitialSocketClientTest {
                     key, VALIDATOR, nativeIo, limits, metadata, fixture.reservations, sources, invalid, publisher,
                     2, operation));
         }
+        int shortLimit = mode.emptyFirst() ? 1 : 3;
         var limited = new SegmentClosedReconstruction.Limits(ServiceEpisode.CONTROL_LOG_BYTES, 64,
-                prepared.config.bytesPerFile(), 3, Duration.ofSeconds(15));
+                prepared.config.bytesPerFile(), shortLimit, Duration.ofSeconds(15));
         assertThrows(IOException.class, () -> SegmentClosedReconstruction.admitCohort(prepared.config, identity,
                 key, VALIDATOR, nativeIo, limited, metadata, fixture.reservations, sources, List.of(first, second),
                 publisher, 2, operation));
@@ -19199,14 +19224,23 @@ public class SegmentProfileInitialSocketClientTest {
         }
         assertNull(fixture.reservations.readClosedReconstruction(scope));
         assertEquals(before, recoveryObservationFileDigests(prepared.config.directory()));
+        if (mode == ReconstructionEpisode.MIXED_ADMIT) {
+            assertEmptyReconstructionEvidence(prepared.config, identity, fixture.reservations, metadata, first,
+                    second);
+        }
         var admitted = SegmentClosedReconstruction.admitCohort(prepared.config, identity, key, VALIDATOR, nativeIo,
                 limits, metadata, fixture.reservations, sources, List.of(second, first), publisher, 2, operation);
         assertEquals(List.of(first.context().ledger(), second.context().ledger()), admitted.admission().members()
                 .stream().map(ProfileClosedReconstruction.Member::context).toList());
+        assertEquals(mode.emptyFirst() ? ProfileClosedReconstruction.Kind.EMPTY_TERMINAL
+                : ProfileClosedReconstruction.Kind.NONEMPTY_SELF, admitted.admission().members().get(0).kind());
         assertNull(admitted.ready());
         assertEquals(admitted, fixture.reservations.readClosedReconstruction(scope));
         assertEquals(before, recoveryObservationFileDigests(prepared.config.directory()));
-        if (mode == ReconstructionEpisode.COHORT_READY_RACE) {
+        if (mode == ReconstructionEpisode.MIXED_ADMIT) {
+            assertParentRejectsMixedReconstruction(fixture, prepared.config, identity, admitted);
+        }
+        if (mode == ReconstructionEpisode.COHORT_READY_RACE || mode == ReconstructionEpisode.MIXED_READY_RACE) {
             var active = IsolatedSegmentFiles.dataPath(prepared.config, 0);
             var originalObject = SegmentClassicHandoffPaths.loadingIdentity(active);
             raceCohortPublication(episode, prepared.config, metadata, identity, publisher, sources, limits,
@@ -19219,6 +19253,103 @@ public class SegmentProfileInitialSocketClientTest {
                     .sessionOpen());
         }
         return admitted;
+    }
+
+    private static void assertEmptyReconstructionEvidence(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata,
+            ZKProfileReservationStore.ReadOnlySnapshot empty, ZKProfileReservationStore.ReadOnlySnapshot nonempty)
+            throws Exception {
+        var target = identity.bookieId().toString();
+        var incarnation = identity.incarnation().value();
+        var proof = (ZKProfileReservationStore.ClosedReconstructionEmpty) reservations.readClosedReconstructionProof(
+                metadata, empty, target, incarnation);
+        var self = reservations.readClosedReconstructionSelf(metadata, nonempty, target, incarnation);
+        SegmentStorageInspector.withRecoveryDependencies(config, identity, ServiceEpisode.CONTROL_LOG_BYTES, 64,
+                new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, dependencies -> {
+                    SegmentStorageInspector.requireClosedReconstructionScope(config, dependencies,
+                            List.of(proof, self));
+                    assertEquals(1, dependencies.bookie().appliedRecoveryGrants());
+                    var local = dependencies.bookie().ledgers().get(0);
+                    assertEquals(empty.context().ledger(), local.context());
+                    var actual = local.terminalBoundaries().get(0);
+                    var wrong = new SegmentBookieControlLog.ObservedTerminalBoundary(actual.scope(),
+                            new ProfileControlRequest.TerminalBinding(-1, 0, bytes(32, 125)), actual.sequence());
+                    var operation = actual.scope();
+                    var wrongOperation = new ProfileControlScope(operation.operation(), operation.purpose(),
+                            operation.ledgerId(), operation.ledgerInstanceId(), operation.descriptorIdentity(),
+                            operation.targetBookie(), operation.targetStorageIncarnation(), operation.authorityDomain(),
+                            operation.authorityGeneration(), bytes(16, 124), operation.publicSemanticPayloadIdentity(),
+                            null);
+                    var wrongScope = new SegmentBookieControlLog.ObservedTerminalBoundary(wrongOperation,
+                            actual.binding(), actual.sequence());
+                    for (var invalid : List.<List<SegmentBookieControlLog.ObservedTerminalBoundary>>of(
+                            List.of(), List.of(wrong), List.of(wrongScope))) {
+                        var incomplete = new SegmentBookieControlLog.ObservedLedger(local.context(),
+                                local.installGeneration(), local.activationGeneration(), local.localGeneration(),
+                                local.normalActive(), local.fenced(), local.terminalPrefix(), List.of(), invalid);
+                        assertThrows(IOException.class, () ->
+                                SegmentStorageInspector.requireEmptyReconstructionMember(incomplete, proof));
+                    }
+                    try (var data = SegmentOwnedFiles.openRegularReadOnly(null,
+                            IsolatedSegmentFiles.dataPath(config, 0))) {
+                        var actualMembers = List.of(new SegmentDataRecovery.ClosedImageMember(proof.ledger(), -1, 0),
+                                new SegmentDataRecovery.ClosedImageMember(self.ledger(), 1, 33));
+                        var image = SegmentDataRecovery.auditClosedImage(data, config, identity, dependencies.arena(),
+                                actualMembers, config.bytesPerFile(), 64);
+                        assertTrue(image.entries().get(proof.ledger()).isEmpty());
+                        assertEquals(2, image.entries().get(self.ledger()).size());
+                        var mislabeled = List.of(actualMembers.get(0),
+                                new SegmentDataRecovery.ClosedImageMember(self.ledger(), -1, 0));
+                        var failure = assertThrows(IOException.class, () -> SegmentDataRecovery.auditClosedImage(
+                                data, config, identity, dependencies.arena(), mislabeled, config.bytesPerFile(), 64));
+                        assertTrue(failure.getMessage().contains("foreign coordinate"));
+                    }
+                    return null;
+                });
+        String closed = ProfileClosedReconstruction.closedDigest(empty, proof);
+        var wrongKind = new ProfileClosedReconstruction.Member(proof.ledger().ledgerId(), proof.ledger(), closed,
+                ProfileClosedReconstruction.emptySourceDigest(closed));
+        assertFalse(ProfileClosedReconstruction.matchesEvidence(wrongKind, empty, proof));
+        var member = new ProfileClosedReconstruction.Member(proof.ledger().ledgerId(), proof.ledger(), closed,
+                ProfileClosedReconstruction.emptySourceDigest(closed), ProfileClosedReconstruction.Kind.EMPTY_TERMINAL);
+        var wrongBirth = new ZKProfileReservationStore.ReadySnapshot(proof.initial().page(), UUID.randomUUID(),
+                proof.initial().storeVersion(), proof.initial().digest());
+        assertFalse(ProfileClosedReconstruction.matchesEvidence(member, empty,
+                new ZKProfileReservationStore.ClosedReconstructionEmpty(proof.ledger(), proof.target(), wrongBirth)));
+    }
+
+    private void assertParentRejectsMixedReconstruction(Fixture fixture, IsolatedSegmentConfig config,
+            SegmentFileHeader identity, ProfileClosedReconstruction.Receipt receipt) throws Exception {
+        String parent = System.getProperty("bookkeeper.reconstruction.parent.classes");
+        if (parent == null) {
+            return;
+        }
+        assertTrue(Files.isDirectory(Path.of(parent)));
+        var operation = receipt.admission().operation();
+        var files = recoveryObservationFileDigests(config.directory());
+        var stage = config.directory().resolve(".closed-reconstruction-" + operation);
+        boolean staged = Files.isDirectory(stage);
+        var before = SegmentArenaControlLog.inspect(config, identity, ServiceEpisode.CONTROL_LOG_BYTES);
+        var objects = mixedReconstructionObjects(config, stage);
+        runReconstructionChild(fixture, config, identity, operation, "parent-rejects-mixed");
+        assertEquals(receipt, fixture.reservations.readClosedReconstruction(receipt.admission().scope()));
+        assertEquals(staged, Files.isDirectory(stage));
+        assertEquals(files, recoveryObservationFileDigests(config.directory()));
+        assertEquals(objects, mixedReconstructionObjects(config, stage));
+        assertEquals(before, SegmentArenaControlLog.inspect(config, identity, ServiceEpisode.CONTROL_LOG_BYTES));
+    }
+
+    private static Map<Path, SegmentClassicHandoffPaths.Identity> mixedReconstructionObjects(
+            IsolatedSegmentConfig config, Path stage)
+            throws IOException {
+        var objects = new HashMap<Path, SegmentClassicHandoffPaths.Identity>();
+        for (Path file : List.of(config.directory().resolve("data-0"), stage.resolve("retained-old"),
+                stage.resolve("image"))) {
+            if (Files.exists(file)) {
+                objects.put(file, SegmentClassicHandoffPaths.loadingIdentity(file));
+            }
+        }
+        return objects;
     }
 
     private record ReconstructedNeighbor(ProfileLedgerContext context, byte[] first, byte[] second,
@@ -19368,7 +19499,10 @@ public class SegmentProfileInitialSocketClientTest {
                 }), fixture.cold);
                 try {
                     assertTrue(held.await(10, TimeUnit.SECONDS));
-                    long ledger = members.get(1).context().ledger().ledgerId();
+                    var first = members.get(0);
+                    var selected = first.closed().metadata().metadata().getValue().getLastEntryId() == -1
+                            ? first : members.get(1);
+                    long ledger = selected.context().ledger().ledgerId();
                     var deletion = new ProfileDeleteCoordinator(fixture.reservations, originalMetadata, fixture.cold)
                             .beginDelete(ledger, bytes(16, 104), episode.sdk.getClientCtx(), Duration.ofSeconds(10));
                     assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED,
@@ -19928,7 +20062,11 @@ public class SegmentProfileInitialSocketClientTest {
         if (nativeLibrary != null) {
             command.add("-Dbookkeeper.native.io.library.path=" + nativeLibrary);
         }
-        command.addAll(List.of("-cp", System.getProperty("java.class.path"),
+        String classpath = System.getProperty("java.class.path");
+        if (phase.equals("parent-rejects-mixed")) {
+            classpath = System.getProperty("bookkeeper.reconstruction.parent.classes") + File.pathSeparator + classpath;
+        }
+        command.addAll(List.of("-cp", classpath,
                 ClosedReconstructionCrashProbe.class.getName(),
                 fixture.cluster.getZooKeeperConnectString(), config.directory().toString(),
                 Long.toString(config.bytesPerFile()), identity.bookieId().toString(), identity.incarnation().toString(),
@@ -19965,6 +20103,9 @@ public class SegmentProfileInitialSocketClientTest {
                     "UW_CLOSED_RECONSTRUCTION_HALT " + phase + " " + operation + " " + child.pid())));
             if (phase.equals("ready-lost")) {
                 assertTrue(log, log.contains("UW_CLOSED_RECONSTRUCTION_SHADOW_REPLY_LOST " + operation));
+            }
+            if (phase.equals("parent-rejects-mixed")) {
+                assertTrue(log, log.contains("UW_OLD_ADMISSION_READER_REFUSED " + operation));
             }
             System.out.printf("UW_CLOSED_RECONSTRUCTION_HALT %s %s %d%n", phase, operation, child.pid());
         } finally {
@@ -20075,6 +20216,15 @@ public class SegmentProfileInitialSocketClientTest {
                     }, null);
                     var controlIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, null,
                             phase.equals("installed") ? halt : null, phase.equals("resolution-forced") ? halt : null);
+                    if (phase.equals("parent-rejects-mixed")) {
+                        var rejected = assertThrows(IOException.class, () -> SegmentClosedReconstruction
+                                .reconstructCohort(config, identity, new SecretKeySpec(bytes(32, 7), "AES"),
+                                        VALIDATOR, nativeIo, limits, metadata, reservations, sources, List.of(),
+                                        null, 2, operation, imageIo, controlIo));
+                        assertTrue(rejected.getMessage().contains("Unknown reconstruction admission version"));
+                        System.out.println("UW_OLD_ADMISSION_READER_REFUSED " + operation);
+                        halt.run();
+                    }
                     var scope = new ProfileClosedReconstruction.Scope(identity.bookieId().toString(),
                             identity.incarnation(), identity.arenaId(), 2);
                     var original = reservations.readClosedReconstruction(scope);

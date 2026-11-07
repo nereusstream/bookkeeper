@@ -44,6 +44,7 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.meta.LedgerMetadataSerDe;
 import org.apache.bookkeeper.versioning.Versioned;
@@ -948,24 +949,28 @@ public final class ZKProfileReservationStore {
             if (install == null) {
                 throw new IllegalArgumentException("Empty last fragment has no retained activated target");
             }
-            byte[] bookie = install.targetBookie().getBytes(java.nio.charset.StandardCharsets.UTF_8);
-            byte[] operation = Arrays.copyOf(ProfileRepairIntent.digest(java.nio.ByteBuffer.allocate(
-                    ProfileRecoveryContext.ENCODED_BYTES + 52 + bookie.length).put(context.encode())
-                    .put(selected.reference().digest()).putInt(slot).put(install.targetStorageIncarnation())
-                    .put(bookie).array()), 16);
-            var base = new ProfileControlScope(ProfileControlOperation.RECOVERY_TERMINAL_CLOSE,
-                    ProfileAuthorityPurpose.RECOVERY_TERMINAL_CLOSE, context.ledger().ledgerId(),
-                    context.ledger().ledgerInstanceId(), install.descriptorIdentity(), install.targetBookie(),
-                    install.targetStorageIncarnation(), "recovery-terminal", context.generation(),
-                    operation, new byte[32], null);
-            var scope = new ProfileControlScope(base.operation(), base.purpose(), base.ledgerId(),
-                    base.ledgerInstanceId(), base.descriptorIdentity(), base.targetBookie(),
-                    base.targetStorageIncarnation(), base.authorityDomain(), base.authorityGeneration(),
-                    base.operationId(), org.apache.bookkeeper.common.profile.control.ProfileControlRequest
-                        .terminalPayloadIdentity(base, binding), null);
-            targets.add(new CloseTarget(slot, null, scope, binding));
+            targets.add(activatedEmptyClose(context, selected, slot, install, binding));
         }
         return List.copyOf(targets);
+    }
+
+    private static CloseTarget activatedEmptyClose(ProfileRecoveryContext context, BoundarySnapshot selected,
+            int slot, ProfileControlScope install, ProfileControlRequest.TerminalBinding binding) {
+        byte[] bookie = install.targetBookie().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] operation = Arrays.copyOf(ProfileRepairIntent.digest(ByteBuffer.allocate(
+                ProfileRecoveryContext.ENCODED_BYTES + 52 + bookie.length).put(context.encode())
+                .put(selected.reference().digest()).putInt(slot).put(install.targetStorageIncarnation())
+                .put(bookie).array()), 16);
+        var base = new ProfileControlScope(ProfileControlOperation.RECOVERY_TERMINAL_CLOSE,
+                ProfileAuthorityPurpose.RECOVERY_TERMINAL_CLOSE, context.ledger().ledgerId(),
+                context.ledger().ledgerInstanceId(), install.descriptorIdentity(), install.targetBookie(),
+                install.targetStorageIncarnation(), "recovery-terminal", context.generation(),
+                operation, new byte[32], null);
+        var scope = new ProfileControlScope(base.operation(), base.purpose(), base.ledgerId(),
+                base.ledgerInstanceId(), base.descriptorIdentity(), base.targetBookie(),
+                base.targetStorageIncarnation(), base.authorityDomain(), base.authorityGeneration(),
+                base.operationId(), ProfileControlRequest.terminalPayloadIdentity(base, binding), null);
+        return new CloseTarget(slot, null, scope, binding);
     }
 
     private static boolean closingTargetMatches(CloseTarget target, ClosingPlan plan) {
@@ -1084,28 +1089,89 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    public sealed interface ClosedReconstructionProof permits ClosedReconstructionSelf, ClosedReconstructionEmpty {
+        ProfileLedgerContext ledger();
+    }
+
     /** The native immutable SELF publication for the still-current original CLOSED target. */
     public record ClosedReconstructionSelf(RepairSnapshot repair, ProfileRepairCommit.Reference reference,
-                                            long commitBirth, ProfileControlScope closeScope) { }
+                                            long commitBirth, ProfileControlScope closeScope)
+            implements ClosedReconstructionProof {
+        @Override
+        public ProfileLedgerContext ledger() {
+            return repair.intent().recovery().ledger();
+        }
+    }
+
+    /** EMPTY closes use the original activation and exact native grantless terminal target. */
+    public record ClosedReconstructionEmpty(ProfileLedgerContext ledger, CloseTarget target, ReadySnapshot initial)
+            implements ClosedReconstructionProof { }
 
     public ClosedReconstructionSelf readClosedReconstructionSelf(ProfileLedgerMetadataStore metadata,
             ReadOnlySnapshot expected, String targetBookie, byte[] targetIncarnation)
             throws IOException, InterruptedException {
+        var proof = readClosedReconstructionProof(metadata, expected, targetBookie, targetIncarnation);
+        if (proof instanceof ClosedReconstructionSelf self) {
+            return self;
+        }
+        throw new IOException("EMPTY CLOSED has no native SELF grant");
+    }
+
+    public ClosedReconstructionProof readClosedReconstructionProof(ProfileLedgerMetadataStore metadata,
+            ReadOnlySnapshot expected, String targetBookie, byte[] targetIncarnation)
+            throws IOException, InterruptedException {
         requireRecoveryClient(metadata);
         long ledger = expected.context().ledger().ledgerId();
-        if (!expected.sameObservation(readClosedForOpen(metadata, ledger).snapshot())) {
+        long deadline = System.nanoTime() + timeoutNanos;
+        if (!expected.sameObservation(readClosedForOpen(metadata, ledger, deadline).snapshot())) {
             throw new IOException("CLOSED reconstruction lost the original current snapshot");
         }
-        long deadline = System.nanoTime() + timeoutNanos;
         try {
-            var self = closedReconstructionSelf(expected, targetBookie, targetIncarnation, deadline);
-            if (!expected.sameObservation(readClosedForOpen(metadata, ledger).snapshot())) {
-                throw new IOException("CLOSED reconstruction changed during SELF observation");
+            var proof = closedReconstructionProof(expected, targetBookie, targetIncarnation, deadline);
+            if (!expected.sameObservation(readClosedForOpen(metadata, ledger, deadline).snapshot())) {
+                throw new IOException("CLOSED reconstruction changed during native close observation");
             }
-            return self;
+            return proof;
         } catch (TimeoutException | IllegalArgumentException | IllegalStateException invalid) {
-            throw new IOException("CLOSED reconstruction SELF evidence is incomplete", invalid);
+            throw new IOException("CLOSED reconstruction native close evidence is incomplete", invalid);
         }
+    }
+
+    private ClosedReconstructionProof closedReconstructionProof(ReadOnlySnapshot snapshot, String targetBookie,
+            byte[] targetIncarnation, long deadline) throws IOException, InterruptedException, TimeoutException {
+        var value = snapshot.closed().metadata().metadata().getValue();
+        if (value.getLastEntryId() >= 0) {
+            return closedReconstructionSelf(snapshot, targetBookie, targetIncarnation, deadline);
+        }
+        var context = snapshot.context();
+        var selected = snapshot.closed().selection();
+        var ensemble = value.getAllEnsembles().get(0L);
+        if (value.getState() != LedgerMetadata.State.CLOSED || value.getLastEntryId() != -1 || value.getLength() != 0
+                || value.getEnsembleSize() != 3 || value.getWriteQuorumSize() != 3 || value.getAckQuorumSize() != 3
+                || value.getAllEnsembles().size() != 1 || ensemble == null || context.lifecycleSequence() != 2
+                || !ProfileRepairCommit.head(value.getCustomMetadata().get(ProfileRepairCommit.KEY)).isEmpty()
+                || selected == null || !selected.boundary().context().equals(context)
+                || selected.boundary().prefixEntryId() != -1 || selected.boundary().prefixLength() != 0) {
+            throw new IOException("EMPTY reconstruction requires the original whole CLOSED ledger");
+        }
+        int slot = ensemble.stream().map(Object::toString).toList().indexOf(targetBookie);
+        var root = read(context.ledger().ledgerId(), deadline).snapshot();
+        if (slot < 0 || root == null || !context.matchesRoot(root) && !closedAfterDelete(context, root)) {
+            throw new IOException("EMPTY reconstruction lost its original lifecycle or member slot");
+        }
+        var initial = page(root, deadline);
+        if (initial == null || !published(root.lifecycle(), initial) || !initial.page().installs().equals(
+                snapshot.sources())) {
+            throw new IOException("EMPTY reconstruction lost its original activated targets");
+        }
+        var install = initial.page().installs().get(slot).scope();
+        if (!install.targetBookie().equals(targetBookie)
+                || !Arrays.equals(install.targetStorageIncarnation(), targetIncarnation)) {
+            throw new IOException("EMPTY reconstruction original activated incarnation differs");
+        }
+        var binding = new ProfileControlRequest.TerminalBinding(-1, 0, selected.reference().digest());
+        return new ClosedReconstructionEmpty(context.ledger(),
+                activatedEmptyClose(context, selected, slot, install, binding), initial);
     }
 
     private ClosedReconstructionSelf closedReconstructionSelf(ReadOnlySnapshot snapshot, String targetBookie,
@@ -1417,8 +1483,8 @@ public final class ZKProfileReservationStore {
                 || !expected.sameObservation(readClosedForOpen(metadata, ledger, deadline).snapshot())) {
             throw new IOException("Reconstruction requires its unchanged current CLOSED snapshot");
         }
-        var self = closedReconstructionSelf(expected, scope.bookie(), scope.incarnation().value(), deadline);
-        if (!member.closed().equals(ProfileClosedReconstruction.closedDigest(expected, self))) {
+        var proof = closedReconstructionProof(expected, scope.bookie(), scope.incarnation().value(), deadline);
+        if (!ProfileClosedReconstruction.matchesEvidence(member, expected, proof)) {
             throw new IOException("Reconstruction request differs from its current native CLOSED evidence");
         }
         var root = read(ledger, deadline);
@@ -1434,10 +1500,16 @@ public final class ZKProfileReservationStore {
         checks.add(Op.check(headPath(ledger) + "/recovery-birth-" + Long.toHexString(source.birthZxid()), 0));
         checks.add(Op.check(boundaryPath(ledger), 0));
         checks.add(Op.check(boundaryBirthGuard(ledger, expected.closed().selection().birthZxid()), 0));
-        String selfPath = repairPath(ledger, self.reference().slot());
-        checks.add(Op.check(marker(selfPath, self.repair().birth()), 0));
-        checks.add(Op.check(selfPath + "/committed", 0));
-        checks.add(Op.check(repairAdmissionGuardPath(self.repair()), 0));
+        if (proof instanceof ClosedReconstructionSelf self) {
+            String selfPath = repairPath(ledger, self.reference().slot());
+            checks.add(Op.check(marker(selfPath, self.repair().birth()), 0));
+            checks.add(Op.check(selfPath + "/committed", 0));
+            checks.add(Op.check(repairAdmissionGuardPath(self.repair()), 0));
+        } else {
+            var empty = (ClosedReconstructionEmpty) proof;
+            checks.add(Op.check(pagePath(ledger), 0));
+            checks.add(Op.check(marker(pagePath(ledger), empty.initial().birthId()), 0));
+        }
         return checks;
     }
 
@@ -1493,8 +1565,8 @@ public final class ZKProfileReservationStore {
             }
             var historical = new ReadOnlySnapshot(context, new ClosedRecoveryResult(closed.outcome(), predecessor,
                     closed.selection()), closedSources(value, retained.targets()));
-            var self = closedReconstructionSelf(historical, scope.bookie(), scope.incarnation().value(), deadline);
-            if (!member.closed().equals(ProfileClosedReconstruction.closedDigest(historical, self))) {
+            var proof = closedReconstructionProof(historical, scope.bookie(), scope.incarnation().value(), deadline);
+            if (!ProfileClosedReconstruction.matchesEvidence(member, historical, proof)) {
                 throw new IOException("Logical DELETE predecessor differs from the exact READY CLOSED observation");
             }
             var delivery = readLedgerDeleteDelivery(metadata, ledger, target, deadline);

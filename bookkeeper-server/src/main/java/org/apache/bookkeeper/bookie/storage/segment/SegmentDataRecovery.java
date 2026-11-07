@@ -660,8 +660,9 @@ final class SegmentDataRecovery {
         }
         long total = 0;
         for (var member : members) {
-            if (member.prefix() < 0 || member.prefix() >= maximumEntries || member.length() < 0) {
-                throw new IOException("CLOSED reconstruction requires a bounded nonempty member");
+            if (member.prefix() < -1 || member.prefix() >= maximumEntries || member.length() < 0
+                    || member.prefix() == -1 && member.length() != 0) {
+                throw new IOException("CLOSED reconstruction requires a bounded exact member length");
             }
             total = Math.addExact(total, member.prefix() + 1);
             if (total > maximumEntries) {

@@ -66,15 +66,17 @@ public final class SegmentStorageInspector {
     }
 
     static void requireClosedReconstructionScope(IsolatedSegmentConfig config, RecoveryDependencies dependencies,
-            List<ZKProfileReservationStore.ClosedReconstructionSelf> members) throws IOException {
+            List<? extends ZKProfileReservationStore.ClosedReconstructionProof> members) throws IOException {
         var arena = dependencies.arena();
         var bookie = dependencies.bookie();
+        long nonempty = members == null ? 0 : members.stream()
+                .filter(ZKProfileReservationStore.ClosedReconstructionSelf.class::isInstance).count();
         if (config.dataFiles() != 1 || !arena.cut().sessionOpen() || arena.grants().isEmpty()
                 || !arena.reconstructionCapacity()
                 || !arena.cut().recordedQuarantineFiles().isEmpty() || arena.relocationOrReuseHistory()
                 || !arena.selections().isEmpty() || !arena.retiredSlots().isEmpty() || !arena.retiredRanges().isEmpty()
-                || bookie.classicHistory() || members == null || members.isEmpty()
-                || bookie.ledgers().size() != members.size() || bookie.appliedRecoveryGrants() != members.size()
+                || bookie.classicHistory() || nonempty == 0
+                || bookie.ledgers().size() != members.size() || bookie.appliedRecoveryGrants() != nonempty
                 || !bookie.tombstones().isEmpty() || bookie.deleteApplied() != null
                 || bookie.deleteHandoff() || bookie.deleteEffective()) {
             throw new IOException("Original scope has unsupported CLOSED reconstruction dependencies");
@@ -83,9 +85,30 @@ public final class SegmentStorageInspector {
         for (var local : bookie.ledgers()) {
             remaining.put(local.context(), local);
         }
-        for (var self : members) {
-            var local = remaining.remove(self.repair().intent().recovery().ledger());
-            requireClosedReconstructionMember(local, self);
+        for (var proof : members) {
+            var local = remaining.remove(proof.ledger());
+            if (proof instanceof ZKProfileReservationStore.ClosedReconstructionSelf self) {
+                requireClosedReconstructionMember(local, self);
+            } else {
+                requireEmptyReconstructionMember(local, (ZKProfileReservationStore.ClosedReconstructionEmpty) proof);
+            }
+        }
+    }
+
+    static void requireEmptyReconstructionMember(SegmentBookieControlLog.ObservedLedger local,
+            ZKProfileReservationStore.ClosedReconstructionEmpty empty) throws IOException {
+        var target = empty.target();
+        var initial = empty.initial().page();
+        if (local == null || !local.fenced() || local.normalActive() || !Objects.equals(local.terminalPrefix(), -1L)
+                || local.installGeneration() != initial.installs().get(target.member()).localInstallGeneration()
+                || local.activationGeneration() != initial.controlGeneration()
+                || !local.recoveryGrants().isEmpty() || local.terminalBoundaries().size() != 1) {
+            throw new IOException("Original EMPTY Bookie state lacks its grantless terminal result");
+        }
+        var terminal = local.terminalBoundaries().get(0);
+        if (terminal.sequence() < 0 || !terminal.scope().equals(target.scope())
+                || !terminal.binding().equals(target.terminal())) {
+            throw new IOException("Original EMPTY terminal result differs from its exact native close");
         }
     }
 

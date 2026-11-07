@@ -23,12 +23,14 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.control.CommittedProfileAuthority;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
@@ -42,6 +44,7 @@ public final class ProfileClosedReconstruction {
     private static final int READY = 0x55574359;
     private static final int VERSION = 1;
     private static final int COHORT_VERSION = 2;
+    private static final int MIXED_VERSION = 3;
     private static final int MAX_BYTES = 8192;
     public static final int MAX_MEMBERS = 16;
 
@@ -74,10 +77,18 @@ public final class ProfileClosedReconstruction {
         }
     }
 
+    public enum Kind { NONEMPTY_SELF, EMPTY_TERMINAL }
+
     /** Legacy v1 stores just the ledger ID here, with its complete identity bound by the CLOSED digest. */
-    public record Member(long ledger, ProfileLedgerContext context, String closed, String sources) {
+    public record Member(long ledger, ProfileLedgerContext context, String closed, String sources, Kind kind) {
+        public Member(long ledger, ProfileLedgerContext context, String closed, String sources) {
+            this(ledger, context, closed, sources, Kind.NONEMPTY_SELF);
+        }
+
         public Member {
-            if (ledger < 0 || context != null && context.ledgerId() != ledger) {
+            Objects.requireNonNull(kind, "kind");
+            if (ledger < 0 || context != null && context.ledgerId() != ledger
+                    || context == null && kind != Kind.NONEMPTY_SELF) {
                 throw new IllegalArgumentException("Invalid CLOSED reconstruction member identity");
             }
             requireDigest(closed);
@@ -115,11 +126,16 @@ public final class ProfileClosedReconstruction {
             }
             members = List.copyOf(members);
             long previous = -1;
+            boolean nonempty = false;
             for (var member : members) {
                 if (member.ledger() <= previous || (member.context() == null) != (members.size() == 1)) {
                     throw new IllegalArgumentException("CLOSED reconstruction members are not canonical");
                 }
+                nonempty |= member.kind() == Kind.NONEMPTY_SELF;
                 previous = member.ledger();
+            }
+            if (!nonempty) {
+                throw new IllegalArgumentException("CLOSED reconstruction requires a nonempty member");
             }
         }
 
@@ -128,7 +144,8 @@ public final class ProfileClosedReconstruction {
             try (var out = new DataOutputStream(bytes)) {
                 out.writeInt(ADMISSION);
                 boolean legacy = members.size() == 1;
-                out.writeInt(legacy ? VERSION : COHORT_VERSION);
+                boolean mixed = members.stream().anyMatch(member -> member.kind() == Kind.EMPTY_TERMINAL);
+                out.writeInt(legacy ? VERSION : mixed ? MIXED_VERSION : COHORT_VERSION);
                 writeScope(out, scope);
                 writeId(out, operation);
                 if (legacy) {
@@ -150,6 +167,9 @@ public final class ProfileClosedReconstruction {
                 } else {
                     out.writeInt(members.size());
                     for (var member : members) {
+                        if (mixed) {
+                            out.writeByte(member.kind() == Kind.NONEMPTY_SELF ? 1 : 2);
+                        }
                         out.write(member.context().encode());
                         writeDigest(out, member.closed());
                         writeDigest(out, member.sources());
@@ -165,7 +185,7 @@ public final class ProfileClosedReconstruction {
         static Admission decode(byte[] bytes) throws IOException {
             try (var in = input(bytes, ADMISSION)) {
                 int version = in.readInt();
-                if (version != VERSION && version != COHORT_VERSION) {
+                if (version != VERSION && version != COHORT_VERSION && version != MIXED_VERSION) {
                     throw new IOException("Unknown reconstruction admission version");
                 }
                 var scope = new Scope(in.readUTF(), new StorageIncarnation(in.readNBytes(16)), readId(in),
@@ -191,16 +211,30 @@ public final class ProfileClosedReconstruction {
                         throw new IOException("Invalid reconstruction cohort size");
                     }
                     members = new ArrayList<>(count);
+                    boolean empty = false;
                     for (int index = 0; index < count; index++) {
+                        Kind kind = version == MIXED_VERSION ? readKind(in) : Kind.NONEMPTY_SELF;
                         var context = ProfileLedgerContext.decode(ByteBuffer.wrap(
                                 in.readNBytes(ProfileLedgerContext.ENCODED_LENGTH)));
-                        members.add(new Member(context.ledgerId(), context, readDigest(in), readDigest(in)));
+                        members.add(new Member(context.ledgerId(), context, readDigest(in), readDigest(in), kind));
+                        empty |= kind == Kind.EMPTY_TERMINAL;
+                    }
+                    if (version == MIXED_VERSION && !empty) {
+                        throw new IOException("Mixed reconstruction admission requires an EMPTY member");
                     }
                 }
                 requireEnd(in);
                 return new Admission(scope, operation, arenaCut, bookieCut, pid, start, session, directory,
                         directoryObject, stagingObject, original, dependencies, members);
             }
+        }
+
+        private static Kind readKind(DataInputStream in) throws IOException {
+            return switch (in.readUnsignedByte()) {
+                case 1 -> Kind.NONEMPTY_SELF;
+                case 2 -> Kind.EMPTY_TERMINAL;
+                default -> throw new IOException("Unknown CLOSED reconstruction member kind");
+            };
         }
     }
 
@@ -252,11 +286,32 @@ public final class ProfileClosedReconstruction {
     /** One actual native attempt fence, or the original READY that won before this attempt. */
     public record Shadow(Receipt ready, UUID attempt, long birth, int version) { }
 
+    public static Kind kind(ZKProfileReservationStore.ClosedReconstructionProof proof) {
+        return proof instanceof ZKProfileReservationStore.ClosedReconstructionEmpty
+                ? Kind.EMPTY_TERMINAL : Kind.NONEMPTY_SELF;
+    }
+
+    public static boolean matchesEvidence(Member member, ZKProfileReservationStore.ReadOnlySnapshot snapshot,
+            ZKProfileReservationStore.ClosedReconstructionProof proof) throws IOException {
+        return member.matchesContext(proof.ledger()) && member.kind() == kind(proof)
+                && member.closed().equals(closedDigest(snapshot, proof))
+                && (member.kind() != Kind.EMPTY_TERMINAL
+                    || member.sources().equals(emptySourceDigest(member.closed())));
+    }
+
+    public static String emptySourceDigest(String closed) {
+        return digest(("BookKeeper/CLOSEDReconstruction/EMPTY/NoPayloadSources/v1\0" + closed)
+                .getBytes(StandardCharsets.US_ASCII));
+    }
+
     public static String closedDigest(ZKProfileReservationStore.ReadOnlySnapshot snapshot,
-            ZKProfileReservationStore.ClosedReconstructionSelf self) throws IOException {
+            ZKProfileReservationStore.ClosedReconstructionProof proof) throws IOException {
         var metadata = snapshot.closed().metadata();
         var bytes = new ByteArrayOutputStream();
         try (var out = new DataOutputStream(bytes)) {
+            if (proof instanceof ZKProfileReservationStore.ClosedReconstructionEmpty) {
+                out.write("BookKeeper/CLOSEDReconstruction/EMPTY/Terminal/v1\0".getBytes(StandardCharsets.US_ASCII));
+            }
             out.write(snapshot.context().encode());
             out.writeLong(metadata.birthZxid());
             out.writeLong(((LongVersion) metadata.metadata().getVersion()).getLongVersion());
@@ -264,10 +319,28 @@ public final class ProfileClosedReconstruction {
             var serialized = new LedgerMetadataSerDe().serialize(metadata.metadata().getValue());
             out.writeInt(serialized.length);
             out.write(serialized);
-            out.writeLong(self.commitBirth());
-            out.writeLong(self.reference().intentStoreVersion());
-            writeId(out, self.reference().intentBirth());
-            out.write(self.reference().digest());
+            if (proof instanceof ZKProfileReservationStore.ClosedReconstructionSelf self) {
+                out.writeLong(self.commitBirth());
+                out.writeLong(self.reference().intentStoreVersion());
+                writeId(out, self.reference().intentBirth());
+                out.write(self.reference().digest());
+            } else {
+                var empty = (ZKProfileReservationStore.ClosedReconstructionEmpty) proof;
+                var target = empty.target();
+                writeId(out, empty.initial().birthId());
+                out.writeLong(empty.initial().storeVersion());
+                out.write(empty.initial().digest());
+                out.write(snapshot.closed().selection().reference().encode());
+                out.writeInt(target.member());
+                var scope = ProfileAuthorityCodec.encode(new CommittedProfileAuthority(target.scope(),
+                        CommittedProfileAuthority.State.RECOVERY_TERMINAL_CLOSE_AUTHORIZED,
+                        EngineProfile.SEGMENT_WAL_ENGINE, 0, true));
+                out.writeInt(scope.length);
+                out.write(scope);
+                out.writeLong(target.terminal().prefixEntryId());
+                out.writeLong(target.terminal().prefixLength());
+                out.write(target.terminal().selectionDigest());
+            }
             out.writeInt(snapshot.sources().size());
             for (var source : snapshot.sources()) {
                 var scope = ProfileAuthorityCodec.encode(new CommittedProfileAuthority(source.scope(),

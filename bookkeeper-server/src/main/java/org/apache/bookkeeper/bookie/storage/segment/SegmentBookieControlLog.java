@@ -797,9 +797,13 @@ final class SegmentBookieControlLog implements AutoCloseable {
                                  long grantGeneration, long grantSequence, boolean committedReadable,
                                  ProfileControlScope terminalScope, long terminalSequence) { }
 
+    record ObservedTerminalBoundary(ProfileControlScope scope, ProfileControlRequest.TerminalBinding binding,
+                                    long sequence) { }
+
     record ObservedLedger(ProfileLedgerContext context, long installGeneration, long activationGeneration,
                           long localGeneration, boolean normalActive, boolean fenced, Long terminalPrefix,
-                          List<ObservedRecoveryGrant> recoveryGrants) { }
+                          List<ObservedRecoveryGrant> recoveryGrants,
+                          List<ObservedTerminalBoundary> terminalBoundaries) { }
 
     record RecoveryDependencies(long physicalGeneration, long observedSequence, long checkpointGeneration,
                                 long appliedRecoveryGrants, boolean classicHistory, String historyDigest,
@@ -824,13 +828,28 @@ final class SegmentBookieControlLog implements AutoCloseable {
         if (rows > maximumRows) {
             throw new IOException("Bookie recovery dependency observation exceeds its row limit");
         }
+        var terminals = new HashMap<ProfileLedgerContext, List<ObservedTerminalBoundary>>();
+        for (var applied : observed.operations.values()) {
+            var command = applied.command();
+            if (applied.outcome() == Status.APPLIED_DURABLE
+                    && command.type == SegmentControlFormat.Type.RECOVERY_TERMINAL_BOUNDARY) {
+                if (++rows > maximumRows) {
+                    throw new IOException("Bookie recovery dependency observation exceeds its row limit");
+                }
+                terminals.computeIfAbsent(command.scope.context, ignored -> new ArrayList<>())
+                        .add(new ObservedTerminalBoundary(command.scope.observation(), command.terminal,
+                                applied.sequence()));
+            }
+        }
         var ledgers = observed.ledgers.values().stream().sorted(Comparator.comparingLong(state ->
                 state.context.ledgerId())).map(state -> new ObservedLedger(state.context, state.localInstallGeneration,
                         state.activationGeneration, state.localGeneration, state.active, state.fenced,
                         state.terminalPrefix,
                         state.recoveryGrants.values().stream().map(observed::observeGrant)
                                 .sorted(Comparator.comparingLong(ObservedRecoveryGrant::grantSequence))
-                                .toList())).toList();
+                                .toList(), terminals.getOrDefault(state.context, List.of()).stream()
+                                .sorted(Comparator.comparingLong(ObservedTerminalBoundary::sequence)).toList()))
+                .toList();
         long appliedGrants = observed.operations.values().stream().filter(operation ->
                 operation.outcome() == Status.APPLIED_DURABLE
                         && operation.command().type == SegmentControlFormat.Type.RECOVERY_GRANT).count();
