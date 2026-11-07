@@ -34,7 +34,7 @@
 
 步骤 7→12→15 接通 READY 后的逻辑 DELETE。原文件已移动时，后继 JVM 按同一 READY 续接，原 owned service 以精确原生 DELETE 后继和原 incarnation 事件进入内部恢复。删除追赶实际应用后才发布 writable，已删除 entry 持续拒绝。原物理路径完成该 incarnation 的实际 FREE 和持久回执，其他目标义务仍待结算。详见 [重建 READY 后的原 incarnation 删除闭环](profile-wire/README.md#重建-ready-后的原-incarnation-删除闭环)。
 
-步骤 7/12/14 扩展单 DATA 文件的完整非空 CLOSED 集合准入。原生 v2 ADMITTED 持久绑定全部成员，一个 ADMITTED/READY 事务核对全体成员，保留 v1 和 action 6 字节契约。每个成员独立核验 SELF 和当前来源，全体共享原文件扫描、来源截止及累计上限。详见 [单 DATA 文件的完整 CLOSED 集合准入](local-storage/README.md#单-data-文件的完整-closed-集合准入)。
+步骤 7/12/14/15 扩展单 DATA 文件的完整非空 CLOSED 集合重建。原生 v2 ADMITTED 持久绑定全部成员，一个 ADMITTED/READY 事务核对全体成员，保留 v1 和 action 6 字节契约。两个共享 allocation 的真实 3/3/3 账本已验证整组重开。READY 后仅删除其中一个时，原启动门等删除追赶，随后将存活成员搬到新 grant、实际 FREE 原共享 allocation，冷启保留数据和原目标回执。详见 [完整集合准入](local-storage/README.md#单-data-文件的完整-closed-集合准入) 和 [共享 allocation 删除](profile-wire/README.md#同一-allocation-的-closed-成员恢复和删除)。
 
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 

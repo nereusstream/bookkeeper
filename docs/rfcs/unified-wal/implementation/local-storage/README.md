@@ -962,7 +962,7 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 Native ADMITTED v2 按 ledger ID 严格递增编码完整 context、原 CLOSED 摘要和来源绑定。全体成员的原生检查随同一个 ADMITTED 或 READY 事务提交，继续使用同一 shadow 版本和 operation。ADMITTED 上限仍为 8192 字节。v1 单成员回执保持原编码和出生，READY 仍通过完整 ADMITTED 摘要绑定全部成员。后继首次 OPEN 遍历全体，逐项校验原 CLOSED 或精确已提交 DELETE 后继。已安装但遗漏的 context、空 CLOSED、未关闭账本、损坏数据、多文件、已有 MOVE/FREE 或复用历史仍拒绝。
 
-真实 3/3/3 两账本交错写入并 CLOSED 后，原 Bookie JVM 退出，旧版在完整控制依赖准入处拒绝。新版确认一个原生 v2 ADMITTED，验证遗漏、重复及累计 entry 超限均拒绝。扣住实际 ADMITTED multi，在第二成员提交逻辑 DELETE 后发出原包。省略第二成员检查时实际获准，恢复全体检查后 ZooKeeper 返回 `BADVERSION`，原 scope 仍无 ADMITTED。两项编码及七项定向 socket 回归通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-cohort-evidence-e3cc8074`。共享 allocation 的整组重开和删除回收另行验证。
+真实 3/3/3 两账本交错写入并 CLOSED 后，原 Bookie JVM 退出，旧版在完整控制依赖准入处拒绝。新版确认一个原生 v2 ADMITTED，遗漏、重复、累计 entry 超限和第二成员的实际 mTLS 来源拒绝均阻止准入。扣住实际 ADMITTED multi，在第二成员提交逻辑 DELETE 后发出原包。省略第二成员检查时实际获准，恢复全体检查后 ZooKeeper 返回 `BADVERSION`，原 scope 仍无 ADMITTED。实际 READY multi 的相同竞争也返回 `BADVERSION`，原 ADMITTED、active inode、摘要和旧 OPEN 保留。两项编码及七项准入相关 socket 回归通过，后续整组重开见 [共享 allocation 删除](../profile-wire/README.md#同一-allocation-的-closed-成员恢复和删除)。
 
 ## Profile 普通 Add 的真实接线
 

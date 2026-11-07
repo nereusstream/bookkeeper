@@ -2878,3 +2878,11 @@ Spotless/Checkstyle实际exit0；独立RAT实际exit1，仍为父982a18dad9既�
 真实反例先复现旧首次 OPEN 拒绝，再复现 bound listener 在首次启动及健康清理后的重试中返回 `FOUND`。修复后的真实 mTLS 探针核对 READ 拒绝、已获原生授权的 DELETE_APPLY 拒绝、控制 cut 和 cursor 保持及连接额度归还。最终 32 项定向 JUnit 全部通过，Spotless 和 Checkstyle 通过。日志与原始回执位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-delete-evidence-ed424a68`。
 
 验收范围是单 Arena、单 DATA 文件、单个非空 CLOSED ledger 和同版本进程退出。批准 Linux、真实掉电、一般异常恢复、全目标物理终结、永久退役和历史 GC 保持未验收，生产 Gate 保持 OPEN。
+
+### 同一 allocation 的 CLOSED 成员恢复和删除
+
+两个真实 3/3/3 SDK writer 在同 shard 交错写入并正常关闭。原 Bookie 子 JVM 退出后，读原 DATA 批次确认两个 context 共用同一 allocation。两者以一个 v2 ADMITTED/READY 绑定完整文件。重建 JVM 在 READY 回执和 active 移动切点退出，后继 JVM 用同一 operation 完成原文件发布和 action 6。两个成员均保持 CLOSED 时，原身份重开后逐条读回各自原字节。
+
+另一场景在 READY 后只删除排序第二个成员。实际 `DELETE_APPLY` force 被扣住时，未删成员的 mTLS 点读也受 owned startup 门约束。应用原 tombstone 和 cursor 后新 session 注册，删除成员拒绝，未删成员读回原字节。既有物理路径将未删记录搬到原截止之后的新 allocation，实际 FREE 共享旧源，并保留旧 allocation 的追加截止。健康关闭、冷启后仍读回未删数据，独立 session 可冷读原删除回执。其他目标仍待物理终结，全局状态为 `PENDING`。
+
+最终两项编码与八项 socket 回归全部通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-cohort-evidence-e3cc8074`。实际验收限同版本进程退出、单 Arena、单文件与两个非空 CLOSED 成员。空 CLOSED、多文件、多 Arena、损坏数据、批准 Linux 和真实掉电保持未验收，生产 Gate 保持 OPEN。
