@@ -704,6 +704,16 @@ supervisor文件名按clusterId、原cluster birth和Bookie固定，绑定UUID�
 
 父源码上，真实 PREPARED 和签名文件的组合测试在原 `Files.isSameFile` 处复现 `NoSuchFileException`。修正后，同一用例通过，原 Classic 锁和 marker 仍缺失，原 native 观察未变。另验证了必需 guard 缺失、marker 出现、父目录或叶子别名、查询不确定、同文件与硬链接别名，以及锁出现、消失和替换。实际持有的 Classic 锁经独立进程探测保持排他。七项定向通过，最终材料 21、共同根 13、Arena 11、owned 文件 7、文件锁 10 共 62 项通过，Java Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-initial-guard-evidence-02ae3330`。
 
+## ENABLED 重开时的原证明与本地封口
+
+2026-11-07，基线 `5747c41c53`。离线准备阶段可以绑定真实 ZooKeeper 的 `ENABLED` 观察。材料读取复用原签名 `PREPARED` 证明，检查相同原生出生、不可变绑定、Cookie 和 commissioned requirements。`ENABLED` 必须已有全部 Classic guard。
+
+本地封口核验要求同一 ZooKeeper manager、精确的 `ENABLED` 观察、持锁的原 Classic 根和已重开的 owned Bookie control。根标记必须匹配原生绑定的 `PREPARED` 内容，本地保留的 `BOOTSTRAP_COMPLETE` 必须匹配 `ENABLED` 的封口引用。持 supervisor guard 再冷读 ZooKeeper，复核完整观察、两类注册缺失和签名成员。校验失败撤销本次输入关联，原资源继续由各 owner 排空。
+
+真实 ZooKeeper 和文件夹具在父源码复现 `ENABLED` 阶段拒绝。正向从实际控制日志重开，复用原签名、retirement 和已应用 claim，核对原 Journal、index 和 control 字节。错误的原生封口 UUID 和证明绑定后新出现的只读注册均拒绝。最终七类 93 项回归和 Spotless、Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-enabled-reopen-evidence-5747c41c`。
+
+此项覆盖包内的签名、原生来源与本地封口核验。完整受保护 owner、Arena 组合与既有 claim 的全量核验、实时 Unix 采用和批准 Linux 运行继续待验收。
+
 ## 固定交接的原子不覆盖改名
 
 2026-10-31在父源码`facda20fcc9ef6ce31202fee1ddcdc02a1d53648`上，接续规划裁决，为固定retirement/proof发布增加既有native-io的窄renameNoReplace依赖。NativeIO新增默认拒绝，旧方法集合的Java实现无需增加实现即可明确拒绝新能力；NativeIOImpl/NativeIOJni及原Rust库增加一次原子改名。Linux走libc架构常量与syscall(RENAME_NOREPLACE)，不直接链接较新的glibc renameat2符号；macOS走renamex_np(RENAME_EXCL)。不增加通用flags、I/O后端、客户端线程或自动重试，不复制/删除源、fsync或打开业务fd；只有原生明确返回0才成功，其余保留真实errno或明确报能力不可用。旧库缺符号/装载失败不回退到Java move或hardlink。JNI直接读取UTF-16并严格转换，NUL、null或未配对surrogate拒绝，不经lossy转换改名另一路径；有效非BMP/非ASCII路径保持。

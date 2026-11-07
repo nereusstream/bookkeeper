@@ -375,7 +375,7 @@ public class SegmentClassicRootBindingsTest {
                 assertEquals(3, io.forces);
                 assertTrue(io.writes > 3);
                 roots.verifyExisting();
-                assertThrows(IOException.class, () -> roots.verifyEnabledOwner(bookie));
+                assertThrows(IOException.class, () -> roots.verifyEnabledOwner(manager, prepared, bookie));
                 for (int member = -1; member < manifest.classicRoots().size(); member++) {
                     byte[] raw = Files.readAllBytes(marker(member));
                     ByteBuffer in = ByteBuffer.wrap(raw);
@@ -407,7 +407,7 @@ public class SegmentClassicRootBindingsTest {
                 assertEquals(new BookieRouteBinding.BootstrapSeal(new UUID(0, 21), 0, -1), seal);
                 enabled = manager.completeBookieRouteBinding(prepared, seal).observation().orElseThrow();
                 roots.adoptEnabled(enabled, bookie);
-                roots.verifyEnabledOwner(bookie);
+                roots.verifyEnabledOwner(manager, enabled, bookie);
                 assertThrows(IOException.class, () -> roots.createMarkers(bookie, new SegmentFileIo()));
             }
         }
@@ -415,7 +415,7 @@ public class SegmentClassicRootBindingsTest {
             roots.verifyExisting();
             roots.openLocks(new SegmentFileIo());
             try (var bookie = openControl()) {
-                roots.verifyEnabledOwner(bookie);
+                roots.verifyEnabledOwner(manager, enabled, bookie);
                 assertEquals(enabled.binding().seal(), bookie.bootstrapSeal());
             }
         }

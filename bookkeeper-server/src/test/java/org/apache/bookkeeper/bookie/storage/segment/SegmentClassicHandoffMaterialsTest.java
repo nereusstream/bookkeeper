@@ -59,10 +59,12 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.crypto.spec.SecretKeySpec;
 import org.apache.bookkeeper.bookie.ClassicClaimTestHistory;
 import org.apache.bookkeeper.bookie.Cookie;
 import org.apache.bookkeeper.bookie.IndexPersistenceMgr;
 import org.apache.bookkeeper.common.profile.EngineProfile;
+import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest;
@@ -217,9 +219,7 @@ public class SegmentClassicHandoffMaterialsTest {
                     ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
         }
         var instance = new String(client.getData(instancePath, false, null), StandardCharsets.UTF_8);
-        var conf = new ServerConfiguration().setBookieId(manifest.bookieId().toString())
-                .setJournalDirsName(new String[]{manifest.classicRoots().get(0).directory().toString()})
-                .setLedgerDirNames(new String[]{manifest.classicRoots().get(1).directory().toString()});
+        var conf = classicConfiguration();
         var manager = new ZKRegistrationManager(conf, client, ledgers);
         var cookie = Cookie.generateCookie(conf).setInstanceId(instance).build();
         cookie.writeToRegistrationManager(manager, conf, Version.NEW);
@@ -251,6 +251,12 @@ public class SegmentClassicHandoffMaterialsTest {
         writeMaterials(SegmentClassicHandoff.Requirements.from(
                 store.read(manifest.bookieId().toString()).observation().orElseThrow()));
         return new NativeSources(manager, store);
+    }
+
+    private ServerConfiguration classicConfiguration() {
+        return new ServerConfiguration().setBookieId(manifest.bookieId().toString())
+                .setJournalDirsName(new String[]{manifest.classicRoots().get(0).directory().toString()})
+                .setLedgerDirNames(new String[]{manifest.classicRoots().get(1).directory().toString()});
     }
 
     @After
@@ -307,16 +313,140 @@ public class SegmentClassicHandoffMaterialsTest {
         assertFalse(preparation.inputsBound());
         probe("AVAILABLE");
         assertTrue(client.getState().isAlive());
-        var seal = new BookieRouteBinding.BootstrapSeal(new UUID(0, 20), 0, -1);
-        assertEquals(BookieRouteBinding.WriteStatus.APPLIED,
-                nativeSources.manager().completeBookieRouteBinding(nativeScope, seal).status());
-        var enabled = prepare(nativeSources, Duration.ofSeconds(5));
+    }
+
+    private record SealedScope(NativeSources sources, IsolatedSegmentConfig control,
+                               SegmentBookieControlLog.RouteBinding route,
+                               BookieRouteBinding.BootstrapSeal localSeal,
+                               BookieRouteBinding.Observation enabled) { }
+
+    private SealedScope sealScope(boolean exactSeal) throws Exception {
+        Path controlRoot = manifest.controlDirectory();
+        Files.delete(controlRoot.resolve("bookie-control.lock"));
+        Files.delete(controlRoot);
+        ClassicClaimTestHistory.writeJournal(manifest.classicRoots().get(0).directory().resolve("current/1.txn"), 11);
+        ClassicClaimTestHistory.writeIndex(manifest.classicRoots().get(1).directory().resolve("current"), 11);
+        var config = new IsolatedSegmentConfig(controlRoot, 1, 1, 1, 16384, 4096, 1024, 16,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        var route = new SegmentBookieControlLog.RouteBinding(nativeScope.binding().bindingId(), manifest.identity());
+        var io = new SegmentFileIo();
+        BookieRouteBinding.BootstrapSeal seal;
+        NativeSources sources;
+        try (var bookie = SegmentBookieControlLog.createManifestControl(config, manifest, manifest.identity(), 32768,
+                new SecretKeySpec(filled(32, 10), "AES"), new ProfileDescriptorValidator((i, v) -> false,
+                        (i, v) -> false), io, route)) {
+            sources = realSources();
+            try (var roots = new SegmentClassicRootBindings(classicConfiguration(), sources.manager(), manifest,
+                    nativeScope)) {
+                roots.openLocks(io);
+                roots.createMarkers(bookie, io);
+                var claim = bookie.prepareBootstrapClaim(11).command();
+                var complete = new SegmentBookieControlLog.RouteChange(
+                        SegmentBookieControlLog.RouteAction.BOOTSTRAP_COMPLETE, 0, route, new UUID(0, 20));
+                var results = bookie.applyDurable(bookie.appendChangesDurably(List.of(claim, complete)));
+                assertEquals(List.of(SegmentBookieControlLog.Status.APPLIED_DURABLE,
+                        SegmentBookieControlLog.Status.APPLIED_DURABLE),
+                        results.stream().map(SegmentBookieControlLog.Result::status).toList());
+                seal = bookie.bootstrapSeal().orElseThrow();
+            }
+        }
+        var published = exactSeal ? seal
+                : new BookieRouteBinding.BootstrapSeal(new UUID(0, 21), seal.sequence(), seal.appliedCut());
+        var enabled = sources.manager().completeBookieRouteBinding(nativeScope, published).observation().orElseThrow();
+        return new SealedScope(sources, config, route, seal, enabled);
+    }
+
+    private void verifyColdEnabled(SealedScope scope, SegmentClassicBootstrapPreparation preparation)
+            throws Exception {
+        assertEquals(scope.enabled(), preparation.boundNative());
+        var io = new SegmentFileIo();
+        try (var roots = new SegmentClassicRootBindings(classicConfiguration(), scope.sources().manager(), manifest,
+                preparation.boundNative())) {
+            roots.openLocks(io);
+            var control = SegmentBookieControlLog.ownedExisting(scope.control(), manifest, manifest.identity(),
+                    32768, new SecretKeySpec(filled(32, 10), "AES"),
+                    new ProfileDescriptorValidator((i, v) -> false, (i, v) -> false), io, scope.route());
+            try {
+                control.initialize();
+                var bookie = control.log();
+                assertEquals(Optional.of(scope.localSeal()), bookie.bootstrapSeal());
+                var claim = bookie.prepareBootstrapClaim(11).applied().orElseThrow();
+                assertEquals(0, claim.sequence());
+                preparation.verifyEnabled(roots, control);
+                assertEquals(claim, bookie.prepareBootstrapClaim(11).applied().orElseThrow());
+                assertEquals(scope.localSeal().sequence(), bookie.appliedThrough());
+                assertThrows(IOException.class, () -> bookie.prepareBootstrapClaim(12));
+                assertEquals(0, io.writes);
+            } finally {
+                assertTrue(control.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void preparationReusesOriginalSignedProofAfterNativeEnable() throws Exception {
+        var scope = sealScope(true);
+        byte[] proof = Files.readAllBytes(references.proof());
+        byte[] intent = Files.readAllBytes(intentPath);
+        Path journal = manifest.classicRoots().get(0).directory().resolve("current/1.txn");
+        Path index = manifest.classicRoots().get(1).directory().resolve("current")
+                .resolve(IndexPersistenceMgr.getLedgerName(11));
+        byte[] journalBytes = Files.readAllBytes(journal);
+        byte[] indexBytes = Files.readAllBytes(index);
+        Path controlFile = manifest.controlDirectory().resolve("bookie-control");
+        byte[] controlBytes = Files.readAllBytes(controlFile);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
-            var failure = assertThrows(IOException.class, enabled::initialize);
-            assertTrue(failure.getMessage().contains("ENABLED recovery is separate"));
-            probe("AVAILABLE");
+            preparation.initialize();
+            assertTrue(preparation.inputsBound());
+            probe("HELD");
+            verifyColdEnabled(scope, preparation);
+            probe("HELD");
+            assertEquals(scope.enabled(), scope.sources().manager().readBookieRouteBinding(manifest.bookieId())
+                    .observation().orElseThrow());
+            assertArrayEquals(proof, Files.readAllBytes(references.proof()));
+            assertArrayEquals(intent, Files.readAllBytes(intentPath));
+            assertArrayEquals(journalBytes, Files.readAllBytes(journal));
+            assertArrayEquals(indexBytes, Files.readAllBytes(index));
+            assertArrayEquals(controlBytes, Files.readAllBytes(controlFile));
         } finally {
-            assertTrue(enabled.closeAndDrain().drained());
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void enabledVerificationRejectsARealNativeSealThatDiffersFromTheRecoveredControl() throws Exception {
+        var scope = sealScope(false);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            var failure = assertThrows(IOException.class, () -> verifyColdEnabled(scope, preparation));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("retained control seal differ"));
+            assertFalse(preparation.inputsBound());
+            assertThrows(IOException.class, preparation::boundNative);
+            probe("HELD");
+            assertSame(failure, preparation.closeAndDrain().initializationFailure());
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void enabledVerificationRejectsRegistrationAfterTheOriginalProofWasBound() throws Exception {
+        var scope = sealScope(true);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        try {
+            preparation.initialize();
+            String registration = "/ledgers/available/readonly/" + manifest.bookieId();
+            client.create(registration, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.EPHEMERAL);
+            var failure = assertThrows(IOException.class, () -> verifyColdEnabled(scope, preparation));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("still has a Bookie registration"));
+            assertFalse(preparation.inputsBound());
+            assertNotNull(client.exists(registration, false));
+        } finally {
+            assertTrue(preparation.closeAndDrain().drained());
         }
     }
 

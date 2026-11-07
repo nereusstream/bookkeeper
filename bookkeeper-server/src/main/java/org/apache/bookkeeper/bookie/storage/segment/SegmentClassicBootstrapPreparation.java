@@ -46,7 +46,7 @@ final class SegmentClassicBootstrapPreparation {
     private final Duration readTimeout;
     private ClassicBootstrapSources sources;
     private SegmentClassicHandoffMaterials materials;
-    private Thread initializing;
+    private Thread checking;
     private Thread draining;
     private boolean attempted;
     private boolean closing;
@@ -72,13 +72,13 @@ final class SegmentClassicBootstrapPreparation {
                 throw new IOException("Classic bootstrap preparation is one-use");
             }
             attempted = true;
-            initializing = Thread.currentThread();
+            checking = Thread.currentThread();
         }
         try {
             sources = manager.borrowClassicBootstrapSources(requirements, manifest.bookieId(), readTimeout);
             requireOpen();
             var first = sources.read();
-            requirePreparedScope(first.nativeBinding().binding());
+            requireScope(first.nativeBinding().binding());
             var commissioned = SegmentClassicHandoff.Requirements.from(
                     first.requirementsSource(), first.commissionedCompatibility());
             var expected = new SegmentClassicHandoffMaterials.Expected(trust.deployment(),
@@ -87,32 +87,59 @@ final class SegmentClassicBootstrapPreparation {
             materials = new SegmentClassicHandoffMaterials(references, expected, manifest);
             requireOpen();
             materials.initialize();
-            var proof = materials.parsed().proof();
-            requireMembers(proof);
-            requireOpen();
-            if (!first.equals(sources.read())) {
-                throw new IOException("Classic bootstrap sources changed under the supervisor guard");
-            }
-            requireMembers(proof);
-            materials.recheckClassicGuards();
+            requireCurrentSources(first);
             synchronized (this) {
                 requireOpen();
                 bound = first;
-                initializing = null;
+                checking = null;
             }
         } catch (IOException | RuntimeException | Error failure) {
-            synchronized (this) {
-                initializationFailure = failure;
-                initializing = null;
-            }
+            fail(failure);
             throw failure;
         }
     }
 
-    private void requirePreparedScope(BookieRouteBinding binding) throws IOException {
-        if (binding.phase() != BookieRouteBinding.Phase.PREPARED) {
-            throw new IOException("Classic bootstrap preparation requires PREPARED; ENABLED recovery is separate");
+    /** Confirm the sealed cold path while the outer owner holds the original roots and recovered control. */
+    void verifyEnabled(SegmentClassicRootBindings roots, SegmentBookieControlLog.Owned control) throws IOException {
+        ClassicBootstrapSnapshot original;
+        synchronized (this) {
+            if (boundNative().binding().phase() != BookieRouteBinding.Phase.ENABLED || checking != null) {
+                throw new IOException("Classic bootstrap verification requires a bound ENABLED scope");
+            }
+            original = bound;
+            checking = Thread.currentThread();
         }
+        try {
+            roots.verifyEnabledOwner(manager, original.nativeBinding(), control.log());
+            requireCurrentSources(original);
+            synchronized (this) {
+                requireOpen();
+                checking = null;
+            }
+        } catch (IOException | RuntimeException | Error failure) {
+            fail(failure);
+            throw failure;
+        }
+    }
+
+    private synchronized void fail(Throwable failure) {
+        initializationFailure = failure;
+        bound = null;
+        checking = null;
+    }
+
+    private void requireCurrentSources(ClassicBootstrapSnapshot original) throws IOException {
+        var proof = materials.parsed().proof();
+        requireMembers(proof);
+        requireOpen();
+        if (!original.equals(sources.read())) {
+            throw new IOException("Classic bootstrap sources changed under the supervisor guard");
+        }
+        requireMembers(proof);
+        materials.recheckClassicGuards();
+    }
+
+    private void requireScope(BookieRouteBinding binding) throws IOException {
         if (manifest.classicRoots().isEmpty() || !binding.bookieId().equals(manifest.bookieId())
                 || !binding.incarnation().equals(manifest.incarnation())
                 || !binding.manifest().equals(manifest.identity())
@@ -152,6 +179,14 @@ final class SegmentClassicBootstrapPreparation {
         return bound != null && !closing;
     }
 
+    /** Original observation for the root and control owner assembly, without adoption or write permission. */
+    synchronized BookieRouteBinding.Observation boundNative() throws IOException {
+        if (!inputsBound()) {
+            throw new IOException("Classic bootstrap sources are not bound", initializationFailure);
+        }
+        return bound.nativeBinding();
+    }
+
     /**
      * Request close and report actual drain. A pending initializer or borrowed callback retains the material
      * owner and its guard. The borrowed manager, store and ZooKeeper client remain with their original owner.
@@ -159,12 +194,12 @@ final class SegmentClassicBootstrapPreparation {
     Drain closeAndDrain() throws InterruptedException {
         synchronized (this) {
             Thread caller = Thread.currentThread();
-            if (caller == initializing || caller == draining) {
+            if (caller == checking || caller == draining) {
                 throw new IllegalStateException("Classic bootstrap preparation cannot drain its own activity");
             }
             closing = true;
             bound = null;
-            if (initializing != null || draining != null) {
+            if (checking != null || draining != null) {
                 return new Drain(false, initializationFailure, null, null);
             }
             if (lastDrain != null && (lastDrain.drained() || lastDrain.materials() != null)) {
