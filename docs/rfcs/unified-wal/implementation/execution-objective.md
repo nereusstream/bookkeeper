@@ -12,6 +12,8 @@
 
 步骤 15 已为显式 commissioning 的新生 G1 源接入完整 restore admission 依赖。DATA 与 EMPTY 同原 admission 事务追加，精确续接核对原 ordinal。只读观察复核原生切点，按原 CLOSE 回执结算。真实版本栅栏反例及三类 37 项回归已归档。独立 coordinator JVM 退出和恢复目标首次注册的两项组合验证随后通过。旧目标终态、跨 assignment、历史 GC 和生产 Gate 仍开放。详见 [profile-wire](profile-wire/README.md#g1-源的恢复准入依赖)。
 
+步骤 16 已补 G1 恢复依赖的有限投影。实际冻结的准入、枚举与回执边界在两条依赖上组合探索，涵盖原 floor 竞争、晚到准入、scope 更替与完成回执。21 个定向配置符合预期，完整组合与生产验收继续开放。详见 [G1 恢复依赖的有限投影](models/README.md#g1-恢复依赖的有限投影)。
+
 步骤 14→15 的组合验证覆盖实际承载 3/3/3 已确认数据的 Bookie JVM 退出。临时注册自然消失后，原 auditor 产生任务，worker 将 CLOSED 账本修复到另一 BookieId/incarnation，保留原 CLOSED 边界并通过公开 SDK 读回。旧目录的原 owned restart 拒绝。后续逻辑删除包含原三个及新目标的确切义务，旧离线 incarnation 的物理终结回执仍缺失。详见 [profile-wire](profile-wire/README.md#已确认-data-的-bookie-jvm-退出后修复与删除)。
 
 步骤 7→12 的服务组合验证覆盖持原目录并完成真实注册、从未发 DATA grant 的 Bookie 子 JVM 异常退出。旧临时注册自然消失后，原 owned service 以同一身份、目录和端点重开，持久应用 action 4 后发布新 episode。旧观察在端点复用时仍拒绝，公开 SDK 经新注册池以 3/3/3 确认首次写入，正常关闭并逐条读回。详见 [profile-wire](profile-wire/README.md#未授权-data-的-bookie-jvm-退出后重新注册)。
