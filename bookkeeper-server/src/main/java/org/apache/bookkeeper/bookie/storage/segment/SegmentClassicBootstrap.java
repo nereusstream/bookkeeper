@@ -22,6 +22,8 @@ import java.nio.file.Path;
 import java.security.PublicKey;
 import java.time.Duration;
 import java.util.Objects;
+import org.apache.bookkeeper.bookie.ClassicBootstrapStorage;
+import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.BookieRouteBinding;
 import org.apache.bookkeeper.discover.ZKRegistrationManager;
 import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
@@ -29,14 +31,54 @@ import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore.
 import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore.ClassicBootstrapSnapshot;
 import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore.ClassicBootstrapSources;
 
-/** Binds cold inputs under the supervisor guard. Unix adoption and bootstrap authorization are separate steps. */
-final class SegmentClassicBootstrapPreparation {
+/** Offline Classic bootstrap lifecycle. Cold verification does not establish Unix adoption or write authority. */
+public final class SegmentClassicBootstrap {
     record Trust(String deployment, SegmentClassicHandoff.Digest programConfiguration,
                  SegmentClassicHandoff.Digest signerKeyId, PublicKey signer,
                  long oldUid, long targetUid, long materialOwnerUid) { }
 
-    record Drain(boolean drained, Throwable initializationFailure, ClassicBootstrapDrain sources,
+    record Drain(boolean drained, Throwable initializationFailure, ClassicBootstrapStorage.Drain inventory,
+                 ClassicBootstrapDrain sources,
                  SegmentClassicHandoffMaterials.Result materials) { }
+
+    /** Private issuance for the concrete Bookie reader on this owner's active verification thread. */
+    public static final class InventorySession {
+        private final SegmentClassicBootstrap owner;
+        private final ServerConfiguration configuration;
+        private boolean consumed;
+
+        private InventorySession(SegmentClassicBootstrap owner, ServerConfiguration configuration) {
+            this.owner = owner;
+            this.configuration = configuration;
+        }
+
+        public ServerConfiguration consume(ClassicBootstrapStorage candidate) throws IOException {
+            synchronized (owner) {
+                requireOwner(candidate);
+                if (consumed) {
+                    throw new IOException("Classic bootstrap inventory session is one-use");
+                }
+                consumed = true;
+                return configuration;
+            }
+        }
+
+        public void requireReader(ClassicBootstrapStorage candidate) throws IOException {
+            synchronized (owner) {
+                requireOwner(candidate);
+                if (!consumed) {
+                    throw new IOException("Classic bootstrap inventory session was not consumed");
+                }
+            }
+        }
+
+        private void requireOwner(ClassicBootstrapStorage candidate) throws IOException {
+            owner.requireOpen();
+            if (candidate != owner.inventory || owner.bound == null || owner.checking != Thread.currentThread()) {
+                throw new IOException("Classic bootstrap inventory session belongs to another reader or episode");
+            }
+        }
+    }
 
     private final ZKRegistrationManager manager;
     private final ZKProfileStartupRequirementsStore requirements;
@@ -44,6 +86,7 @@ final class SegmentClassicBootstrapPreparation {
     private final SegmentClassicHandoffMaterials.References references;
     private final Trust trust;
     private final Duration readTimeout;
+    private final ClassicBootstrapStorage inventory = ClassicBootstrapStorage.prepare();
     private ClassicBootstrapSources sources;
     private SegmentClassicHandoffMaterials materials;
     private Thread checking;
@@ -55,7 +98,7 @@ final class SegmentClassicBootstrapPreparation {
     private Drain lastDrain;
 
     /** No I/O before the enclosing cold caller retains this preparation owner. */
-    SegmentClassicBootstrapPreparation(ZKRegistrationManager manager, ZKProfileStartupRequirementsStore requirements,
+    SegmentClassicBootstrap(ZKRegistrationManager manager, ZKProfileStartupRequirementsStore requirements,
             SegmentArenaManifest manifest, SegmentClassicHandoffMaterials.References references, Trust trust,
             Duration readTimeout) {
         this.manager = Objects.requireNonNull(manager, "manager");
@@ -99,10 +142,9 @@ final class SegmentClassicBootstrapPreparation {
         }
     }
 
-    /** The outer owner retains the locked roots, recovered control and both readers through actual return. */
-    void verifyEnabled(SegmentClassicRootBindings roots, SegmentBookieControlLog.Owned control,
-            SegmentClassicBootstrapClaims.LedgerSource indexes, SegmentClassicBootstrapClaims.LedgerSource journals)
-            throws IOException {
+    /** The caller retains the verified Arena, root and control owners until this scope actually drains. */
+    void verifyEnabled(SegmentClassicRootBindings roots, SegmentClassicArenaBindings arenas,
+            SegmentBookieControlLog.Owned control) throws IOException {
         ClassicBootstrapSnapshot original;
         synchronized (this) {
             if (boundNative().binding().phase() != BookieRouteBinding.Phase.ENABLED || checking != null) {
@@ -115,18 +157,21 @@ final class SegmentClassicBootstrapPreparation {
             var bookie = control.log();
             var seal = original.nativeBinding().binding().seal().orElseThrow();
             long before = roots.verifyEnabledOwner(manager, original.nativeBinding(), bookie);
-            SegmentClassicBootstrapClaims.LedgerVisitor visitor = ledger -> {
+            arenas.requireVerified(original.nativeBinding().binding().manifest());
+            inventory.initialize(new InventorySession(this, roots.inventoryConfiguration()));
+            inventory.scan(ledger -> {
                 requireOpen();
                 var applied = bookie.prepareBootstrapClaim(ledger).applied();
                 if (applied.isEmpty() || applied.orElseThrow().sequence() > seal.appliedCut()) {
                     throw new IOException("Original bootstrap cut does not include the claim for ledger " + ledger);
                 }
-            };
-            requireOpen();
-            indexes.scan(visitor);
-            requireOpen();
-            journals.scan(visitor);
+            });
+            var drained = inventory.closeAndDrain();
+            if (!drained.drained()) {
+                throw new IOException("Classic bootstrap inventory has unresolved resources", drained.closeFailure());
+            }
             requireCurrentSources(original);
+            arenas.requireVerified(original.nativeBinding().binding().manifest());
             if (before != bookie.requireSealedBootstrapCut(seal)) {
                 throw new IOException("Bookie control changed during the sealed Classic inventory");
             }
@@ -218,7 +263,7 @@ final class SegmentClassicBootstrapPreparation {
             closing = true;
             bound = null;
             if (checking != null || draining != null) {
-                return new Drain(false, initializationFailure, null, null);
+                return new Drain(false, initializationFailure, null, null, null);
             }
             if (lastDrain != null && (lastDrain.drained() || lastDrain.materials() != null)) {
                 return lastDrain;
@@ -227,12 +272,14 @@ final class SegmentClassicBootstrapPreparation {
         }
 
         try {
+            var inventoryResult = inventory.closeAndDrain();
             var sourceResult = sources == null ? null : sources.closeAndDrain();
             boolean sourcesDrained = sourceResult == null || sourceResult.drained();
-            var materialResult = sourcesDrained && materials != null ? materials.closeAndDrain() : null;
-            boolean drained = sourcesDrained && (materialResult == null || materialResult.drained());
+            boolean readersDrained = inventoryResult.drained() && sourcesDrained;
+            var materialResult = readersDrained && materials != null ? materials.closeAndDrain() : null;
+            boolean drained = readersDrained && (materialResult == null || materialResult.drained());
             synchronized (this) {
-                lastDrain = new Drain(drained, initializationFailure, sourceResult, materialResult);
+                lastDrain = new Drain(drained, initializationFailure, inventoryResult, sourceResult, materialResult);
                 return lastDrain;
             }
         } finally {

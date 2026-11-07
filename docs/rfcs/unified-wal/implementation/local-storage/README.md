@@ -2407,4 +2407,14 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 使用真实 ZooKeeper 和已有文件，父源码在一个缺 claim 的有效 index 上误报成功。新逻辑分别拒绝缺 claim 的 index、必要 Journal suffix，以及封口之后才出现的持久 claim。正向核对 `lastMark` 跳过的旧前缀、必要 suffix 中的重复记录及各自的原回执，原 Journal、index 和控制日志字节保持。八类 406 项通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-enabled-claim-evidence-ce17e3c1`。
 
-本次文件集成通过包内 reader 的测试接线完成。绑定完整受保护 scope 的生产恢复桥、首次导入的写入门控、PREPARED 恢复和批准 Linux 运行仍待验收。
+本次文件集成通过包内 reader 的测试接线完成。后续已接入[恢复桥的只读清单阶段](#classic-bootstrap-恢复桥的只读清单阶段)。
+
+## Classic bootstrap 恢复桥的只读清单阶段
+
+2026-11-07，基线 `4faccb128b`。原 `SegmentClassicBootstrapPreparation` 收入冻结名称 `SegmentClassicBootstrap`。离线 `ENABLED` 核验在精确原生封口、已重开的 Bookie control、同一 manifest 的持锁 Classic 根和已核验 Arena owner 下，为本次核验线程及唯一 `ClassicBootstrapStorage` 发行一次性读取 session。
+
+恢复桥从持锁根的冻结配置读取有效 index、ledger 和 Journal current 根。复用现有包内 reader，保留 Journal 配置顺序、`lastMark.N`、index 默认回落和真实关闭结果。核验消费实际文件流。两个 reader 实际排空后才重新核对原生来源和控制位置。关闭请求保留在途 reader 和 supervisor guard，待实际返回后拒绝迟到成功。首次关闭失败使同一 owner 持续未排空。
+
+真实 ZooKeeper 和文件夹具覆盖完整格式化的 Arena、独立 index 和两个 Journal。Journal 配置顺序与 manifest 排序不同，验证 `lastMark.1` 仍定位原第二个 Journal。新增实际文件打开挂起与首次关闭失败用例，使用独立进程观察 supervisor guard。首轮关闭夹具重复包装了 JDK 的两个 open 重载，修正后八类 118 项全部通过，Spotless 和 Checkstyle 通过。修正前同一生产源码的 301 项控制日志回归单独保留。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-bootstrap-reader-bridge-evidence-4faccb12`。
+
+当前接通包内 `ENABLED` 只读路径。Arena、Classic 根和 Bookie control 仍由调用方持有。完整公开启动还需装配这些资源的排空顺序和 supervisor 最终释放，并接入实时 Unix 采用、首次导入的写入门控、PREPARED 恢复和批准 Linux 验收。

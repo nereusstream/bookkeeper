@@ -145,6 +145,12 @@ final class SegmentClassicArenaBindings {
         return initialized && !closing && files.healthy();
     }
 
+    synchronized void requireVerified(ManifestIdentity expected) throws IOException {
+        if (!commissioned.equals(expected) || !verified()) {
+            throw new IOException("Classic bootstrap requires its verified and held Arena members");
+        }
+    }
+
     /** Serialized with actual validation. Never interrupts its reader or retries an unknown native close. */
     synchronized Result closeAndDrain() throws InterruptedException {
         if (initializingThread == Thread.currentThread() || closingThread == Thread.currentThread()) {

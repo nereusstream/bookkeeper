@@ -178,16 +178,13 @@ public class SegmentClassicHandoffMaterialsTest {
                         108, 109), oldUid, uid, SegmentClassicHandoff.keyIdentity(filled(32, 10)),
                 SegmentClassicHandoff.digest(SegmentClassicHandoff.encodePolicy(policy)));
         var members = new ArrayList<SegmentClassicHandoff.Member>();
-        int member = 0;
-        for (Path path : List.of(manifest.classicRoots().get(0).directory(), manifest.classicRoots().get(1).directory(),
-                manifest.controlDirectory(), manifest.arenas().get(0).directory())) {
-            int kind = member < 2 ? 1 : member == 2 ? 2 : 3;
-            int index = member < 2 ? member : 0;
-            members.add(new SegmentClassicHandoff.Member(new SegmentClassicHandoff.Physical(kind, index,
-                    ((Number) Files.getAttribute(path, "unix:dev")).longValue(),
-                    ((Number) Files.getAttribute(path, "unix:ino")).longValue()), uid,
-                    Integer.toUnsignedLong((Integer) Files.getAttribute(path, "unix:gid")), 0700));
-            member++;
+        for (int member = 0; member < manifest.classicRoots().size(); member++) {
+            members.add(signedMember(manifest.classicRoots().get(member).directory(), SegmentClassicHandoff.CLASSIC,
+                    member));
+        }
+        members.add(signedMember(manifest.controlDirectory(), SegmentClassicHandoff.CONTROL, 0));
+        for (int member = 0; member < manifest.arenas().size(); member++) {
+            members.add(signedMember(manifest.arenas().get(member).directory(), SegmentClassicHandoff.ARENA, member));
         }
         var retirement = new SegmentClassicHandoff.Retirement(operation,
                 members.stream().map(SegmentClassicHandoff.Member::physical).toList());
@@ -202,6 +199,13 @@ public class SegmentClassicHandoffMaterialsTest {
         privateFile(references.policy(), SegmentClassicHandoff.encodePolicy(policy));
         privateFile(references.aesKey(), filled(32, 10));
         privateFile(intentPath, intent);
+    }
+
+    private SegmentClassicHandoff.Member signedMember(Path path, int kind, int index) throws IOException {
+        return new SegmentClassicHandoff.Member(new SegmentClassicHandoff.Physical(kind, index,
+                ((Number) Files.getAttribute(path, "unix:dev")).longValue(),
+                ((Number) Files.getAttribute(path, "unix:ino")).longValue()), uid,
+                Integer.toUnsignedLong((Integer) Files.getAttribute(path, "unix:gid")), 0700);
     }
 
     private record NativeSources(ZKRegistrationManager manager, ZKProfileStartupRequirementsStore requirements) { }
@@ -254,9 +258,15 @@ public class SegmentClassicHandoffMaterialsTest {
     }
 
     private ServerConfiguration classicConfiguration() {
-        return new ServerConfiguration().setBookieId(manifest.bookieId().toString())
+        var conf = new ServerConfiguration().setBookieId(manifest.bookieId().toString())
                 .setJournalDirsName(new String[]{manifest.classicRoots().get(0).directory().toString()})
                 .setLedgerDirNames(new String[]{manifest.classicRoots().get(1).directory().toString()});
+        if (manifest.classicRoots().size() == 4) {
+            conf.setJournalDirsName(new String[]{manifest.classicRoots().get(3).directory().toString(),
+                    manifest.classicRoots().get(0).directory().toString()});
+            conf.setIndexDirName(new String[]{manifest.classicRoots().get(2).directory().toString()});
+        }
+        return conf;
     }
 
     @After
@@ -272,10 +282,10 @@ public class SegmentClassicHandoffMaterialsTest {
         }
     }
 
-    private SegmentClassicBootstrapPreparation prepare(NativeSources nativeSources, Duration timeout) {
-        var trust = new SegmentClassicBootstrapPreparation.Trust(expected.deployment(),
+    private SegmentClassicBootstrap prepare(NativeSources nativeSources, Duration timeout) {
+        var trust = new SegmentClassicBootstrap.Trust(expected.deployment(),
                 expected.programConfiguration(), expected.signerKeyId(), expected.trustedSigner(), oldUid, uid, uid);
-        return new SegmentClassicBootstrapPreparation(nativeSources.manager(), nativeSources.requirements(),
+        return new SegmentClassicBootstrap(nativeSources.manager(), nativeSources.requirements(),
                 manifest, references, trust, timeout);
     }
 
@@ -324,13 +334,26 @@ public class SegmentClassicHandoffMaterialsTest {
         Path controlRoot = manifest.controlDirectory();
         Files.delete(controlRoot.resolve("bookie-control.lock"));
         Files.delete(controlRoot);
+        var classic = new ArrayList<>(manifest.classicRoots());
+        classic.set(1, new SegmentArenaManifest.ClassicRoot(classic.get(1).directory(),
+                Set.of(SegmentArenaManifest.ClassicRole.LEDGER)));
+        var index = additionalClassicRoot(controlRoot.resolveSibling("classic-2"),
+                SegmentArenaManifest.ClassicRole.INDEX);
+        var secondJournal = additionalClassicRoot(controlRoot.resolveSibling("classic-3"),
+                SegmentArenaManifest.ClassicRole.JOURNAL);
+        classic.add(index);
+        classic.add(secondJournal);
+        manifest = new SegmentArenaManifest(manifest.incarnation(), manifest.bookieId(), manifest.arenas(),
+                controlRoot, manifest.shardArenas(), classic);
         Path journal = manifest.classicRoots().get(0).directory().resolve("current/1.txn");
         Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
         ClassicClaimTestHistory.writeJournal(journal, 97);
         long markedOffset = Files.size(journal);
         ClassicClaimTestHistory.writeJournal(journal, 97, 13, 13);
-        Files.write(ledger.resolve("lastMark"), ByteBuffer.allocate(16).putLong(1).putLong(markedOffset).array());
-        ClassicClaimTestHistory.writeIndex(ledger, 11);
+        // classic-0 is configured second, independently of the manifest's physical sort order.
+        Files.write(ledger.resolve("lastMark.1"), ByteBuffer.allocate(16).putLong(1).putLong(markedOffset).array());
+        ClassicClaimTestHistory.writeJournal(secondJournal.directory().resolve("current/7.txn"), 13);
+        ClassicClaimTestHistory.writeIndex(index.directory().resolve("current"), 11);
         var config = new IsolatedSegmentConfig(controlRoot, 1, 1, 1, 16384, 4096, 1024, 16,
                 "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
         var route = new SegmentBookieControlLog.RouteBinding(nativeScope.binding().bindingId(), manifest.identity());
@@ -340,6 +363,16 @@ public class SegmentClassicHandoffMaterialsTest {
         try (var bookie = SegmentBookieControlLog.createManifestControl(config, manifest, manifest.identity(), 32768,
                 new SecretKeySpec(filled(32, 10), "AES"), new ProfileDescriptorValidator((i, v) -> false,
                         (i, v) -> false), io, route)) {
+            var arena = manifest.arenaConfig(config, 0);
+            Files.delete(arena.directory().resolve("isolated.lock"));
+            Files.delete(arena.directory().resolve("arena-control.lock"));
+            Files.delete(arena.directory());
+            try (var files = IsolatedSegmentFiles.create(arena, SegmentFileHeader.forArena(manifest, 0));
+                 var arenaControl = SegmentArenaControlLog.open(arena, SegmentFileHeader.forArena(manifest, 0),
+                         32768)) {
+                assertEquals(-1, arenaControl.appliedThrough());
+            }
+            Files.setPosixFilePermissions(arena.directory(), PosixFilePermissions.fromString("rwx------"));
             sources = realSources();
             try (var roots = new SegmentClassicRootBindings(classicConfiguration(), sources.manager(), manifest,
                     nativeScope)) {
@@ -364,13 +397,42 @@ public class SegmentClassicHandoffMaterialsTest {
         return new SealedScope(sources, config, route, seal, enabled);
     }
 
+    private static SegmentArenaManifest.ClassicRoot additionalClassicRoot(Path path,
+            SegmentArenaManifest.ClassicRole role) throws IOException {
+        Path current = directory(directory(path).resolve("current"));
+        privateFile(current.resolve(SegmentClassicRootBindings.LOCK_NAME), new byte[0]);
+        return new SegmentArenaManifest.ClassicRoot(path, Set.of(role));
+    }
+
     private SegmentBookieControlLog.Owned coldControl(SealedScope scope, SegmentFileIo io) throws IOException {
         return SegmentBookieControlLog.ownedExisting(scope.control(), manifest, manifest.identity(), 32768,
                 new SecretKeySpec(filled(32, 10), "AES"), new ProfileDescriptorValidator((i, v) -> false,
                         (i, v) -> false), io, scope.route());
     }
 
-    private void verifyColdEnabled(SealedScope scope, SegmentClassicBootstrapPreparation preparation)
+    private void verifyColdEnabled(SealedScope scope, SegmentClassicBootstrap preparation)
+            throws Exception {
+        withColdEnabled(scope, preparation, (roots, arenas, control, io) -> {
+            var bookie = control.log();
+            assertEquals(Optional.of(scope.localSeal()), bookie.bootstrapSeal());
+            var claim = bookie.prepareBootstrapClaim(11).applied().orElseThrow();
+            assertEquals(0, claim.sequence());
+            preparation.verifyEnabled(roots, arenas, control);
+            assertEquals(claim, bookie.prepareBootstrapClaim(11).applied().orElseThrow());
+            assertEquals(1, bookie.prepareBootstrapClaim(13).applied().orElseThrow().sequence());
+            assertEquals(scope.localSeal().sequence(), bookie.appliedThrough());
+            assertThrows(IOException.class, () -> bookie.prepareBootstrapClaim(97));
+            assertEquals(0, io.writes);
+        });
+    }
+
+    @FunctionalInterface
+    private interface ColdEnabledOperation {
+        void run(SegmentClassicRootBindings roots, SegmentClassicArenaBindings arenas,
+                 SegmentBookieControlLog.Owned control, SegmentFileIo io) throws Exception;
+    }
+
+    private void withColdEnabled(SealedScope scope, SegmentClassicBootstrap preparation, ColdEnabledOperation action)
             throws Exception {
         assertEquals(scope.enabled(), preparation.boundNative());
         var io = new SegmentFileIo();
@@ -378,26 +440,124 @@ public class SegmentClassicHandoffMaterialsTest {
                 preparation.boundNative())) {
             roots.openLocks(io);
             var control = coldControl(scope, io);
+            var arenas = new SegmentClassicArenaBindings(manifest, manifest.identity(), 32768);
             try {
                 control.initialize();
-                var bookie = control.log();
-                assertEquals(Optional.of(scope.localSeal()), bookie.bootstrapSeal());
-                var claim = bookie.prepareBootstrapClaim(11).applied().orElseThrow();
-                assertEquals(0, claim.sequence());
-                Path journal = manifest.classicRoots().get(0).directory().resolve("current");
-                Path ledger = manifest.classicRoots().get(1).directory().resolve("current");
-                preparation.verifyEnabled(roots, control,
-                        visitor -> ClassicClaimTestHistory.readIndex(ledger, visitor::visit),
-                        visitor -> ClassicClaimTestHistory.readJournal(journal, ledger, visitor::visit));
-                assertEquals(claim, bookie.prepareBootstrapClaim(11).applied().orElseThrow());
-                assertEquals(1, bookie.prepareBootstrapClaim(13).applied().orElseThrow().sequence());
-                assertEquals(scope.localSeal().sequence(), bookie.appliedThrough());
-                assertThrows(IOException.class, () -> bookie.prepareBootstrapClaim(97));
-                assertEquals(0, io.writes);
+                arenas.initialize();
+                action.run(roots, arenas, control, io);
             } finally {
+                assertTrue(arenas.closeAndDrain().drained());
                 assertTrue(control.closeAndDrain().drained());
             }
         }
+    }
+
+    @Test(timeout = 30000)
+    public void enabledInventoryCloseWaitsForTheActualIndexReaderAndRejectsLateSuccess() throws Exception {
+        var scope = sealScope(true);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        Path index = manifest.classicRoots().get(2).directory().resolve("current")
+                .resolve(IndexPersistenceMgr.getLedgerName(11));
+        try {
+            preparation.initialize();
+            withColdEnabled(scope, preparation, (roots, arenas, control, io) -> {
+                var entered = new CountDownLatch(1);
+                var release = new CountDownLatch(1);
+                var opened = new AtomicReference<FileChannel>();
+                var task = new FutureTask<Void>(() -> {
+                    try (var opens = mockStatic(FileChannel.class, invocation -> {
+                        Object actual = invocation.callRealMethod();
+                        if (invocation.getMethod().getName().equals("open")
+                                && invocation.getMethod().getParameterCount() == 2
+                                && index.equals(invocation.getArgument(0))) {
+                            opened.set((FileChannel) actual);
+                            entered.countDown();
+                            assertTrue(release.await(10, TimeUnit.SECONDS));
+                        }
+                        return actual;
+                    })) {
+                        preparation.verifyEnabled(roots, arenas, control);
+                    }
+                    return null;
+                });
+                var scanner = new Thread(task, "held-classic-bootstrap-index");
+                scanner.start();
+                try {
+                    assertTrue(entered.await(5, TimeUnit.SECONDS));
+                    assertTrue(opened.get().isOpen());
+                    assertFalse(preparation.closeAndDrain().drained());
+                    assertFalse(preparation.inputsBound());
+                    assertTrue(arenas.verified());
+                    probe("HELD");
+                } finally {
+                    release.countDown();
+                    scanner.join(5000);
+                    assertFalse(scanner.isAlive());
+                }
+                var failure = assertThrows(ExecutionException.class, () -> task.get(5, TimeUnit.SECONDS)).getCause();
+                assertTrue(failure.getMessage(), failure.getMessage().contains("preparation is closing"));
+                assertFalse(opened.get().isOpen());
+                assertEquals(0, io.writes);
+                probe("HELD");
+            });
+        } finally {
+            var result = preparation.closeAndDrain();
+            assertTrue(result.drained());
+            assertTrue(result.inventory().drained());
+        }
+        probe("AVAILABLE");
+    }
+
+    @Test(timeout = 30000)
+    public void enabledInventoryKeepsTheSupervisorWhenTheFirstIndexCloseFails() throws Exception {
+        var scope = sealScope(true);
+        var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
+        Path index = manifest.classicRoots().get(2).directory().resolve("current")
+                .resolve(IndexPersistenceMgr.getLedgerName(11));
+        var firstClose = new IOException("Classic bootstrap first index close failed");
+        var opened = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+        try {
+            preparation.initialize();
+            withColdEnabled(scope, preparation, (roots, arenas, control, io) -> {
+                try (var opens = mockStatic(FileChannel.class, invocation -> {
+                    Object actual = invocation.callRealMethod();
+                    if (invocation.getMethod().getName().equals("open")
+                            && invocation.getMethod().getParameterCount() == 2
+                            && index.equals(invocation.getArgument(0))) {
+                        var wrapped = new SegmentDataFileLockTest.FaultChannel((FileChannel) actual);
+                        wrapped.closeFailure = firstClose;
+                        opened.set(wrapped);
+                        return wrapped;
+                    }
+                    return actual;
+                })) {
+                    assertSame(firstClose,
+                            assertThrows(IOException.class, () -> preparation.verifyEnabled(roots, arenas, control)));
+                }
+                for (int i = 0; i < 2; i++) {
+                    var result = preparation.closeAndDrain();
+                    assertFalse(result.drained());
+                    assertSame(firstClose, result.initializationFailure());
+                    assertSame(firstClose, result.inventory().closeFailure());
+                    assertTrue(result.sources().drained());
+                    assertNull(result.materials());
+                    assertTrue(opened.get().actual.isOpen());
+                    assertEquals(1, opened.get().closes.get());
+                    probe("HELD");
+                }
+            });
+        } finally {
+            if (opened.get() != null) {
+                opened.get().actual.close();
+                var member = SegmentClassicBootstrap.class.getDeclaredField("materials");
+                member.setAccessible(true);
+                guard((SegmentClassicHandoffMaterials) member.get(preparation)).close();
+            } else {
+                preparation.closeAndDrain();
+            }
+        }
+        assertFalse(preparation.closeAndDrain().drained());
+        probe("AVAILABLE");
     }
 
     @Test(timeout = 30000)
@@ -406,7 +566,7 @@ public class SegmentClassicHandoffMaterialsTest {
         byte[] proof = Files.readAllBytes(references.proof());
         byte[] intent = Files.readAllBytes(intentPath);
         Path journal = manifest.classicRoots().get(0).directory().resolve("current/1.txn");
-        Path index = manifest.classicRoots().get(1).directory().resolve("current")
+        Path index = manifest.classicRoots().get(2).directory().resolve("current")
                 .resolve(IndexPersistenceMgr.getLedgerName(11));
         byte[] journalBytes = Files.readAllBytes(journal);
         byte[] indexBytes = Files.readAllBytes(index);
@@ -453,7 +613,7 @@ public class SegmentClassicHandoffMaterialsTest {
     @Test(timeout = 30000)
     public void enabledVerificationRejectsAnIndexWithoutAnOriginalClassicClaim() throws Exception {
         var scope = sealScope(true);
-        Path index = manifest.classicRoots().get(1).directory().resolve("current");
+        Path index = manifest.classicRoots().get(2).directory().resolve("current");
         ClassicClaimTestHistory.writeIndex(index, 19);
         Path unclaimed = index.resolve(IndexPersistenceMgr.getLedgerName(19));
         byte[] original = Files.readAllBytes(unclaimed);
@@ -472,7 +632,7 @@ public class SegmentClassicHandoffMaterialsTest {
     @Test(timeout = 30000)
     public void enabledVerificationRejectsAnUnclaimedLedgerInTheRequiredJournalSuffix() throws Exception {
         var scope = sealScope(true);
-        Path unclaimed = manifest.classicRoots().get(0).directory().resolve("current/2.txn");
+        Path unclaimed = manifest.classicRoots().get(3).directory().resolve("current/8.txn");
         ClassicClaimTestHistory.writeJournal(unclaimed, 19);
         byte[] original = Files.readAllBytes(unclaimed);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
@@ -502,7 +662,7 @@ public class SegmentClassicHandoffMaterialsTest {
         } finally {
             assertTrue(control.closeAndDrain().drained());
         }
-        Path index = manifest.classicRoots().get(1).directory().resolve("current");
+        Path index = manifest.classicRoots().get(2).directory().resolve("current");
         ClassicClaimTestHistory.writeIndex(index, 19);
         var preparation = prepare(scope.sources(), Duration.ofSeconds(5));
         try {
@@ -905,7 +1065,7 @@ public class SegmentClassicHandoffMaterialsTest {
             probe("HELD");
         } finally {
             captured.get().actual.close();
-            var member = SegmentClassicBootstrapPreparation.class.getDeclaredField("materials");
+            var member = SegmentClassicBootstrap.class.getDeclaredField("materials");
             member.setAccessible(true);
             guard((SegmentClassicHandoffMaterials) member.get(preparation)).close();
         }

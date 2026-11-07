@@ -16,6 +16,7 @@
  */
 package org.apache.bookkeeper.bookie.storage.segment;
 
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -198,6 +199,29 @@ final class SegmentClassicRootBindings implements AutoCloseable {
         long appliedThrough = bookie.requireSealedBootstrapCut(nativeBinding.binding().seal().orElseThrow());
         verifyExisting();
         return appliedThrough;
+    }
+
+    /** Original configured order, using the canonical directories of the held scope. */
+    synchronized ServerConfiguration inventoryConfiguration() throws IOException {
+        requireLive();
+        if (!locked) {
+            throw new IOException("Classic inventory requires the held common roots");
+        }
+        File[] index = configuration.getIndexDirs();
+        return new ServerConfiguration(configuration)
+                .setJournalDirsName(inventoryRoots(configuration.getJournalDirs()))
+                .setLedgerDirNames(inventoryRoots(configuration.getLedgerDirs()))
+                .setIndexDirName(index == null ? null : inventoryRoots(index));
+    }
+
+    private static String[] inventoryRoots(File[] configured) throws IOException {
+        String[] roots = new String[configured.length];
+        for (int i = 0; i < configured.length; i++) {
+            Path root = configured[i].toPath().toAbsolutePath();
+            current(root);
+            roots[i] = root.toString();
+        }
+        return roots;
     }
 
     private void verifySources() throws IOException {
