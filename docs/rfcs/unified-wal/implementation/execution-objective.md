@@ -24,6 +24,8 @@
 
 步骤 7/12/14 的既有 restart 可在原 DATA 排他锁下解析一种未关闭会话。完整 Arena 历史须证明从未成功授予 DATA allocation。独立 `DEVICE_STATE` action 4 force 并 apply 后，继续原重开检查并开启下一 epoch。真实子 JVM 覆盖首次重开、首次写读、健康再重开、恢复记录应用后退出与轮转接续。曾发 grant 的历史即使全部 FREE 并 checkpoint，仍在打开 Bookie owner 或索引前拒绝。一般已授权 DATA 的同身份异常重开仍待独立恢复协议。详见 [local-storage](local-storage/README.md#从未授权-data-的-open-会话重开)。
 
+已核对步骤 7/12/14 的原 OPEN 同身份恢复缺口。真实 managed 子 JVM 在 DATA force 调用前和 `LOCAL_DURABLE` 后退出，两个切点均可读到原物理候选，原启动门均拒绝。现有维护也可能在新 epoch 接续旧 grant。仍需冻结原 I/O 终结或隔离事实、可验证的必要 DATA 与追加尾界，以及解除原 OPEN 的持久决议。详见 [已授予 DATA 的 OPEN 会话恢复证据](local-storage/README.md#已授予-data-的-open-会话恢复证据)。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。

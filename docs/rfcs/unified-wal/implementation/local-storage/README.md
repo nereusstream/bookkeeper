@@ -892,6 +892,22 @@ OPEN 记录可能来自进程退出，或来自尚未来得及持久化隔离的
 
 服务级组合覆盖实际持锁并注册的 Bookie 子 JVM 异常退出。原启动路径持久化 action 4、开启新 DATA epoch，经同身份重新注册后由公开 SDK 首次写入并读回。[服务级回执](../profile-wire/README.md#未授权-data-的-bookie-jvm-退出后重新注册)
 
+### 已授予 DATA 的 OPEN 会话恢复证据
+
+基线 `1fcb9c5016`。现有 `IsolatedSegmentStorage.start` 先持原 DATA 排他锁，再重放 Arena。原锁排除同目录的合作写者。健康 `DEVICE_STATE CLOSE` 由 DATA 实际停收、I/O 排空和文件关闭后的原 writer 产生，保留复用 allocation 的有效尾界。异常退出缺 CLOSE 时，冷读无法判断上次 force 是否完成，或是否有尚未来得及持久化的隔离通知。持久 quarantine、未决控制与已授权 OPEN 均在打开 Bookie control 或索引前拒绝。
+
+Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起点、最终 MOVE selector 与已退休范围。Bookie applied cut 补充当前可读范围和 MOVE/FREE 的必要前置。已允许的健康重开才使用这些事实核验 DATA、连续序号和必要位置，按文件同步并复核两侧 cut，再更新派生索引和 HotDirectory。复用 allocation 的旧 CLOSE 尾界只覆盖该次健康结束的范围。当前正常追加的游标先越过恢复切点的旧 grant，但 `resumeRetainedTail` 在受保护测量后可接续旧 compaction destination。既有满容量健康重开用例在旧 destination 上继续 COPY。因此某次 OPEN 后没有新 ALLOC，仍可能在旧 grant 上写 DATA。现有实现可证明未授予任何 DATA 的子集仍是 action 4 的全生命周期条件。
+
+两个真实 managed 子 JVM 使用同一逻辑批次。一个在完整 DATA write 之后、第一次 DATA force 调用前退出，另一个在收到原请求的 `LOCAL_DURABLE` 后退出。各自冷读都见到原 OPEN、连续已应用的 grant 和通过身份、CRC 与 payload 校验的物理候选，控制尾部仍止于 ALLOC。原 restart 拒绝，两类锁均可重新取得，索引和 coverage 缺失，原文件逐字节一致。前一退出点只定位应用调用顺序，后一结果只对应原单副本请求。这两次进程退出的证据范围不含介质掉电和集群 ACK。
+
+只读解析可输出物理候选。恢复同步可为已核验范围建立新的本地持久事实，无法补齐未解析的旧 I/O、缺失尾界或当前 required frontier。健康重开的本地读取和重复成功还依赖原 Bookie cut、恢复清单和已启用的新 session。服务注册随后核对当前 required-device、删除追赶、readiness 与原会话准入。现有镜像/repair 路径消费匹配的当前集群取证与目标授权，可修复替代目标并保留旧目标删除义务。旧镜像、单副本最大 entry、LAC、CRC 或索引覆盖均缺少为原 OPEN 解除隔离的权威。
+
+现有 checkpoint 保留按序的业务操作和应用结果。可进一步评估一个窄子集，即先前 epoch 已健康 CLOSE，本次 OPEN 时没有任何存续 grant，且完整后缀证明本 epoch 没有成功授予 DATA。受管写入必须匹配已应用 grant，因此这组事实可用于证明没有可执行的 DATA 写入。当前末态的空 allocation 集合不足以证明这组事实，解除也仍需独立的持久语义。
+
+一般已授权 OPEN 的恢复协议需冻结可验证的旧 epoch 终结或隔离事实，以及绑定原 scope、Arena/Bookie cut、必要 DATA 与安全追加尾界的证据。现有字节无法补齐未记录的旧 I/O 故障或缺失尾界时，需由写入期的持久见证或受保护的当前集群取证提供必要事实。完成验证和所需同步后，才由独立的可重放决议解除原 OPEN，再走既有新 epoch 与 readiness。证据不足时可使用已有替代目标修复路径，其结果独立于原同身份重开。记录格式、前置权威和放行条件待规划冻结。
+
+新增进程对照和相关回归共 10 项通过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/open-data-recovery-gate-evidence-1fcb9c50`。
+
 ## Profile 普通 Add 的真实接线
 
 2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。

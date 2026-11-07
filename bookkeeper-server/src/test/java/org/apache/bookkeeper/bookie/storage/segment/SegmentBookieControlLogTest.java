@@ -725,9 +725,13 @@ public class SegmentBookieControlLogTest {
     }
 
     private static void grant(SegmentArenaControlLog arena, int blocks) throws IOException {
-        arena.submitBatch(List.of(new SegmentArenaControlLog.Allocation(
+        arena.submitBatch(List.of(poolGrant(blocks)));
+    }
+
+    private static SegmentArenaControlLog.Allocation poolGrant(int blocks) {
+        return new SegmentArenaControlLog.Allocation(
                 SegmentControlFormat.Type.ALLOC_POOL, new UUID(0, 5), new Generation(1), 0,
-                0, 0, new Generation(1), 5, 4096, blocks, 1)));
+                0, 0, new Generation(1), 5, 4096, blocks, 1);
     }
 
     private static SegmentDataPhysicalDriver.DuplicateStatus checkPublishedDuplicate(
@@ -12352,6 +12356,68 @@ public class SegmentBookieControlLogTest {
         }
     }
 
+    @Test(timeout = 60000)
+    public void managedDataIsOnlyAPhysicalCandidateAfterEitherForceBoundaryHaltsTheWriter() throws Exception {
+        assertManagedDataHalt("normal-managed-before-force", 86, "BEFORE_DATA_FORCE");
+        assertManagedDataHalt("normal-managed-after-force", 0, "LOCAL_DURABLE");
+    }
+
+    private void assertManagedDataHalt(String phase, int exit, String marker) throws Exception {
+        var config = abruptWriterConfig(temporary.getRoot().toPath().resolve(phase));
+        runAbruptWriter(phase, config.directory(), exit, marker);
+        var before = inspectionImage(config.directory());
+        assertFalse(Files.exists(SegmentDerivedIndex.directory(config)));
+        for (int slot : List.of(0, 1)) {
+            assertFalse(Files.exists(SegmentDerivedIndex.publication(config, slot)));
+        }
+        SegmentArenaControlLog.Inspection original;
+        try (var lock = SegmentDataFileLock.open(config.directory())) {
+            assertTrue(lock.lock().isValid());
+            original = SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024);
+            assertEquals(1, original.sessionEpoch());
+            assertTrue(original.sessionOpen());
+            assertEquals(1, original.appliedSequence());
+            assertEquals(1, original.currentAllocations());
+            assertTrue(original.recordedQuarantineFiles().isEmpty());
+            var owner = SegmentControlFormat.Owner.ARENA;
+            var generation = new Generation(original.physicalGeneration());
+            ByteBuffer records = ByteBuffer.wrap(before.get("arena-control")).position(4096);
+            int openLength = SegmentControlParser.recordLength(records, owner, generation, 0);
+            records.position(records.position() + openLength);
+            // Exact remaining frame, after OPEN. A CLOSE or other control tail would be extra bytes.
+            var recordedGrant = SegmentControlParser.parse(records, owner, generation, 1);
+            var grant = poolGrant(1);
+            assertEquals(grant.type(), recordedGrant.type());
+            assertEquals(grant.operationId(), recordedGrant.operationId());
+            assertEquals(grant.body(), recordedGrant.body());
+
+            var expected = batch(config, 1, 1, grant.offset());
+            try (var data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, 0), StandardOpenOption.READ)) {
+                ByteBuffer header = ByteBuffer.allocate(4096);
+                SegmentFileIo.readFully(data, header, 0);
+                identity().validate(header, config, 0);
+                ByteBuffer bytes = ByteBuffer.allocate(expected.bytes().remaining());
+                SegmentFileIo.readFully(data, bytes, grant.offset());
+                var candidate = SegmentBatchParser.parse(bytes, expected.address(), config.bytesPerFile());
+                assertEquals(1, candidate.records().size());
+                var record = candidate.records().get(0);
+                assertEquals(context(), record.context());
+                assertEquals(1, record.entryId());
+                assertEquals(entryBytes(context(), 1, -1, 8, (byte) 0), record.entry());
+            }
+        }
+
+        try (var storage = storage(config, 1, 6, 4)) {
+            var refusal = assertThrows(IOException.class, storage::restart);
+            assertTrue(refusal.getMessage(), refusal.getMessage().contains("Unclosed DATA writer session"));
+        }
+        assertInspectionImage(before, config.directory());
+        try (var lock = SegmentDataFileLock.open(config.directory())) {
+            assertTrue(lock.lock().isValid());
+            assertEquals(original, SegmentArenaControlLog.inspect(config, identity(), 1024 * 1024));
+        }
+    }
+
     @Test
     public void resolvedSessionSurvivesProcessExitAndRotationBeforeAnotherUnusedEpoch() throws Exception {
         IsolatedSegmentConfig config = config();
@@ -12676,6 +12742,11 @@ public class SegmentBookieControlLogTest {
         assertTrue(log, log.contains(marker));
     }
 
+    private static IsolatedSegmentConfig abruptWriterConfig(Path directory) {
+        return new IsolatedSegmentConfig(directory, 1, 4, 1,
+                4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+    }
+
     /** Child process for the real process-boundary tests; never returns after the chosen cut. */
     public static void main(String[] args) throws Exception {
         if (args.length == 3 && "hold-data-lock".equals(args[0])) {
@@ -12687,14 +12758,14 @@ public class SegmentBookieControlLogTest {
         }
         if (args.length != 2 || (!"after-force".equals(args[0]) && !"before-force".equals(args[0])
                 && !"normal-after-force".equals(args[0]) && !"normal-before-force".equals(args[0])
+                && !"normal-managed-before-force".equals(args[0]) && !"normal-managed-after-force".equals(args[0])
                 && !"append-after-restart".equals(args[0]) && !"session-force-error".equals(args[0])
                 && !"normal-clean-close".equals(args[0]) && !"session-open-unused".equals(args[0])
                 && !"session-reopen-unused".equals(args[0]) && !"session-resolved-before-reopen".equals(args[0])
                 && !"session-freed-unused".equals(args[0]))) {
             throw new IllegalArgumentException("Expected abrupt writer phase and directory");
         }
-        IsolatedSegmentConfig config = new IsolatedSegmentConfig(Path.of(args[1]), 1, 4, 1,
-                4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        IsolatedSegmentConfig config = abruptWriterConfig(Path.of(args[1]));
         SegmentFileHeader identity = new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 7)),
                 new UUID(0, 9), BookieId.parse("isolated:3181"));
         if ("session-open-unused".equals(args[0]) || "session-reopen-unused".equals(args[0])) {
@@ -12782,13 +12853,16 @@ public class SegmentBookieControlLogTest {
                     SegmentArenaControlLog arena = SegmentArenaControlLog.open(config, identity, 1024 * 1024);
                     SegmentBookieControlLog bookie = SegmentBookieControlLog.open(config, identity,
                             1024 * 1024, key((byte) 3), VALIDATOR)) {
-                if ("normal-clean-close".equals(args[0])) {
+                boolean managedBeforeForce = "normal-managed-before-force".equals(args[0]);
+                boolean managedAfterForce = "normal-managed-after-force".equals(args[0]);
+                if (managedBeforeForce || managedAfterForce || "normal-clean-close".equals(args[0])) {
                     files.startSession(arena);
                 }
                 grant(arena, 1);
                 bookie.submitBatch(List.of(install(1, (byte) 5), activate(2)));
-                if ("normal-before-force".equals(args[0])) {
+                if (managedBeforeForce || "normal-before-force".equals(args[0])) {
                     files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                        assertEquals(0, files.dataIo.forces);
                         System.out.println("BEFORE_DATA_FORCE");
                         System.out.flush();
                         Runtime.getRuntime().halt(86);
@@ -12815,6 +12889,9 @@ public class SegmentBookieControlLogTest {
                 if (!completed.await(10, TimeUnit.SECONDS) || failure.get() != null
                         || status.get() != SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE) {
                     throw new IllegalStateException("Normal DATA did not reach local durable result", failure.get());
+                }
+                if (managedAfterForce) {
+                    assertEquals(1, files.dataIo.forces);
                 }
                 if ("normal-clean-close".equals(args[0])) {
                     owner.stopAdmission();
