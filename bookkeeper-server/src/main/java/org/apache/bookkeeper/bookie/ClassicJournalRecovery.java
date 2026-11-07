@@ -27,6 +27,8 @@ import static org.apache.bookkeeper.bookie.ClassicHistoryFiles.requireSame;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.BasicFileAttributes;
@@ -35,9 +37,12 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 
 /** Read-only V6 recovery resources. Supplies no startup, metadata, launcher or bootstrap permission. */
 final class ClassicJournalRecovery {
+    private static final int INVENTORY_PAGE_SIZE = 256;
+
     record Marks(long logId, long offset, Set<Path> existing) {
         Marks {
             existing = Set.copyOf(existing);
@@ -102,21 +107,82 @@ final class ClassicJournalRecovery {
         Objects.requireNonNull(visitor, "visitor");
         enter();
         try {
+            Journal.JournalScanner scan = (version, position, record) -> visitor.visit(validateRecord(record));
             for (var source : sources) {
-                var mark = readMarks(source.markName());
-                var logs = readIds(source.journal(), mark.logId());
-                requireMarkedJournal(mark.logId(), logs, source.journal());
-                for (long id : logs) {
-                    long offset = id == mark.logId() ? mark.offset() : 0;
-                    scanFile(source.journal(), id, offset, (version, position, record) ->
-                            visitor.visit(validateRecord(record)));
-                }
+                readInventory(source, readMarks(source.markName()), scan);
             }
         } catch (IOException | RuntimeException | Error failure) {
             failed(failure);
             throw failure;
         } finally {
             active = null;
+        }
+    }
+
+    private void readInventory(Source source, Marks mark, Journal.JournalScanner scan) throws IOException {
+        Path journal = source.journal();
+        var originalDirectory = inventoryDirectory(journal);
+        long minimum = mark.logId();
+        while (true) {
+            boolean first = minimum == mark.logId();
+            var logs = inventoryPage(journal, minimum, first);
+            requireSameInventoryDirectory(journal, originalDirectory);
+            if (first) {
+                requireMarkedJournal(mark.logId(), logs, journal);
+            }
+            for (long id : logs) {
+                scanFile(journal, id, id == mark.logId() ? mark.offset() : 0, scan);
+            }
+            if (logs.size() < INVENTORY_PAGE_SIZE || logs.get(logs.size() - 1) == Long.MAX_VALUE) {
+                requireSameInventoryDirectory(journal, originalDirectory);
+                return;
+            }
+            minimum = logs.get(logs.size() - 1) + 1;
+        }
+    }
+
+    /** The outer owner keeps the directory stable between passes. Canonical names make each ID unique. */
+    private List<Long> inventoryPage(Path journal, long minimum, boolean first) throws IOException {
+        var page = new TreeSet<Long>();
+        try (var read = files.openDirectory(journal)) {
+            for (Path path : read.listing) {
+                String name = path.getFileName().toString();
+                if (!name.endsWith(".txn")) {
+                    continue;
+                }
+                long id = journalId(path, name);
+                if (id < 0 || !name.equals(Long.toHexString(id) + ".txn")) {
+                    throw new IOException("Noncanonical historical Journal file name: " + path);
+                }
+                if (first) {
+                    fileIdentity(path);
+                }
+                if (id >= minimum) {
+                    if (page.size() == INVENTORY_PAGE_SIZE) {
+                        if (id >= page.last()) {
+                            continue;
+                        }
+                        page.pollLast();
+                    }
+                    page.add(id);
+                }
+            }
+        }
+        return List.copyOf(page);
+    }
+
+    private static BasicFileAttributes inventoryDirectory(Path journal) throws IOException {
+        var directory = Files.readAttributes(journal, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        if (!directory.isDirectory() || directory.fileKey() == null) {
+            throw new IOException("Historical Journal inventory requires an identifiable directory: " + journal);
+        }
+        return directory;
+    }
+
+    private static void requireSameInventoryDirectory(Path journal, BasicFileAttributes before) throws IOException {
+        var after = inventoryDirectory(journal);
+        if (!before.fileKey().equals(after.fileKey()) || !before.lastModifiedTime().equals(after.lastModifiedTime())) {
+            throw new IOException("Historical Journal directory changed during inventory: " + journal);
         }
     }
 
@@ -197,12 +263,7 @@ final class ClassicJournalRecovery {
                 if (!name.endsWith(".txn")) {
                     continue;
                 }
-                long id;
-                try {
-                    id = Long.parseLong(name.substring(0, name.length() - 4), 16);
-                } catch (NumberFormatException malformed) {
-                    throw new IOException("Invalid historical Journal file name: " + path, malformed);
-                }
+                long id = journalId(path, name);
                 fileIdentity(path);
                 if (id < 0 || !found.add(id)) {
                     throw new IOException("Ambiguous historical Journal identity: " + path);
@@ -210,6 +271,14 @@ final class ClassicJournalRecovery {
             }
         }
         return found.stream().filter(id -> id >= minimum).sorted().toList();
+    }
+
+    private static long journalId(Path path, String name) throws IOException {
+        try {
+            return Long.parseLong(name.substring(0, name.length() - 4), 16);
+        } catch (NumberFormatException malformed) {
+            throw new IOException("Invalid historical Journal file name: " + path, malformed);
+        }
     }
 
     static void requireMarkedJournal(long markedId, List<Long> logs, Path journal) throws IOException {

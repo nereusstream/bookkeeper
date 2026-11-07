@@ -2351,7 +2351,11 @@ owned关闭先拒绝通过原control引用继续取得子图，确认实际CONTR
 
 原文件和 lastMark 在真实多 Journal 用例中保持原路径和字节。另测缺失标记文件、后 Journal 坏 mark 或完整 payload、visitor 与首次 native close 双失败，以及跨 Journal 排空。新增五项通过，最终历史 Journal 13、历史 index 14、普通 Classic Journal 16、历史子图 3 共 46 项通过，Java Spotless 与 Checkstyle 通过。沿用原 acf9afec… native 库，归档位于 `/Users/liusinan/.codex/artifacts/unified-wal/classic-journal-inventory-evidence-f5ccf982`。
 
-ledger ID 按记录流式交付，每个 Journal 仍沿用随实际文件数增长的排序清单。整个 bootstrap 的内存上界、外层根排他、持久 CLASSIC claim、受控重放与 flush、BOOTSTRAP_COMPLETE、PREPARED 到 ENABLED、运行期 route 和批准 Linux 运行仍待验收。
+2026-11-07，基线 `57cfe72cd6`。离线 claim 清单按每页至多 256 个 Journal 文件 ID 枚举，保留原数字升序、每个 Journal 的最大有效 lastMark 与记录顺序。每页从实际目录重新选取下一批。首轮校验全部原生 `.txn` 文件为单链接常规文件，文件名须使用 Journal 写入端的规范小写十六进制。分页期间复核同一目录的 file key 和修改时间，目录变化使清单失败。后续文件仍逐个通过原 V6 扫描和身份复核。已交付的持久前缀仍按原 claim 身份续接，只有整次枚举成功才具备完整清单。
+
+旧实现一次收集全部 Journal ID。真实跨页夹具先观察到该行为，修复后两页各 256 条，以 `Long.MAX_VALUE` 结束。另在保留原 Journal 文件 inode 的情况下替换父目录，确认清单失败。五类 88 项回归通过，满页夹具加强后同类 16 项复验通过，Spotless 与 Checkstyle 通过。日志、命令与阶段源码绑定在 `/Users/liusinan/.codex/artifacts/unified-wal/classic-journal-inventory-paging-evidence-57cfe72c`。
+
+内存上界限定于 claim 清单的 Journal 文件 ID 工作集。实际 Classic replay 的文件清单、整图内存上界、受保护装配、严格 flush、BOOTSTRAP_COMPLETE、PREPARED 到 ENABLED、运行期 route 与批准 Linux 运行仍待验收。
 
 ## 离线 bootstrap 的 Classic claim 身份与结果续接
 

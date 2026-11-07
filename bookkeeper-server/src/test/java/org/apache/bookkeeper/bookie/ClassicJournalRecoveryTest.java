@@ -201,6 +201,87 @@ public class ClassicJournalRecoveryTest {
     }
 
     @Test(timeout = 30000)
+    public void journalInventoryVisitsSortedPagesAndDoesNotOverflowAtTheLastJournalId() throws Exception {
+        try (var f = new Fixture()) {
+            Files.write(f.journal.resolve("7fffffffffffffff.txn"),
+                    suffixImage(entryRecord(Long.MAX_VALUE, 0, 0, 0)));
+            for (long ledger = 511; ledger > 0; ledger--) {
+                Files.write(f.journal.resolve(Long.toHexString(ledger) + ".txn"),
+                        suffixImage(entryRecord(ledger, 0, 0, 0)));
+            }
+            var opened = new AtomicInteger();
+            var reader = f.inventory();
+            var visited = new ArrayList<Long>();
+            try (var files = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+                files.when(() -> Files.newDirectoryStream(f.journal)).thenAnswer(invocation -> {
+                    opened.incrementAndGet();
+                    return invocation.callRealMethod();
+                });
+                reader.readLedgerIds(ledger -> {
+                    assertEquals(visited.size() / 256 + 1, opened.get());
+                    if (ledger != Long.MAX_VALUE) {
+                        assertEquals(visited.size() + 1L, ledger);
+                    }
+                    visited.add(ledger);
+                });
+                assertEquals(512, visited.size());
+                assertEquals(Long.MAX_VALUE, visited.get(511).longValue());
+                assertEquals(2, opened.get());
+            } finally {
+                assertTrue(reader.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void journalInventoryCannotCompleteAfterItsDirectoryIsReplaced() throws Exception {
+        try (var f = new Fixture()) {
+            Path journalFile = f.journal.resolve("1.txn");
+            Files.write(journalFile, suffixImage(entryRecord(44, 0, 0, 0)));
+            Path original = f.journal.resolveSibling("original-current");
+            var reader = f.inventory();
+            try {
+                var failure = assertThrows(IOException.class, () -> reader.readLedgerIds(ledger -> {
+                    assertEquals(44, ledger);
+                    Files.move(f.journal, original);
+                    Files.createDirectory(f.journal);
+                    Files.move(original.resolve(journalFile.getFileName()), journalFile);
+                }));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("directory changed during inventory"));
+                assertSame(failure, reader.closeAndDrain().readFailure());
+            } finally {
+                assertTrue(reader.closeAndDrain().drained());
+                if (Files.exists(original)) {
+                    if (Files.exists(journalFile)) {
+                        Files.move(journalFile, original.resolve(journalFile.getFileName()));
+                    }
+                    Files.deleteIfExists(f.journal);
+                    Files.move(original, f.journal);
+                }
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
+    public void journalInventoryRejectsNoncanonicalJournalNamesBelowTheMark() throws Exception {
+        try (var f = new Fixture()) {
+            Files.write(f.ledgers.get(0).resolve("lastMark.0"), mark(10, JournalChannel.HEADER_SIZE));
+            Files.write(f.journal.resolve("a.txn"), suffixImage(entryRecord(44, 0, 0, 0)));
+            Files.write(f.journal.resolve("09.txn"), suffixImage(entryRecord(55, 0, 0, 0)));
+            var reader = f.inventory();
+            var visited = new ArrayList<Long>();
+            try {
+                var failure = assertThrows(IOException.class, () -> reader.readLedgerIds(visited::add));
+                assertTrue(failure.getMessage(), failure.getMessage().contains("Noncanonical historical Journal"));
+                assertTrue(visited.isEmpty());
+                assertSame(failure, reader.closeAndDrain().readFailure());
+            } finally {
+                assertTrue(reader.closeAndDrain().drained());
+            }
+        }
+    }
+
+    @Test(timeout = 30000)
     public void journalInventoryRejectsMissingMarkedFileEvenWithANewerFile() throws Exception {
         try (var f = new Fixture()) {
             Files.write(f.ledgers.get(0).resolve("lastMark"), mark(2, JournalChannel.HEADER_SIZE));
