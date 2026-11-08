@@ -181,6 +181,25 @@ public class ZKClassicBootstrapSourcesTest extends ProfileZKTestBase {
     }
 
     @Test
+    public void oneDeviceFixedManifestSourceIsOutsideTheClassicBridge() throws Exception {
+        var legacy = requirements.read(BOOKIE).observation().orElseThrow();
+        var identity = legacy.sourceIdentity();
+        first.multi(List.of(Op.delete(identity.nodePath() + "/birth-" + identity.birthId(), 0),
+                Op.delete(identity.nodePath(), 0)));
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                requirements.provisionManifest(compatibility, legacy.requiredDevices()));
+        var fixed = requirements.readManifest(BOOKIE).observation().orElseThrow();
+        var before = first.getData(identity.nodePath(), false, null);
+        var classic = owner(Duration.ofSeconds(5));
+        assertThrows(IllegalArgumentException.class, classic::read);
+        drained(classic);
+        assertEquals(fixed.sourceIdentity(),
+                requirements.readManifest(BOOKIE).observation().orElseThrow().sourceIdentity());
+        assertArrayEquals(before, first.getData(identity.nodePath(), false, null));
+        assertFalse(manager.isBookieRegistered(TARGET));
+    }
+
+    @Test
     public void nativeBirthRequirementsBirthAndCookieChangesAreColdReadInsteadOfUsingPriorValues() throws Exception {
         var owner = owner(Duration.ofSeconds(5));
         var original = owner.read();

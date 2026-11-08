@@ -58,6 +58,8 @@
 
 步骤 12 前置接通固定 Profile-only manifest 的多根访问观测。UWNS2 在实际 Unix 凭据下检查独立 CONTROL 和全部 Arena/INDEX，逐项核对原图所需的既有文件写权限。调用方超时或中断后，原 owner 保留 guard 和额度至实际探针排空。健康 CLOSED 冷启在原 guard 下复验完整 manifest、根和清单，再进入可写恢复。外部隔离签发、多 Arena owned readiness 和注册发布仍待接入。详见 [固定 Profile manifest 的多根访问观测与冷预检](startup-readiness/README.md#固定-profile-manifest-的多根访问观测与冷预检)。
 
+步骤 12 的后续前置接通完整多 Arena 本地恢复事实。显式 UWSQ schema 2 冻结完整设备声明。冷重开图在同一 deadline 下核对原 source birth、唯一 Bookie cut、全部 Arena 的实际恢复 cut 及 G1 游标。事实单独记录原生格式能力，外部 policy、owned startup 和注册发布仍待接入。详见 [绑定原 requirements 的完整多 Arena 恢复事实](startup-readiness/README.md#绑定原-requirements-的完整多-arena-恢复事实)。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。

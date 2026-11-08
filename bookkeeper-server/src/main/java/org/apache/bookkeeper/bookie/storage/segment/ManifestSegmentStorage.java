@@ -44,13 +44,21 @@ import java.util.concurrent.locks.LockSupport;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
+import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
+import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.common.profile.startup.LocalRecoveryFacts;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
+import org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts;
+import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
+import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.tls.SecurityException;
@@ -59,6 +67,33 @@ import org.apache.bookkeeper.tls.TLSContextFactory;
 /** Local Profile-only graph. The manifest fixes routing independently of execution placement. */
 final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHandler.DataOperations {
     record Capacity(long dataBytes, long controlBytes) { }
+
+    enum RecoveryFactsStatus { COMPLETE, SOURCE_UNVERIFIED, GRAPH_UNAVAILABLE, DELETE_INCOMPLETE, DEADLINE_EXPIRED }
+
+    record ArenaCut(UUID arena, long controlThrough) { }
+
+    /** Native format capability, independent of which checkpoint, if any, was used. */
+    record NativeFormats(int identityPage, int controlFrame, List<Integer> readableCheckpointImages,
+            int checkpointWriter) { }
+
+    record RecoveredFacts(ZKProfileStartupRequirementsStore.SourceIdentity source,
+            BookieCompatibilityFact commissioned, BookieId bookie, StorageIncarnation incarnation,
+            ManifestIdentity manifest, NativeFormats formats, long bookieControlThrough, List<ArenaCut> arenas,
+            LocalRecoveryFacts recovery, RollbackSafetyFacts rollback, ProfileDeleteDelivery.Head requiredDelete,
+            ProfileControlRequest.DeleteBinding appliedDelete) { }
+
+    record RecoveryFactsAttempt(RecoveryFactsStatus status, RecoveredFacts facts,
+            IsolatedSegmentStorage.DeleteCatchUpAttempt delete) {
+        CompletableFuture<Void> completion() {
+            return delete == null ? CompletableFuture.completedFuture(null) : delete.completion();
+        }
+    }
+
+    private record LocalCuts(long bookie, List<ArenaCut> arenas, RollbackSafetyFacts rollback,
+            ProfileControlRequest.DeleteBinding applied) { }
+
+    private static final Generation INITIAL_GENERATION = new Generation(1);
+    private static final NativeFormats NATIVE_FORMATS = new NativeFormats(2, 1, List.of(1, 2), 2);
 
     private static final class Member {
         final IsolatedSegmentConfig config;
@@ -104,6 +139,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     private ProfileReceiveBudget.ControlWorkingSet controlCredit;
     private boolean attempted;
     private boolean accepting;
+    private boolean recovered;
     private boolean stopping;
     private boolean freeing;
     private boolean cleanupAttempted;
@@ -327,6 +363,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                     if (stopping || !execution.accepting() || execution.hasFailedOwner()) {
                         throw new IOException("Manifest startup lost the complete local graph");
                     }
+                    recovered = existing;
                     accepting = true;
                 }
             } catch (IOException | InterruptedException | RuntimeException | Error failure) {
@@ -559,6 +596,144 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         }
     }
 
+    /** Pure scope validation available before any local graph or mutable file is opened. */
+    static void requireRecoverySourceScope(SegmentArenaManifest manifest,
+            ZKProfileStartupRequirementsStore.Observation source) throws IOException {
+        var commissioned = source.commissionedCompatibility();
+        var devices = source.requiredDevices();
+        if (!source.isManifestSource() || !manifest.classicRoots().isEmpty()
+                || !commissioned.bookieId().equals(manifest.bookieId().toString())
+                || !commissioned.storageIncarnation().equals(manifest.incarnation())
+                || !commissioned.deviceManifestIdentity().equals(manifest.identity())
+                || !devices.identity().equals(manifest.identity())
+                || !commissioned.deviceManifestGeneration().equals(INITIAL_GENERATION)
+                || !commissioned.localFormatGeneration().equals(INITIAL_GENERATION)
+                || !devices.generation().equals(INITIAL_GENERATION)
+                || !commissioned.effectiveDeleteAssignmentGeneration().equals(INITIAL_GENERATION)
+                || !source.compatibility().effectiveDeleteAssignmentGeneration().equals(INITIAL_GENERATION)
+                || devices.devices().size() != manifest.arenas().size()) {
+            throw new IOException("Required source differs from the fixed Profile manifest or G1 scope");
+        }
+        for (int i = 0; i < manifest.arenas().size(); i++) {
+            var required = devices.devices().get(i);
+            if (!required.deviceId().equals(manifest.arenas().get(i).id().toString())
+                    || !required.storageIncarnation().equals(manifest.incarnation())
+                    || !required.manifestGeneration().equals(INITIAL_GENERATION)) {
+                throw new IOException("Required device differs from the original complete Arena vector");
+            }
+        }
+    }
+
+    /** Cold, source-bound recovery observation. This produces no publication or runtime admission policy. */
+    RecoveryFactsAttempt recoveredStartupFacts(ZKProfileStartupRequirementsStore requirements,
+            ZKProfileStartupRequirementsStore.Observation source, ZKProfileReservationStore reservations,
+            ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout) {
+        Objects.requireNonNull(requirements, "requirements");
+        Objects.requireNonNull(source, "source");
+        IsolatedSegmentStorage.requireDeleteReplayArguments(reservations, metadata, domain, maxEvents, timeout,
+                this::coldRecoveryAvailable);
+        long deadline = System.nanoTime() + timeout.toNanos();
+        try {
+            requireRecoverySourceScope(manifest, source);
+        } catch (IOException mismatch) {
+            return new RecoveryFactsAttempt(RecoveryFactsStatus.SOURCE_UNVERIFIED, null, null);
+        }
+
+        LocalCuts before;
+        IsolatedSegmentStorage.DeleteReplayTarget replay;
+        synchronized (gate) {
+            try {
+                before = recoveredCuts();
+                replay = deleteReplayTarget();
+            } catch (IOException unavailable) {
+                return new RecoveryFactsAttempt(RecoveryFactsStatus.GRAPH_UNAVAILABLE, null, null);
+            }
+        }
+        if (!requirements.revalidateManifestSource(source, reservations, deadline)) {
+            return new RecoveryFactsAttempt(RecoveryFactsStatus.SOURCE_UNVERIFIED, null, null);
+        }
+        var target = new ProfileDeleteRecord.Target(manifest.bookieId().toString(), manifest.incarnation().value());
+        var retained = reservations.retainedG1DeleteReplay(metadata, target, deadline);
+        var deletion = IsolatedSegmentStorage.replayProfileDeletesUntil(replay, reservations, metadata, domain,
+                maxEvents, deadline, this::coldRecoveryAvailable, retained);
+        if (deletion.status() != IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP) {
+            return new RecoveryFactsAttempt(RecoveryFactsStatus.DELETE_INCOMPLETE, null, deletion);
+        }
+        if (!requirements.revalidateManifestSource(source, reservations, deadline)) {
+            return new RecoveryFactsAttempt(RecoveryFactsStatus.SOURCE_UNVERIFIED, null, deletion);
+        }
+        var head = deletion.required();
+        var fresh = retained.readHead();
+        if (fresh.status() != ProfileControlStore.ReadStatus.FOUND || !head.equals(fresh.head())) {
+            return new RecoveryFactsAttempt(RecoveryFactsStatus.DELETE_INCOMPLETE, null, deletion);
+        }
+        synchronized (gate) {
+            LocalCuts after;
+            try {
+                after = recoveredCuts();
+            } catch (IOException unavailable) {
+                return new RecoveryFactsAttempt(RecoveryFactsStatus.GRAPH_UNAVAILABLE, null, deletion);
+            }
+            if (!after.arenas().equals(before.arenas())) {
+                return new RecoveryFactsAttempt(RecoveryFactsStatus.GRAPH_UNAVAILABLE, null, deletion);
+            }
+            var progress = ProfileDeleteDelivery.Progress.fromEvent(after.applied());
+            if (progress == null ? head.committedThrough() != 0 : !progress.matches(head)) {
+                return new RecoveryFactsAttempt(RecoveryFactsStatus.DELETE_INCOMPLETE, null, deletion);
+            }
+            if (System.nanoTime() >= deadline) {
+                return new RecoveryFactsAttempt(RecoveryFactsStatus.DEADLINE_EXPIRED, null, deletion);
+            }
+            var status = LocalRecoveryFacts.RecoveryStatus.RECOVERED;
+            var recovery = new LocalRecoveryFacts(manifest.incarnation(), INITIAL_GENERATION, status, status, status,
+                    new Generation(head.assignmentGeneration()));
+            var facts = new RecoveredFacts(source.sourceIdentity(), source.commissionedCompatibility(),
+                    manifest.bookieId(), manifest.incarnation(), manifest.identity(), NATIVE_FORMATS, after.bookie(),
+                    after.arenas(), recovery, after.rollback(), head, after.applied());
+            return new RecoveryFactsAttempt(RecoveryFactsStatus.COMPLETE, facts, deletion);
+        }
+    }
+
+    private boolean coldRecoveryAvailable() {
+        synchronized (gate) {
+            return recovered && !listenerBorrowed && !freeing && isLive();
+        }
+    }
+
+    private LocalCuts recoveredCuts() throws IOException {
+        if (!coldRecoveryAvailable()) {
+            throw new IOException("Original cold recovered manifest graph is unavailable");
+        }
+        if (execution.onOwnerThread()) {
+            throw new IllegalArgumentException("Manifest recovery observation requires an external cold caller");
+        }
+        for (int worker = 0; worker < settings.workers(); worker++) {
+            if (execution.owner(worker).hasPendingCommands()) {
+                throw new IOException("Original manifest owner still has work");
+            }
+        }
+        bookieGuard.requireHeld(control.directory().resolve("bookie-control.lock"));
+        long cut = bookie.recoveryReadCut(control, bookieIdentity);
+        var arenas = new ArrayList<ArenaCut>(members.size());
+        for (Member member : members) {
+            member.dataGuard.requireHeld(member.config.directory().resolve("isolated.lock"));
+            member.controlGuard.requireHeld(member.config.directory().resolve("arena-control.lock"));
+            member.files.requireStartupRecovered(member.config, member.identity, member.arena, bookie);
+            member.index.requireStartupRecovered(member.config, member.identity);
+            arenas.add(new ArenaCut(member.identity.arenaId(),
+                    member.arena.requireStartupRecovered(member.config, member.identity)));
+        }
+        var applied = bookie.deleteAppliedCursor();
+        var controls = bookie.rollbackSafetyFacts();
+        if (controls.durabilityUnknown() || cut != bookie.recoveryReadCut(control, bookieIdentity) || !isLive()) {
+            throw new IOException("Shared recovered Bookie cut changed or is unresolved");
+        }
+        var rollback = new RollbackSafetyFacts(controls.localSuccess(), controls.routeOrInstall(),
+                controls.activation(), controls.fenceOrGrant(), controls.tombstone(),
+                arenas.stream().anyMatch(arena -> arena.controlThrough() >= 0), controls.durabilityUnknown());
+        return new LocalCuts(cut, List.copyOf(arenas), rollback, applied);
+    }
+
     /** Observe and apply the original retained G1 journal on the sole recovered Bookie control owner. */
     IsolatedSegmentStorage.DeleteCatchUpAttempt catchUpProfileDeletes(ZKProfileReservationStore reservations,
             ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout) {
@@ -571,14 +746,18 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                         IsolatedSegmentStorage.DeleteCatchUpStatus.UNAVAILABLE, null,
                         CompletableFuture.completedFuture(null));
             }
-            if (execution.onOwnerThread()) {
-                throw new IllegalArgumentException("Manifest delete replay requires an external cold caller");
-            }
-            local = new IsolatedSegmentStorage.DeleteReplayTarget(bookieIdentity, controls,
-                    () -> ProfileDeleteDelivery.Progress.fromEvent(profileDeleteProgress()), gate, this::isLive, true);
+            local = deleteReplayTarget();
         }
         return IsolatedSegmentStorage.replayProfileDeletes(local, reservations, metadata, domain, maxEvents, timeout,
                 this::controlAdmission);
+    }
+
+    private IsolatedSegmentStorage.DeleteReplayTarget deleteReplayTarget() {
+        if (execution.onOwnerThread()) {
+            throw new IllegalArgumentException("Manifest delete replay requires an external cold caller");
+        }
+        return new IsolatedSegmentStorage.DeleteReplayTarget(bookieIdentity, controls,
+                () -> ProfileDeleteDelivery.Progress.fromEvent(profileDeleteProgress()), gate, this::isLive, true);
     }
 
     ProfileControlRequest.DeleteBinding profileDeleteProgress() {

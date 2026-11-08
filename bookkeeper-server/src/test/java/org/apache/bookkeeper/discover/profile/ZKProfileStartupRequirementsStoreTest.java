@@ -26,6 +26,7 @@ import static org.junit.Assert.assertTrue;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -74,6 +75,16 @@ public class ZKProfileStartupRequirementsStoreTest extends ProfileZKTestBase {
         return new RequiredDeviceManifest(c.deviceManifestIdentity(), one,
                 List.of(new RequiredDeviceManifest.RequiredDeviceFact("arena", c.storageIncarnation(), one,
                         RequiredDeviceManifest.DeviceStatus.READY, 1, 1, 1, one, List.of(1))));
+    }
+
+    private static RequiredDeviceManifest manifestDevices(String... names) {
+        var old = devices();
+        var member = old.devices().get(0);
+        return new RequiredDeviceManifest(old.identity(), old.generation(), Arrays.stream(names)
+                .map(name -> new RequiredDeviceManifest.RequiredDeviceFact(name, member.storageIncarnation(),
+                        member.manifestGeneration(), member.status(), member.arenaFormatVersion(),
+                        member.controlFormatVersion(), member.checkpointFormatVersion(), member.superblockGeneration(),
+                        member.mandatoryFeatures())).toList());
     }
 
     private static ProfileReadinessRecord readiness() {
@@ -334,6 +345,123 @@ public class ZKProfileStartupRequirementsStoreTest extends ProfileZKTestBase {
             ByteBuffer.wrap(invalid).putInt(invalid.length - 4, (int) crc.getValue());
             assertThrows(IllegalArgumentException.class, () -> ProfileStartupRequirementsCodec.decode(invalid));
         }
+    }
+
+    @Test
+    public void fixedManifestSchemaIsExplicitAndKeepsTheNativeBirthAndBytes() throws Exception {
+        var source = store(first);
+        var required = manifestDevices("arena-a", "arena-b");
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                source.provisionManifest(compatibility(1), required));
+        var observed = source.readManifest(BOOKIE).observation().orElseThrow();
+        var identity = observed.sourceIdentity();
+        String path = identity.nodePath();
+        byte[] bytes = first.getData(path, false, null);
+        String marker = path + "/birth-" + identity.birthId();
+        var stat = first.exists(path, false);
+        assertEquals(stat.getCzxid(), first.exists(marker, false).getCzxid());
+        assertEquals(0, stat.getVersion());
+        assertEquals(2, ByteBuffer.wrap(bytes).getInt(4));
+        assertEquals(required, observed.requiredDevices());
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.ALREADY_APPLIED,
+                source.provisionManifest(compatibility(1), required));
+        assertEquals(identity, source.readManifest(BOOKIE).observation().orElseThrow().sourceIdentity());
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.UNAVAILABLE,
+                source.provision(compatibility(1), devices()));
+        assertEquals(ZKProfileStartupRequirementsStore.Status.CORRUPT, source.read(BOOKIE).status());
+        assertArrayEquals(bytes, first.getData(path, false, null));
+        assertEquals(stat, first.exists(path, false));
+
+        String otherRoot = ROOT + "-v1";
+        first.create(otherRoot, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var legacy = new ZKProfileStartupRequirementsStore(first, otherRoot, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                Duration.ofSeconds(5));
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                legacy.provision(compatibility(1), devices()));
+        var legacyIdentity = legacy.read(BOOKIE).observation().orElseThrow().sourceIdentity();
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.UNAVAILABLE,
+                legacy.provisionManifest(compatibility(1), devices()));
+        assertEquals(ZKProfileStartupRequirementsStore.Status.CORRUPT, legacy.readManifest(BOOKIE).status());
+        assertEquals(legacyIdentity, legacy.read(BOOKIE).observation().orElseThrow().sourceIdentity());
+
+        first.multi(List.of(Op.delete(marker, 0), Op.delete(path, 0)));
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                source.provisionManifest(compatibility(1), devices()));
+        var one = source.readManifest(BOOKIE).observation().orElseThrow();
+        assertTrue(one.isManifestSource());
+        assertThrows(IllegalArgumentException.class, () -> one.applyTo(null));
+        var publisher = new ZKProfileEphemeralRegistrationStore(first, ROOT + "-registration", BOOKIE,
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        assertThrows(IllegalArgumentException.class, () -> publisher.bindStartupRequirements(source, one));
+        first.delete(path + "/birth-" + one.sourceIdentity().birthId(), 0);
+        assertEquals(ZKProfileStartupRequirementsStore.Status.CORRUPT, source.readManifest(BOOKIE).status());
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.UNAVAILABLE,
+                source.provisionManifest(compatibility(1), devices()));
+    }
+
+    @Test
+    public void fixedManifestCodecRejectsNoncanonicalOrUnboundedDeviceVectors() {
+        var expected = new ProfileStartupRequirementsCodec.Envelope(2, new UUID(1, 2), compatibility(1),
+                manifestDevices("arena-a", "arena-b"));
+        byte[] encoded = ProfileStartupRequirementsCodec.encode(expected);
+        assertEquals(expected, ProfileStartupRequirementsCodec.decode(encoded));
+        byte[] legacy = ProfileStartupRequirementsCodec.encode(new ProfileStartupRequirementsCodec.Envelope(
+                expected.birth(), expected.compatibility(), manifestDevices("arena-a")));
+        int memberBytes = 4 + 7 + 16 + 8 + 3 * 4 + 8 + 2 * 4;
+        int countOffset = legacy.length - Integer.BYTES - memberBytes;
+        assertEquals(2, ByteBuffer.wrap(encoded).getInt(countOffset));
+        assertArrayEquals(Arrays.copyOfRange(legacy, countOffset, legacy.length - 4),
+                Arrays.copyOfRange(encoded, countOffset + 4, countOffset + 4 + memberBytes));
+        byte[] unknownSchema = encoded.clone();
+        ByteBuffer.wrap(unknownSchema).putInt(4, 3);
+        assertInvalidManifestCodec(unknownSchema);
+        for (int invalidCount : List.of(0, 65)) {
+            byte[] invalid = encoded.clone();
+            ByteBuffer.wrap(invalid).putInt(countOffset, invalidCount);
+            assertInvalidManifestCodec(invalid);
+        }
+        int firstLastCharacter = countOffset + 4 + 4 + 6;
+        byte[] duplicate = encoded.clone();
+        duplicate[firstLastCharacter + memberBytes] = 'a';
+        assertInvalidManifestCodec(duplicate);
+        byte[] unordered = encoded.clone();
+        unordered[firstLastCharacter] = 'b';
+        unordered[firstLastCharacter + memberBytes] = 'a';
+        assertInvalidManifestCodec(unordered);
+        assertInvalidManifestCodec(Arrays.copyOf(encoded, encoded.length + 1));
+        assertInvalidManifestCodec(Arrays.copyOf(encoded, encoded.length - 1));
+        assertInvalidManifestCodec(Arrays.copyOf(encoded, 32 * 1024 + 1));
+        var names = new ArrayList<String>();
+        for (int i = 0; i < 65; i++) {
+            names.add("arena-" + (100 + i));
+        }
+        var tooMany = new ProfileStartupRequirementsCodec.Envelope(2, expected.birth(), expected.compatibility(),
+                manifestDevices(names.toArray(String[]::new)));
+        assertThrows(IllegalArgumentException.class, () -> ProfileStartupRequirementsCodec.encode(tooMany));
+
+        var c = expected.compatibility();
+        var features = java.util.stream.IntStream.rangeClosed(1, 64).boxed().toList();
+        var maximumCompatibility = new BookieCompatibilityFact("b".repeat(BookieCompatibilityFact.MAX_BOOKIE_ID_BYTES),
+                c.storageIncarnation(), c.activeEngine(), c.profileWireMajor(), c.profileWireMinor(),
+                c.descriptorHashSuite(), features, c.deviceManifestIdentity(), c.deviceManifestGeneration(),
+                c.localFormatGeneration(), c.effectiveDeleteAssignmentGeneration(), c.minimumReaderVersion(),
+                c.minimumWriterVersion(), c.migrationState(), c.migrationGeneration());
+        var maximumDevices = new RequiredDeviceManifest(c.deviceManifestIdentity(), c.deviceManifestGeneration(),
+                names.subList(0, 64).stream().map(name -> new RequiredDeviceManifest.RequiredDeviceFact(
+                        name + "x".repeat(119), c.storageIncarnation(), c.deviceManifestGeneration(),
+                        RequiredDeviceManifest.DeviceStatus.READY, 1, 1, 1, new Generation(1), features)).toList());
+        var maximum = new ProfileStartupRequirementsCodec.Envelope(2, expected.birth(),
+                maximumCompatibility, maximumDevices);
+        byte[] maximumBytes = ProfileStartupRequirementsCodec.encode(maximum);
+        assertEquals(28_563, maximumBytes.length);
+        assertEquals(maximum, ProfileStartupRequirementsCodec.decode(maximumBytes));
+    }
+
+    private static void assertInvalidManifestCodec(byte[] bytes) {
+        CRC32C crc = new CRC32C();
+        crc.update(bytes, 0, bytes.length - Integer.BYTES);
+        ByteBuffer.wrap(bytes).putInt(bytes.length - Integer.BYTES, (int) crc.getValue());
+        assertThrows(IllegalArgumentException.class, () -> ProfileStartupRequirementsCodec.decode(bytes));
     }
 
     @Test

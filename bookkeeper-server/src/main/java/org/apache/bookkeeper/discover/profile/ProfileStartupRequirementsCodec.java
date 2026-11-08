@@ -33,27 +33,32 @@ import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 /** Bounded experimental declared startup requirements. Device READY here is a requirement, not an observation. */
 final class ProfileStartupRequirementsCodec {
     static final int MAX_BYTES = 4096;
+    static final int SINGLE_ARENA = 1;
+    static final int FIXED_MANIFEST = 2;
+    private static final int MAX_MANIFEST_BYTES = 32 * 1024;
+    private static final int MAX_ARENAS = 64;
     private static final int MAGIC = 0x55575351; // UWSQ
-    record Envelope(UUID birth, BookieCompatibilityFact compatibility, RequiredDeviceManifest devices) { }
+    record Envelope(int schema, UUID birth, BookieCompatibilityFact compatibility, RequiredDeviceManifest devices) {
+        Envelope(UUID birth, BookieCompatibilityFact compatibility, RequiredDeviceManifest devices) {
+            this(SINGLE_ARENA, birth, compatibility, devices);
+        }
+    }
 
     private ProfileStartupRequirementsCodec() { }
 
     static byte[] encode(Envelope envelope) {
         var c = envelope.compatibility();
         var devices = envelope.devices();
-        if (envelope.birth().equals(new UUID(0, 0)) || devices.devices().size() != 1
+        int count = devices.devices().size();
+        int schema = envelope.schema();
+        if (envelope.birth().equals(new UUID(0, 0))
+                || (schema == SINGLE_ARENA ? count != 1 : schema != FIXED_MANIFEST || count > MAX_ARENAS)
                 || !c.deviceManifestIdentity().equals(devices.identity())
                 || !c.deviceManifestGeneration().equals(devices.generation())) {
             throw new IllegalArgumentException("Invalid initial startup requirements");
         }
-        var d = devices.devices().get(0);
-        if (d.status() != RequiredDeviceManifest.DeviceStatus.READY
-                || !d.storageIncarnation().equals(c.storageIncarnation())
-                || !d.manifestGeneration().equals(devices.generation())) {
-            throw new IllegalArgumentException("Invalid expected device scope");
-        }
-        ByteBuffer out = ByteBuffer.allocate(MAX_BYTES);
-        out.putInt(MAGIC).putInt(1).putLong(envelope.birth().getMostSignificantBits())
+        ByteBuffer out = ByteBuffer.allocate(schema == SINGLE_ARENA ? MAX_BYTES : MAX_MANIFEST_BYTES);
+        out.putInt(MAGIC).putInt(schema).putLong(envelope.birth().getMostSignificantBits())
                 .putLong(envelope.birth().getLeastSignificantBits());
         text(out, c.bookieId(), BookieCompatibilityFact.MAX_BOOKIE_ID_BYTES);
         out.put(c.storageIncarnation().value()).putInt(c.activeEngine().wireValue())
@@ -68,11 +73,21 @@ final class ProfileStartupRequirementsCodec {
                     case QUARANTINED -> 3;
                     case UNKNOWN_MANDATORY -> 4;
                 }).putLong(c.migrationGeneration().value());
-        text(out, d.deviceId(), RequiredDeviceManifest.RequiredDeviceFact.MAX_DEVICE_ID_BYTES);
-        out.put(d.storageIncarnation().value()).putLong(d.manifestGeneration().value())
-                .putInt(d.arenaFormatVersion()).putInt(d.controlFormatVersion()).putInt(d.checkpointFormatVersion())
-                .putLong(d.superblockGeneration().value());
-        ids(out, d.mandatoryFeatures());
+        if (schema == FIXED_MANIFEST) {
+            out.putInt(count);
+        }
+        for (var d : devices.devices()) {
+            if (d.status() != RequiredDeviceManifest.DeviceStatus.READY
+                    || !d.storageIncarnation().equals(c.storageIncarnation())
+                    || !d.manifestGeneration().equals(devices.generation())) {
+                throw new IllegalArgumentException("Invalid expected device scope");
+            }
+            text(out, d.deviceId(), RequiredDeviceManifest.RequiredDeviceFact.MAX_DEVICE_ID_BYTES);
+            out.put(d.storageIncarnation().value()).putLong(d.manifestGeneration().value())
+                    .putInt(d.arenaFormatVersion()).putInt(d.controlFormatVersion()).putInt(d.checkpointFormatVersion())
+                    .putLong(d.superblockGeneration().value());
+            ids(out, d.mandatoryFeatures());
+        }
         CRC32C crc = new CRC32C();
         crc.update(out.array(), 0, out.position());
         out.putInt((int) crc.getValue());
@@ -80,16 +95,21 @@ final class ProfileStartupRequirementsCodec {
     }
 
     static Envelope decode(byte[] bytes) {
-        if (bytes == null || bytes.length < 184 || bytes.length > MAX_BYTES) {
+        if (bytes == null || bytes.length < 184 || bytes.length > MAX_MANIFEST_BYTES) {
             throw new IllegalArgumentException("Invalid startup requirements size");
+        }
+        ByteBuffer in = ByteBuffer.wrap(bytes);
+        int schema = in.getInt(4);
+        if (schema == SINGLE_ARENA ? bytes.length > MAX_BYTES : schema != FIXED_MANIFEST) {
+            throw new IllegalArgumentException("Unsupported startup requirements schema or length");
         }
         CRC32C crc = new CRC32C();
         crc.update(bytes, 0, bytes.length - Integer.BYTES);
-        ByteBuffer in = ByteBuffer.wrap(bytes);
         if (in.getInt(bytes.length - Integer.BYTES) != (int) crc.getValue()
-                || in.getInt() != MAGIC || in.getInt() != 1) {
+                || in.getInt() != MAGIC) {
             throw new IllegalArgumentException("Invalid startup requirements envelope");
         }
+        in.position(8);
         try {
             var birth = new UUID(in.getLong(), in.getLong());
             String bookie = text(in, BookieCompatibilityFact.MAX_BOOKIE_ID_BYTES);
@@ -118,13 +138,20 @@ final class ProfileStartupRequirementsCodec {
             var c = new BookieCompatibilityFact(bookie, incarnation, EngineProfile.SEGMENT_WAL_ENGINE, major, minor,
                     suite, features, manifest, deviceGeneration, formatGeneration, assignment, reader, writer,
                     state, migration);
-            var device = new RequiredDeviceManifest.RequiredDeviceFact(
-                    text(in, RequiredDeviceManifest.RequiredDeviceFact.MAX_DEVICE_ID_BYTES),
-                    new StorageIncarnation(fixed(in, StorageIncarnation.LENGTH)), new Generation(in.getLong()),
-                    RequiredDeviceManifest.DeviceStatus.READY, in.getInt(), in.getInt(), in.getInt(),
-                    new Generation(in.getLong()), ids(in));
-            var result = new Envelope(birth, c,
-                    new RequiredDeviceManifest(manifest, deviceGeneration, List.of(device)));
+            int count = schema == SINGLE_ARENA ? 1 : in.getInt();
+            if (count < 1 || count > MAX_ARENAS) {
+                throw new IllegalArgumentException("Invalid fixed manifest device count");
+            }
+            var devices = new ArrayList<RequiredDeviceManifest.RequiredDeviceFact>(count);
+            for (int i = 0; i < count; i++) {
+                devices.add(new RequiredDeviceManifest.RequiredDeviceFact(
+                        text(in, RequiredDeviceManifest.RequiredDeviceFact.MAX_DEVICE_ID_BYTES),
+                        new StorageIncarnation(fixed(in, StorageIncarnation.LENGTH)), new Generation(in.getLong()),
+                        RequiredDeviceManifest.DeviceStatus.READY, in.getInt(), in.getInt(), in.getInt(),
+                        new Generation(in.getLong()), ids(in)));
+            }
+            var result = new Envelope(schema, birth, c,
+                    new RequiredDeviceManifest(manifest, deviceGeneration, devices));
             if (in.remaining() != Integer.BYTES || !Arrays.equals(bytes, encode(result))) {
                 throw new IllegalArgumentException("Non-canonical startup requirements");
             }

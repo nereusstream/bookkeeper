@@ -6118,7 +6118,10 @@ public final class ZKProfileReservationStore {
 
     /** Missing is unknown authority, never an empty applicable set or a bootstrap instruction. */
     public DeleteHeadResult readDeleteHead(ProfileDeleteRecord.Target target) {
-        long deadline = System.nanoTime() + timeoutNanos;
+        return readDeleteHead(target, System.nanoTime() + timeoutNanos);
+    }
+
+    DeleteHeadResult readDeleteHead(ProfileDeleteRecord.Target target, long deadline) {
         try {
             if (reads.sync(root, deadline) != Code.OK.intValue()) {
                 return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);

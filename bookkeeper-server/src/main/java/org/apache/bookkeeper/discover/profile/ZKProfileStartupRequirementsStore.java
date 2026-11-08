@@ -255,6 +255,10 @@ public final class ZKProfileStartupRequirementsStore {
             return envelope.devices();
         }
 
+        public boolean isManifestSource() {
+            return envelope.schema() == ProfileStartupRequirementsCodec.FIXED_MANIFEST;
+        }
+
         /** Exact commissioned node bytes, before any current native delete-assignment overlay. */
         public SourceIdentity sourceIdentity() {
             return sourceIdentity;
@@ -267,6 +271,9 @@ public final class ZKProfileStartupRequirementsStore {
 
         /** Actual graph replaces recovery/device observations later; scope/credential proof is external. */
         public StartupReadinessInput applyTo(StartupReadinessInput requested) {
+            if (isManifestSource()) {
+                throw new IllegalArgumentException("Fixed manifest requirements have no startup publication adapter");
+            }
             return new StartupReadinessInput(compatibility(), requiredDevices(), requested.recoveryFacts(),
                     requested.newScopeFallback(), requested.rollbackSafetyFacts(),
                     requested.targetReadinessGeneration(),
@@ -325,15 +332,26 @@ public final class ZKProfileStartupRequirementsStore {
 
     /** Explicit create-only provisioning. An existing missing/corrupt record is never overwritten or repaired. */
     public ProvisionStatus provision(BookieCompatibilityFact compatibility, RequiredDeviceManifest devices) {
-        byte[] bytes = ProfileStartupRequirementsCodec.encode(
-                new ProfileStartupRequirementsCodec.Envelope(UUID.randomUUID(), compatibility, devices));
+        return provision(new ProfileStartupRequirementsCodec.Envelope(UUID.randomUUID(), compatibility, devices));
+    }
+
+    /** Explicit immutable source for a fixed manifest. Does not upgrade an existing requirements node. */
+    public ProvisionStatus provisionManifest(BookieCompatibilityFact compatibility, RequiredDeviceManifest devices) {
+        return provision(new ProfileStartupRequirementsCodec.Envelope(ProfileStartupRequirementsCodec.FIXED_MANIFEST,
+                UUID.randomUUID(), compatibility, devices));
+    }
+
+    private ProvisionStatus provision(ProfileStartupRequirementsCodec.Envelope requested) {
+        var compatibility = requested.compatibility();
+        byte[] bytes = ProfileStartupRequirementsCodec.encode(requested);
         long deadline = System.nanoTime() + timeoutNanos;
         boolean submitted = false;
         try {
-            var existing = snapshot(compatibility.bookieId(), deadline);
+            var existing = snapshot(compatibility.bookieId(), deadline, reads,
+                    requested.schema() == ProfileStartupRequirementsCodec.SINGLE_ARENA, requested.schema());
             if (existing != null) {
                 return existing.envelope.compatibility().equals(compatibility)
-                        && existing.requiredDevices().equals(devices)
+                        && existing.requiredDevices().equals(requested.devices())
                         ? ProvisionStatus.ALREADY_APPLIED : ProvisionStatus.CONFLICT;
             }
             var envelope = ProfileStartupRequirementsCodec.decode(bytes);
@@ -363,8 +381,17 @@ public final class ZKProfileStartupRequirementsStore {
     }
 
     public ReadResult read(String bookieId) {
+        return read(bookieId, ProfileStartupRequirementsCodec.SINGLE_ARENA);
+    }
+
+    /** Read an explicitly commissioned fixed manifest without offering the legacy publication bridge. */
+    public ReadResult readManifest(String bookieId) {
+        return read(bookieId, ProfileStartupRequirementsCodec.FIXED_MANIFEST);
+    }
+
+    private ReadResult read(String bookieId, int schema) {
         try {
-            var observed = snapshot(bookieId, System.nanoTime() + timeoutNanos);
+            var observed = snapshot(bookieId, System.nanoTime() + timeoutNanos, reads, true, schema);
             return new ReadResult(observed == null ? Status.NOT_FOUND : Status.FOUND, Optional.ofNullable(observed));
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
@@ -376,8 +403,31 @@ public final class ZKProfileStartupRequirementsStore {
         }
     }
 
+    /** Recheck only the original immutable source. Retained replay separately verifies the native G1 head. */
+    public boolean revalidateManifestSource(Observation expected, ZKProfileReservationStore reservations,
+            long deadline) {
+        synchronized (this) {
+            if (expected == null || expected.owner() != this || !expected.isManifestSource()
+                    || deleteAssignments == null || deleteAssignments != reservations) {
+                return false;
+            }
+        }
+        try {
+            var current = snapshot(expected.commissionedCompatibility().bookieId(), deadline, reads,
+                    false, ProfileStartupRequirementsCodec.FIXED_MANIFEST);
+            return current != null && current.sourceIdentity().equals(expected.sourceIdentity())
+                    && current.envelope.equals(expected.envelope) && System.nanoTime() < deadline;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException unavailable) {
+            return false;
+        }
+    }
+
     void requirePublisherClient(ZooKeeper client, Observation observed, String bookieId) {
-        if (zk != client || observed == null || !observed.compatibility().bookieId().equals(bookieId)) {
+        if (zk != client || observed == null || observed.isManifestSource()
+                || !observed.compatibility().bookieId().equals(bookieId)) {
             throw new IllegalArgumentException("Startup requirement source/client/scope mismatch");
         }
         // Also rejects an observation constructed by another instance, including one sharing this client.
@@ -425,6 +475,11 @@ public final class ZKProfileStartupRequirementsStore {
     private Observation snapshot(String bookieId, long deadline, ProfileZKReadClient reader,
             boolean effectiveAssignment)
             throws InterruptedException, TimeoutException {
+        return snapshot(bookieId, deadline, reader, effectiveAssignment, ProfileStartupRequirementsCodec.SINGLE_ARENA);
+    }
+
+    private Observation snapshot(String bookieId, long deadline, ProfileZKReadClient reader,
+            boolean effectiveAssignment, int schema) throws InterruptedException, TimeoutException {
         if (reader.sync(root, deadline) != Code.OK.intValue()) {
             throw new IllegalStateException("Startup requirement sync unavailable");
         }
@@ -436,6 +491,9 @@ public final class ZKProfileStartupRequirementsStore {
             throw new IllegalStateException("Startup requirement read unavailable");
         }
         var envelope = ProfileStartupRequirementsCodec.decode(node.bytes());
+        if (envelope.schema() != schema) {
+            throw new IllegalArgumentException("Startup requirement schema is outside this reader's scope");
+        }
         var stat = node.stat();
         if (stat == null || stat.getVersion() != 0 || stat.getEphemeralOwner() != 0
                 || !envelope.compatibility().bookieId().equals(bookieId)) {
@@ -456,7 +514,8 @@ public final class ZKProfileStartupRequirementsStore {
         var c = envelope.compatibility();
         if (effectiveAssignment && deleteAssignments != null) {
             var target = new ProfileDeleteRecord.Target(c.bookieId(), c.storageIncarnation().value());
-            var actual = deleteAssignments.readDeleteHead(target);
+            var actual = schema == ProfileStartupRequirementsCodec.FIXED_MANIFEST
+                    ? deleteAssignments.readDeleteHead(target, deadline) : deleteAssignments.readDeleteHead(target);
             if (actual.status() != org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.FOUND) {
                 if (actual.status()
                         == org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus.QUARANTINED) {

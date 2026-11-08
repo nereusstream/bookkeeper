@@ -59,6 +59,11 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
 
     /** Actual terminal, independent of this cold caller's timeout/interrupt; observer must not throw. */
     TransitionResult conditionalApply(Transition transition, Runnable actualTerminal) {
+        return conditionalApply(transition, actualTerminal, 0);
+    }
+
+    /** An enclosing cold observation can retain its original absolute deadline. */
+    TransitionResult conditionalApply(Transition transition, Runnable actualTerminal, long enclosingDeadline) {
         Objects.requireNonNull(actualTerminal, "actualTerminal");
         boolean accepted = false;
         try {
@@ -83,7 +88,10 @@ final class SegmentProfileInstallStore implements ProtectedProfileStateStore {
                     || !Arrays.equals(scope.targetStorageIncarnation(), identity.incarnation().value())) {
                 return result(Outcome.CONFLICT);
             }
-            long deadline = System.nanoTime() + timeoutNanos;
+            long deadline = enclosingDeadline == 0 ? System.nanoTime() + timeoutNanos : enclosingDeadline;
+            if (enclosingDeadline != 0 && System.nanoTime() >= deadline) {
+                return result(Outcome.TRANSIENT_RECONCILING);
+            }
             CompletableFuture<TransitionResult> reply = new CompletableFuture<>();
             SegmentBookieControlDriver.BatchCompletion completion = (results, failure) -> {
                 try {

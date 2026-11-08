@@ -984,6 +984,14 @@ final class SegmentDerivedIndex implements AutoCloseable {
         }
     }
 
+    synchronized void requireStartupRecovered(IsolatedSegmentConfig expected, SegmentFileHeader storage)
+            throws IOException {
+        requireOpen();
+        if (!config.sameStorageScope(expected) || !identity.equals(storage) || db == null) {
+            throw new IOException("Original derived index scope or recovery is unavailable");
+        }
+    }
+
     @Override
     public synchronized void close() {
         if (!closed) {

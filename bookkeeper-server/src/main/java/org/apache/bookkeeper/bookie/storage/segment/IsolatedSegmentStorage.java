@@ -607,14 +607,22 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     static DeleteCatchUpAttempt replayProfileDeletes(DeleteReplayTarget local, ZKProfileReservationStore reservations,
             ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout, BooleanSupplier live) {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        var identity = local.identity();
+        var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
+        var retained = local.retainedG1Only() ? reservations.retainedG1DeleteReplay(metadata, target, deadline) : null;
+        return replayProfileDeletesUntil(local, reservations, metadata, domain, maxEvents, deadline, live, retained);
+    }
+
+    static DeleteCatchUpAttempt replayProfileDeletesUntil(DeleteReplayTarget local,
+            ZKProfileReservationStore reservations, ProfileLedgerMetadataStore metadata, String domain, int maxEvents,
+            long deadline, BooleanSupplier live, ZKProfileReservationStore.RetainedG1DeleteReplay retained) {
         var identity = local.identity();
         var originalControls = local.controls();
         if (originalControls == null || originalControls.isOwnerThread()) {
             throw new IllegalArgumentException("Delete catch-up requires a bounded cold caller");
         }
-        long deadline = System.nanoTime() + timeout.toNanos();
         var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
-        var retained = local.retainedG1Only() ? reservations.retainedG1DeleteReplay(metadata, target, deadline) : null;
         ZKProfileReservationStore.DeleteSnapshotView snapshot = null;
         boolean snapshotLoaded = false;
         CompletableFuture<Void> actual = CompletableFuture.completedFuture(null);
@@ -719,7 +727,8 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 var terminal = actual;
                 var store = new SegmentProfileInstallStore(originalControls, identity, Duration.ofNanos(remaining));
                 var result = store.conditionalApply(new ProtectedProfileStateStore.Transition(
-                        request, authority.authority(), null), () -> terminal.complete(null));
+                        request, authority.authority(), null), () -> terminal.complete(null),
+                        retained == null ? 0 : deadline);
                 switch (result.outcome()) {
                     case APPLIED, ALREADY_APPLIED -> {
                         actual.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);

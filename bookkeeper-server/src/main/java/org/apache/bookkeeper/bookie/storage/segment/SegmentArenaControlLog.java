@@ -2428,12 +2428,13 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
-    synchronized void requireStartupRecovered(IsolatedSegmentConfig expected, SegmentFileHeader storage)
+    synchronized long requireStartupRecovered(IsolatedSegmentConfig expected, SegmentFileHeader storage)
             throws IOException {
         requireQuiescentControl(expected, storage);
         if (!sessionOpen || sessionOwner == null) {
             throw new IOException("Original recovered DATA session is not active");
         }
+        return appliedThrough;
     }
 
     synchronized long durableThrough() {

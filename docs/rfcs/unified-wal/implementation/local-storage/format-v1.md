@@ -30,7 +30,7 @@ DATA fileId 从0递增；superblock A/B 为 -1/-2，Bookie/Arena control 为 -3/
 
 ## 多 Arena 的显式 v2 身份基础
 
-2026-10-30按指定规划会话裁决新增`SegmentArenaManifest`和v2身份页编码/校验；原三参数`SegmentFileHeader`仍产生上述逐字节不变的v1。后续本地接线已使独立Bookie control及两个Arena的真实文件/恢复/index可共享此scope；实际storage/service运行与发布图仍拒绝v2，完整required设备启动、预算和维护仍OPEN，不能据局部owner或部分Arena发布readiness。
+2026-10-30 新增 `SegmentArenaManifest` 和 v2 身份页编解码。原三参数 `SegmentFileHeader` 保持上述 v1 字节。独立 Bookie control 和各 Arena 的真实 DATA、恢复及索引已接入固定 Profile-only 本地图。冷重开可观察完整成员的原生格式与恢复事实。完整 owned 启动、readiness 发布和长期维护仍待验收。 [完整多 Arena 恢复事实](../startup-readiness/README.md#绑定原-requirements-的完整多-arena-恢复事实)
 
 manifest采用big-endian的`UWAMAN01`、schema u32=1、incarnation[16]、BookieId、Arena数量、独立Bookie control root、全局shard数量、按UUID字符串升序的全部Arena及逐shard的Arena索引。文本为u32长度加严格UTF-8；BookieId最多255 bytes，root最多4096 bytes，Arena和shard各1～64，单个输入最多1 MiB。每Arena记录UUID、绝对规范root、DATA文件数及每文件容量，root之间及与control root不得嵌套/重叠，全部容量用checked arithmetic。映射明确保留每个全局shard，不依赖worker或当前可读设备。manifest identity为`SHA-256(ASCII("BookKeeper/SegmentArenaManifest/v1\0") || 完整编码)`，不含可调worker/CPU/NUMA/准入额度或运行期checkpoint，也不含反向引用该digest的身份页。
 

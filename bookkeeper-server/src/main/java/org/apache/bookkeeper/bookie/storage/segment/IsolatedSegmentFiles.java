@@ -971,6 +971,19 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         return !closed && config.sameStorageScope(otherConfig) && identity.equals(otherIdentity);
     }
 
+    synchronized void requireStartupRecovered(IsolatedSegmentConfig expected, SegmentFileHeader storage,
+            SegmentArenaControlLog arena, SegmentBookieControlLog bookie) throws IOException {
+        if (!matchesScope(expected, storage) || !sessionReady || sessionAuthority != arena || restartBookie != bookie
+                || startupInventory == null || reclamation != null || activeIo != 0 || pendingReservations != 0) {
+            throw new IOException("Original recovered DATA writer is unavailable or still has work");
+        }
+        for (boolean fileFailed : failed) {
+            if (fileFailed) {
+                throw new IOException("An original recovered DATA file failed");
+            }
+        }
+    }
+
     static void writeIdentity(Path path, ByteBuffer bytes, SegmentFileIo io) throws IOException {
         writeIdentity(path, bytes, io, null);
     }

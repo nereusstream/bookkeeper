@@ -391,6 +391,16 @@ operation 确认旧 worker 实际返回同 nonce 的结果，并清理原身份�
 
 在 macOS 上验证了 Python `lockf` 和 Java `FileChannel.tryLock` 对同一字节的真实互斥。最终 30 项定向测试全部通过，无失败、错误或跳过。真实进程用例覆盖 caller deadline、中断、collector 先退出、终态已写但 operation 仍持锁、operation 异常退出且无终态、错误 nonce 和锁 inode 替换。实际排空后原文件摘要一致，同 scope 可冷重开。缺终态用例由独立 JVM 保有原资源至实际退出。Spotless、Checkstyle 和 Python 编译通过。根 RAT 的 431 个路径均在父源码中。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-recovery-facts-baseline-08220046`，前一切片 40 项证据保留原源码绑定。Linux 和生产资格保持未验证。 [Java FileLock](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html) · [Python lockf](https://docs.python.org/3/library/fcntl.html#fcntl.lockf)
 
+## 绑定原 requirements 的完整多 Arena 恢复事实
+
+原 UWSQ schema 1 只声明一个 Arena。显式 `provisionManifest` 和 `readManifest` 使用同一 codec 和原 ZooKeeper record/marker 事务的 schema 2。schema 2 在原 compatibility 字段后加设备数，再存 1 至 64 项完整、有序、唯一的原设备声明及 CRC32C。总上限为 32 KiB，按现有字段上限计算的最大规范编码为 28,563 bytes。精确重试复用原 birth。同一节点禁止跨 schema 采用或覆写，原 schema 1 入口和 4096-byte 格式保留。即使只声明一个设备，schema 2 也不能进入原 Classic、`applyTo` 或 publisher 入口。此版本保存 commissioning 声明，设备状态 READY 本身无本地恢复意义。
+
+`ManifestSegmentStorage.requireRecoverySourceScope` 可在打开文件前核对声明的 Bookie、incarnation、完整 manifest 摘要、generation 和全部 Arena UUID。摘要继续使用原 manifest 字节，覆盖 DATA 几何及 shard 映射。`recoveredStartupFacts` 只观察健康冷重开、尚未借出 listener 的完整 Profile-only 图。它在短 gate 下确认原锁、实际 DATA 恢复和 session、索引及每个 owner 的空闲控制切点。原 requirements store 必须绑定同一个 reservations 实例，metadata 使用原 ZK mutation client。整次调用共用一个 deadline，首尾复核原不可变 envelope 和 native birth；其间用同一个 retained G1 reader 驱动和复核实际删除追赶。复核失败时拒绝完整事实，已合法持久化的本地 DELETE_APPLY 前缀继续生效。
+
+只有整体 `COMPLETE` 携带恢复事实。结果包含原 SourceIdentity、完整 manifest 摘要、唯一 Bookie 控制 cut、按 manifest 顺序排列的全部 Arena 控制 cut、LocalRecoveryFacts 和保守的 rollback facts，以及本次原生 G1 required head 和实际 Bookie 游标。已 commissioning 的零头允许空游标。LIMIT、UNKNOWN 和局部失效不生成完整事实。completion 副本保留原已接纳控制操作的真实终态语义。原生格式描述分别为 identity page 2、control frame 1、checkpoint image 读 1/2 和写 2。该描述不投影本次恢复选中的 image，也不声明 runtime reader/writer、feature 或发布资格。后继发布还需完整外部 policy 和原生事务重验。
+
+2026-11-09，基线 `40f21ad61caa60aab80349dccc3e8d78d9c3b94a`。两条真实 3/3/3 ledger 分别写入两个 Arena，经过 UWNS2 观测、实际排空及健康冷重开后均可读回。完整事实包含两项真实成员 cut。两条删除事件覆盖 LIMIT 后原前缀、实际 force 超时与 completion 副本取消、排空后游标 2 和精确重读无重复 force。真实 ZooKeeper 在另一实际 force 中以相同字节和 UUID 重建 requirements，原本地删除照常完成，旧出生观察无法生成完整事实。只跳过第二个 Arena 索引校验的变体在同一真实图上错误返回 COMPLETE。最终定向 50 项全部通过，零失败、错误或跳过。父 codec 对同一个有效的一成员 schema 2 向量拒绝，原 schema 1 的 226-byte 固定向量保持。Spotless 和 Checkstyle 通过，根 RAT 的 431 个路径与父报告一致。证据在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-recovered-facts-evidence-40f21ad6`。本轮未执行 Linux D2、掉电和生产资格验证。
+
 2026-10-12 [显式Profile listener与actual network drain](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)已复用original graph/pipeline并管理native parent/child、worker handoff与receive ledger终态；cold/frame/backing保留至实际归还，caller future不能伪造drain，borrowed graph/cold/loops由caller续接。actual mTLS/held cold/bind failure/queued accepted socket验证完成，46项Java/13配置模型得到预期结果、style通过，RAT443历史问题无新增。它是full startup owner的必要接线，尚未把required/physical proof、端口和registration组成default服务入口，生产Gate继续OPEN。
 
 ## 显式 Profile 服务启动与 owner 排空

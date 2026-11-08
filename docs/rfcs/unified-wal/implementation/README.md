@@ -415,6 +415,8 @@ DATA durable → hot locator → local result
 
 [固定 Profile manifest 的多根访问观测与冷预检](startup-readiness/README.md#固定-profile-manifest-的多根访问观测与冷预检) 将 UWNS2 实际 Unix 访问结果绑定到完整 CONTROL/Arena/INDEX、原 manifest 摘要和文件用途。健康 CLOSED 冷启在原锁下先复验观测。原 owner 通过受保护终态与同一原 operation 锁确认实际排空，即使结果等待已超时或中断。外部隔离签发、owned startup 和注册发布仍待接入。
 
+[绑定原 requirements 的完整多 Arena 恢复事实](startup-readiness/README.md#绑定原-requirements-的完整多-arena-恢复事实) 将 UWSQ schema 2 的完整声明与冷重开图的唯一 Bookie cut、全部 Arena cut 和已实际追赶的 G1 游标绑定。失败保留已持久化的原删除前缀，完整事实仅作为后续 owned startup 的输入。
+
 依赖步骤14，首版删除要求fenced-close。将步骤9的本地能力接入集群流程：
 
 ```text

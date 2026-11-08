@@ -2964,7 +2964,22 @@ public class SegmentProfileInitialSocketClientTest {
                 if (episode == null) {
                     storage.restart();
                 } else {
+                    var requirements = provisionManifestRequirements(fixture, manifest, "/manifest-read-required");
+                    ManifestSegmentStorage.requireRecoverySourceScope(manifest, requirements.source());
+                    var wrong = new SegmentArenaManifest(manifest.incarnation(), manifest.bookieId(),
+                            manifest.arenas(), manifest.controlDirectory(), List.of(0, 1));
+                    assertThrows(IOException.class,
+                            () -> ManifestSegmentStorage.requireRecoverySourceScope(wrong, requirements.source()));
+                    var wrongMember = provisionManifestRequirements(fixture, manifest, "/manifest-wrong-required",
+                            List.of(manifest.arenas().get(0).id(), new UUID(0, 99)));
+                    assertThrows(IOException.class, () -> ManifestSegmentStorage.requireRecoverySourceScope(
+                            manifest, wrongMember.source()));
                     storage.restart(observeRetainedManifest(episode, layout));
+                    var attempt = requirements.facts(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+                    assertRecoveredManifestFacts(storage, layout, requirements, attempt, 0);
+                    assertNull(attempt.facts().appliedDelete());
+                    assertFalse(Files.exists(manifest.controlDirectory().resolve("local-readiness")));
+                    assertNull(fixture.zk.exists("/socket-ledgers/available/socket0:3181", false));
                 }
                 var listener = listenManifest(fixture, storage, 0);
                 try (var peer = dataClient(fixture, 0, 8, Duration.ofSeconds(5))) {
@@ -3158,6 +3173,74 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private record ManifestRequirements(ZKProfileStartupRequirementsStore store,
+            ZKProfileStartupRequirementsStore.Observation source) {
+        ManifestSegmentStorage.RecoveryFactsAttempt facts(ManifestSegmentStorage storage, Fixture fixture,
+                ProfileLedgerMetadataStore metadata, int maxEvents, Duration timeout) {
+            return storage.recoveredStartupFacts(store, source, fixture.reservations, metadata, "ledger-profile",
+                    maxEvents, timeout);
+        }
+    }
+
+    private static ManifestRequirements provisionManifestRequirements(Fixture fixture, SegmentArenaManifest manifest,
+            String path) throws Exception {
+        return provisionManifestRequirements(fixture, manifest, path,
+                manifest.arenas().stream().map(SegmentArenaManifest.Arena::id).toList());
+    }
+
+    private static ManifestRequirements provisionManifestRequirements(Fixture fixture, SegmentArenaManifest manifest,
+            String path, List<UUID> arenas) throws Exception {
+        fixture.zk.create(path, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var store = new ZKProfileStartupRequirementsStore(fixture.zk, path, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                Duration.ofSeconds(5));
+        store.bindDeleteAssignments(fixture.reservations);
+        var target = new ProfileDeleteRecord.Target(manifest.bookieId().toString(), manifest.incarnation().value());
+        assertEquals(ProfileControlStore.ReadStatus.FOUND,
+                fixture.reservations.createInitialDeleteAssignment(target).status());
+        var one = new Generation(1);
+        // The commissioned values deliberately differ from the local native format observations.
+        var compatibility = new BookieCompatibilityFact(manifest.bookieId().toString(), manifest.incarnation(),
+                EngineProfile.SEGMENT_WAL_ENGINE, 1, 0, 1, List.of(73), manifest.identity(), one, one, one,
+                99, 98, BookieCompatibilityFact.MigrationState.FORMAT_READY, one);
+        var devices = new RequiredDeviceManifest(manifest.identity(), one, arenas.stream()
+                .map(id -> new RequiredDeviceManifest.RequiredDeviceFact(id.toString(), manifest.incarnation(), one,
+                        RequiredDeviceManifest.DeviceStatus.READY, 9, 8, 7, one, List.of(73))).toList());
+        assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                store.provisionManifest(compatibility, devices));
+        return new ManifestRequirements(store, store.readManifest(manifest.bookieId().toString())
+                .observation().orElseThrow());
+    }
+
+    private static void assertRecoveredManifestFacts(ManifestSegmentStorage storage, ManifestWireLayout layout,
+            ManifestRequirements requirements, ManifestSegmentStorage.RecoveryFactsAttempt attempt,
+            long through) throws Exception {
+        assertEquals(ManifestSegmentStorage.RecoveryFactsStatus.COMPLETE, attempt.status());
+        var facts = attempt.facts();
+        assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, attempt.delete().status());
+        assertTrue(attempt.completion().isDone());
+        assertEquals(requirements.source().sourceIdentity(), facts.source());
+        assertEquals(requirements.source().commissionedCompatibility(), facts.commissioned());
+        assertEquals(99, facts.commissioned().minimumReaderVersion());
+        assertEquals(layout.manifest().identity(), facts.manifest());
+        assertEquals(layout.manifest().incarnation(), facts.incarnation());
+        assertEquals(layout.manifest().bookieId(), facts.bookie());
+        assertEquals(new ManifestSegmentStorage.NativeFormats(2, 1, List.of(1, 2), 2), facts.formats());
+        assertEquals(layout.manifest().arenas().stream().map(SegmentArenaManifest.Arena::id).toList(),
+                facts.arenas().stream().map(ManifestSegmentStorage.ArenaCut::arena).toList());
+        for (int member = 0; member < facts.arenas().size(); member++) {
+            assertEquals(manifestMember(storage, member, "arena", SegmentArenaControlLog.class).appliedThrough(),
+                    facts.arenas().get(member).controlThrough());
+        }
+        assertEquals(manifestField(storage, "bookie", SegmentBookieControlLog.class).appliedThrough(),
+                facts.bookieControlThrough());
+        assertEquals(through, facts.requiredDelete().committedThrough());
+        assertEquals(storage.profileDeleteProgress(), facts.appliedDelete());
+        var recovered = LocalRecoveryFacts.RecoveryStatus.RECOVERED;
+        assertEquals(new LocalRecoveryFacts(layout.manifest().incarnation(), new Generation(1), recovered, recovered,
+                recovered, new Generation(1)), facts.recovery());
+        assertTrue(facts.rollback().arenaAuthority());
+    }
+
     @Test
     public void manifestRetainedDeleteReplayUsesOneDurableCursorAcrossArenas() throws Exception {
         try (var fixture = new Fixture(false, false, true, 3, 3, true, true); BookKeeper sdk = sdk(fixture)) {
@@ -3224,21 +3307,32 @@ public class SegmentProfileInitialSocketClientTest {
             var head = fixture.reservations.readDeleteHead(target).head();
             assertEquals(2, head.committedThrough());
             assertEquals(1, head.assignmentGeneration());
+            var requirements = provisionManifestRequirements(fixture, layout.manifest(), "/manifest-delete-required");
             try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
                 storage.restart();
+                var limited = requirements.facts(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+                assertEquals(ManifestSegmentStorage.RecoveryFactsStatus.DELETE_INCOMPLETE, limited.status());
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.LIMIT, limited.delete().status());
+                assertNull(limited.facts());
+                limited.completion().get(5, TimeUnit.SECONDS);
+                assertEquals(1, storage.profileDeleteProgress().sequence());
                 var listener = listenManifest(fixture, storage, 0);
                 try (var peer = dataClient(fixture, 0, 8, Duration.ofSeconds(5))) {
-                    var limited = replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5));
-                    assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.LIMIT, limited.status());
-                    limited.completion().get(5, TimeUnit.SECONDS);
-                    assertEquals(1, storage.profileDeleteProgress().sequence());
                     assertManifestDeletedRead(peer, first);
                     assertReadPayload(peer, second, bytes(16, 71));
-                    assertManifestDeleteForceWait(storage, fixture, metadata);
-                    assertManifestDeletedRead(peer, second);
                 } finally {
                     listener.closeAsync().get(10, TimeUnit.SECONDS);
                 }
+            }
+            try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
+                storage.restart();
+                assertManifestDeleteForceWait(storage, layout, requirements, fixture, metadata);
+                // The existing complete G1 cursor cannot stand in for a failed required Arena.
+                manifestMember(storage, 1, "index", SegmentDerivedIndex.class).close();
+                var refused = requirements.facts(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+                assertEquals(ManifestSegmentStorage.RecoveryFactsStatus.GRAPH_UNAVAILABLE, refused.status());
+                assertNull(refused.facts());
+                assertEquals(2, storage.profileDeleteProgress().sequence());
             }
             try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
                 storage.restart();
@@ -3268,6 +3362,83 @@ public class SegmentProfileInitialSocketClientTest {
             }
             assertNull(fixture.zk.exists("/socket-ledgers/available/socket0:3181", false));
             assertFalse(Files.exists(layout.manifest().controlDirectory().resolve("local-readiness")));
+        }
+    }
+
+    @Test
+    public void manifestRecoveredFactsRejectSameByteSourceRecreationDuringDeleteForce() throws Exception {
+        try (var fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var layout = replaceWithManifest(fixture, 1);
+            ProfileLedgerMetadataStore metadata;
+            try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
+                storage.startNew();
+                var listener = listenManifest(fixture, storage, 1);
+                try {
+                    metadata = preparePhysicalDelete(fixture, sdk, false);
+                    assertNull(storage.profileDeleteProgress());
+                } finally {
+                    listener.closeAsync().get(10, TimeUnit.SECONDS);
+                }
+            }
+            var requirements = provisionManifestRequirements(fixture, layout.manifest(), "/manifest-race-required");
+            var source = requirements.source().sourceIdentity();
+            String path = source.nodePath();
+            String marker = path + "/birth-" + source.birthId();
+            var original = fixture.zk.getData(path, false, null);
+            try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
+                storage.restart();
+                var entered = new CountDownLatch(1);
+                var release = new CountDownLatch(1);
+                var io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                    entered.countDown();
+                    await(release);
+                });
+                setManifestBookieIo(storage, io);
+                var waiting = CompletableFuture.supplyAsync(
+                        () -> requirements.facts(storage, fixture, metadata, 1, Duration.ofSeconds(10)), fixture.cold);
+                try {
+                    assertTrue(entered.await(5, TimeUnit.SECONDS));
+                    fixture.zk.multi(List.of(org.apache.zookeeper.Op.delete(marker, 0),
+                            org.apache.zookeeper.Op.delete(path, 0),
+                            org.apache.zookeeper.Op.create(path, original, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                                    CreateMode.PERSISTENT),
+                            org.apache.zookeeper.Op.create(marker, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                                    CreateMode.PERSISTENT)));
+                } finally {
+                    release.countDown();
+                }
+                var stale = waiting.get(8, TimeUnit.SECONDS);
+                assertEquals(ManifestSegmentStorage.RecoveryFactsStatus.SOURCE_UNVERIFIED, stale.status());
+                assertNull(stale.facts());
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, stale.delete().status());
+                assertTrue(stale.completion().isDone());
+                assertEquals(1, storage.profileDeleteProgress().sequence());
+
+                var current = new ManifestRequirements(requirements.store(), requirements.store()
+                        .readManifest(layout.manifest().bookieId().toString()).observation().orElseThrow());
+                var replacement = current.source().sourceIdentity();
+                assertNotEquals(source.birthZxid(), replacement.birthZxid());
+                assertEquals(source.birthId(), replacement.birthId());
+                assertArrayEquals(source.sha256(), replacement.sha256());
+                assertRecoveredManifestFacts(storage, layout, current,
+                        current.facts(storage, fixture, metadata, 1, Duration.ofSeconds(5)), 1);
+                assertEquals(1, io.forces);
+                var other = new ZKProfileStartupRequirementsStore(fixture.zk, "/manifest-race-required",
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                other.bindDeleteAssignments(fixture.reservations);
+                assertEquals(replacement, other.readManifest(layout.manifest().bookieId().toString())
+                        .observation().orElseThrow().sourceIdentity());
+                var foreign = new ManifestRequirements(other, current.source());
+                assertEquals(ManifestSegmentStorage.RecoveryFactsStatus.SOURCE_UNVERIFIED,
+                        foreign.facts(storage, fixture, metadata, 1, Duration.ofSeconds(5)).status());
+                fixture.zk.delete(marker, 0);
+                var unavailable = current.facts(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+                assertEquals(ManifestSegmentStorage.RecoveryFactsStatus.SOURCE_UNVERIFIED, unavailable.status());
+                assertNull(unavailable.facts());
+                assertNull(unavailable.delete());
+                assertFalse(Files.exists(layout.manifest().controlDirectory().resolve("local-readiness")));
+                assertNull(fixture.zk.exists("/socket-ledgers/available/socket1:3181", false));
+            }
         }
     }
 
@@ -3356,25 +3527,24 @@ public class SegmentProfileInitialSocketClientTest {
         return storage.catchUpProfileDeletes(fixture.reservations, metadata, "ledger-profile", maxEvents, timeout);
     }
 
-    private static void assertManifestDeleteForceWait(ManifestSegmentStorage storage, Fixture fixture,
-            ProfileLedgerMetadataStore metadata) throws Exception {
-        var bookie = manifestField(storage, "bookie", SegmentBookieControlLog.class);
+    private static void assertManifestDeleteForceWait(ManifestSegmentStorage storage, ManifestWireLayout layout,
+            ManifestRequirements requirements, Fixture fixture, ProfileLedgerMetadataStore metadata) throws Exception {
         var entered = new CountDownLatch(1);
         var release = new CountDownLatch(1);
         var io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
             entered.countDown();
             await(release);
         });
-        var field = SegmentBookieControlLog.class.getDeclaredField("io");
-        field.setAccessible(true);
-        field.set(bookie, io);
+        setManifestBookieIo(storage, io);
         var waiting = CompletableFuture.supplyAsync(
-                () -> replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(2)), fixture.cold);
-        IsolatedSegmentStorage.DeleteCatchUpAttempt timedOut;
+                () -> requirements.facts(storage, fixture, metadata, 1, Duration.ofSeconds(2)), fixture.cold);
+        ManifestSegmentStorage.RecoveryFactsAttempt timedOut;
         try {
             assertTrue(entered.await(5, TimeUnit.SECONDS));
             timedOut = waiting.get(5, TimeUnit.SECONDS);
-            assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.UNKNOWN, timedOut.status());
+            assertEquals(ManifestSegmentStorage.RecoveryFactsStatus.DELETE_INCOMPLETE, timedOut.status());
+            assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.UNKNOWN, timedOut.delete().status());
+            assertNull(timedOut.facts());
             assertEquals(1, storage.profileDeleteProgress().sequence());
             var copy = timedOut.completion();
             assertFalse(copy.isDone());
@@ -3382,16 +3552,24 @@ public class SegmentProfileInitialSocketClientTest {
             assertFalse(timedOut.completion().isDone());
             var group = manifestField(storage, "execution", SegmentExecutionGroup.class);
             assertTrue(group.owner(0).controlPending() > 0);
+            var budget = manifestField(storage, "budget", ProfileReceiveBudget.class);
+            assertEquals(layout.capacity().controlBytes(), budget.used(ProfileReceiveBudget.Lane.CONTROL));
         } finally {
             release.countDown();
         }
         timedOut.completion().get(5, TimeUnit.SECONDS);
         assertEquals(2, storage.profileDeleteProgress().sequence());
         assertEquals(1, io.forces);
-        var finished = replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5));
-        assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, finished.status());
-        assertEquals(2, finished.required().committedThrough());
+        var finished = requirements.facts(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+        assertRecoveredManifestFacts(storage, layout, requirements, finished, 2);
+        assertTrue(finished.facts().rollback().tombstone());
         assertEquals(1, io.forces);
+    }
+
+    private static void setManifestBookieIo(ManifestSegmentStorage storage, SegmentFileIo io) throws Exception {
+        var field = SegmentBookieControlLog.class.getDeclaredField("io");
+        field.setAccessible(true);
+        field.set(manifestField(storage, "bookie", SegmentBookieControlLog.class), io);
     }
 
     private static void assertManifestDeletedRead(ProfileNormalDataClient peer, ProfileLedgerContext ledger)
