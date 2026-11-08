@@ -1683,6 +1683,16 @@ python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" --config-
 
 2026-11-07，基线 `da58f7700d`。单条物理终结回执的逻辑删除、投递证据、先存回执、原生提交及提交后读回共用一个 store deadline。真实 ZooKeeper multi 已提交且回调已到，暂停提交线程跨越原期限后，旧代码在新期限内读回并报告该目标 `REUSABLE`。修复后首次观察保留 `PENDING`，目标结果为 `UNKNOWN`。新协调器凭同一原生回执的字节和 czxid 确认 `REUSABLE`。定向两类 16 项通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/physical-receipt-deadline-evidence-da58f770`。
 
+## 固定多 Arena 的 G1 删除追赶
+
+完整 `ManifestSegmentStorage` 启动后，显式 cold 调用从唯一 Bookie 控制日志的持久游标追赶原 G1。调用在一个绝对期限内读取原生 head、连续事件及确切删除 authority，固定本轮首次观测的流和出生。仅有原生核验过的已 commissioning 零 head 才能证明空切点。需要 snapshot 补缺或出现后继 assignment 时，本入口不完成追赶。每个 effect 沿原 Bookie driver 持久化 tombstone 和游标。`CAUGHT_UP` 表示本轮实际观察切点。
+
+真实 ZooKeeper 和 mTLS 用例关闭多 Arena 目标后发布两条 ledger 的逻辑删除。重开后 `maxEvents=1` 只落第一个 effect，返回 `LIMIT`，另一个 Arena 的原数据仍可读。实际第二个 Bookie force 挂起时返回 `UNKNOWN`，原游标、槽位和完成义务仍保留。调用者取消 completion 副本后，原 owner 在实际 force 返回后应用。后继调用核验当前 head 与原游标，无重复 force。再次冷启保留两个 tombstone 和全部原 DATA 字节及分配，两个 ledger 的全部物理终结回执仍缺失。提前返回 `CAUGHT_UP` 的反向版本在真实 force 挂起的用例失败。
+
+有原 snapshot 的缺事件、错 stream、同字节重建事件或流出生见证均被拒绝。另一 incarnation 的零 head 和已经关闭的真实 ZooKeeper 会话均不能提供原切点。真实 G2 handoff 夹具在同一共享 cold 分支下拒绝追赶，原单 Arena 路径继续应用 G2。另一个 Arena 的 force 失败或 owner 退出后，整图拒绝追赶和进度查询。上述拒绝路径不推进 Bookie cut。
+
+最终源码 51 项定向回归通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。父提交的 43 项启动基线独立归档。外部根隔离证明、owned startup、readiness 和注册发布是独立前置条件。源码哈希、原始结果和反向验证位于 `/Users/liusinan/.codex/artifacts/unified-wal/profile-manifest-startup-baseline-1341a9f2`。
+
 ## 删除流完整 snapshot 与真实启动追赶
 
 2026-10-12，父源码6bf92b4a3f之后新增ProfileDeleteSnapshot（UWDX root/UWDY page，schema1）：64 effects/page、最多64 pages，覆盖原stream最多4096个连续event；最多64个snapshot generations。root绑定完整target/incarnation、原stream/assignment generation、covered-through、snapshot generation/nonce及全部page SHA-256。每页保留原完整Event和original event/index creation zxid，顺序/数量/目标/stream/digest/CRC必须匹配；不能用digest-only root、缺page或cursor替代effect。该snapshot保存完整prefix，不在此阶段去重/裁剪历史或改变generation1的assignment。

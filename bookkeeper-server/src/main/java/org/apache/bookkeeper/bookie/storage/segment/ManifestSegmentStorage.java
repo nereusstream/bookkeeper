@@ -35,15 +35,20 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
+import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
+import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.tls.SecurityException;
@@ -446,6 +451,37 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 throw new IllegalStateException("Manifest storage is not accepting control requests");
             }
             return controls;
+        }
+    }
+
+    /** Observe and apply the original retained G1 journal on the sole recovered Bookie control owner. */
+    IsolatedSegmentStorage.DeleteCatchUpAttempt catchUpProfileDeletes(ZKProfileReservationStore reservations,
+            ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout) {
+        IsolatedSegmentStorage.requireDeleteReplayArguments(reservations, metadata, domain, maxEvents, timeout,
+                this::controlAdmission);
+        IsolatedSegmentStorage.DeleteReplayTarget local;
+        synchronized (gate) {
+            if (!isLive()) {
+                return new IsolatedSegmentStorage.DeleteCatchUpAttempt(
+                        IsolatedSegmentStorage.DeleteCatchUpStatus.UNAVAILABLE, null,
+                        CompletableFuture.completedFuture(null));
+            }
+            if (execution.onOwnerThread()) {
+                throw new IllegalArgumentException("Manifest delete replay requires an external cold caller");
+            }
+            local = new IsolatedSegmentStorage.DeleteReplayTarget(bookieIdentity, controls,
+                    () -> ProfileDeleteDelivery.Progress.fromEvent(profileDeleteProgress()), gate, this::isLive, true);
+        }
+        return IsolatedSegmentStorage.replayProfileDeletes(local, reservations, metadata, domain, maxEvents, timeout,
+                this::controlAdmission);
+    }
+
+    ProfileControlRequest.DeleteBinding profileDeleteProgress() {
+        synchronized (gate) {
+            if (!isLive()) {
+                throw new IllegalStateException("Complete manifest graph is not available for delete replay");
+            }
+            return bookie.deleteAppliedCursor();
         }
     }
 

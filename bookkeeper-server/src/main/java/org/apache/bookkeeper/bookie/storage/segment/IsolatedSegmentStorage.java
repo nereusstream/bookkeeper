@@ -40,6 +40,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
@@ -512,9 +513,14 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     private record EffectiveLocalAttempt(DeleteCatchUpStatus status, CompletableFuture<Void> completion) { }
 
+    record DeleteReplayTarget(SegmentFileHeader identity, SegmentBookieControlDriver controls,
+            Supplier<ProfileDeleteDelivery.Progress> progress, Object gate, BooleanSupplier available,
+            boolean retainedG1Only) { }
+
     /** Original native witness only; repeat both local stages after UNKNOWN without inventing an event. */
-    private EffectiveLocalAttempt applyEffectiveProfileDeletes(ZKProfileReservationStore reservations,
-            ProfileDeleteHandoff.Effective effective, long deadline, BooleanSupplier live) {
+    private static EffectiveLocalAttempt applyEffectiveProfileDeletes(DeleteReplayTarget local,
+            ZKProfileReservationStore reservations, ProfileDeleteHandoff.Effective effective, long deadline,
+            BooleanSupplier live) {
         CompletableFuture<Void> actual = CompletableFuture.completedFuture(null);
         var target = effective.plan().predecessor().target();
         try {
@@ -527,8 +533,8 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 }
                 var result = new CompletableFuture<SegmentBookieControlLog.Status>();
                 var terminal = new CompletableFuture<Void>();
-                synchronized (gate) {
-                    if (!accepting || closed || !live.getAsBoolean() || System.nanoTime() >= deadline) {
+                synchronized (local.gate()) {
+                    if (!local.available().getAsBoolean() || !live.getAsBoolean() || System.nanoTime() >= deadline) {
                         return new EffectiveLocalAttempt(DeleteCatchUpStatus.UNAVAILABLE, actual);
                     }
                     SegmentBookieControlDriver.LacCompletion completed = (value, failure) -> {
@@ -538,9 +544,10 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                             result.completeExceptionally(failure);
                         }
                     };
+                    var driver = local.controls();
                     boolean accepted = adopt
-                            ? controls.submitHandoff(effective.plan(), completed, () -> terminal.complete(null))
-                            : controls.submitEffectiveHandoff(effective, completed, () -> terminal.complete(null));
+                            ? driver.submitHandoff(effective.plan(), completed, () -> terminal.complete(null))
+                            : driver.submitEffectiveHandoff(effective, completed, () -> terminal.complete(null));
                     if (!accepted) {
                         return new EffectiveLocalAttempt(DeleteCatchUpStatus.UNAVAILABLE, actual);
                     }
@@ -573,6 +580,21 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     DeleteCatchUpAttempt catchUpProfileDeletes(ZKProfileReservationStore reservations,
             ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout, BooleanSupplier live) {
+        requireDeleteReplayArguments(reservations, metadata, domain, maxEvents, timeout, live);
+        DeleteReplayTarget local;
+        synchronized (gate) {
+            if (closed) {
+                return new DeleteCatchUpAttempt(DeleteCatchUpStatus.QUARANTINED, null,
+                        CompletableFuture.completedFuture(null));
+            }
+            local = new DeleteReplayTarget(identity, controls, this::profileDeleteAssignmentProgress, gate,
+                    () -> accepting && !closed, false);
+        }
+        return replayProfileDeletes(local, reservations, metadata, domain, maxEvents, timeout, live);
+    }
+
+    static void requireDeleteReplayArguments(ZKProfileReservationStore reservations,
+            ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout, BooleanSupplier live) {
         Objects.requireNonNull(live, "live");
         Objects.requireNonNull(reservations, "reservations");
         Objects.requireNonNull(metadata, "metadata");
@@ -581,19 +603,18 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 || timeout.compareTo(Duration.ofMinutes(1)) > 0) {
             throw new IllegalArgumentException("Delete catch-up requires a bounded cold caller");
         }
-        SegmentBookieControlDriver originalControls;
-        synchronized (gate) {
-            if (closed) {
-                return new DeleteCatchUpAttempt(DeleteCatchUpStatus.QUARANTINED, null,
-                        CompletableFuture.completedFuture(null));
-            }
-            originalControls = controls;
-        }
+    }
+
+    static DeleteCatchUpAttempt replayProfileDeletes(DeleteReplayTarget local, ZKProfileReservationStore reservations,
+            ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout, BooleanSupplier live) {
+        var identity = local.identity();
+        var originalControls = local.controls();
         if (originalControls == null || originalControls.isOwnerThread()) {
             throw new IllegalArgumentException("Delete catch-up requires a bounded cold caller");
         }
         long deadline = System.nanoTime() + timeout.toNanos();
         var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
+        var retained = local.retainedG1Only() ? reservations.retainedG1DeleteReplay(metadata, target, deadline) : null;
         ZKProfileReservationStore.DeleteSnapshotView snapshot = null;
         boolean snapshotLoaded = false;
         CompletableFuture<Void> actual = CompletableFuture.completedFuture(null);
@@ -601,14 +622,17 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         int applied = 0;
         try {
             while (live.getAsBoolean() && System.nanoTime() < deadline) {
-                var read = reservations.readDeleteHead(target);
+                var read = retained == null ? reservations.readDeleteHead(target) : retained.readHead();
                 if (read.status() != ProfileControlStore.ReadStatus.FOUND) {
                     return new DeleteCatchUpAttempt(read.status() == ProfileControlStore.ReadStatus.QUARANTINED
                             ? DeleteCatchUpStatus.QUARANTINED : DeleteCatchUpStatus.UNAVAILABLE,
                                 required, actual);
                 }
                 required = read.head();
-                var cursor = profileDeleteAssignmentProgress();
+                if (retained != null && required.assignmentGeneration() != 1) {
+                    return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNAVAILABLE, required, actual);
+                }
+                var cursor = local.progress().get();
                 if (cursor != null && (!Arrays.equals(cursor.streamId(), required.streamId())
                         || cursor.streamGeneration() != required.streamGeneration()
                         || cursor.assignmentGeneration() > required.assignmentGeneration())) {
@@ -629,7 +653,7 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                         return new DeleteCatchUpAttempt(DeleteCatchUpStatus.QUARANTINED, required, actual);
                     }
                     if (through == cut) {
-                        var appliedAssignment = applyEffectiveProfileDeletes(
+                        var appliedAssignment = applyEffectiveProfileDeletes(local,
                                 reservations, effective.value(), deadline, live);
                         actual = appliedAssignment.completion();
                         if (appliedAssignment.status() != DeleteCatchUpStatus.CAUGHT_UP) {
@@ -644,12 +668,20 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                     return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNAVAILABLE, required, actual);
                 }
                 if (through == required.committedThrough() && assignment == required.assignmentGeneration()) {
+                    if (retained != null) {
+                        synchronized (local.gate()) {
+                            if (!local.available().getAsBoolean() || !live.getAsBoolean()
+                                    || System.nanoTime() >= deadline) {
+                                return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNAVAILABLE, required, actual);
+                            }
+                        }
+                    }
                     return new DeleteCatchUpAttempt(DeleteCatchUpStatus.CAUGHT_UP, required, actual);
                 }
                 if (applied == maxEvents) {
                     return new DeleteCatchUpAttempt(DeleteCatchUpStatus.LIMIT, required, actual);
                 }
-                if (!snapshotLoaded) {
+                if (retained == null && !snapshotLoaded) {
                     var loaded = reservations.readDeleteSnapshot(target);
                     if (loaded.status() != ZKProfileReservationStore.DeleteSnapshotStatus.FOUND
                             && loaded.status() != ZKProfileReservationStore.DeleteSnapshotStatus.ABSENT) {
@@ -661,7 +693,9 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                     snapshot = loaded.snapshot();
                     snapshotLoaded = true;
                 }
-                var delivery = reservations.readDeleteDelivery(metadata, target, through + 1, snapshot);
+                var delivery = retained == null
+                        ? reservations.readDeleteDelivery(metadata, target, through + 1, snapshot)
+                        : retained.readDelivery(through + 1);
                 if (delivery.status() != ZKProfileReservationStore.DeliveryStatus.COMMITTED
                         || !Arrays.equals(delivery.event().streamId(), required.streamId())) {
                     return new DeleteCatchUpAttempt(delivery.status()
@@ -670,8 +704,9 @@ final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                             ? DeleteCatchUpStatus.UNAVAILABLE : DeleteCatchUpStatus.QUARANTINED, required, actual);
                 }
                 var request = delivery.event().deleteApply(domain);
-                var authority = reservations.deleteAuthorityReader(target.bookie(), target.incarnation(),
-                        metadata, snapshot).read(ProfileAuthorityKey.fromScope(request.scope()));
+                var key = ProfileAuthorityKey.fromScope(request.scope());
+                var authority = retained == null ? reservations.deleteAuthorityReader(target.bookie(),
+                        target.incarnation(), metadata, snapshot).read(key) : retained.readAuthority(key);
                 if (authority.authority() == null || !authority.authority().scope().equals(request.scope())) {
                     return new DeleteCatchUpAttempt(authority.status() == ProfileControlStore.ReadStatus.UNAVAILABLE
                             ? DeleteCatchUpStatus.UNAVAILABLE : DeleteCatchUpStatus.QUARANTINED, required, actual);

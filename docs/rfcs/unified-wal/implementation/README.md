@@ -411,6 +411,8 @@ DATA durable → hot locator → local result
 
 #### 15. 实现集群删除、离线投递与rejoin
 
+[固定多 Arena 的 G1 删除追赶](profile-wire/README.md#固定多-arena-的-g1-删除追赶) 以唯一 Bookie 控制日志持久化已应用游标。真实重开、限额、实际 force 超时和源证据拒绝已验证。该本地追赶入口返回当次观察切点，owned startup 和注册发布仍需完整根证明与后续接线。
+
 依赖步骤14，首版删除要求fenced-close。将步骤9的本地能力接入集群流程：
 
 ```text

@@ -6136,6 +6136,80 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    /** One cold observation of the retained G1 journal. No snapshot substitution or new read deadline. */
+    public final class RetainedG1DeleteReplay {
+        private final ProfileLedgerMetadataStore metadata;
+        private final ProfileDeleteRecord.Target target;
+        private final long deadline;
+        private DeleteHeadSnapshot initial;
+
+        private RetainedG1DeleteReplay(ProfileLedgerMetadataStore metadata, ProfileDeleteRecord.Target target,
+                long deadline) {
+            requireRecoveryClient(metadata);
+            this.metadata = metadata;
+            this.target = Objects.requireNonNull(target, "target");
+            this.deadline = deadline;
+        }
+
+        public DeleteHeadResult readHead() {
+            try {
+                if (reads.sync(root, deadline) != Code.OK.intValue()) {
+                    return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
+                }
+                var current = deleteHead(target, deadline);
+                if (current == null) {
+                    return new DeleteHeadResult(ReadStatus.NOT_FOUND, null);
+                }
+                if (initial == null) {
+                    initial = current;
+                } else {
+                    requireSameG1(initial, current.head(), current.node());
+                }
+                return new DeleteHeadResult(ReadStatus.FOUND, current.head());
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
+            } catch (TimeoutException | IllegalStateException unavailable) {
+                return new DeleteHeadResult(ReadStatus.UNAVAILABLE, null);
+            } catch (IllegalArgumentException invalid) {
+                return new DeleteHeadResult(ReadStatus.QUARANTINED, null);
+            }
+        }
+
+        public DeliveryResult readDelivery(long sequence) {
+            return readDeleteDelivery(metadata, target, sequence, null, deadline, null, requireG1());
+        }
+
+        public ProfileControlStore.ReadResult readAuthority(ProfileAuthorityKey key) {
+            return readDeleteAuthority(metadata, target, null, key, deadline, requireG1());
+        }
+
+        private DeleteHeadSnapshot requireG1() {
+            if (initial == null || initial.head().assignmentGeneration() != 1) {
+                throw new IllegalStateException("Retained delete replay requires an observed G1 head");
+            }
+            return initial;
+        }
+    }
+
+    public RetainedG1DeleteReplay retainedG1DeleteReplay(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Target target, long deadline) {
+        return new RetainedG1DeleteReplay(metadata, target, deadline);
+    }
+
+    private static void requireSameG1(DeleteHeadSnapshot initial, ProfileDeleteDelivery.Head current,
+            ProfileZKReadClient.Node node) {
+        var expected = initial.head();
+        if (expected.assignmentGeneration() != 1 || current.assignmentGeneration() != 1
+                || current.streamGeneration() != expected.streamGeneration()
+                || !current.target().equals(expected.target())
+                || !Arrays.equals(current.streamId(), expected.streamId())
+                || current.committedThrough() < expected.committedThrough()
+                || node.stat().getCzxid() != initial.node().stat().getCzxid()) {
+            throw new IllegalArgumentException("Original G1 delete stream changed during retained replay");
+        }
+    }
+
     void requireDeletePublisherClient(ZooKeeper client) {
         if (client != zk) {
             throw new IllegalArgumentException("Delete registration cut must use the publisher's exact ZK client");
@@ -6216,6 +6290,13 @@ public final class ZKProfileReservationStore {
     private DeliveryResult resolveDelivery(long ledger, ProfileDeleteRecord.Target target,
             ProfileZKReadClient.Node receipt, ProfileZKReadClient.Node headNode, ProfileDeleteDelivery.Head head,
             DeleteSnapshotView cached, long deadline) throws InterruptedException, TimeoutException {
+        return resolveDelivery(ledger, target, receipt, headNode, head, cached, deadline, false);
+    }
+
+    private DeliveryResult resolveDelivery(long ledger, ProfileDeleteRecord.Target target,
+            ProfileZKReadClient.Node receipt, ProfileZKReadClient.Node headNode, ProfileDeleteDelivery.Head head,
+            DeleteSnapshotView cached, long deadline, boolean retainedOnly)
+            throws InterruptedException, TimeoutException {
         requireFound(receipt);
         requirePersistent(receipt, true);
         var event = ProfileDeleteDelivery.Event.decode(receipt.bytes());
@@ -6225,6 +6306,9 @@ public final class ZKProfileReservationStore {
         }
         var actual = reads.get(deliveryPath(target) + "/event-" + Long.toHexString(event.sequence()), deadline);
         if (actual.code() == Code.NONODE.intValue()) {
+            if (retainedOnly) {
+                throw new IllegalArgumentException("Retained G1 delete replay cannot substitute a snapshot effect");
+            }
             var retained = snapshotEffect(target, event.sequence(), cached, deadline);
             if (retained.originalBirth() != receipt.stat().getCzxid()
                     || !Arrays.equals(retained.event().encode(), receipt.bytes())) {
@@ -6464,6 +6548,12 @@ public final class ZKProfileReservationStore {
 
     private DeliveryResult readDeleteDelivery(ProfileLedgerMetadataStore metadata, ProfileDeleteRecord.Target target,
             long sequence, DeleteSnapshotView cached, long deadline, List<Op> committedChecks) {
+        return readDeleteDelivery(metadata, target, sequence, cached, deadline, committedChecks, null);
+    }
+
+    private DeliveryResult readDeleteDelivery(ProfileLedgerMetadataStore metadata, ProfileDeleteRecord.Target target,
+            long sequence, DeleteSnapshotView cached, long deadline, List<Op> committedChecks,
+            DeleteHeadSnapshot retainedG1) {
         requireRecoveryClient(metadata);
         if (sequence < 1 || sequence > ProfileDeleteDelivery.MAX_EVENTS) {
             throw new IllegalArgumentException("Invalid bounded delivery sequence");
@@ -6477,6 +6567,9 @@ public final class ZKProfileReservationStore {
             requireFound(node);
             var head = ProfileDeleteDelivery.Head.decode(node.bytes());
             verifyDeliveryHead(node, head, name, deadline);
+            if (retainedG1 != null) {
+                requireSameG1(retainedG1, head, node);
+            }
             if (!head.target().equals(target)) {
                 return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
             }
@@ -6486,6 +6579,9 @@ public final class ZKProfileReservationStore {
             var eventNode = reads.get(name + "/event-" + Long.toHexString(sequence), deadline);
             ProfileDeleteDelivery.Event event;
             if (eventNode.code() == Code.NONODE.intValue()) {
+                if (retainedG1 != null) {
+                    return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
+                }
                 event = snapshotEffect(target, sequence, cached, deadline).event();
             } else {
                 requireFound(eventNode);
@@ -6497,7 +6593,8 @@ public final class ZKProfileReservationStore {
             }
             var receipt = reads.get(path(event.ledger().ledgerId()) + "/delete-delivery-" + deliveryTargetKey(target),
                     deadline);
-            var resolved = resolveDelivery(event.ledger().ledgerId(), target, receipt, node, head, cached, deadline);
+            var resolved = resolveDelivery(event.ledger().ledgerId(), target, receipt, node, head, cached, deadline,
+                    retainedG1 != null);
             if (!event.equals(resolved.event())) {
                 return new DeliveryResult(DeliveryStatus.QUARANTINED, null);
             }
@@ -6713,49 +6810,54 @@ public final class ZKProfileReservationStore {
             ProfileLedgerMetadataStore metadata, DeleteSnapshotView cached) {
         var target = new ProfileDeleteRecord.Target(localBookie, storageIncarnation);
         requireRecoveryClient(metadata);
-        return key -> {
-            if (key.purpose() != ProfileAuthorityPurpose.TOMBSTONE_OR_DELETE) {
+        return key -> readDeleteAuthority(metadata, target, cached, key, System.nanoTime() + timeoutNanos, null);
+    }
+
+    private ProfileControlStore.ReadResult readDeleteAuthority(ProfileLedgerMetadataStore metadata,
+            ProfileDeleteRecord.Target target, DeleteSnapshotView cached, ProfileAuthorityKey key, long deadline,
+            DeleteHeadSnapshot retainedG1) {
+        if (key.purpose() != ProfileAuthorityPurpose.TOMBSTONE_OR_DELETE) {
+            return ProfileControlStore.ReadResult.notFound();
+        }
+        try {
+            var state = read(key.ledgerId(), deadline);
+            if (state.snapshot() == null) {
+                return new ProfileControlStore.ReadResult(state.status(), null);
+            }
+            String domain = state.snapshot().reservation().installs().get(0).authorityDomain();
+            if (!domain.equals(key.authorityDomain())) {
                 return ProfileControlStore.ReadResult.notFound();
             }
-            long deadline = System.nanoTime() + timeoutNanos;
-            try {
-                var state = read(key.ledgerId(), deadline);
-                if (state.snapshot() == null) {
-                    return new ProfileControlStore.ReadResult(state.status(), null);
-                }
-                String domain = state.snapshot().reservation().installs().get(0).authorityDomain();
-                if (!domain.equals(key.authorityDomain())) {
-                    return ProfileControlStore.ReadResult.notFound();
-                }
-                var receipt = reads.get(path(key.ledgerId()) + "/delete-delivery-" + deliveryTargetKey(target),
-                        deadline);
-                if (receipt.code() == Code.NONODE.intValue()) {
-                    return ProfileControlStore.ReadResult.notFound();
-                }
-                requireFound(receipt);
-                var candidate = ProfileDeleteDelivery.Event.decode(receipt.bytes());
-                var committed = readDeleteDelivery(metadata, target, candidate.sequence(), cached);
-                if (committed.status() != DeliveryStatus.COMMITTED) {
-                    return committed.status() == DeliveryStatus.QUARANTINED
-                            ? ProfileControlStore.ReadResult.quarantined()
-                            : ProfileControlStore.ReadResult.unavailable();
-                }
-                var scope = committed.event().deleteApply(domain).scope();
-                if (!candidate.equals(committed.event()) || !ProfileAuthorityKey.fromScope(scope).equals(key)) {
-                    return ProfileControlStore.ReadResult.quarantined();
-                }
-                return ProfileControlStore.ReadResult.found(new CommittedProfileAuthority(scope,
-                        CommittedProfileAuthority.State.DELETE_AUTHORIZED, EngineProfile.SEGMENT_WAL_ENGINE,
-                        receipt.stat().getCzxid(), true));
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                return ProfileControlStore.ReadResult.unavailable();
-            } catch (TimeoutException | IllegalStateException unavailable) {
-                return ProfileControlStore.ReadResult.unavailable();
-            } catch (IllegalArgumentException invalid) {
+            var receipt = reads.get(path(key.ledgerId()) + "/delete-delivery-" + deliveryTargetKey(target),
+                    deadline);
+            if (receipt.code() == Code.NONODE.intValue()) {
+                return ProfileControlStore.ReadResult.notFound();
+            }
+            requireFound(receipt);
+            var candidate = ProfileDeleteDelivery.Event.decode(receipt.bytes());
+            var committed = retainedG1 == null
+                    ? readDeleteDelivery(metadata, target, candidate.sequence(), cached)
+                    : readDeleteDelivery(metadata, target, candidate.sequence(), null, deadline, null, retainedG1);
+            if (committed.status() != DeliveryStatus.COMMITTED) {
+                return committed.status() == DeliveryStatus.QUARANTINED
+                        ? ProfileControlStore.ReadResult.quarantined()
+                        : ProfileControlStore.ReadResult.unavailable();
+            }
+            var scope = committed.event().deleteApply(domain).scope();
+            if (!candidate.equals(committed.event()) || !ProfileAuthorityKey.fromScope(scope).equals(key)) {
                 return ProfileControlStore.ReadResult.quarantined();
             }
-        };
+            return ProfileControlStore.ReadResult.found(new CommittedProfileAuthority(scope,
+                    CommittedProfileAuthority.State.DELETE_AUTHORIZED, EngineProfile.SEGMENT_WAL_ENGINE,
+                    receipt.stat().getCzxid(), true));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return ProfileControlStore.ReadResult.unavailable();
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return ProfileControlStore.ReadResult.unavailable();
+        } catch (IllegalArgumentException invalid) {
+            return ProfileControlStore.ReadResult.quarantined();
+        }
     }
 
     /** Admission cut only. It retains published targets; it neither fences Bookies nor deletes/GCs any data. */

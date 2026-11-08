@@ -99,6 +99,7 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlResult;
 import org.apache.bookkeeper.common.profile.control.ProfileControlResult.Outcome;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
+import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
@@ -128,6 +129,7 @@ import org.apache.bookkeeper.discover.BookieRouteBinding;
 import org.apache.bookkeeper.discover.ZKRegistrationManager;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator;
+import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeletePhysicalReceipt;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileInitialControlClient;
@@ -2960,6 +2962,249 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    @Test
+    public void manifestRetainedDeleteReplayUsesOneDurableCursorAcrossArenas() throws Exception {
+        try (var fixture = new Fixture(false, false, true, 3, 3, true, true); BookKeeper sdk = sdk(fixture)) {
+            var layout = replaceWithManifest(fixture, 0);
+            var identity = fixture.identities.get(0);
+            var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            ProfileLedgerContext first;
+            ProfileLedgerContext second;
+            try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.UNAVAILABLE,
+                        replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5)).status());
+                storage.startNew();
+                var wrongIncarnation = new ProfileDeleteRecord.Target(identity.bookieId().toString(), bytes(16, 95));
+                assertEquals(ProfileControlStore.ReadStatus.FOUND,
+                        fixture.reservations.createInitialDeleteAssignment(wrongIncarnation).status());
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.UNAVAILABLE,
+                        replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5)).status());
+                assertEquals(ProfileControlStore.ReadStatus.FOUND,
+                        fixture.reservations.createInitialDeleteAssignment(target).status());
+                var zero = replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, zero.status());
+                assertEquals(0, zero.required().committedThrough());
+                assertNull(storage.profileDeleteProgress());
+                var listener = listenManifest(fixture, storage, 0);
+                try {
+                    fixture.connectAll(Duration.ofSeconds(5));
+                    var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                    for (int node = 0; node < 3; node++) {
+                        data.put(fixture.identities.get(node).bookieId(),
+                                dataClient(fixture, node, 8, Duration.ofSeconds(5)));
+                    }
+                    var writer = openHandoffTestLedger(fixture, sdk, metadata, 44, data);
+                    first = fixture.additionalReadContext;
+                    fixture.retainedReadContexts = Set.of(first);
+                    assertEquals(0, sdkAdd(writer, bytes(16, 70)).get(5, TimeUnit.SECONDS).longValue());
+                    writer.closeAsync().get(30, TimeUnit.SECONDS);
+                    var other = openHandoffTestLedger(fixture, sdk, metadata, 45, data);
+                    second = fixture.additionalReadContext;
+                    assertEquals(0, sdkAdd(other, bytes(16, 71)).get(5, TimeUnit.SECONDS).longValue());
+                    other.closeAsync().get(30, TimeUnit.SECONDS);
+                    assertManifestDataPlacement(storage, layout.manifest(), layout.runtime(), first, second);
+                } finally {
+                    listener.closeAsync().get(10, TimeUnit.SECONDS);
+                }
+            }
+            var paths = new ArrayList<Path>();
+            var before = new ArrayList<byte[]>();
+            for (int member = 0; member < 2; member++) {
+                var path = IsolatedSegmentFiles.dataPath(layout.manifest().arenaConfig(layout.runtime(), member), 0);
+                paths.add(path);
+                before.add(Files.readAllBytes(path));
+            }
+            var deletion = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+            var obligations = new ArrayList<ProfileDeleteRecord.Manifest>();
+            for (long ledger : new long[] {44, 45}) {
+                var deleted = deletion.deleteLedgerAsync(ledger, bytes(16, (int) ledger), sdk.getClientCtx(),
+                        Duration.ofSeconds(30)).get(30, TimeUnit.SECONDS);
+                assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, deleted.status());
+                assertEquals(3, deleted.manifest().targets().size());
+                obligations.add(deleted.manifest());
+            }
+            var head = fixture.reservations.readDeleteHead(target).head();
+            assertEquals(2, head.committedThrough());
+            assertEquals(1, head.assignmentGeneration());
+            try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
+                storage.restart();
+                var listener = listenManifest(fixture, storage, 0);
+                try (var peer = dataClient(fixture, 0, 8, Duration.ofSeconds(5))) {
+                    var limited = replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+                    assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.LIMIT, limited.status());
+                    limited.completion().get(5, TimeUnit.SECONDS);
+                    assertEquals(1, storage.profileDeleteProgress().sequence());
+                    assertManifestDeletedRead(peer, first);
+                    assertReadPayload(peer, second, bytes(16, 71));
+                    assertManifestDeleteForceWait(storage, fixture, metadata);
+                    assertManifestDeletedRead(peer, second);
+                } finally {
+                    listener.closeAsync().get(10, TimeUnit.SECONDS);
+                }
+            }
+            try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
+                storage.restart();
+                var bookie = manifestField(storage, "bookie", SegmentBookieControlLog.class);
+                assertEquals(2, storage.profileDeleteProgress().sequence());
+                assertTrue(bookie.hasTerminalTombstone(first));
+                assertTrue(bookie.hasTerminalTombstone(second));
+                var listener = listenManifest(fixture, storage, 0);
+                try (var peer = dataClient(fixture, 0, 8, Duration.ofSeconds(5))) {
+                    assertManifestDeletedRead(peer, first);
+                    assertManifestDeletedRead(peer, second);
+                } finally {
+                    listener.closeAsync().get(10, TimeUnit.SECONDS);
+                }
+            }
+            for (int member = 0; member < 2; member++) {
+                assertArrayEquals(before.get(member), Files.readAllBytes(paths.get(member)));
+                assertEquals(1, SegmentArenaControlLog.inspect(layout.manifest().arenaConfig(layout.runtime(), member),
+                        SegmentFileHeader.forArena(layout.manifest(), member), layout.limits().controlLogBytes())
+                        .currentAllocations());
+            }
+            for (var manifest : obligations) {
+                for (var obligated : manifest.targets()) {
+                    assertEquals(ZKProfileReservationStore.PhysicalReceiptStatus.ABSENT,
+                            fixture.reservations.readPhysicalDeleteReceipt(metadata, manifest, obligated).status());
+                }
+            }
+            assertNull(fixture.zk.exists("/socket-ledgers/available/socket0:3181", false));
+            assertFalse(Files.exists(layout.manifest().controlDirectory().resolve("local-readiness")));
+        }
+    }
+
+    @Test
+    public void manifestRetainedDeleteReplayRefusesSnapshotSubstitutionAndRecreatedBirth() throws Exception {
+        try (var fixture = new Fixture(false, false, true, 3, 2, true, true); BookKeeper sdk = sdk(fixture)) {
+            var layout = replaceWithManifest(fixture, 1);
+            var identity = fixture.identities.get(1);
+            var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(), identity.incarnation().value());
+            ProfileLedgerMetadataStore metadata;
+            try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
+                storage.startNew();
+                var listener = listenManifest(fixture, storage, 1);
+                try {
+                    // The helper publishes the real cohort deletion and applies only socket0's local effect.
+                    metadata = preparePhysicalDelete(fixture, sdk, false);
+                    assertNull(storage.profileDeleteProgress());
+                } finally {
+                    listener.closeAsync().get(10, TimeUnit.SECONDS);
+                }
+            }
+            var snapshot = fixture.reservations.publishDeleteSnapshot(metadata, target, 8, Duration.ofSeconds(10),
+                    () -> true);
+            assertEquals(ZKProfileReservationStore.DeleteSnapshotStatus.FOUND, snapshot.status());
+            String stream = actualDeleteStreamPath(fixture, target);
+            String event = stream + "/event-1";
+            byte[] eventBytes = fixture.zk.getData(event, false, null);
+            fixture.zk.delete(event, 0);
+            assertEquals(ZKProfileReservationStore.DeliveryStatus.COMMITTED,
+                    fixture.reservations.readDeleteDelivery(metadata, target, 1).status());
+            try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
+                storage.restart();
+                var bookie = manifestField(storage, "bookie", SegmentBookieControlLog.class);
+                long cut = bookie.appliedThrough();
+                var absent = replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.QUARANTINED, absent.status());
+                assertEquals(1, absent.required().committedThrough());
+                var original = ProfileDeleteDelivery.Event.decode(eventBytes);
+                var wrongStream = new ProfileDeleteDelivery.Event(bytes(16, 96), original.streamGeneration(),
+                        original.assignmentGeneration(), original.sequence(), original.ledger(), original.target(),
+                        original.tombstone(), original.requestId(), original.deleteEpoch());
+                fixture.zk.create(event, wrongStream.encode(), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.QUARANTINED,
+                        replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5)).status());
+                fixture.zk.delete(event, 0);
+                fixture.zk.create(event, eventBytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                var recreated = replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.QUARANTINED, recreated.status());
+                assertEquals(1, recreated.required().committedThrough());
+
+                String birth = stream + "/birth-" + java.util.HexFormat.of().formatHex(
+                        recreated.required().streamId());
+                byte[] birthBytes = fixture.zk.getData(birth, false, null);
+                fixture.zk.delete(birth, 0);
+                fixture.zk.create(birth, birthBytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                var wrongBirth = replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+                assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.QUARANTINED, wrongBirth.status());
+                assertNull(wrongBirth.required());
+                assertManifestDeleteSourceUnavailable(storage, fixture);
+                assertEquals(cut, bookie.appliedThrough());
+                assertNull(storage.profileDeleteProgress());
+                assertFalse(bookie.hasTerminalTombstone(fixture.context()));
+            }
+        }
+    }
+
+    private static void assertManifestDeleteSourceUnavailable(ManifestSegmentStorage storage, Fixture fixture)
+            throws Exception {
+        var watcher = new ZooKeeperWatcherBase(10000, false);
+        try (var client = new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher)) {
+            watcher.waitForConnection();
+            var source = new ZKProfileReservationStore(client, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    Duration.ofSeconds(5));
+            var metadata = new ProfileLedgerMetadataStore(client, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            client.close();
+            var failed = storage.catchUpProfileDeletes(source, metadata, "ledger-profile", 1,
+                    Duration.ofSeconds(1));
+            assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.UNAVAILABLE, failed.status());
+            assertNull(failed.required());
+        }
+    }
+
+    private static IsolatedSegmentStorage.DeleteCatchUpAttempt replayManifestDeletes(ManifestSegmentStorage storage,
+            Fixture fixture, ProfileLedgerMetadataStore metadata, int maxEvents, Duration timeout) {
+        return storage.catchUpProfileDeletes(fixture.reservations, metadata, "ledger-profile", maxEvents, timeout);
+    }
+
+    private static void assertManifestDeleteForceWait(ManifestSegmentStorage storage, Fixture fixture,
+            ProfileLedgerMetadataStore metadata) throws Exception {
+        var bookie = manifestField(storage, "bookie", SegmentBookieControlLog.class);
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var io = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+            entered.countDown();
+            await(release);
+        });
+        var field = SegmentBookieControlLog.class.getDeclaredField("io");
+        field.setAccessible(true);
+        field.set(bookie, io);
+        var waiting = CompletableFuture.supplyAsync(
+                () -> replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(2)), fixture.cold);
+        IsolatedSegmentStorage.DeleteCatchUpAttempt timedOut;
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            timedOut = waiting.get(5, TimeUnit.SECONDS);
+            assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.UNKNOWN, timedOut.status());
+            assertEquals(1, storage.profileDeleteProgress().sequence());
+            var copy = timedOut.completion();
+            assertFalse(copy.isDone());
+            assertTrue(copy.cancel(false));
+            assertFalse(timedOut.completion().isDone());
+            var group = manifestField(storage, "execution", SegmentExecutionGroup.class);
+            assertTrue(group.owner(0).controlPending() > 0);
+        } finally {
+            release.countDown();
+        }
+        timedOut.completion().get(5, TimeUnit.SECONDS);
+        assertEquals(2, storage.profileDeleteProgress().sequence());
+        assertEquals(1, io.forces);
+        var finished = replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+        assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, finished.status());
+        assertEquals(2, finished.required().committedThrough());
+        assertEquals(1, io.forces);
+    }
+
+    private static void assertManifestDeletedRead(ProfileNormalDataClient peer, ProfileLedgerContext ledger)
+            throws Exception {
+        try (var reply = peer.readEntryBuffer(ledger, 0).get(5, TimeUnit.SECONDS)) {
+            assertEquals(ProfileReadEntryReplyCodec.Outcome.REFUSED, reply.outcome());
+        }
+    }
+
     private ManifestWireLayout replaceWithManifest(Fixture fixture, int target) throws Exception {
         fixture.listeners.get(target).close().sync();
         fixture.nodes.get(target).close();
@@ -3112,6 +3357,13 @@ public class SegmentProfileInitialSocketClientTest {
                         var otherWriter = openHandoffTestLedger(fixture, sdk, metadata, otherLedger, data);
                         second = fixture.additionalReadContext;
                         otherWriter.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                        var identity = fixture.identities.get(0);
+                        var target = new ProfileDeleteRecord.Target(identity.bookieId().toString(),
+                                identity.incarnation().value());
+                        assertEquals(ProfileControlStore.ReadStatus.FOUND,
+                                fixture.reservations.createInitialDeleteAssignment(target).status());
+                        assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP,
+                                replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5)).status());
                     }
                     var files = manifestMember(storage, layout.manifest().arenaForShard(0), "files",
                             IsolatedSegmentFiles.class);
@@ -3161,6 +3413,11 @@ public class SegmentProfileInitialSocketClientTest {
                                 beginManifestAdd(fixture, cached, first).result().get(5, TimeUnit.SECONDS));
                         assertEquals(cut, bookie.appliedThrough());
                         failed = fault == ManifestWireFault.DATA_FORCE;
+                        var replay = replayManifestDeletes(storage, fixture, metadata, 1, Duration.ofSeconds(5));
+                        assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.UNAVAILABLE, replay.status());
+                        assertNull(replay.required());
+                        assertThrows(IllegalStateException.class, storage::profileDeleteProgress);
+                        assertEquals(cut, bookie.appliedThrough());
                     }
                 } finally {
                     listener.closeAsync().get(10, TimeUnit.SECONDS);
@@ -8224,6 +8481,18 @@ public class SegmentProfileInitialSocketClientTest {
                                 persistent.read(target.bookie()).versionedRecord().orElseThrow().record().state());
                         assertEquals(1, storage.profileDeleteAssignmentProgress().assignmentGeneration());
                         assertEquals(2, source.readDeleteHead(target).head().assignmentGeneration());
+                        var originalDriver = storage.controls();
+                        var retained = new IsolatedSegmentStorage.DeleteReplayTarget(fixture.identities.get(node),
+                                originalDriver, storage::profileDeleteAssignmentProgress,
+                                manifestField(storage, "gate", Object.class),
+                                () -> storage.controls() == originalDriver, true);
+                        long before = bookie(storage).appliedThrough();
+                        var refused = IsolatedSegmentStorage.replayProfileDeletes(retained, source, metadata,
+                                "ledger-profile", 64, Duration.ofSeconds(10),
+                                () -> storage.controls() == originalDriver);
+                        assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.UNAVAILABLE, refused.status());
+                        assertEquals(2, refused.required().assignmentGeneration());
+                        assertEquals(before, bookie(storage).appliedThrough());
                         var caughtUp = storage.catchUpProfileDeletes(source, metadata,
                                 "ledger-profile", 64, Duration.ofSeconds(10));
                         assertEquals(IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP, caughtUp.status());

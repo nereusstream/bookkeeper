@@ -54,6 +54,8 @@
 
 步骤 11 接通固定多 Arena owner 的显式借用回环 mTLS listener。两条 3/3/3 ledger 在同一目标的不同 Arena 写入、关闭和冷重开读回，使用原 ZooKeeper 初始化与 preconnected SDK handle。原 repair grant 的恢复 Add、实际 force 排空、能力交集和 owner 故障准入均有真实连接验证。owned startup 与注册发布仍待验收。详见 [固定多 Arena 的隔离 mTLS 分发](profile-wire/README.md#固定多-arena-的隔离-mtls-分发)。
 
+步骤 12/15 前置接通固定多 Arena 的显式 G1 删除追赶。两个 Arena 共享原 Bookie 持久游标。真实双事件覆盖 `LIMIT`、force 超时、实际排空及冷重开。缺事件、重建出生、源不可用、后继 assignment 和成员失效均拒绝完整结论。完整根证明、readiness 与注册发布仍待独立接入。详见 [固定多 Arena 的 G1 删除追赶](profile-wire/README.md#固定多-arena-的-g1-删除追赶)。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。
