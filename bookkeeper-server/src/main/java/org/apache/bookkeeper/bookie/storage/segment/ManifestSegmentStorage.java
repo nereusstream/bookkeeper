@@ -32,8 +32,10 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.FutureTask;
@@ -195,28 +197,58 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     }
 
     void startNew() throws IOException, InterruptedException {
-        start(false);
+        start(false, null);
     }
 
     void restart() throws IOException, InterruptedException {
-        start(true);
+        start(true, null);
     }
 
-    private void start(boolean existing) throws IOException, InterruptedException {
+    void restart(SegmentManifestAccessObservation observed) throws IOException, InterruptedException {
+        start(true, Objects.requireNonNull(observed));
+    }
+
+    /** A one-use offline observer. Hold every original lock until the probe process has exited. */
+    SegmentManifestAccessObservation observeAccess(SegmentManifestAccessObservation.OldScope old, long newUid,
+            Path probe, Duration timeout) throws IOException, InterruptedException {
         synchronized (lifecycle) {
-            synchronized (gate) {
-                if (attempted || stopping) {
-                    throw new IllegalStateException("Manifest storage startup is one-use");
-                }
-                attempted = true;
+            claimStartup();
+            try (var owner = this) {
+                owner.reserveCapacity();
+                owner.requireRoots(true);
+                owner.acquireGuards(true);
+                var requiredWrites = new HashSet<Path>();
+                owner.preflightRestart(requiredWrites);
+                return SegmentManifestAccessObservation.observe(manifest, control, old, newUid, probe,
+                        requiredWrites, timeout);
             }
+        }
+    }
+
+    private void claimStartup() {
+        synchronized (gate) {
+            if (attempted || stopping) {
+                throw new IllegalStateException("Manifest storage startup is one-use");
+            }
+            attempted = true;
+        }
+    }
+
+    private void start(boolean existing, SegmentManifestAccessObservation observed)
+            throws IOException, InterruptedException {
+        synchronized (lifecycle) {
+            claimStartup();
             try {
                 reserveCapacity();
                 requireRoots(existing);
                 acquireGuards(existing);
                 long bookieCut = -1;
                 if (existing) {
-                    bookieCut = preflightRestart();
+                    Set<Path> writes = observed == null ? null : new HashSet<>();
+                    bookieCut = preflightRestart(writes);
+                    if (observed != null) {
+                        observed.requireCurrent(manifest, control, writes);
+                    }
                 } else {
                     SegmentBookieControlLog.formatManifestControl(control, bookieIdentity, bookieGuard, bookieFiles,
                             new SegmentFileIo());
@@ -344,19 +376,38 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
     }
 
-    private long preflightRestart() throws IOException {
-        long bookieCut = SegmentBookieControlLog.inspectManifestWhileLocked(control, bookieIdentity,
+    private long preflightRestart(Set<Path> writes) throws IOException {
+        var bookieInspection = SegmentBookieControlLog.inspectManifestWhileLocked(control, bookieIdentity,
                 limits.controlLogBytes(), key, validator, bookieGuard, bookieFiles);
+        long bookieCut = bookieInspection.cut();
+        if (writes != null) {
+            writes.addAll(lockPaths);
+            writes.add(control.directory().resolve("bookie-control"));
+            writes.add(bookieInspection.activeJournal());
+        }
         for (Member member : members) {
             member.dataGuard.requireHeld(member.config.directory().resolve("isolated.lock"));
             try (var arena = SegmentArenaControlLog.openManifestWhileLocked(member.config, member.identity,
                     limits.controlLogBytes(), new SegmentFileIo(), member.controlGuard, member.owned, true)) {
                 arena.requireHealthyManifestRestart(bookieCut);
+                if (writes != null) {
+                    writes.add(member.config.directory().resolve("arena-control"));
+                    writes.add(arena.manifestRestartJournal());
+                }
             }
             SegmentDerivedIndex.requireExistingScope(member.config, member.identity);
+            if (writes != null) {
+                writes.add(SegmentDerivedIndex.directory(member.config).resolve("LOCK"));
+                for (int file = 0; file < member.config.dataFiles(); file++) {
+                    writes.add(IsolatedSegmentFiles.dataPath(member.config, file));
+                }
+            }
             for (int slot = 0; slot < 2; slot++) {
                 Path coverage = SegmentDerivedIndex.publication(member.config, slot);
                 if (Files.exists(coverage, LinkOption.NOFOLLOW_LINKS)) {
+                    if (writes != null) {
+                        writes.add(coverage);
+                    }
                     for (Path lock : lockPaths) {
                         if (Files.isSameFile(coverage, lock)) {
                             throw new IOException("Index coverage aliases a manifest lock");

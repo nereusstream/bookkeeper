@@ -26,7 +26,9 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
@@ -56,6 +58,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -2841,6 +2845,18 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void manifestListenerRoutesTwoLedgersAndReadsAfterHealthyIndexRebuild() throws Exception {
+        verifyManifestRetainedReads(false);
+    }
+
+    @Test
+    public void manifestAccessBindsAllRetainedRootsBeforeRecovery() throws Exception {
+        SegmentNewScopeAccessTest.requireCredentials();
+        assumeTrue("Unix permission-bit experiment requires a non-root target credential",
+                ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
+        verifyManifestRetainedReads(true);
+    }
+
+    private void verifyManifestRetainedReads(boolean observe) throws Exception {
         try (var fixture = new Fixture(false, false, true, 3, 3, true, true); BookKeeper sdk = sdk(fixture)) {
             var layout = replaceWithManifest(fixture, 0);
             var identity = fixture.identities.get(0);
@@ -2936,12 +2952,20 @@ public class SegmentProfileInitialSocketClientTest {
             }
             assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
             assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
-            for (int member = 0; member < 2; member++) {
-                var config = manifest.arenaConfig(runtime, member);
-                org.apache.commons.io.FileUtils.deleteDirectory(SegmentDerivedIndex.directory(config).toFile());
+            if (!observe) {
+                for (int member = 0; member < 2; member++) {
+                    var config = manifest.arenaConfig(runtime, member);
+                    org.apache.commons.io.FileUtils.deleteDirectory(SegmentDerivedIndex.directory(config).toFile());
+                }
             }
-            try (var storage = layout.owner(manifestWireBudget(capacity))) {
-                storage.restart();
+            try (var episode = observe ? new SegmentClassicScopeEpisodeTest.Episode(
+                            fixture.cluster.getZooKeeperConnectString(), "/old-classic-manifest-access") : null;
+                    var storage = layout.owner(manifestWireBudget(capacity))) {
+                if (episode == null) {
+                    storage.restart();
+                } else {
+                    storage.restart(observeRetainedManifest(episode, layout));
+                }
                 var listener = listenManifest(fixture, storage, 0);
                 try (var peer = dataClient(fixture, 0, 8, Duration.ofSeconds(5))) {
                     assertReadPayload(peer, first, a);
@@ -2951,6 +2975,178 @@ public class SegmentProfileInitialSocketClientTest {
                 }
             }
         }
+    }
+
+    private SegmentManifestAccessObservation observeRetainedManifest(SegmentClassicScopeEpisodeTest.Episode episode,
+            ManifestWireLayout layout) throws Exception {
+        var manifest = layout.manifest();
+        Path script = Path.of("../scripts/unified-wal/probe-new-scope-access.py").toRealPath();
+        var control = manifest.controlDirectory();
+        long uid = Integer.toUnsignedLong(((Number) Files.getAttribute(control, "unix:uid")).intValue());
+        var arena = manifest.arenas().get(1).directory();
+        var config = manifest.arenaConfig(layout.runtime(), 1);
+        var data = IsolatedSegmentFiles.dataPath(config, 0);
+        var index = SegmentDerivedIndex.directory(config);
+        var before = manifestTreeDigests(layout);
+        episode.writeAndReadConfirmedEntry();
+        assertThrows(IllegalStateException.class, episode::drained);
+        episode.requestCloseAndHoldProcess();
+        assertThrows(IllegalStateException.class, episode::drained);
+        episode.exit();
+        episode.drained();
+        var ready = episode.ready();
+        var oldRoots = new ArrayList<Map<String, String>>();
+        for (var root : ready.path("roots")) {
+            oldRoots.add(Map.of("kind", root.path("kind").asText(), "path", root.path("path").asText()));
+        }
+        var old = new SegmentManifestAccessObservation.OldScope(
+                ready.path("bookieId").asText(), "nobody", ready.path("uid").asLong(), oldRoots);
+        var ownerOnlyRead = PosixFilePermissions.fromString("r--------");
+        Files.setPosixFilePermissions(manifest.path(), ownerOnlyRead);
+        var dataPermissions = Files.getPosixFilePermissions(data);
+        try {
+            Files.setPosixFilePermissions(data, ownerOnlyRead);
+            var writeFailure = assertThrows(IOException.class, () -> manifestAccess(layout, old, uid, script));
+            assertEquals("Unexpected writeOpen for " + data, writeFailure.getMessage());
+            var testDirectory = temporary.getRoot().toPath().toRealPath();
+            var parent = arena.getParent();
+            var savedTestDirectory = Files.getPosixFilePermissions(testDirectory);
+            var savedParent = Files.getPosixFilePermissions(parent);
+            var savedArena = Files.getPosixFilePermissions(arena);
+            var savedIndex = Files.getPosixFilePermissions(index);
+            try {
+                var searchable = PosixFilePermissions.fromString("rwx--x--x");
+                Files.setPosixFilePermissions(testDirectory, searchable);
+                Files.setPosixFilePermissions(parent, searchable);
+                Files.setPosixFilePermissions(arena, searchable);
+                Files.setPosixFilePermissions(index, PosixFilePermissions.fromString("rwx------"));
+                Files.setPosixFilePermissions(data, PosixFilePermissions.fromString("rw-r--r--"));
+                var knownFile = new ProcessBuilder("/usr/bin/sudo", "-n", "-u", old.user(), "--",
+                        "/usr/bin/head", "-c", "1", data.toString())
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
+                try {
+                    assertTrue(knownFile.waitFor(10, TimeUnit.SECONDS));
+                    assertEquals(0, knownFile.exitValue());
+                } finally {
+                    if (knownFile.isAlive()) {
+                        knownFile.destroyForcibly();
+                    }
+                }
+                var accessFailure = assertThrows(IOException.class, () -> manifestAccess(layout, old, uid,
+                        script));
+                assertTrue(accessFailure.toString(),
+                        accessFailure.getMessage().startsWith("Unexpected readOpen for " + arena + "/"));
+            } finally {
+                Files.setPosixFilePermissions(arena, savedArena);
+                Files.setPosixFilePermissions(index, savedIndex);
+                Files.setPosixFilePermissions(parent, savedParent);
+                Files.setPosixFilePermissions(testDirectory, savedTestDirectory);
+            }
+        } finally {
+            Files.setPosixFilePermissions(data, dataPermissions);
+        }
+        var overlap = new ArrayList<>(oldRoots);
+        overlap.set(0, Map.of("kind", overlap.get(0).get("kind"), "path", arena.toString()));
+        var overlappingOld = new SegmentManifestAccessObservation.OldScope(
+                old.bookieId(), old.user(), old.uid(), overlap);
+        assertThrows(IOException.class, () -> manifestAccess(layout, overlappingOld, uid, script));
+
+        var observed = manifestAccess(layout, old, uid, script);
+        assertMissingManifestRootRefused(layout, old, uid, script);
+        var receipt = new ObjectMapper().readTree(observed.receipt());
+        assertEquals("UWNS2", receipt.path("schema").asText());
+        assertEquals("ACCESS_SNAPSHOT_ONLY", receipt.path("authority").asText());
+        assertEquals(5, receipt.path("newRoots").size());
+        var writes = new java.util.HashSet<String>();
+        receipt.path("requiredWrites").forEach(row -> writes.add(row.textValue()));
+        for (int i = 0; i < manifest.arenas().size(); i++) {
+            var member = manifest.arenaConfig(layout.runtime(), i);
+            assertTrue(writes.contains(IsolatedSegmentFiles.dataPath(member, 0).toString()));
+            assertTrue(writes.contains(SegmentDerivedIndex.directory(member).resolve("LOCK").toString()));
+        }
+        boolean immutableObserved = false;
+        for (var row : receipt.path("newActor").path("files")) {
+            if (manifest.path().toString().equals(row.path("path").textValue())) {
+                assertEquals("DENIED", row.path("writeOpen").path("status").asText());
+                immutableObserved = true;
+            }
+        }
+        assertTrue(immutableObserved);
+        System.out.println("UWNS2_ACCESS_RECEIPT " + receipt);
+
+        var otherRoot = temporary.newFolder().toPath().toRealPath();
+        var otherManifest = new SegmentArenaManifest(new StorageIncarnation(bytes(16, 77)), manifest.bookieId(),
+                manifest.arenas().stream().map(member -> new SegmentArenaManifest.Arena(member.id(),
+                        otherRoot.resolve(member.directory().getFileName()), member.dataFiles(),
+                        member.bytesPerFile())).toList(), otherRoot.resolve("bookie"), manifest.shardArenas());
+        var other = new ManifestWireLayout(otherManifest, layout.runtime(), layout.execution(), layout.limits(),
+                layout.capacity());
+        try (var owner = other.owner(manifestWireBudget(other.capacity()))) {
+            owner.startNew();
+        }
+        var otherBefore = manifestTreeDigests(other);
+        try (var owner = other.owner(manifestWireBudget(other.capacity()))) {
+            var failure = assertThrows(IOException.class, () -> owner.restart(observed));
+            assertEquals("Access observation does not belong to this complete manifest and file use",
+                    failure.getMessage());
+        }
+        assertEquals(otherBefore, manifestTreeDigests(other));
+
+        Path saved = index.resolveSibling("test-saved-index");
+        Files.move(index, saved);
+        try {
+            org.apache.commons.io.FileUtils.copyDirectory(saved.toFile(), index.toFile());
+            try (var owner = layout.owner(manifestWireBudget(layout.capacity()))) {
+                var failure = assertThrows(IOException.class, () -> owner.restart(observed));
+                assertTrue(failure.toString(), failure.getMessage().startsWith("Observed root identity changed"));
+            }
+        } finally {
+            org.apache.commons.io.FileUtils.deleteDirectory(index.toFile());
+            Files.move(saved, index);
+        }
+        assertEquals(before, manifestTreeDigests(layout));
+        return observed;
+    }
+
+    private static void assertMissingManifestRootRefused(ManifestWireLayout layout,
+            SegmentManifestAccessObservation.OldScope old, long uid, Path script) throws Exception {
+        var partial = Files.createTempFile(Path.of("/tmp"), "uw-manifest-partial-", ".py").toRealPath();
+        try {
+            String source = Files.readString(script);
+            String complete = "    return receipt\n";
+            assertTrue(source.contains(complete));
+            // Both actors run the real checks. Remove the CONTROL identity from the returned receipt only.
+            Files.writeString(partial, source.replace(complete,
+                    "    receipt[\"newRoots\"] = [r for r in receipt[\"newRoots\"] if r[\"kind\"] != \"CONTROL\"]\n"
+                            + complete));
+            Files.setPosixFilePermissions(partial, PosixFilePermissions.fromString("rw-r--r--"));
+            var failure = assertThrows(IOException.class, () -> manifestAccess(layout, old, uid, partial));
+            assertEquals("Probe did not cover the complete expected root vector", failure.getMessage());
+        } finally {
+            Files.deleteIfExists(partial);
+        }
+    }
+
+    private static SegmentManifestAccessObservation manifestAccess(ManifestWireLayout layout,
+            SegmentManifestAccessObservation.OldScope old, long uid, Path script) throws Exception {
+        return layout.owner(manifestWireBudget(layout.capacity())).observeAccess(old, uid, script,
+                Duration.ofSeconds(12));
+    }
+
+    private static Map<Path, String> manifestTreeDigests(ManifestWireLayout layout) throws Exception {
+        var result = new HashMap<Path, String>();
+        var roots = new ArrayList<Path>();
+        roots.add(layout.manifest().controlDirectory());
+        layout.manifest().arenas().forEach(arena -> roots.add(arena.directory()));
+        var digest = MessageDigest.getInstance("SHA-256");
+        for (var root : roots) {
+            try (var walk = Files.walk(root)) {
+                for (var path : walk.filter(Files::isRegularFile).toList()) {
+                    result.put(path, java.util.HexFormat.of().formatHex(digest.digest(Files.readAllBytes(path))));
+                }
+            }
+        }
+        return result;
     }
 
     private record ManifestWireLayout(SegmentArenaManifest manifest, IsolatedSegmentConfig runtime,

@@ -369,6 +369,20 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 这是owned isolated current-build Classic episode的关闭/排空与新scope replay组合，released-old-binary全矩阵、外部old-service authority/永久退役、default bootstrap/SDK routing与综合验收继续OPEN。B14/B15整体仍未接受，步骤12/14/15及生产Gate保持PARTIAL/OPEN；Linux/NUMA、真实掉电、正式性能本轮NOT_EXECUTED，完整目标保持active。
 
 
+## 固定 Profile manifest 的多根访问观测与冷预检
+
+`ManifestSegmentStorage.observeAccess` 在离线且已健康 CLOSE 的原图上持有共享 Bookie control 锁及各 Arena 的 DATA/control 锁，运行既有只读预检。它从调用者已冻结的 `SegmentArenaManifest` 生成完整向量，包含独立 CONTROL，以及每个原 Arena UUID 对应的 ARENA 和实际派生 INDEX。UWNS2 请求绑定原 BookieId、incarnation 和完整 manifest 摘要，摘要覆盖 DATA 几何和 shard 映射。旧 UWNS1 仍使用原四类根输入和原逐文件判定。
+
+实际 Unix 探针运行当前进程身份和非交互 sudo 的旧身份，记录两者的 effective UID、GID 和 supplementary groups。Java 只接收本次实际退出的子进程结果，核对 nonce、原 scope、全部根及文件操作。各根须为 canonical path，且物理身份、属主和模式在观测前后稳定。独立根不可重叠，INDEX 只允许位于所属 Arena 中。清单对嵌套目录去重，拒绝旧根重叠、别名、超限及未知操作结果。每个新根验证真实的临时文件 create/write/fsync。旧身份必须无法打开目录、已知文件及临时 marker。现有文件只执行 open/close。
+
+新身份逐文件检查 read-open。需要 write-open 的现有文件来自实际图的用途，包括 owner 锁、Bookie 和各 Arena 的 base 及选中的活动 control journal、DATA、RocksDB `LOCK` 和现存 index coverage slot。commissioned manifest 等只读输入允许拒绝 write-open。`restart(observed)` 在同一组原生 guard 下复跑冷预检，并重验完整 scope、文件用途、根与文件身份，然后才进入 mutable open、恢复和新 session。该观测只覆盖既有离线图和实际受测凭据的当次访问。
+
+原受控 Classic episode 独立提供 ACK/read、有序关闭、实际退出和原 registration 消失的证据。episode UUID 是本地实验标识，访问回执的 `oldServiceDisposition` 为 `NOT_VERIFIED`。外部 issuer、持续凭据隔离、DLR、persistent READY、ephemeral writable、online follower 和多 Arena owned startup 仍待验收，生产 Gate 保持 OPEN。
+
+2026-11-08 的 macOS 真实夹具在同一目标的两个 Arena 各保留一条 3/3/3 ledger。UID 501 与实际旧 UID 4294967294 的观测覆盖 5 个新根、35 个现有文件和 12 个必需可写文件。新身份的 DATA 只读、旧身份可经仅有搜索权限的目录读取 DATA、旧根重叠、回执缺 CONTROL、错误 manifest/incarnation 和替换 INDEX 目录身份均拒绝。两份图在预检拒绝前后的文件摘要一致。完整观测允许 commissioned manifest 只读，随后通过原 mTLS listener 读回两条 ledger。原 Classic 回归保留已关闭但尚存活、异常退出且 registration 已消失的 DRAINED 拒绝。独立 UWNS1 探针复核了只读保留文件的原汇总语义。
+
+父源码 `c4690c16575719265d99bcf20ba25823c96b280a`。定向验证 40 项全部通过，无失败、错误或跳过。单行删除根身份覆盖校验的变体在同一个真实用例中接受了缺 CONTROL 的回执，使预期拒绝断言失败。Spotless、Checkstyle 和 Python 源码编译通过。根 RAT 因 431 个父源码中已跟踪路径的许可识别问题失败。测试选择、XML、两种原始回执和 RED 变体见 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-root-proof-baseline-c4690c16`。Linux D2、掉电及生产验证本轮未执行。
+
 2026-10-12 [显式Profile listener与actual network drain](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)已复用original graph/pipeline并管理native parent/child、worker handoff与receive ledger终态；cold/frame/backing保留至实际归还，caller future不能伪造drain，borrowed graph/cold/loops由caller续接。actual mTLS/held cold/bind failure/queued accepted socket验证完成，46项Java/13配置模型得到预期结果、style通过，RAT443历史问题无新增。它是full startup owner的必要接线，尚未把required/physical proof、端口和registration组成default服务入口，生产Gate继续OPEN。
 
 ## 显式 Profile 服务启动与 owner 排空

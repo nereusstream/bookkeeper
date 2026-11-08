@@ -2394,6 +2394,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
+    synchronized Path manifestRestartJournal() {
+        return rotationRoot == null ? config.directory().resolve("arena-control")
+                : SegmentControlRotation.path(config, SegmentControlFormat.Owner.ARENA, rotationRoot.generation());
+    }
+
     synchronized boolean manifestAccepting() {
         if (failed || closed || !sessionOpen || sessionOwner == null) {
             return false;

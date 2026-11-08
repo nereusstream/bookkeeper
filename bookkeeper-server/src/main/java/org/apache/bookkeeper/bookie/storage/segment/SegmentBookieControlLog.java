@@ -1204,9 +1204,11 @@ final class SegmentBookieControlLog implements AutoCloseable {
         IsolatedSegmentFiles.syncDirectory(config.directory().getParent(), files);
     }
 
-    static long inspectManifestWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
-            long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator, SegmentDataFileLock guard,
-            SegmentOwnedFiles files) throws IOException {
+    record ManifestRestartInspection(long cut, Path activeJournal) { }
+
+    static ManifestRestartInspection inspectManifestWhileLocked(IsolatedSegmentConfig config,
+            SegmentFileHeader identity, long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator,
+            SegmentDataFileLock guard, SegmentOwnedFiles files) throws IOException {
         guard.requireHeld(config.directory().resolve("bookie-control.lock"));
         requireRouteBinding(identity, null);
         try (FileChannel original = SegmentOwnedFiles.openRegularReadOnly(files,
@@ -1216,7 +1218,10 @@ final class SegmentBookieControlLog implements AutoCloseable {
             try {
                 log.validateStorageFiles();
                 log.recover();
-                return log.appliedThrough();
+                var journal = log.rotationRoot == null ? config.directory().resolve("bookie-control")
+                        : SegmentControlRotation.path(config, SegmentControlFormat.Owner.BOOKIE,
+                                log.rotationRoot.generation());
+                return new ManifestRestartInspection(log.appliedThrough(), journal);
             } finally {
                 if (log.channel != original) {
                     log.channel.close();

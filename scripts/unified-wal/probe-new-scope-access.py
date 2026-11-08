@@ -32,6 +32,8 @@ import time
 import uuid
 
 KINDS = {"JOURNAL", "LEDGER", "INDEX", "ARENA"}
+MANIFEST_SCHEMA = "UWNS2"
+MAX_MANIFEST_ROOTS = 1 + 2 * 64
 MAX_INPUT = 16384
 MAX_WORK_INPUT = 262144
 MAX_OUTPUT = 262144
@@ -65,6 +67,80 @@ def roots(values):
     if len({v["path"] for v in result}) != 4:
         raise ValueError("duplicate scope path")
     return sorted(result, key=lambda v: v["path"])
+
+
+def manifest_roots(values):
+    if not isinstance(values, list) or not 3 <= len(values) <= MAX_MANIFEST_ROOTS:
+        raise ValueError("invalid manifest root count")
+    members = {}
+    paths = set()
+    for row in values:
+        if set(row) != {"kind", "arena", "path"}:
+            raise ValueError("invalid manifest root fields")
+        kind, arena, path = row["kind"], row["arena"], row["path"]
+        if not isinstance(path, str) or len(path.encode("utf-8")) > 1024 or not os.path.isabs(path):
+            raise ValueError("invalid manifest root path")
+        if kind == "CONTROL":
+            if arena != "":
+                raise ValueError("control root cannot belong to an Arena")
+        else:
+            member = uuid.UUID(arena)
+            if kind not in {"ARENA", "INDEX"} or str(member) != arena or member.int == 0:
+                raise ValueError("invalid manifest Arena root role")
+        if path in paths or (kind, arena) in members:
+            raise ValueError("duplicate manifest root path or role")
+        paths.add(path)
+        members[kind, arena] = path
+    arenas = {arena for kind, arena in members if kind == "ARENA"}
+    if ("CONTROL", "") not in members or not arenas or arenas != {arena for kind, arena in members if kind == "INDEX"}:
+        raise ValueError("manifest control/Arena/index coverage is incomplete")
+    independent = [members["CONTROL", ""]] + [members["ARENA", arena] for arena in arenas]
+    for index, left in enumerate(independent):
+        for right in independent[index + 1:]:
+            if os.path.commonpath([left, right]) in (left, right):
+                raise ValueError("independent manifest roots overlap")
+    for arena in arenas:
+        if os.path.dirname(members["INDEX", arena]) != members["ARENA", arena]:
+            raise ValueError("index root is outside its Arena")
+    return sorted(values, key=lambda v: v["path"])
+
+
+def observed_manifest_roots(values):
+    result = []
+    identities = set()
+    for value in manifest_roots(values):
+        path = value["path"]
+        if str(Path(path).resolve(strict=True)) != path:
+            raise ValueError("manifest root path must already be canonical")
+        observed = root_identity(path)
+        key = observed["device"], observed["inode"]
+        if key in identities:
+            raise ValueError("manifest root aliases another required root")
+        identities.add(key)
+        result.append(dict(value, identity=observed))
+    return result
+
+
+def manifest_scope(request):
+    scope = request["scope"]
+    if set(scope) != {"oldBookieId", "bookieId", "incarnation", "manifestIdentity"}:
+        raise ValueError("invalid manifest access scope fields")
+    for key in ("oldBookieId", "bookieId"):
+        value = scope[key]
+        if not isinstance(value, str) or not 1 <= len(value.encode("utf-8")) <= 255 or "\0" in value:
+            raise ValueError("invalid manifest Bookie scope")
+    if scope["oldBookieId"] == scope["bookieId"]:
+        raise ValueError("manifest access requires a distinct Bookie")
+    for key, length in (("incarnation", 32), ("manifestIdentity", 64)):
+        value = scope[key]
+        if not isinstance(value, str) or len(value) != length or any(c not in "0123456789abcdef" for c in value):
+            raise ValueError("invalid manifest scope identity")
+    return scope
+
+
+def require_nonce(nonce):
+    if not isinstance(nonce, str) or len(nonce) != 32 or any(c not in "0123456789abcdef" for c in nonce):
+        raise ValueError("invalid probe nonce")
 
 
 def inventory(scope_roots):
@@ -158,18 +234,21 @@ def created(path, nonce):
 def worker(request):
     actor = identity()
     nonce = request["nonce"]
-    if not isinstance(nonce, str) or len(nonce) != 32 or any(c not in "0123456789abcdef" for c in nonce):
-        raise ValueError("invalid probe nonce")
-    if not isinstance(request["roots"], list) or len(request["roots"]) != 4:
-        raise ValueError("invalid worker scope")
-    if {root["kind"] for root in request["roots"]} != KINDS:
-        raise ValueError("invalid worker root kinds")
+    require_nonce(nonce)
+    manifest = request.get("schema") == MANIFEST_SCHEMA
+    if manifest:
+        manifest_roots(request["roots"])
+    else:
+        if not isinstance(request["roots"], list) or len(request["roots"]) != 4:
+            raise ValueError("invalid worker scope")
+        if {root["kind"] for root in request["roots"]} != KINDS:
+            raise ValueError("invalid worker root kinds")
     for root in request["roots"]:
         path = root["path"]
         if not isinstance(path, str) or len(path.encode("utf-8")) > 1024 or not os.path.isabs(path):
             raise ValueError("invalid worker path")
     files = request["files"]
-    if not isinstance(files, list) or len(files) > MAX_INVENTORY + 4:
+    if not isinstance(files, list) or len(files) > MAX_INVENTORY + len(request["roots"]):
         raise ValueError("invalid worker file inventory")
     for path in files:
         if not isinstance(path, str) or len(path.encode("utf-8")) > 1024 or not os.path.isabs(path):
@@ -180,12 +259,13 @@ def worker(request):
                           "readOpen": operation(lambda: opened(path, os.O_RDONLY)),
                           "writeOpen": operation(lambda: opened(path, os.O_RDWR))} for path in files]
     observations = []
+    fields = ("kind", "arena", "path") if manifest else ("kind", "path")
     for root in request["roots"]:
         path = root["path"]
         read = operation(lambda: opened(path, os.O_RDONLY | os.O_DIRECTORY))
         write_path = os.path.join(path, ".uw-scope-access-" + nonce + "-" + str(actor["uid"]))
         write = operation(lambda: created(write_path, nonce))
-        observations.append({"kind": root["kind"], "path": path, "directoryRead": read, "createWriteSync": write})
+        observations.append(dict({key: root[key] for key in fields}, directoryRead=read, createWriteSync=write))
     return {"nonce": nonce, "actor": actor, "roots": observations, "files": file_observations}
 
 
@@ -197,20 +277,30 @@ def read_input(max_bytes):
 
 
 def probe(request, timeout):
+    manifest = request.get("schema") == MANIFEST_SCHEMA
+    scope = manifest_scope(request) if manifest else None
+    fields = ("kind", "arena", "path") if manifest else ("kind", "path")
+    observe_new = observed_manifest_roots if manifest else roots
     old_roots = roots(request["oldRoots"])
-    new_roots = roots(request["newRoots"])
+    new_roots = observe_new(request["newRoots"])
     for old in old_roots:
         for new in new_roots:
             shared = os.path.commonpath([old["path"], new["path"]])
-            if shared in (old["path"], new["path"]) or old["identity"] == new["identity"]:
+            alias = all(old["identity"][key] == new["identity"][key] for key in ("device", "inode"))
+            if shared in (old["path"], new["path"]) or (alias if manifest else old["identity"] == new["identity"]):
                 raise ValueError("old and new roots overlap")
     old_user = request["oldUser"]
     old_uid = pwd.getpwnam(old_user).pw_uid
     current = identity()
     if old_uid == 0 or old_uid == current["uid"]:
         raise ValueError("old service must have a distinct non-root Unix identity")
-    nonce = uuid.uuid4().hex
+    nonce = request["nonce"] if manifest else uuid.uuid4().hex
+    require_nonce(nonce)
     before_files = inventory(new_roots)
+    required_writes = request["requiredWrites"] if manifest else []
+    if manifest and (not isinstance(required_writes, list) or required_writes != sorted(set(required_writes))
+                     or not set(required_writes).issubset({row["path"] for row in before_files})):
+        raise ValueError("required writable files are absent from the manifest inventory")
     markers = {}
     script = str(Path(__file__).resolve())
     command = ["/usr/bin/sudo", "-n", "-u", old_user, "--", sys.executable, "-I", "-B", script, "--worker"]
@@ -220,8 +310,10 @@ def probe(request, timeout):
         for root in new_roots:
             path = os.path.join(root["path"], ".uw-scope-readable-" + nonce)
             markers[path] = readable_marker(path, nonce)
-        work = {"nonce": nonce, "roots": [{"kind": v["kind"], "path": v["path"]} for v in new_roots],
+        work = {"nonce": nonce, "roots": [{k: v[k] for k in fields} for v in new_roots],
                 "files": sorted([value["path"] for value in before_files] + list(markers))}
+        if manifest:
+            work["schema"] = MANIFEST_SCHEMA
         encoded = json.dumps(work).encode()
         if len(encoded) > MAX_WORK_INPUT:
             raise ValueError("oversized worker inventory")
@@ -233,7 +325,7 @@ def probe(request, timeout):
         old = json.loads(child.stdout.decode("utf-8"))
         if old.get("nonce") != nonce or old.get("actor", {}).get("uid") != old_uid:
             raise RuntimeError("old-credential child identity or nonce mismatch")
-        if [{k: v[k] for k in ("kind", "path")} for v in old.get("roots", [])] != work["roots"]:
+        if [{k: v[k] for k in fields} for v in old.get("roots", [])] != work["roots"]:
             raise RuntimeError("old-credential child scope mismatch")
         if [value["path"] for value in old.get("files", [])] != work["files"]:
             raise RuntimeError("old-credential child file inventory mismatch")
@@ -243,14 +335,17 @@ def probe(request, timeout):
             if (current_marker.st_dev, current_marker.st_ino) != own:
                 raise RuntimeError("private probe marker identity changed")
             os.unlink(path)
-    after = roots(request["newRoots"])
-    if after != new_roots or inventory(new_roots) != before_files:
+    after = observe_new(request["newRoots"])
+    if after != new_roots or inventory(new_roots) != before_files or manifest and roots(request["oldRoots"]) != old_roots:
         raise RuntimeError("scope root/file identity/mode/owner changed during the probe")
     new_ok = all(v[operation]["status"] == "ALLOWED" for v in new["roots"]
                  for operation in ("directoryRead", "createWriteSync"))
     old_denied = all(v[operation]["status"] == "DENIED" for v in old["roots"]
                      for operation in ("directoryRead", "createWriteSync"))
     new_ok = new_ok and all(value["readOpen"]["status"] == "ALLOWED" for value in new["files"])
+    if manifest:
+        writable = {value["path"] for value in new["files"] if value["writeOpen"]["status"] == "ALLOWED"}
+        new_ok = new_ok and set(required_writes).issubset(writable)
     old_denied = old_denied and all(value[operation]["status"] == "DENIED" for value in old["files"]
                                     for operation in ("readOpen", "writeOpen"))
     file_unknown = any(value[operation]["status"] == "ERROR" for actor in (old, new) for value in actor["files"]
@@ -258,7 +353,7 @@ def probe(request, timeout):
     unknown = file_unknown or any(v[operation]["status"] == "ERROR" for actor in (old, new) for v in actor["roots"]
                   for operation in ("directoryRead", "createWriteSync"))
     status = "UNAVAILABLE" if unknown else "VERIFIED" if new_ok and old_denied else "REJECTED"
-    return {"schema": "UWNS1", "status": status, "nonce": nonce,
+    receipt = {"schema": MANIFEST_SCHEMA if manifest else "UWNS1", "status": status, "nonce": nonce,
             "scopeSha256": hashlib.sha256(json.dumps(request, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
             "scriptSha256": hashlib.sha256(Path(script).read_bytes()).hexdigest(),
             "interpreter": sys.executable, "oldCommand": command, "oldChildExitCode": child.returncode,
@@ -269,6 +364,10 @@ def probe(request, timeout):
             "newCredentialAccessToNewScope": "READ_WRITE" if new_ok else "UNPROVEN",
             "authority": "ACCESS_SNAPSHOT_ONLY",
             "oldServiceDisposition": "NOT_VERIFIED", "stockBinaryMatrix": "NOT_EXECUTED"}
+    if manifest:
+        receipt["scope"] = scope
+        receipt["requiredWrites"] = required_writes
+    return receipt
 
 
 def main():
@@ -276,8 +375,11 @@ def main():
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=float, default=10)
     args = parser.parse_args()
+    schema = "UWNS1"
     try:
         request = read_input(MAX_WORK_INPUT if args.worker else MAX_INPUT)
+        if request.get("schema") == MANIFEST_SCHEMA:
+            schema = MANIFEST_SCHEMA
         if args.worker:
             output = worker(request)
         else:
@@ -289,8 +391,8 @@ def main():
             raise RuntimeError("oversized probe response")
         print(encoded)
         return 0 if args.worker or output["status"] == "VERIFIED" else 1
-    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired, KeyError, TypeError):
-        print(json.dumps({"schema": "UWNS1", "status": "UNAVAILABLE", "authority": "ACCESS_SNAPSHOT_ONLY"}))
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired, KeyError, TypeError, AttributeError):
+        print(json.dumps({"schema": schema, "status": "UNAVAILABLE", "authority": "ACCESS_SNAPSHOT_ONLY"}))
         return 2
 
 
