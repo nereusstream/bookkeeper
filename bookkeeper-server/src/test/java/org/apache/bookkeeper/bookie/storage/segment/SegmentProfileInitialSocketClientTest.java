@@ -23,6 +23,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -276,6 +277,8 @@ public class SegmentProfileInitialSocketClientTest {
         final AtomicInteger faultTarget = new AtomicInteger(2);
         volatile long helloReadinessGeneration;
         volatile ProfileLedgerContext additionalReadContext;
+        int manifestTarget = -1;
+        InetSocketAddress manifestAddress;
         volatile Set<ProfileLedgerContext> retainedReadContexts = Set.of();
 
         boolean permitsReadContext(ProfileLedgerContext context) {
@@ -697,8 +700,13 @@ public class SegmentProfileInitialSocketClientTest {
         CompletableFuture<ProfileInitialControlClient> connect(int target, int maxPending, Duration timeout,
                 String hostname, String bookie, byte[] incarnation) {
             return ProfileInitialControlClient.connect(clientGroup, peerTls,
-                    (InetSocketAddress) listeners.get(target).localAddress(), hostname, bookie, incarnation,
+                    address(target), hostname, bookie, incarnation,
                     maxPending, timeout);
+        }
+
+        InetSocketAddress address(int target) {
+            return target == manifestTarget
+                    ? manifestAddress : (InetSocketAddress) listeners.get(target).localAddress();
         }
 
         ProfileInitialControlClient connect(int target, int maxPending, Duration timeout) throws Exception {
@@ -807,19 +815,24 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     private static ReferenceCounted entry(Fixture fixture, long entryId, int payloadBytes) throws Exception {
-        var digest = DigestManager.instantiate(44, fixture.password,
+        return entry(fixture, 44, entryId, bytes(payloadBytes, 8));
+    }
+
+    private static ReferenceCounted entry(Fixture fixture, long ledger, long entryId, byte[] payload)
+            throws Exception {
+        var digest = DigestManager.instantiate(ledger, fixture.password,
                 org.apache.bookkeeper.client.BookKeeper.DigestType.toProtoDigestType(
                         org.apache.bookkeeper.client.BookKeeper.DigestType.CRC32C),
                 UnpooledByteBufAllocator.DEFAULT, false);
-        return digest.computeDigestAndPackageForSending(entryId, -1, payloadBytes,
-                Unpooled.wrappedBuffer(bytes(payloadBytes, 8)), DigestManager.generateMasterKey(fixture.password), 0);
+        return digest.computeDigestAndPackageForSending(entryId, -1, payload.length,
+                Unpooled.wrappedBuffer(payload), DigestManager.generateMasterKey(fixture.password), 0);
     }
 
     private static ProfileNormalDataClient dataClient(Fixture fixture, int target, int pending, Duration timeout)
             throws Exception {
         var identity = fixture.identities.get(target);
         var client = ProfileNormalDataClient.connect(fixture.clientGroup, fixture.peerTls,
-                (InetSocketAddress) fixture.listeners.get(target).localAddress(), "apache.bookkeeper.org",
+                fixture.address(target), "apache.bookkeeper.org",
                 identity.bookieId().toString(), identity.incarnation().value(), pending, 1060, timeout)
                 .get(5, TimeUnit.SECONDS);
         fixture.dataClients.add(client);
@@ -2822,6 +2835,425 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(0, budget.usedConnections(lane));
             }
         }
+    }
+
+    @Test
+    public void manifestListenerRoutesTwoLedgersAndReadsAfterHealthyIndexRebuild() throws Exception {
+        try (var fixture = new Fixture(false, false, true, 3, 3, true, true); BookKeeper sdk = sdk(fixture)) {
+            var layout = replaceWithManifest(fixture, 0);
+            var identity = fixture.identities.get(0);
+            var manifest = layout.manifest();
+            var runtime = layout.runtime();
+            var capacity = layout.capacity();
+            assertOwnedServiceRejectsManifest(fixture, layout, identity);
+            var budget = manifestWireBudget(capacity);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var a = bytes(16, 32);
+            var b = bytes(16, 33);
+            ProfileLedgerContext first;
+            ProfileLedgerContext second;
+            try (var storage = layout.owner(budget)) {
+                assertThrows(IllegalStateException.class, () -> listenManifest(fixture, storage, 0));
+                storage.startNew();
+                var listener = listenManifest(fixture, storage, 0);
+                try {
+                    assertThrows(IllegalStateException.class, () -> listenManifest(fixture, storage, 0));
+                    fixture.connectAll(Duration.ofSeconds(5));
+                    var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                    for (int target = 0; target < 3; target++) {
+                        data.put(fixture.identities.get(target).bookieId(),
+                                dataClient(fixture, target, 8, Duration.ofSeconds(5)));
+                    }
+                    var peer = data.get(identity.bookieId());
+                    var writer = openHandoffTestLedger(fixture, sdk, metadata, 44, data);
+                    first = fixture.additionalReadContext;
+                    fixture.retainedReadContexts = Set.of(first);
+                    var neighbor = openHandoffTestLedger(fixture, sdk, metadata, 45, data);
+                    second = fixture.additionalReadContext;
+                    var entered = new CountDownLatch(1);
+                    var release = new CountDownLatch(1);
+                    var heldFiles = manifestMember(storage, manifest.arenaForShard(0), "files",
+                            IsolatedSegmentFiles.class);
+                    heldFiles.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                        entered.countDown();
+                        await(release);
+                    });
+                    try {
+                        var held = sdkAdd(writer, a);
+                        try {
+                            assertTrue(entered.await(5, TimeUnit.SECONDS));
+                            assertFalse(held.isDone());
+                            var encoded = entry(fixture, 45, 0, b);
+                            try {
+                                assertEquals(ProfileStatus.DurableResult.APPLIED,
+                                        peer.addNormal(second, fixture.credential, 0, encoded)
+                                                .get(5, TimeUnit.SECONDS).durableResult());
+                            } finally {
+                                encoded.release();
+                            }
+                            assertReadPayload(peer, second, b);
+                            assertFalse(held.isDone());
+                        } finally {
+                            release.countDown();
+                        }
+                        assertEquals(0, held.get(5, TimeUnit.SECONDS).longValue());
+                        assertEquals(0, sdkAdd(neighbor, b).get(5, TimeUnit.SECONDS).longValue());
+                        assertReadPayload(peer, first, a);
+                        var refused = fixture.clients.get(identity.bookieId().toString()).fence(first, bytes(16, 90),
+                                ProtectedProfileCredential.of(1, bytes(20, 91))).get(5, TimeUnit.SECONDS);
+                        assertEquals(ProfileStatus.StatusClass.UNAUTHORIZED, refused.statusClass());
+                        assertEquals(ProfileStatus.DurableResult.NONE, refused.durableResult());
+                        writer.closeAsync().get(30, TimeUnit.SECONDS);
+                        neighbor.closeAsync().get(30, TimeUnit.SECONDS);
+                        assertEquals(LedgerMetadata.State.CLOSED, fixture.manager.readLedgerMetadata(44)
+                                .get(5, TimeUnit.SECONDS).getValue().getState());
+                        assertEquals(LedgerMetadata.State.CLOSED, fixture.manager.readLedgerMetadata(45)
+                                .get(5, TimeUnit.SECONDS).getValue().getState());
+                        var entry = entry(fixture, 1, 16);
+                        try {
+                            var fenced = peer.addNormal(first, fixture.credential, 1, entry)
+                                    .get(5, TimeUnit.SECONDS);
+                            assertEquals(ProfileStatus.StatusClass.FENCED, fenced.statusClass());
+                            assertEquals(ProfileStatus.DurableResult.NONE, fenced.durableResult());
+                        } finally {
+                            entry.release();
+                        }
+                        assertManifestDataPlacement(storage, manifest, runtime, first, second);
+                        assertManifestPhysicalDeleteUnsupported(fixture, identity, manifest, first);
+                    } finally {
+                        release.countDown();
+                        writer.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                        neighbor.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    }
+                } finally {
+                    listener.closeAsync().get(10, TimeUnit.SECONDS);
+                }
+                assertEquals(capacity.dataBytes(), budget.used(ProfileReceiveBudget.Lane.DATA));
+                assertEquals(capacity.controlBytes(), budget.used(ProfileReceiveBudget.Lane.CONTROL));
+            }
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+            for (int member = 0; member < 2; member++) {
+                var config = manifest.arenaConfig(runtime, member);
+                org.apache.commons.io.FileUtils.deleteDirectory(SegmentDerivedIndex.directory(config).toFile());
+            }
+            try (var storage = layout.owner(manifestWireBudget(capacity))) {
+                storage.restart();
+                var listener = listenManifest(fixture, storage, 0);
+                try (var peer = dataClient(fixture, 0, 8, Duration.ofSeconds(5))) {
+                    assertReadPayload(peer, first, a);
+                    assertReadPayload(peer, second, b);
+                } finally {
+                    listener.closeAsync().get(10, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    private record ManifestWireLayout(SegmentArenaManifest manifest, IsolatedSegmentConfig runtime,
+            SegmentExecutionGroup.Settings execution, IsolatedSegmentStorage.Limits limits,
+            ManifestSegmentStorage.Capacity capacity) {
+        ManifestSegmentStorage owner(ProfileReceiveBudget budget) throws IOException {
+            return new ManifestSegmentStorage(manifest, manifest.identity(), runtime,
+                    new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, execution, limits, budget);
+        }
+    }
+
+    private ManifestWireLayout replaceWithManifest(Fixture fixture, int target) throws Exception {
+        fixture.listeners.get(target).close().sync();
+        fixture.nodes.get(target).close();
+        var identity = fixture.identities.get(target);
+        Path root = temporary.newFolder().toPath().toRealPath();
+        long fileBytes = 4L * 1024 * 1024;
+        var manifest = new SegmentArenaManifest(identity.incarnation(), identity.bookieId(), List.of(
+                new SegmentArenaManifest.Arena(new UUID(0, 19), root.resolve("arena-a"), 1, fileBytes),
+                new SegmentArenaManifest.Arena(new UUID(0, 20), root.resolve("arena-b"), 1, fileBytes)),
+                root.resolve("bookie"), List.of(1, 0));
+        var runtime = new IsolatedSegmentConfig(manifest.controlDirectory(), 1, 2, 1, fileBytes, 4096, 1024, 16,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        var execution = new SegmentExecutionGroup.Settings(2, 4, 4, 4, 4096, 4096,
+                4 * (4096L + 4095) + 4096, Duration.ofSeconds(5));
+        var limits = new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 32, 1, 1,
+                new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30)));
+        var capacity = ManifestSegmentStorage.capacity(manifest, runtime, execution, limits);
+        return new ManifestWireLayout(manifest, runtime, execution, limits, capacity);
+    }
+
+    private static ProfileReceiveBudget manifestWireBudget(ManifestSegmentStorage.Capacity capacity) {
+        long wire = 1024 * 1024;
+        return new ProfileReceiveBudget(capacity.dataBytes() + capacity.controlBytes() + 3 * wire,
+                capacity.controlBytes() + wire, wire, 16, 16, 16);
+    }
+
+    private static void assertOwnedServiceRejectsManifest(Fixture fixture, ManifestWireLayout layout,
+            SegmentFileHeader identity) {
+        var config = new ServerConfiguration();
+        serviceSettings(layout.runtime()).forEach((name, value) ->
+                config.setProperty(SegmentProfileService.CONFIG_PREFIX + name, value));
+        var policy = startupPolicy(layout.runtime(), identity);
+        var original = policy.requiredDevices().devices().get(0);
+        var members = layout.manifest().arenas().stream().map(arena -> new RequiredDeviceManifest.RequiredDeviceFact(
+                arena.id().toString(), identity.incarnation(), original.manifestGeneration(), original.status(),
+                original.arenaFormatVersion(), original.controlFormatVersion(), original.checkpointFormatVersion(),
+                original.superblockGeneration(), original.mandatoryFeatures())).toList();
+        var devices = new RequiredDeviceManifest(layout.manifest().identity(), original.manifestGeneration(), members);
+        var requested = new StartupReadinessInput(policy.compatibility(), devices, policy.recoveryFacts(),
+                policy.newScopeFallback(), policy.rollbackSafetyFacts(), policy.targetReadinessGeneration(),
+                policy.capabilityGeneration(), policy.runtimeReaderVersion(), policy.runtimeWriterVersion(),
+                policy.supportedMandatoryFeatures(), policy.profileEndpoint(), policy.capabilityHints());
+        var settings = new SegmentProfileOwnedResources.Settings(requested, "/required", "/ready", "/reserved",
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, "ledger-profile", 4, Duration.ofSeconds(5), Duration.ofMillis(100),
+                1, 1, 4);
+        var control = fixture.controlConfigs.get(0);
+        var refused = assertThrows(IllegalArgumentException.class, () -> SegmentProfileService.withOwnedResources(
+                config, new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, settings, fixture.serverTls,
+                manifestWireBudget(layout.capacity()), 131072, 64, "socket-test", new InetSocketAddress("127.0.0.1", 0),
+                control.staticAuthorizer(), control.exactAuthorizer(), new SegmentProfileReadConfig((p, r) -> false)));
+        assertEquals("One declared Arena required for isolated bootstrap", refused.getMessage());
+        assertFalse(Files.exists(layout.manifest().controlDirectory()));
+    }
+
+    private static SegmentProfileListener listenManifest(Fixture fixture, ManifestSegmentStorage storage, int target)
+            throws Exception {
+        var read = new SegmentProfileReadConfig((caller, query) -> fixture.permitsReadContext(query.context()),
+                (caller, query) -> fixture.permitsReadContext(query.context()));
+        var listener = storage.listen(fixture.serverTls,
+                new SegmentProfileListener.Settings(131072, 64, "socket-test", 0),
+                new InetSocketAddress("127.0.0.1", 0), fixture.acceptor, fixture.worker,
+                fixture.controlConfigs.get(target), read);
+        fixture.manifestAddress = listener.bound().get(5, TimeUnit.SECONDS);
+        fixture.manifestTarget = target;
+        return listener;
+    }
+
+    private static void assertManifestDataPlacement(ManifestSegmentStorage storage, SegmentArenaManifest manifest,
+            IsolatedSegmentConfig runtime, ProfileLedgerContext first, ProfileLedgerContext second) throws Exception {
+        var contexts = List.of(first, second);
+        var grants = new ArrayList<SegmentArenaControlLog.Allocation>();
+        for (int shard = 0; shard < contexts.size(); shard++) {
+            int member = manifest.arenaForShard(shard);
+            var config = manifest.arenaConfig(runtime, member);
+            var arena = manifestMember(storage, member, "arena", SegmentArenaControlLog.class);
+            var allocations = arena.compactionCandidates(shard, -1, arena.appliedThrough()).allocations();
+            assertEquals(1, allocations.size());
+            var grant = allocations.get(0);
+            grants.add(grant);
+            var batch = readReconstructionBatch(IsolatedSegmentFiles.dataPath(config, grant.file()), config, grant,
+                    grant.offset());
+            assertEquals(contexts.get(shard), batch.records().get(0).context());
+            assertFalse(Files.exists(config.directory().resolve("bookie-control")));
+        }
+        assertEquals(grants.get(0).file(), grants.get(1).file());
+        assertEquals(grants.get(0).allocationId(), grants.get(1).allocationId());
+        assertEquals(grants.get(0).offset(), grants.get(1).offset());
+        assertTrue(Files.isRegularFile(manifest.controlDirectory().resolve("bookie-control")));
+    }
+
+    private static <T> T manifestMember(ManifestSegmentStorage storage, int index, String field, Class<T> type)
+            throws Exception {
+        var member = manifestField(storage, "members", List.class).get(index);
+        return manifestField(member, field, type);
+    }
+
+    private static <T> T manifestField(Object owner, String field, Class<T> type) throws Exception {
+        var selected = owner.getClass().getDeclaredField(field);
+        selected.setAccessible(true);
+        return type.cast(selected.get(owner));
+    }
+
+    @Test
+    public void manifestListenerDisconnectKeepsActualForceOwnedUntilGraphDrains() throws Exception {
+        verifyManifestWireDrain(ManifestWireFault.NONE);
+    }
+
+    @Test
+    public void manifestListenerForceFailureRejectsNewRequestsOnExistingConnections() throws Exception {
+        verifyManifestWireDrain(ManifestWireFault.DATA_FORCE);
+    }
+
+    @Test
+    public void manifestListenerOwnerFailureRejectsNewRequestsOnExistingConnections() throws Exception {
+        verifyManifestWireDrain(ManifestWireFault.OWNER);
+    }
+
+    private enum ManifestWireFault { NONE, DATA_FORCE, OWNER }
+
+    private void verifyManifestWireDrain(ManifestWireFault fault) throws Exception {
+        try (var fixture = new Fixture(false, false, true, 3, 3, true, true); BookKeeper sdk = sdk(fixture)) {
+            var layout = replaceWithManifest(fixture, 0);
+            var budget = manifestWireBudget(layout.capacity());
+            var storage = layout.owner(budget);
+            var entered = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            var actuallyForced = new CountDownLatch(1);
+            boolean failed = false;
+            try {
+                storage.startNew();
+                var listener = listenManifest(fixture, storage, 0);
+                var group = manifestField(storage, "execution", SegmentExecutionGroup.class);
+                var owner = group.owner(0);
+                var pool = manifestField(owner, "pool", SegmentBufferPool.class);
+                try {
+                    fixture.connectAll(Duration.ofSeconds(5));
+                    var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                    var data = new HashMap<BookieId, ProfileNormalDataClient>();
+                    for (int target = 0; target < 3; target++) {
+                        data.put(fixture.identities.get(target).bookieId(),
+                                dataClient(fixture, target, 8, Duration.ofSeconds(5)));
+                    }
+                    var heldWriter = openHandoffTestLedger(fixture, sdk, metadata, 44, data);
+                    var first = fixture.additionalReadContext;
+                    heldWriter.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    ProfileLedgerContext second = null;
+                    if (fault != ManifestWireFault.NONE) {
+                        long otherLedger = fault == ManifestWireFault.DATA_FORCE ? 45 : 46;
+                        var otherWriter = openHandoffTestLedger(fixture, sdk, metadata, otherLedger, data);
+                        second = fixture.additionalReadContext;
+                        otherWriter.stopLocalWrites().get(5, TimeUnit.SECONDS);
+                    }
+                    var files = manifestMember(storage, layout.manifest().arenaForShard(0), "files",
+                            IsolatedSegmentFiles.class);
+                    files.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, -1, false, () -> {
+                        entered.countDown();
+                        await(release);
+                    }, null, actuallyForced::countDown);
+                    var heldPeer = dataClient(fixture, 0, 4, Duration.ofSeconds(5));
+                    var held = beginManifestAdd(fixture, heldPeer, first);
+                    assertTrue(entered.await(5, TimeUnit.SECONDS));
+                    int pending = owner.pending();
+                    int buffers = manifestField(pool, "outstanding", Integer.class);
+                    assertTrue(pending > 0);
+                    assertTrue(buffers > 0);
+                    assertThrows(java.util.concurrent.TimeoutException.class,
+                            () -> held.result().get(100, TimeUnit.MILLISECONDS));
+                    assertTrue(held.result().cancel(false));
+                    heldPeer.closeAsync().get(5, TimeUnit.SECONDS);
+                    assertEquals(pending, owner.pending());
+                    assertEquals(buffers, manifestField(pool, "outstanding", Integer.class).intValue());
+                    assertEquals(1, actuallyForced.getCount());
+                    var cached = data.get(fixture.identities.get(0).bookieId());
+                    if (fault == ManifestWireFault.DATA_FORCE) {
+                        var failedFiles = manifestMember(storage, layout.manifest().arenaForShard(1), "files",
+                                IsolatedSegmentFiles.class);
+                        failedFiles.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+                        var failure = beginManifestAdd(fixture, cached, second).result().get(5, TimeUnit.SECONDS);
+                        assertEquals(ProfileStatus.DurableResult.UNKNOWN, failure.durableResult());
+                        assertEquals(1, failedFiles.dataIo.forces);
+                    } else if (fault == ManifestWireFault.OWNER) {
+                        var other = group.owner(1);
+                        var original = new IllegalStateException("Injected second manifest owner failure");
+                        assertTrue(other.control(() -> {
+                            throw original;
+                        }));
+                        assertTrue(other.awaitTermination(Duration.ofSeconds(5)));
+                        assertSame(original, other.failure());
+                    }
+                    if (fault != ManifestWireFault.NONE) {
+                        var bookie = manifestField(storage, "bookie", SegmentBookieControlLog.class);
+                        long cut = bookie.appliedThrough();
+                        var probe = fault == ManifestWireFault.OWNER ? second : first;
+                        var denied = fixture.clients.get(fixture.identities.get(0).bookieId().toString())
+                                .fence(probe, bytes(16, 96), fixture.credential).get(5, TimeUnit.SECONDS);
+                        assertEquals(ProfileStatus.notReadyOrStale(), denied);
+                        assertEquals(ProfileStatus.notReadyOrStale(),
+                                beginManifestAdd(fixture, cached, first).result().get(5, TimeUnit.SECONDS));
+                        assertEquals(cut, bookie.appliedThrough());
+                        failed = fault == ManifestWireFault.DATA_FORCE;
+                    }
+                } finally {
+                    listener.closeAsync().get(10, TimeUnit.SECONDS);
+                }
+                assertFalse(storage.close(Duration.ofMillis(150)));
+                assertTrue(owner.pending() > 0);
+                assertTrue(manifestField(pool, "outstanding", Integer.class) > 0);
+                assertEquals(1, actuallyForced.getCount());
+                assertEquals(layout.capacity().dataBytes(), budget.used(ProfileReceiveBudget.Lane.DATA));
+                assertEquals(layout.capacity().controlBytes(), budget.used(ProfileReceiveBudget.Lane.CONTROL));
+            } finally {
+                release.countDown();
+                if (failed) {
+                    var closeFailure = assertThrows(IOException.class, storage::close);
+                    assertSame(closeFailure, assertThrows(IOException.class, storage::close));
+                } else {
+                    storage.close();
+                }
+            }
+            assertEquals(0, actuallyForced.getCount());
+            if (fault != ManifestWireFault.DATA_FORCE) {
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+            }
+        }
+    }
+
+    private static ProfileNormalDataClient.AddAttempt beginManifestAdd(Fixture fixture, ProfileNormalDataClient peer,
+            ProfileLedgerContext context) throws Exception {
+        var source = entry(fixture, context.ledgerId(), 0, bytes(16, 87));
+        try {
+            return peer.beginNormalAdd(context, fixture.credential, 0, source);
+        } finally {
+            source.release();
+        }
+    }
+
+    private static void assertManifestPhysicalDeleteUnsupported(Fixture fixture, SegmentFileHeader identity,
+            SegmentArenaManifest manifest, ProfileLedgerContext ledger) throws Exception {
+        var event = new org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery.Event(bytes(16, 50),
+                1, 1, 1, ledger, new ProfileDeleteRecord.Target(identity.bookieId().toString(),
+                        identity.incarnation().value()), new ProfileDeleteRecord.Reference(1, bytes(32, 1),
+                        bytes(32, 2)), bytes(16, 51), 1);
+        var request = new ProfilePhysicalDeleteCodec.Request(event.deleteApply("ledger-profile"), 4, 1, 1000);
+        byte[] body = ProfilePhysicalDeleteCodec.encodeRequest(request);
+        Path bookie = manifest.controlDirectory().resolve("bookie-control");
+        var arenas = manifest.arenas().stream().map(arena -> arena.directory().resolve("arena-control")).toList();
+        var beforeBookie = Files.readAllBytes(bookie);
+        var beforeFirst = Files.readAllBytes(arenas.get(0));
+        var beforeSecond = Files.readAllBytes(arenas.get(1));
+        int reads = fixture.authorityReads.get();
+        try (var peer = fixture.connect(0, 4, Duration.ofSeconds(5), "apache.bookkeeper.org",
+                identity.bookieId().toString(), identity.incarnation().value()).get(5, TimeUnit.SECONDS)) {
+            assertFalse(peer.hello().capabilities().contains(ProfilePhysicalDeleteCodec.CAPABILITY));
+            assertFalse(peer.hello().capabilities().contains(ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY));
+            // The typed control client already offered UIC8. Bypass its own support check for this wire probe.
+            var field = ProfileInitialControlClient.class.getDeclaredField("socket");
+            field.setAccessible(true);
+            Object socket = field.get(peer);
+            var channelField = socket.getClass().getDeclaredField("channel");
+            channelField.setAccessible(true);
+            var channel = (Channel) channelField.get(socket);
+            var response = new CompletableFuture<ProfileStatus>();
+            channel.eventLoop().submit(() -> {
+                String decoder = channel.pipeline().context(io.netty.handler.codec.LengthFieldBasedFrameDecoder.class)
+                        .name();
+                channel.pipeline().addAfter(decoder, "observeUnsolicitedPhysicalDelete",
+                        new io.netty.channel.SimpleChannelInboundHandler<ByteBuf>() {
+                            @Override
+                            protected void channelRead0(ChannelHandlerContext ctx, ByteBuf frame) {
+                                try {
+                                    var bytes = new byte[frame.readableBytes()];
+                                    frame.getBytes(frame.readerIndex(), bytes);
+                                    var reply = ProfileFrameCodec.decode(bytes,
+                                            ProfileFrameCodec.DecodePhase.ESTABLISHED);
+                                    assertEquals(ProfileOperation.OPERATION_STATUS, reply.header().operation());
+                                    assertEquals(7, reply.header().requestId());
+                                    response.complete(ProfileStatus.decode(reply.body()));
+                                } catch (RuntimeException | AssertionError failure) {
+                                    response.completeExceptionally(failure);
+                                }
+                            }
+                        });
+            }).get(5, TimeUnit.SECONDS);
+            channel.writeAndFlush(Unpooled.wrappedBuffer(ProfileFrameCodec.encode(new ProfileFrame(
+                    ProfileFrameHeader.request(ProfileOperation.OPERATION_STATUS, 7, body.length), body))))
+                    .sync();
+            assertEquals(ProfileStatus.unsupported(), response.get(5, TimeUnit.SECONDS));
+        }
+        assertEquals(reads, fixture.authorityReads.get());
+        assertArrayEquals(beforeBookie, Files.readAllBytes(bookie));
+        assertArrayEquals(beforeFirst, Files.readAllBytes(arenas.get(0)));
+        assertArrayEquals(beforeSecond, Files.readAllBytes(arenas.get(1)));
     }
 
     @Test
@@ -6771,7 +7203,8 @@ public class SegmentProfileInitialSocketClientTest {
                 installId, bytes(32, 74), null)).toList();
         var reservation = new ProfileReservation(new ProfileMetadataBacklink(ledger, instance, sidecar), scopes);
         var next = LedgerMetadataBuilder.create().withId(ledger).withEnsembleSize(3).withWriteQuorumSize(3)
-                .withAckQuorumSize(2).withDigestType(DigestType.CRC32C).withPassword(fixture.password)
+                .withAckQuorumSize(fixture.descriptor.ackQuorumSize()).withDigestType(DigestType.CRC32C)
+                .withPassword(fixture.password)
                 .newEnsembleEntry(0, scopes.stream().map(scope -> BookieId.parse(scope.targetBookie()))
                     .toList()).build();
         var installs = new HashMap<String, ProfileInitialMetadataCoordinator.Target>();
@@ -9455,63 +9888,104 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void admittedRepairInstallsInactiveTargetAndGrantsActualRecoveryAddOverVerifiedSockets() throws Exception {
-        try (Fixture fixture = new Fixture(false, false, true, 4, 2, true, true)) {
-            fixture.connectAll(Duration.ofSeconds(5));
-            fixture.initialize().get(5, TimeUnit.SECONDS);
-            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
-                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
-            var plan = fixture.reservations.captureRecovery(metadata, 44, bytes(16, 31)).plan();
-            var entered = fixture.reservations.beginRecovery(metadata, plan);
-            var identity = fixture.identities.get(3);
-            var scope = new ProfileControlScope(ProfileControlOperation.INSTALL,
-                    ProfileAuthorityPurpose.PREPARING_INSTALL,
-                    44, fixture.context().ledgerInstanceId(), ProfileDescriptorCodec.identityOf(DESCRIPTOR, VALIDATOR),
-                    identity.bookieId().toString(), identity.incarnation().value(), "ledger-profile",
-                    entered.context().controlGeneration(), bytes(16, 40), bytes(32, 40), null);
-            var intent = new org.apache.bookkeeper.discover.profile.ProfileRepairIntent(entered.context(), 0,
-                    bytes(16, 41), 0, 1, ZKProfileReservationStore.repairEnsembleDigest(
-                            entered.metadata().metadata().getValue(), 0), scope, bytes(16, 42),
-                    new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 1));
-            var prepared = fixture.reservations.prepareRepair(metadata, intent);
-            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, prepared.status());
-            var control = fixture.connect(3, 4, Duration.ofSeconds(5));
-            var request = ProfileControlRequest.recoveryGrant(intent.grantScope(),
-                    new ProfileControlRequest.RecoveryBinding(intent.intentId(),
-                            intent.intentGeneration(), intent.grantGeneration()));
-            assertFalse(control.recoveryGrant(request).get(5, TimeUnit.SECONDS).durable());
-            control = fixture.connect(3, 4, Duration.ofSeconds(5));
-            var installed = control.install(ProfileControlRequest.install(scope, DESCRIPTOR_BYTES,
-                    EngineProfile.SEGMENT_WAL_ENGINE, fixture.credential)).get(5, TimeUnit.SECONDS);
-            assertTrue(installed.durable());
-            assertFalse(fixture.normal(3));
-            var receipt = org.apache.bookkeeper.discover.profile.ProfileInstallReceipt.from(
-                    scope, control.hello(), installed);
-            assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
-                    fixture.reservations.admitRepair(metadata, prepared.snapshot(), receipt).status());
-            var granted = control.recoveryGrant(request).get(5, TimeUnit.SECONDS);
-            assertTrue(granted.durable());
-            assertFalse(fixture.normal(3));
-            var repeatedGrant = control.recoveryGrant(request).get(5, TimeUnit.SECONDS);
-            assertEquals(ProfileControlResult.Outcome.ALREADY_APPLIED, repeatedGrant.outcome());
-            assertEquals(granted.localGeneration(), repeatedGrant.localGeneration());
-            var data = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
-            var source = entry(fixture, 0, 16);
-            try {
-                var copied = data.addRecovery(intent, fixture.credential, 0, source).get(5, TimeUnit.SECONDS);
-                assertEquals(ProfileStatus.DurableResult.APPLIED, copied.durableResult());
-                int dataForces = files(fixture.nodes.get(3)).dataIo.forces;
-                assertEquals(ProfileStatus.DurableResult.APPLIED,
-                        data.addRecovery(intent, fixture.credential, 0, source)
-                                .get(5, TimeUnit.SECONDS).durableResult());
-                assertEquals(dataForces, files(fixture.nodes.get(3)).dataIo.forces);
-            } finally {
-                source.release();
-            }
-            assertFalse(fixture.normal(3));
-            assertEquals(4, fixture.reservations.retainedActivationTargets(44).targets().size());
-            assertEquals(LedgerMetadata.State.IN_RECOVERY,
-                    fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
+        try (var fixture = new Fixture(false, false, true, 4, 2, true, true)) {
+            verifyRecoveryAdd(fixture, bookie(fixture.nodes.get(3)), files(fixture.nodes.get(3)));
         }
+    }
+
+    @Test
+    public void manifestListenerAdmitsRecoveryAddOnMappedArena() throws Exception {
+        try (var fixture = new Fixture(false, false, true, 4, 2, true, true)) {
+            var layout = replaceWithManifest(fixture, 3);
+            var budget = manifestWireBudget(layout.capacity());
+            try (var storage = layout.owner(budget)) {
+                storage.startNew();
+                var listener = listenManifest(fixture, storage, 3);
+                try {
+                    int shard = SegmentOwnerLoop.shardFor(fixture.context().ledgerId(), 2);
+                    int member = layout.manifest().arenaForShard(shard);
+                    var files = manifestMember(storage, member, "files", IsolatedSegmentFiles.class);
+                    var bookie = manifestField(storage, "bookie", SegmentBookieControlLog.class);
+                    verifyRecoveryAdd(fixture, bookie, files);
+                    var arena = manifestMember(storage, member, "arena", SegmentArenaControlLog.class);
+                    var grants = arena.compactionCandidates(shard, -1, arena.appliedThrough()).allocations();
+                    assertEquals(1, grants.size());
+                    var grant = grants.get(0);
+                    var config = layout.manifest().arenaConfig(layout.runtime(), member);
+                    var batch = readReconstructionBatch(IsolatedSegmentFiles.dataPath(config, grant.file()),
+                            config, grant, grant.offset());
+                    assertEquals(fixture.context(), batch.records().get(0).context());
+                    assertEquals(0, batch.records().get(0).entryId());
+                    assertEquals(0, manifestMember(storage, 1 - member, "files", IsolatedSegmentFiles.class)
+                            .dataIo.forces);
+                } finally {
+                    listener.closeAsync().get(10, TimeUnit.SECONDS);
+                }
+            }
+        }
+    }
+
+    private static void verifyRecoveryAdd(Fixture fixture, SegmentBookieControlLog target,
+            IsolatedSegmentFiles targetFiles) throws Exception {
+        fixture.connectAll(Duration.ofSeconds(5));
+        fixture.initialize().get(5, TimeUnit.SECONDS);
+        var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        var plan = fixture.reservations.captureRecovery(metadata, 44, bytes(16, 31)).plan();
+        var entered = fixture.reservations.beginRecovery(metadata, plan);
+        var identity = fixture.identities.get(3);
+        var scope = new ProfileControlScope(ProfileControlOperation.INSTALL,
+                ProfileAuthorityPurpose.PREPARING_INSTALL,
+                44, fixture.context().ledgerInstanceId(), ProfileDescriptorCodec.identityOf(DESCRIPTOR, VALIDATOR),
+                identity.bookieId().toString(), identity.incarnation().value(), "ledger-profile",
+                entered.context().controlGeneration(), bytes(16, 40), bytes(32, 40), null);
+        var intent = new org.apache.bookkeeper.discover.profile.ProfileRepairIntent(entered.context(), 0,
+                bytes(16, 41), 0, 1, ZKProfileReservationStore.repairEnsembleDigest(
+                        entered.metadata().metadata().getValue(), 0), scope, bytes(16, 42),
+                new org.apache.bookkeeper.common.profile.control.ProfileExactRange(0, 1));
+        var prepared = fixture.reservations.prepareRepair(metadata, intent);
+        assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED, prepared.status());
+        var control = fixture.connect(3, 4, Duration.ofSeconds(5));
+        var request = ProfileControlRequest.recoveryGrant(intent.grantScope(),
+                new ProfileControlRequest.RecoveryBinding(intent.intentId(),
+                        intent.intentGeneration(), intent.grantGeneration()));
+        assertFalse(control.recoveryGrant(request).get(5, TimeUnit.SECONDS).durable());
+        control = fixture.connect(3, 4, Duration.ofSeconds(5));
+        var installed = control.install(ProfileControlRequest.install(scope, DESCRIPTOR_BYTES,
+                EngineProfile.SEGMENT_WAL_ENGINE, fixture.credential)).get(5, TimeUnit.SECONDS);
+        assertTrue(installed.durable());
+        assertFalse(target.normalAdmission(fixture.context(), DigestManager.generateMasterKey(fixture.password)));
+        var receipt = org.apache.bookkeeper.discover.profile.ProfileInstallReceipt.from(
+                scope, control.hello(), installed);
+        assertEquals(ZKProfileReservationStore.CreateStatus.APPLIED,
+                fixture.reservations.admitRepair(metadata, prepared.snapshot(), receipt).status());
+        var granted = control.recoveryGrant(request).get(5, TimeUnit.SECONDS);
+        assertTrue(granted.durable());
+        assertFalse(target.normalAdmission(fixture.context(), DigestManager.generateMasterKey(fixture.password)));
+        var repeatedGrant = control.recoveryGrant(request).get(5, TimeUnit.SECONDS);
+        assertEquals(ProfileControlResult.Outcome.ALREADY_APPLIED, repeatedGrant.outcome());
+        assertEquals(granted.localGeneration(), repeatedGrant.localGeneration());
+        var data = dataClient(fixture, 3, 4, Duration.ofSeconds(5));
+        var source = entry(fixture, 0, 16);
+        try {
+            var denied = data.addRecovery(intent, ProtectedProfileCredential.of(1, bytes(20, 83)), 0, source)
+                    .get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileStatus.StatusClass.UNAUTHORIZED, denied.statusClass());
+            assertEquals(ProfileStatus.DurableResult.NONE, denied.durableResult());
+            var copied = data.addRecovery(intent, fixture.credential, 0, source).get(5, TimeUnit.SECONDS);
+            assertEquals(ProfileStatus.DurableResult.APPLIED, copied.durableResult());
+            int dataForces = targetFiles.dataIo.forces;
+            assertEquals(ProfileStatus.DurableResult.APPLIED,
+                    data.addRecovery(intent, fixture.credential, 0, source)
+                            .get(5, TimeUnit.SECONDS).durableResult());
+            assertEquals(dataForces, targetFiles.dataIo.forces);
+        } finally {
+            source.release();
+        }
+        assertFalse(target.normalAdmission(fixture.context(), DigestManager.generateMasterKey(fixture.password)));
+        assertEquals(4, fixture.reservations.retainedActivationTargets(44).targets().size());
+        assertEquals(LedgerMetadata.State.IN_RECOVERY,
+                fixture.manager.readLedgerMetadata(44).get(5, TimeUnit.SECONDS).getValue().getState());
     }
 
     @Test

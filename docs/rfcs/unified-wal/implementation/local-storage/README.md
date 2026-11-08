@@ -2190,7 +2190,7 @@ per-Arena create/open消费已存完整manifest，只创建本Arena的DATA、sup
 
 最终源码分两轮运行八类定向用例，116 项通过，5 项 Linux 亲和性用例按平台条件跳过。旧 v8 真实服务重建用例使用隔离 APFS 临时卷及既有 macOS JNI 夹具，宿主默认临时目录触发磁盘使用率门槛的结果单独归档。Spotless、Checkstyle 通过。源码哈希、原始 XML 和反向验证位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-local-owner-evidence-ab6af1c6`。
 
-当前入口限本地 OFF/SYSTEM/PARK。网络与注册、Main、共同 Classic route、自动维护协同、跨 Arena 异常 OPEN 恢复和长期 filesystem 预算仍待对应验收。
+执行入口限 OFF/SYSTEM/PARK。显式借用的回环 mTLS 分发沿同一图和预算，详见 [固定多 Arena 的隔离 mTLS 分发](../profile-wire/README.md#固定多-arena-的隔离-mtls-分发)。owned startup、注册、Main、共同 Classic route、自动维护协同、跨 Arena 异常 OPEN 恢复和长期 filesystem 预算仍待验收。
 
 ## 共同 ROUTE 的持久命令与恢复
 

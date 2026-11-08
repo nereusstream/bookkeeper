@@ -122,6 +122,22 @@ stock/JDI沿原harness README；resolver单独compile/run，输入是同一relea
 
 replacement candidate 的机器锁见 [`candidate.json`](candidate.json)，记录当前实验候选、本次scoped矩阵与G1剩余阻塞，不覆盖或重写上述counterexample。
 
+## 固定多 Arena 的隔离 mTLS 分发
+
+固定 Profile-only manifest 的整图进入 LIVE 后，可以显式借用一个回环 listener。它复用原 TLS、接收解码、请求 handler 和响应排空。正常 Add、恢复 Add、点读和 LAC 按全局 shard 路由到固定 Arena。INSTALL、ACTIVATE、FENCE、LAC 写入、恢复 grant 和 terminal close 沿原控制协议使用同一 Bookie driver 及全局 Bookie 身份。连接与运行中的 DATA、CONTROL 使用同一预算。借用方先排空 listener，再关闭存储图。
+
+请求能力按 HELLO 客户端报价与服务端实际支持取交集。多 Arena 不发布 delete apply 和 physical delete。对主动报价 UIC8 的客户端，真实 `OPERATION_STATUS` 请求返回 `UNSUPPORTED` 和 `NONE`，未读取删除 authority，Bookie 和两个 Arena 的控制文件不变。只看客户端报价的反向版本将相同请求误送到处理分支并返回 `UNKNOWN`。
+
+定向 mTLS 用例用一个双 Arena owner 替换现有 3/3/3 cohort 中的一个目标。原 ZooKeeper 协调器完成两条 ledger 的初始化和激活，显式 preconnected `ProfileLedgerHandle` 走原 SDK Add 和 close。第一个 Arena 的实际 DATA force 挂起时，第二个 Arena 的写读完成。两个物理位置使用相同的本地 file、allocation 和 offset，实际 DATA 中分别记录各自 ledger。删除派生索引后，以原身份健康冷开并从同一 mTLS 分发读回两个 ledger。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/profile-manifest-transport-baseline-a123cbce`。
+
+原 ZooKeeper repair 准入将恢复目标 INSTALL 到多 Arena Bookie。确切 grant 生效后，真实 recovery Add 在映射的 Arena force 并返回 `APPLIED`，重复请求复用原写入，错误凭据返回 `UNAUTHORIZED/NONE`。从物理 DATA 解析原 ledger 和 entry 坐标。
+
+等待超时和关闭客户端连接后，挂起的实际 DATA force 继续占有原 owner 槽位和缓冲。监听器排空后，存储关闭仍等待原 force。健康排空返回总额度。另一 Arena 的实际 force 失败返回 `UNKNOWN`，或另一 owner 记录异常退出时，旧 DATA 与 CONTROL 连接拒绝新请求。反向用例中，忽略 owner 失败的版本在旧连接持久化 FENCE 并返回 `APPLIED`。修复后返回 `PROFILE_NOT_READY_OR_STALE/NONE`，Bookie cut 不变。实际 force 失败保留原 sticky 关闭结果。
+
+最终源码的定向回归覆盖真实 socket、接收预算、固定 manifest 图、执行组和 wire codec。87 项通过，5 项 Linux 亲和性用例按平台条件跳过，Spotless 与 Checkstyle 通过。原始 XML、源码哈希、分阶段日志及两次反向验证随上面的证据归档。
+
+上述 READY 属于 ledger 初始化。`SegmentProfileService.withOwnedResources` 仍在构造时拒绝两个必需 Arena，未创建存储目录。Bookie owned startup readiness、ephemeral writable 注册、注册池及其 SDK 公共工厂、自动维护和生产 Gate 各有独立验收。
+
 ## 真实隔离普通 Add 接线
 
 本节保留 `66644a6021` 的 normal 切片与当时回执；后续 FENCE 接线及当前边界见下一节。

@@ -19,7 +19,10 @@
 package org.apache.bookkeeper.bookie.storage.segment;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelPipeline;
+import io.netty.channel.EventLoopGroup;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
@@ -41,10 +44,13 @@ import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
+import org.apache.bookkeeper.tls.SecurityException;
+import org.apache.bookkeeper.tls.TLSContextFactory;
 
 /** Local Profile-only graph. The manifest fixes routing independently of execution placement. */
-final class ManifestSegmentStorage implements AutoCloseable {
+final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHandler.DataOperations {
     record Capacity(long dataBytes, long controlBytes) { }
 
     private static final class Member {
@@ -79,6 +85,7 @@ final class ManifestSegmentStorage implements AutoCloseable {
     private final List<Path> lockPaths;
     private final SegmentOwnedFiles bookieFiles;
     private final List<Member> members;
+    private final int maxEntryBytes;
     private final SegmentDataPhysicalDriver.NormalBatcher[] writes;
     private final SegmentPointRead.Reader[] reads;
     private final SegmentHotDirectory[] hot;
@@ -94,6 +101,7 @@ final class ManifestSegmentStorage implements AutoCloseable {
     private boolean freeing;
     private boolean cleanupAttempted;
     private IOException cleanupFailure;
+    private boolean listenerBorrowed;
 
     ManifestSegmentStorage(SegmentArenaManifest manifest, ManifestIdentity expected, IsolatedSegmentConfig runtime,
             SecretKey key, ProfileDescriptorValidator validator, SegmentExecutionGroup.Settings settings,
@@ -141,6 +149,8 @@ final class ManifestSegmentStorage implements AutoCloseable {
                     lockPaths));
         }
         members = List.copyOf(arenas);
+        maxEntryBytes = SegmentBatchFormat.ENTRY_OVERHEAD + members.stream()
+                .mapToInt(member -> SegmentBatchFormat.maxPayload(member.config)).min().orElseThrow();
         writes = new SegmentDataPhysicalDriver.NormalBatcher[shards];
         reads = new SegmentPointRead.Reader[shards];
         hot = new SegmentHotDirectory[shards];
@@ -154,13 +164,15 @@ final class ManifestSegmentStorage implements AutoCloseable {
             shardCounts[arena]++;
         }
         try {
+            var layout = SegmentControlCapacity.Layout.hotSpot();
             long data = SegmentControlCapacity.sum(settings.reservedBufferBytes(), settings.inputBudgetBytes(),
                     SegmentHotDirectory.metadataCapacity(global, settings, limits.hotEntries()),
                     SegmentDataPhysicalDriver.parsingCapacity(global, settings),
                     SegmentPointRead.runtimeCapacity(global, settings),
                     SegmentExecutionGroup.metadataCapacity(global, settings),
                     SegmentEntryInputs.metadataCapacity(settings.inputBudgetBytes()),
-                    SegmentDataPhysicalDriver.metadataCapacity(global, settings));
+                    SegmentDataPhysicalDriver.metadataCapacity(global, settings),
+                    layout.object(SegmentProfileListener.class), layout.object(Connection.class));
             for (int i = 0; i < shardCounts.length; i++) {
                 var config = manifest.arenaConfig(runtime, i);
                 data = SegmentControlCapacity.sum(data, SegmentDerivedIndex.CONFIGURED_CAPACITY_BYTES,
@@ -221,7 +233,7 @@ final class ManifestSegmentStorage implements AutoCloseable {
                         this::controlAdmission);
                 bootstrapShards();
                 synchronized (gate) {
-                    if (stopping || !execution.accepting()) {
+                    if (stopping || !execution.accepting() || execution.hasFailedOwner()) {
                         throw new IOException("Manifest startup lost the complete local graph");
                     }
                     accepting = true;
@@ -437,6 +449,73 @@ final class ManifestSegmentStorage implements AutoCloseable {
         }
     }
 
+    @Override
+    public SegmentProfileInstallStore profileInstallStore(Duration timeout) {
+        return new SegmentProfileInstallStore(controls(), bookieIdentity, timeout);
+    }
+
+    /** One explicitly borrowed loopback listener. The borrower drains it before retiring this graph. */
+    SegmentProfileListener listen(TLSContextFactory tls, SegmentProfileListener.Settings settings,
+            InetSocketAddress address, EventLoopGroup acceptor, EventLoopGroup worker,
+            SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
+        Objects.requireNonNull(control, "control");
+        Objects.requireNonNull(read, "read");
+        if (address.getAddress() == null || !address.getAddress().isLoopbackAddress()) {
+            throw new IllegalArgumentException("Manifest Profile listener requires a resolved loopback address");
+        }
+        synchronized (gate) {
+            if (!isLive() || listenerBorrowed) {
+                throw new IllegalStateException("Manifest listener requires one complete live graph");
+            }
+            int base = SegmentProfileAddHandler.connectionBaseBytes(settings.connectionBaseBytes(),
+                    this.control.maxPendingEntries());
+            listenerBorrowed = true;
+            return new SegmentProfileListener(tls, budget, settings, address, acceptor, worker,
+                    base, new Connection(settings, control, read, base));
+        }
+    }
+
+    private final class Connection implements SegmentProfileListener.ConnectionInstaller {
+        private final SegmentProfileListener.Settings listenerSettings;
+        private final SegmentProfileControlConfig controlConfig;
+        private final SegmentProfileReadConfig read;
+        private final int base;
+
+        private Connection(SegmentProfileListener.Settings listenerSettings, SegmentProfileControlConfig controlConfig,
+                SegmentProfileReadConfig read, int base) {
+            this.listenerSettings = listenerSettings;
+            this.controlConfig = controlConfig;
+            this.read = read;
+            this.base = base;
+        }
+
+        @Override
+        public void install(ChannelPipeline pipeline, TLSContextFactory tls) throws SecurityException {
+            synchronized (gate) {
+                if (!isLive() || !ProfileInboundPipeline.admitConnection(pipeline.channel(), budget,
+                        listenerSettings.connectionBytes(), base)) {
+                    pipeline.channel().close();
+                    return;
+                }
+                boolean installed = false;
+                try {
+                    var hello = SegmentProfileAddHandler.hello(bookieIdentity, listenerSettings.readinessGeneration(),
+                            true, false, read);
+                    var handler = new SegmentProfileAddHandler(ManifestSegmentStorage.this, tls,
+                            listenerSettings.trustDomain(), hello, maxEntryBytes, control.maxPendingEntries(),
+                            controlConfig, read);
+                    installed = ProfileInboundPipeline.install(pipeline, tls, budget,
+                            listenerSettings.connectionBytes(), base, 100 + maxEntryBytes, 144 + maxEntryBytes,
+                            handler, true, handler.frameMetadataBytes());
+                } finally {
+                    if (!installed) {
+                        pipeline.channel().close();
+                    }
+                }
+            }
+        }
+    }
+
     private int shard(ProfileLedgerContext context) {
         return SegmentOwnerLoop.shardFor(context.ledgerId(), writes.length);
     }
@@ -447,7 +526,7 @@ final class ManifestSegmentStorage implements AutoCloseable {
     }
 
     private boolean isLive() {
-        if (accepting && (!execution.accepting() || !bookieFiles.healthy()
+        if (accepting && (!execution.accepting() || execution.hasFailedOwner() || !bookieFiles.healthy()
                 || !bookie.matchesScope(control, bookieIdentity)
                 || members.stream().anyMatch(member -> !member.owned.healthy() || !member.arena.manifestAccepting()))) {
             accepting = false;
@@ -459,6 +538,108 @@ final class ManifestSegmentStorage implements AutoCloseable {
     private boolean controlAdmission() {
         synchronized (gate) {
             return isLive();
+        }
+    }
+
+    @Override
+    public boolean ownedStartupAllowsRequests() {
+        return controlAdmission();
+    }
+
+    @Override
+    public SegmentBookieControlLog.NormalRejection submitProfileNormal(ProfileLedgerContext context, byte[] credential,
+            long entryId, ByteBuf entry, SegmentDataPhysicalDriver.NormalRequest request) throws IOException {
+        synchronized (gate) {
+            if (!isLive()) {
+                return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+            }
+            var rejection = bookie.normalRejection(context, credential);
+            if (rejection != null) {
+                return rejection;
+            }
+            IsolatedSegmentStorage.requireProfileCoordinate(context, entryId, entry, "Profile");
+            if (submitNormal(context, credential, entry, request)) {
+                return null;
+            }
+            rejection = bookie.normalRejection(context, credential);
+            return rejection != null ? rejection : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+        }
+    }
+
+    @Override
+    public SegmentBookieControlLog.NormalRejection submitProfileRecovery(ProfileOperationCodec.AddRecovery request,
+            ByteBuf entry, SegmentDataPhysicalDriver.RecoveryRequest response) throws IOException {
+        synchronized (gate) {
+            int shard = shard(request.context());
+            return accepts(shard)
+                    ? IsolatedSegmentStorage.submitLocalProfileRecovery(execution, bookie, writes[shard],
+                            request, entry, response)
+                    : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+        }
+    }
+
+    @Override
+    public SegmentBookieControlLog.NormalRejection profileFenceRejection(ProfileOperationCodec.FenceLedger request) {
+        synchronized (gate) {
+            return isLive() ? bookie.fenceRejection(request.context(), request.credential())
+                    : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+        }
+    }
+
+    @Override
+    public SegmentBookieControlLog.NormalRejection submitProfileFence(ProfileOperationCodec.FenceLedger request,
+            SegmentBookieControlDriver.FenceCompletion completion) {
+        synchronized (gate) {
+            var rejection = profileFenceRejection(request);
+            if (rejection != null) {
+                return rejection;
+            }
+            return controls.submitFence(request, completion)
+                    ? null : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+        }
+    }
+
+    @Override
+    public SegmentBookieControlLog.NormalRejection profileLacRejection(ProfileOperationCodec.WriteLac request) {
+        synchronized (gate) {
+            return isLive() ? bookie.explicitLacRejection(request)
+                    : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+        }
+    }
+
+    @Override
+    public SegmentBookieControlLog.NormalRejection submitProfileLac(ProfileOperationCodec.WriteLac request,
+            SegmentBookieControlDriver.LacCompletion completion) {
+        synchronized (gate) {
+            var rejection = profileLacRejection(request);
+            if (rejection != null) {
+                return rejection;
+            }
+            return controls.submitExplicitLac(request, completion)
+                    ? null : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+        }
+    }
+
+    @Override
+    public boolean profileReadVisible(ProfileLedgerContext context, long entryId) {
+        synchronized (gate) {
+            return isLive() && bookie.networkReadable(context, entryId);
+        }
+    }
+
+    @Override
+    public boolean submitLacRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request) {
+        synchronized (gate) {
+            int shard = shard(context);
+            return accepts(shard) && reads[shard].submitLac(context, request);
+        }
+    }
+
+    @Override
+    public boolean submitLatestRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request) {
+        synchronized (gate) {
+            int shard = shard(context);
+            return accepts(shard) && reads[shard].submitLatest(context, request);
         }
     }
 
@@ -492,7 +673,8 @@ final class ManifestSegmentStorage implements AutoCloseable {
         }
     }
 
-    boolean submitRead(ProfileLedgerContext context, long entryId, SegmentPointRead.ReadRequest request) {
+    @Override
+    public boolean submitRead(ProfileLedgerContext context, long entryId, SegmentPointRead.ReadRequest request) {
         synchronized (gate) {
             int shard = shard(context);
             return accepts(shard) && reads[shard].submit(context, entryId, request);

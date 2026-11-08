@@ -271,7 +271,7 @@ DATA durable → hot locator → local result
 
 用户于 2026-10-28 冻结首版多 Arena 边界。固定 Arena/device 清单及显式 shard→Arena 映射纳入受保护 manifest。同一 storage incarnation 内的成员和映射固定，拓扑变更经新 incarnation bootstrap。已有显式 v2 身份、独立 Bookie 控制与 per-Arena DATA、control、index。
 
-[固定多 Arena 的统一本地 owner](local-storage/README.md#固定多-arena-的统一本地-owner) 接通一组全局 worker/I/O/input 和每 Arena 独立的分配、DATA、索引及恢复。整图预算在打开资源前检查，健康重开使用同一批持锁预检。实际读写、跨成员故障排空和受保护 FREE 限于本地能力，网络服务仍采用单 Arena。步骤 10 的长期压力、维护协同和共享 filesystem 预算仍待验收。
+[固定多 Arena 的统一本地 owner](local-storage/README.md#固定多-arena-的统一本地-owner) 接通一组全局 worker/I/O/input 和每 Arena 独立的分配、DATA、索引及恢复。整图预算在打开资源前检查，健康重开使用同一批持锁预检。受保护 FREE 限于本地能力，注册服务仍采用单 Arena。步骤 10 的长期压力、维护协同和共享 filesystem 预算仍待验收。
 
 亲和性沿用B18的分离对照，worker数、batch、I/O、TLS范围、E/W/A和维护负载保持相同：
 
@@ -289,6 +289,8 @@ DATA durable → hot locator → local result
 ### 第四阶段：协议与集群生命周期
 
 #### 11. 实现Profile transport adapter与接收背压
+
+[固定多 Arena 的隔离 mTLS 分发](profile-wire/README.md#固定多-arena-的隔离-mtls-分发) 接到原 Profile handler、唯一 Bookie 控制与固定 shard 路由。真实网络验证覆盖双 ledger、原 recovery grant 和 Add、健康重开、能力子集，以及断连和成员故障后的准入与排空。owned startup 和注册另有前置条件。
 
 依赖步骤3的格式/codec、步骤4的执行模型及步骤6、7的真实接口，可在接口稳定后提前独立开发。复用reference codec/corpus，增加ByteBuf adapter、TLS/HELLO、operation分发、完整status三元组及DATA/control连接分工。
 

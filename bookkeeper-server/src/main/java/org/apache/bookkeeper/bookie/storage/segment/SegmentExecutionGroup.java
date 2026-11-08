@@ -433,6 +433,15 @@ final class SegmentExecutionGroup {
         return accepting;
     }
 
+    boolean hasFailedOwner() {
+        for (SegmentOwnerLoop owner : owners) {
+            if (owner != null && owner.failure() != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     boolean onOwnerThread() {
         for (SegmentOwnerLoop owner : owners) {
             if (owner != null && owner.isOwnerThread()) {

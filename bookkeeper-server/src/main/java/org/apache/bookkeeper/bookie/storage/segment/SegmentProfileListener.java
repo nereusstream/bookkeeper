@@ -20,6 +20,7 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.group.DefaultChannelGroup;
 import io.netty.channel.socket.SocketChannel;
@@ -35,6 +36,12 @@ import org.apache.bookkeeper.tls.TLSContextFactory;
 
 /** Explicit isolated Profile listener owner. Caller retains storage, TLS, cold pool and event-loop ownership. */
 final class SegmentProfileListener {
+    @FunctionalInterface
+    interface ConnectionInstaller {
+        void install(ChannelPipeline pipeline, TLSContextFactory tls)
+                throws org.apache.bookkeeper.tls.SecurityException;
+    }
+
     record Settings(int connectionBytes, int connectionBaseBytes, String trustDomain, long readinessGeneration) {
         Settings {
             if (connectionBytes < 1 || connectionBaseBytes < 1 || connectionBaseBytes > connectionBytes
@@ -55,14 +62,23 @@ final class SegmentProfileListener {
     SegmentProfileListener(IsolatedSegmentStorage storage, TLSContextFactory tls, ProfileReceiveBudget budget,
             Settings settings, InetSocketAddress address, EventLoopGroup acceptor, EventLoopGroup worker,
             SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
-        Objects.requireNonNull(storage, "storage");
+        this(tls, budget, settings, address, acceptor, worker,
+                Objects.requireNonNull(storage, "storage").profileConnectionBaseBytes(settings.connectionBaseBytes()),
+                (pipeline, factory) -> storage.installProfileConnection(pipeline, factory, budget,
+                        settings.connectionBytes(), settings.connectionBaseBytes(), settings.trustDomain(),
+                        settings.readinessGeneration(), control, read));
+    }
+
+    SegmentProfileListener(TLSContextFactory tls, ProfileReceiveBudget budget, Settings settings,
+            InetSocketAddress address, EventLoopGroup acceptor, EventLoopGroup worker,
+            int connectionBase, ConnectionInstaller installer) {
         Objects.requireNonNull(tls, "tls");
         Objects.requireNonNull(settings, "settings");
         Objects.requireNonNull(address, "address");
         Objects.requireNonNull(acceptor, "acceptor");
+        Objects.requireNonNull(installer, "installer");
         this.worker = Objects.requireNonNull(worker, "worker");
         this.budget = Objects.requireNonNull(budget, "budget");
-        int connectionBase = storage.profileConnectionBaseBytes(settings.connectionBaseBytes());
         children = new DefaultChannelGroup(worker.next(), true);
         ChannelFuture binding = new ServerBootstrap().group(acceptor, ProfileInboundPipeline.admittingGroup(
                 worker, budget, settings.connectionBytes(), connectionBase))
@@ -71,9 +87,7 @@ final class SegmentProfileListener {
                     @Override
                     protected void initChannel(SocketChannel channel) throws Exception {
                         children.add(channel);
-                        storage.installProfileConnection(channel.pipeline(), tls, budget, settings.connectionBytes(),
-                                settings.connectionBaseBytes(), settings.trustDomain(), settings.readinessGeneration(),
-                                control, read);
+                        installer.install(channel.pipeline(), tls);
                     }
                 }).bind(address);
         listener = binding.channel();

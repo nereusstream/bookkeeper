@@ -24,6 +24,7 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.handler.ssl.SslHandler;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
@@ -74,6 +75,37 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         PENDING_METADATA_BYTES = pendingMetadataBytes(layout);
         FRAME_METADATA_BYTES = frameMetadataBytes(layout);
     }
+    interface DataOperations {
+        boolean ownedStartupAllowsRequests();
+
+        SegmentProfileInstallStore profileInstallStore(Duration timeout);
+
+        SegmentBookieControlLog.NormalRejection submitProfileNormal(ProfileLedgerContext context, byte[] credential,
+                long entryId, ByteBuf entry, SegmentDataPhysicalDriver.NormalRequest request) throws IOException;
+
+        SegmentBookieControlLog.NormalRejection submitProfileRecovery(ProfileOperationCodec.AddRecovery request,
+                ByteBuf entry, SegmentDataPhysicalDriver.RecoveryRequest response) throws IOException;
+
+        boolean profileReadVisible(ProfileLedgerContext context, long entryId);
+
+        boolean submitRead(ProfileLedgerContext context, long entryId, SegmentPointRead.ReadRequest request);
+
+        boolean submitLacRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request);
+
+        boolean submitLatestRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request);
+
+        SegmentBookieControlLog.NormalRejection profileFenceRejection(ProfileOperationCodec.FenceLedger request);
+
+        SegmentBookieControlLog.NormalRejection submitProfileFence(ProfileOperationCodec.FenceLedger request,
+                SegmentBookieControlDriver.FenceCompletion completion);
+
+        SegmentBookieControlLog.NormalRejection profileLacRejection(ProfileOperationCodec.WriteLac request);
+
+        SegmentBookieControlLog.NormalRejection submitProfileLac(ProfileOperationCodec.WriteLac request,
+                SegmentBookieControlDriver.LacCompletion completion);
+    }
+
+    private final DataOperations data;
     private final IsolatedSegmentStorage storage;
     private final TLSContextFactory tls;
     private final String trustDomain;
@@ -117,13 +149,26 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
     SegmentProfileAddHandler(IsolatedSegmentStorage storage, TLSContextFactory tls, String trustDomain,
                              ProfileHello.Server hello, int maxEntryBytes, int maxPending,
                              SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
+        this(storage, storage, tls, trustDomain, hello, maxEntryBytes, maxPending, control, read);
+    }
+
+    SegmentProfileAddHandler(ManifestSegmentStorage storage, TLSContextFactory tls, String trustDomain,
+                             ProfileHello.Server hello, int maxEntryBytes, int maxPending,
+                             SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
+        this(storage, null, tls, trustDomain, hello, maxEntryBytes, maxPending, control, read);
+    }
+
+    private SegmentProfileAddHandler(DataOperations data, IsolatedSegmentStorage storage, TLSContextFactory tls,
+                                     String trustDomain, ProfileHello.Server hello, int maxEntryBytes, int maxPending,
+                                     SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
         this.read = read;
         readLoanBytes = read == null ? 0 : SegmentPointRead.loanMetadataBytes();
         pendingMetadataBytes = PENDING_METADATA_BYTES;
         frameMetadataBytes = FRAME_METADATA_BYTES;
         this.control = control;
-        physicalControl = control == null ? null : storage.profileInstallStore(control.timeout());
-        this.storage = Objects.requireNonNull(storage, "storage");
+        this.data = Objects.requireNonNull(data, "data");
+        physicalControl = control == null ? null : data.profileInstallStore(control.timeout());
+        this.storage = storage;
         this.tls = Objects.requireNonNull(tls, "tls");
         this.trustDomain = Objects.requireNonNull(trustDomain, "trustDomain");
         this.hello = Objects.requireNonNull(hello, "hello");
@@ -271,43 +316,28 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                         ssl.engine().getSession().getProtocol(), true, true, true,
                         tls.authenticatedProfilePrincipal(ssl, trustDomain));
                 if (control != null || read != null) {
-                    byte[] offer = new byte[frame.body().readableBytes()];
-                    frame.body().getBytes(frame.body().readerIndex(), offer);
-                    writeLacNegotiated = control != null && ProfileHello.decodeClient(offer).capabilities()
-                            .contains(ProfileOperationCodec.WRITE_LAC_CAPABILITY);
-                    explicitLacNegotiated = read != null && read.lacAuthorization() != null
-                            && ProfileHello.decodeClient(offer).capabilities().contains(
-                                    ProfileLacReplyCodec.EXPLICIT_CAPABILITY);
-                    lacNegotiated = read != null && read.lacAuthorization() != null
-                            && ProfileHello.decodeClient(offer).capabilities().contains(
-                                    ProfileLacReplyCodec.CAPABILITY);
-                    readNegotiated = read != null && ProfileHello.decodeClient(offer).capabilities().contains(
-                            ProfileReadEntryReplyCodec.CAPABILITY);
-                    physicalDeleteNegotiated = control != null
-                            && ProfileHello.decodeClient(offer).capabilities().contains(
-                                    ProfilePhysicalDeleteCodec.CAPABILITY);
-                    deleteApplyNegotiated = control != null
-                            && ProfileHello.decodeClient(offer).capabilities().contains(
-                                    ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY);
-                    terminalBoundaryNegotiated = control != null
-                            && ProfileHello.decodeClient(offer).capabilities().contains(
-                                    ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY);
-                    recoveryCloseNegotiated = control != null
-                            && ProfileHello.decodeClient(offer).capabilities().contains(new ProfileHello.Capability(
-                                    ProfileInitialControlCodec.RECOVERY_CLOSE_CAPABILITY_ID,
-                                    ProfileInitialControlCodec.RECOVERY_CLOSE_SCHEMA));
-                    recoveryControlNegotiated = control != null
-                            && ProfileHello.decodeClient(offer).capabilities().contains(new ProfileHello.Capability(
-                                    ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID,
-                                    ProfileInitialControlCodec.RECOVERY_SCHEMA));
-                    initialControlNegotiated = control != null
-                            && ProfileHello.decodeClient(offer).capabilities().contains(
-                            new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID,
-                                    ProfileInitialControlCodec.SCHEMA));
-                    replacementControlNegotiated = control != null
-                            && ProfileHello.decodeClient(offer).capabilities().contains(
-                            new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
-                                    ProfileInitialControlCodec.REPLACEMENT_SCHEMA));
+                    byte[] offeredBytes = new byte[frame.body().readableBytes()];
+                    frame.body().getBytes(frame.body().readerIndex(), offeredBytes);
+                    var offered = ProfileHello.decodeClient(offeredBytes);
+                    writeLacNegotiated = negotiated(offered, ProfileOperationCodec.WRITE_LAC_CAPABILITY);
+                    explicitLacNegotiated = negotiated(offered, ProfileLacReplyCodec.EXPLICIT_CAPABILITY);
+                    lacNegotiated = negotiated(offered, ProfileLacReplyCodec.CAPABILITY);
+                    readNegotiated = negotiated(offered, ProfileReadEntryReplyCodec.CAPABILITY);
+                    physicalDeleteNegotiated = negotiated(offered, ProfilePhysicalDeleteCodec.CAPABILITY);
+                    deleteApplyNegotiated = negotiated(offered, ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY);
+                    terminalBoundaryNegotiated = negotiated(offered,
+                            ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY);
+                    recoveryCloseNegotiated = negotiated(offered, new ProfileHello.Capability(
+                            ProfileInitialControlCodec.RECOVERY_CLOSE_CAPABILITY_ID,
+                            ProfileInitialControlCodec.RECOVERY_CLOSE_SCHEMA));
+                    recoveryControlNegotiated = negotiated(offered, new ProfileHello.Capability(
+                            ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID,
+                            ProfileInitialControlCodec.RECOVERY_SCHEMA));
+                    initialControlNegotiated = negotiated(offered, new ProfileHello.Capability(
+                            ProfileInitialControlCodec.CAPABILITY_ID, ProfileInitialControlCodec.SCHEMA));
+                    replacementControlNegotiated = negotiated(offered, new ProfileHello.Capability(
+                            ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
+                            ProfileInitialControlCodec.REPLACEMENT_SCHEMA));
                 }
                 // Capability agreement grants neither principal permissions nor metadata authority.
                 ProfileInboundPipeline.markEstablished(ctx.pipeline());
@@ -316,7 +346,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                 write(ctx, request, null, body);
             } else if (!established) {
                 ctx.close();
-            } else if (!storage.ownedStartupAllowsRequests()) {
+            } else if (!data.ownedStartupAllowsRequests()) {
                 write(ctx, request, ProfileStatus.notReadyOrStale(), null);
             } else if (frame.header().operation() == ProfileOperation.OPERATION_STATUS) {
                 physicalDelete(ctx, request);
@@ -353,6 +383,43 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         }
     }
 
+    private boolean negotiated(ProfileHello.Client offered, ProfileHello.Capability capability) {
+        return hello.capabilities().contains(capability) && offered.capabilities().contains(capability);
+    }
+
+    static ProfileHello.Server hello(SegmentFileHeader identity, long readinessGeneration, boolean control,
+            boolean delete, SegmentProfileReadConfig read) {
+        var capabilities = new ArrayList<ProfileHello.Capability>();
+        if (control) {
+            capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID,
+                    ProfileInitialControlCodec.SCHEMA));
+            capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
+                    ProfileInitialControlCodec.REPLACEMENT_SCHEMA));
+            capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID,
+                    ProfileInitialControlCodec.RECOVERY_SCHEMA));
+            capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CLOSE_CAPABILITY_ID,
+                    ProfileInitialControlCodec.RECOVERY_CLOSE_SCHEMA));
+            capabilities.add(ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY);
+            capabilities.add(ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY);
+            if (delete) {
+                capabilities.add(ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY);
+                capabilities.add(ProfilePhysicalDeleteCodec.CAPABILITY);
+            }
+        }
+        if (read != null) {
+            capabilities.add(ProfileReadEntryReplyCodec.CAPABILITY);
+            if (read.lacAuthorization() != null) {
+                capabilities.add(ProfileLacReplyCodec.CAPABILITY);
+                capabilities.add(ProfileLacReplyCodec.EXPLICIT_CAPABILITY);
+            }
+        }
+        if (control) {
+            capabilities.add(ProfileOperationCodec.WRITE_LAC_CAPABILITY);
+        }
+        return new ProfileHello.Server(EngineProfile.SEGMENT_WAL_ENGINE.wireValue(), identity.incarnation().value(),
+                readinessGeneration, identity.bookieId().toString(), capabilities);
+    }
+
     private void writeLac(ChannelHandlerContext ctx, Pending request) {
         if (!writeLacNegotiated) {
             write(ctx, request, ProfileStatus.unsupported(), null);
@@ -385,7 +452,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             write(ctx, request, status(StatusClass.BAD_REQUEST, RetryDisposition.NEVER, DurableResult.NONE), null);
             return;
         }
-        var refused = storage.profileLacRejection(value);
+        var refused = data.profileLacRejection(value);
         if (refused != null) {
             write(ctx, request, rejectionStatus(refused), null);
             return;
@@ -393,7 +460,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         request.beginControl();
         boolean submitted = false;
         try {
-            refused = storage.submitProfileLac(value, (result, failure) -> {
+            refused = data.submitProfileLac(value, (result, failure) -> {
                 try {
                     complete(ctx, request, failure != null || result == null ? unknown() : switch (result) {
                         case APPLIED_DURABLE -> status(StatusClass.OK, RetryDisposition.NEVER, DurableResult.APPLIED);
@@ -442,7 +509,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             write(ctx, request, status(StatusClass.UNAUTHORIZED, RetryDisposition.NEVER, DurableResult.NONE), null);
             return;
         }
-        if (!storage.profileReadVisible(query.context(), query.entryId())) {
+        if (!data.profileReadVisible(query.context(), query.entryId())) {
             write(ctx, request, ProfileStatus.notReadyOrStale(), null);
             return;
         }
@@ -452,9 +519,9 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         request.readRequest = stored;
         boolean submitted = false;
         try {
-            submitted = latest ? explicitLacNegotiated ? storage.submitLacRead(query.context(), stored)
-                    : storage.submitLatestRead(query.context(), stored)
-                    : storage.submitRead(query.context(), query.entryId(), stored);
+            submitted = latest ? explicitLacNegotiated ? data.submitLacRead(query.context(), stored)
+                    : data.submitLatestRead(query.context(), stored)
+                    : data.submitRead(query.context(), query.entryId(), stored);
             if (!submitted) {
                 write(ctx, request, status(StatusClass.TRANSIENT_UNAVAILABLE,
                         RetryDisposition.SAME_PROFILE_OPERATION, DurableResult.NONE), null);
@@ -490,7 +557,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                     if (!readAuthorized(query, latest)) {
                         write(ctx, request, status(StatusClass.UNAUTHORIZED,
                                 RetryDisposition.NEVER, DurableResult.NONE), null);
-                    } else if (!storage.profileReadVisible(query.context(), query.entryId())) {
+                    } else if (!data.profileReadVisible(query.context(), query.entryId())) {
                         write(ctx, request, status(StatusClass.PROFILE_NOT_READY_OR_STALE,
                                 RetryDisposition.AFTER_CONTROL_RECONCILIATION, DurableResult.NONE), null);
                     } else if (failure == null && result == SegmentPointRead.ReadStatus.FOUND && lease != null) {
@@ -603,7 +670,8 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         try {
             ctx.executor().execute(() -> {
                 try {
-                    if (admitted.isDone() || request.finished.get() || !ctx.channel().isActive()) {
+                    if (admitted.isDone() || request.finished.get() || !ctx.channel().isActive()
+                            || !data.ownedStartupAllowsRequests()) {
                         admitted.complete(false);
                         return;
                     }
@@ -853,7 +921,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         pendingRequest.storageRequest = new SegmentDataPhysicalDriver.NormalRequest((result, failure) ->
                 complete(ctx, pendingRequest, resultStatus(result, failure)));
         try {
-            SegmentBookieControlLog.NormalRejection refused = storage.submitProfileNormal(
+            SegmentBookieControlLog.NormalRejection refused = data.submitProfileNormal(
                     context, credential, entryId, entry, pendingRequest.storageRequest);
             if (refused != null) {
                 pendingRequest.storageRequest.stopWaiting();
@@ -902,7 +970,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         request.recoveryRequest = new SegmentDataPhysicalDriver.RecoveryRequest((result, failure) ->
                 complete(ctx, request, recoveryResultStatus(result, failure)));
         try {
-            SegmentBookieControlLog.NormalRejection refused = storage.submitProfileRecovery(
+            SegmentBookieControlLog.NormalRejection refused = data.submitProfileRecovery(
                     tuple, entry, request.recoveryRequest);
             if (refused != null) {
                 request.recoveryRequest.stopWaiting();
@@ -939,7 +1007,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
             write(ctx, request, status(StatusClass.BAD_REQUEST, RetryDisposition.NEVER, DurableResult.NONE), null);
             return;
         }
-        SegmentBookieControlLog.NormalRejection refused = storage.profileFenceRejection(fence);
+        SegmentBookieControlLog.NormalRejection refused = data.profileFenceRejection(fence);
         if (refused != null) {
             request.closeAfterWrite = !controlEstablished;
             write(ctx, request, rejectionStatus(refused), null);
@@ -952,7 +1020,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
         request.beginControl();
         boolean submitted = false;
         try {
-            refused = storage.submitProfileFence(fence, (result, failure) -> {
+            refused = data.submitProfileFence(fence, (result, failure) -> {
                 try {
                     ProfileStatus response;
                     if (failure != null || result == null) {
@@ -966,7 +1034,7 @@ final class SegmentProfileAddHandler extends ChannelInboundHandlerAdapter {
                             case WAITING_PRECUT -> status(StatusClass.TRANSIENT_UNAVAILABLE,
                                     RetryDisposition.SAME_PROFILE_OPERATION, DurableResult.NONE);
                             case REJECTED -> {
-                                SegmentBookieControlLog.NormalRejection reason = storage.profileFenceRejection(fence);
+                                SegmentBookieControlLog.NormalRejection reason = data.profileFenceRejection(fence);
                                 yield rejectionStatus(reason != null ? reason
                                         : SegmentBookieControlLog.NormalRejection.IDENTITY_CONFLICT);
                             }

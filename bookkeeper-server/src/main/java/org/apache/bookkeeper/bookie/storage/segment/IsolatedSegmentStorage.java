@@ -58,10 +58,8 @@ import org.apache.bookkeeper.common.profile.startup.StartupReadinessHarness;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessResult;
 import org.apache.bookkeeper.common.profile.wire.ProfileHello;
-import org.apache.bookkeeper.common.profile.wire.ProfileInitialControlCodec;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
-import org.apache.bookkeeper.common.profile.wire.ProfilePhysicalDeleteCodec;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteHandoff;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
@@ -75,7 +73,7 @@ import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.tls.TLSContextFactory;
 
 /** Owns the isolated local storage graph. This is not Bookie registration or production ACK readiness. */
-final class IsolatedSegmentStorage implements AutoCloseable {
+final class IsolatedSegmentStorage implements AutoCloseable, SegmentProfileAddHandler.DataOperations {
     enum ControlRotationStatus {
         ROTATED, TRANSIENT_UNAVAILABLE, UNKNOWN
     }
@@ -915,7 +913,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                 || profileAdmission.allows(identity.bookieId().toString(), identity.incarnation());
     }
 
-    boolean ownedStartupAllowsRequests() {
+    @Override
+    public boolean ownedStartupAllowsRequests() {
         var startup = ownedStartupAdmission;
         return startup == null || startup.hasCompletedFirstOpen(identity.incarnation());
     }
@@ -1058,7 +1057,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     }
 
     /** Borrow the original control driver for a bounded, synchronous cold INSTALL endpoint. */
-    SegmentProfileInstallStore profileInstallStore(Duration timeout) {
+    @Override
+    public SegmentProfileInstallStore profileInstallStore(Duration timeout) {
         return new SegmentProfileInstallStore(controls(), identity, timeout);
     }
 
@@ -1165,37 +1165,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             }
             boolean installed = false;
             try {
-                List<ProfileHello.Capability> capabilities = new java.util.ArrayList<>();
-                if (control != null) {
-                    capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.CAPABILITY_ID,
-                            ProfileInitialControlCodec.SCHEMA));
-                    capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.REPLACEMENT_CAPABILITY_ID,
-                            ProfileInitialControlCodec.REPLACEMENT_SCHEMA));
-                    capabilities.add(new ProfileHello.Capability(ProfileInitialControlCodec.RECOVERY_CAPABILITY_ID,
-                            ProfileInitialControlCodec.RECOVERY_SCHEMA));
-                    capabilities.add(new ProfileHello.Capability(
-                            ProfileInitialControlCodec.RECOVERY_CLOSE_CAPABILITY_ID,
-                            ProfileInitialControlCodec.RECOVERY_CLOSE_SCHEMA));
-                    capabilities.add(ProfileInitialControlCodec.TERMINAL_CLOSE_CAPABILITY);
-                    capabilities.add(ProfileInitialControlCodec.TERMINAL_BOUNDARY_CAPABILITY);
-                    capabilities.add(ProfileInitialControlCodec.DELETE_APPLY_CAPABILITY);
-                    capabilities.add(ProfilePhysicalDeleteCodec.CAPABILITY);
-                }
-                if (read != null) {
-                    capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileReadEntryReplyCodec.CAPABILITY);
-                    if (read.lacAuthorization() != null) {
-                        capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec.CAPABILITY);
-                        capabilities.add(org.apache.bookkeeper.common.profile.wire.ProfileLacReplyCodec
-                                .EXPLICIT_CAPABILITY);
-                    }
-                }
-                if (control != null) {
-                    capabilities.add(ProfileOperationCodec.WRITE_LAC_CAPABILITY);
-                }
-                ProfileHello.Server hello = new ProfileHello.Server(
-                        EngineProfile.SEGMENT_WAL_ENGINE.wireValue(),
-                        identity.incarnation().value(), readinessGeneration, identity.bookieId().toString(),
-                        capabilities);
+                ProfileHello.Server hello = SegmentProfileAddHandler.hello(identity, readinessGeneration,
+                        control != null, true, read);
                 SegmentProfileAddHandler handler = new SegmentProfileAddHandler(this, tls, trustDomain, hello,
                         SegmentBatchFormat.ENTRY_OVERHEAD + SegmentBatchFormat.maxPayload(config),
                         config.maxPendingEntries(), control, read);
@@ -1213,7 +1184,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     }
 
     /** Exact validation precedes the existing charged synchronous copy and real admission path. */
-    SegmentBookieControlLog.NormalRejection submitProfileNormal(ProfileLedgerContext context, byte[] credential,
+    @Override
+    public SegmentBookieControlLog.NormalRejection submitProfileNormal(ProfileLedgerContext context, byte[] credential,
             long entryId, ByteBuf entry, SegmentDataPhysicalDriver.NormalRequest request) throws IOException {
         synchronized (gate) {
             if (!accepting || !execution.accepting() || !writableRegistrationAllowsAdmission()) {
@@ -1223,15 +1195,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
             if (rejection != null) {
                 return rejection;
             }
-            SegmentEntryIdentity parsed;
-            try {
-                parsed = SegmentEntryIdentity.parse(context, entry.nioBuffer());
-            } catch (IOException invalid) {
-                throw new IllegalArgumentException("Invalid Profile BK entry", invalid);
-            }
-            if (parsed.entryId() != entryId) {
-                throw new IllegalArgumentException("Profile coordinate differs from its BK entry");
-            }
+            requireProfileCoordinate(context, entryId, entry, "Profile");
             if (submitNormal(context, credential, entry, request)) {
                 return null;
             }
@@ -1240,7 +1204,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
-    SegmentBookieControlLog.NormalRejection profileFenceRejection(ProfileOperationCodec.FenceLedger request) {
+    @Override
+    public SegmentBookieControlLog.NormalRejection profileFenceRejection(ProfileOperationCodec.FenceLedger request) {
         synchronized (gate) {
             if (!accepting || !execution.accepting()) {
                 return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
@@ -1250,7 +1215,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     }
 
     /** Controls keep their reserved owner/I/O path when DATA input or space is backpressured. */
-    SegmentBookieControlLog.NormalRejection submitProfileFence(ProfileOperationCodec.FenceLedger request,
+    @Override
+    public SegmentBookieControlLog.NormalRejection submitProfileFence(ProfileOperationCodec.FenceLedger request,
             SegmentBookieControlDriver.FenceCompletion completion) {
         synchronized (gate) {
             SegmentBookieControlLog.NormalRejection rejection = profileFenceRejection(request);
@@ -1262,7 +1228,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
-    SegmentBookieControlLog.NormalRejection profileLacRejection(ProfileOperationCodec.WriteLac request) {
+    @Override
+    public SegmentBookieControlLog.NormalRejection profileLacRejection(ProfileOperationCodec.WriteLac request) {
         synchronized (gate) {
             if (!accepting || !execution.accepting() || !writableRegistrationAllowsAdmission()) {
                 return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
@@ -1271,7 +1238,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
-    SegmentBookieControlLog.NormalRejection submitProfileLac(ProfileOperationCodec.WriteLac request,
+    @Override
+    public SegmentBookieControlLog.NormalRejection submitProfileLac(ProfileOperationCodec.WriteLac request,
             SegmentBookieControlDriver.LacCompletion completion) {
         synchronized (gate) {
             var rejection = profileLacRejection(request);
@@ -1313,7 +1281,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
     }
 
     /** The complete entry is borrowed only until its synchronous, precharged source copy finishes. */
-    SegmentBookieControlLog.NormalRejection submitProfileRecovery(ProfileOperationCodec.AddRecovery tuple,
+    @Override
+    public SegmentBookieControlLog.NormalRejection submitProfileRecovery(ProfileOperationCodec.AddRecovery tuple,
             ByteBuf entry, SegmentDataPhysicalDriver.RecoveryRequest response) throws IOException {
         synchronized (gate) {
             if (!accepting || !execution.accepting() || !writableRegistrationAllowsAdmission()
@@ -1321,56 +1290,70 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     || controlCapacityPaused() || dataCapacityPaused()) {
                 return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
             }
-            SegmentBookieControlLog.NormalRejection rejection = bookie.recoveryRejection(tuple);
-            if (rejection != null) {
-                return rejection;
+            int shard = SegmentOwnerLoop.shardFor(tuple.context().ledgerId(), config.logicalShards());
+            var rejection = submitLocalProfileRecovery(execution, bookie, writes[shard], tuple, entry, response);
+            if (rejection == SegmentBookieControlLog.NormalRejection.UNAVAILABLE) {
+                controlCapacityPaused();
             }
-            SegmentEntryIdentity parsed;
-            try {
-                parsed = SegmentEntryIdentity.parse(tuple.context(), entry.nioBuffer());
-            } catch (IOException invalid) {
-                throw new IllegalArgumentException("Invalid Profile recovery BK entry", invalid);
-            }
-            if (parsed.entryId() != tuple.entryId()) {
-                throw new IllegalArgumentException("Profile recovery coordinate differs from its BK entry");
-            }
-            SegmentBookieControlLog.RecoveryAdmission admission = bookie.admitRecoveryTuple(tuple).orElse(null);
-            if (admission == null) {
-                rejection = bookie.recoveryRejection(tuple);
-                return rejection != null ? rejection : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
-            }
-            SegmentEntryInputs.Input input = null;
-            try {
-                input = execution.inputs().acquire(tuple.context(), entry.readableBytes(),
-                        ProfileInboundPipeline.inputCopyAllocator(entry));
-                if (input == null) {
-                    admission.releaseUnclaimed();
-                    return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
-                }
-                input.bytes().writeBytes(entry, entry.readerIndex(), entry.readableBytes());
-                boolean accepted = writes[SegmentOwnerLoop.shardFor(tuple.context().ledgerId(),
-                        config.logicalShards())].submitRecovery(input, admission, response);
-                if (!accepted) {
-                    controlCapacityPaused();
-                }
-                return accepted ? null : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
-            } catch (IOException | RuntimeException | Error failure) {
-                if (input != null) {
-                    input.close();
-                }
-                admission.releaseUnclaimed();
-                throw failure;
-            }
+            return rejection;
         }
     }
 
-    boolean profileReadVisible(ProfileLedgerContext context, long entryId) {
+    static SegmentBookieControlLog.NormalRejection submitLocalProfileRecovery(SegmentExecutionGroup execution,
+            SegmentBookieControlLog bookie, SegmentDataPhysicalDriver.NormalBatcher batcher,
+            ProfileOperationCodec.AddRecovery tuple, ByteBuf entry, SegmentDataPhysicalDriver.RecoveryRequest response)
+            throws IOException {
+        var rejection = bookie.recoveryRejection(tuple);
+        if (rejection != null) {
+            return rejection;
+        }
+        requireProfileCoordinate(tuple.context(), tuple.entryId(), entry, "Profile recovery");
+        var admission = bookie.admitRecoveryTuple(tuple).orElse(null);
+        if (admission == null) {
+            rejection = bookie.recoveryRejection(tuple);
+            return rejection != null ? rejection : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+        }
+        SegmentEntryInputs.Input input = null;
+        try {
+            input = execution.inputs().acquire(tuple.context(), entry.readableBytes(),
+                    ProfileInboundPipeline.inputCopyAllocator(entry));
+            if (input == null) {
+                admission.releaseUnclaimed();
+                return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+            }
+            input.bytes().writeBytes(entry, entry.readerIndex(), entry.readableBytes());
+            return batcher.submitRecovery(input, admission, response)
+                    ? null : SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
+        } catch (IOException | RuntimeException | Error failure) {
+            if (input != null) {
+                input.close();
+            }
+            admission.releaseUnclaimed();
+            throw failure;
+        }
+    }
+
+    static void requireProfileCoordinate(ProfileLedgerContext context, long entryId, ByteBuf entry, String operation) {
+        SegmentEntryIdentity parsed;
+        try {
+            parsed = SegmentEntryIdentity.parse(context, entry.nioBuffer());
+        } catch (IOException invalid) {
+            throw new IllegalArgumentException("Invalid " + operation + " BK entry", invalid);
+        }
+        if (parsed.entryId() != entryId) {
+            throw new IllegalArgumentException(operation + " coordinate differs from its BK entry");
+        }
+    }
+
+    @Override
+    public boolean profileReadVisible(ProfileLedgerContext context, long entryId) {
         synchronized (gate) {
             return accepting && bookie.networkReadable(context, entryId);
         }
     }
 
-    boolean submitLacRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request) {
+    @Override
+    public boolean submitLacRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request) {
         synchronized (gate) {
             return accepting && execution.accepting() && freeOperation == null
                     && compaction == null && !deleteInspection && controlRotation == null && !controlCapacityPaused()
@@ -1379,7 +1362,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
-    boolean submitLatestRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request) {
+    @Override
+    public boolean submitLatestRead(ProfileLedgerContext context, SegmentPointRead.ReadRequest request) {
         synchronized (gate) {
             return accepting && execution.accepting() && freeOperation == null
                     && compaction == null && !deleteInspection && controlRotation == null && !controlCapacityPaused()
@@ -1388,7 +1372,8 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
-    boolean submitRead(ProfileLedgerContext context, long entryId, SegmentPointRead.ReadRequest request) {
+    @Override
+    public boolean submitRead(ProfileLedgerContext context, long entryId, SegmentPointRead.ReadRequest request) {
         synchronized (gate) {
             return accepting && execution.accepting() && freeOperation == null
                     && compaction == null && !deleteInspection && controlRotation == null && !controlCapacityPaused()
