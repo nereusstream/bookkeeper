@@ -716,8 +716,23 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     record ObservedRetirement(UUID operationId, Generation generation, FreeFacts facts) { }
 
-    record ReconstructionHistory(boolean committedMoves, int successfulFrees, boolean reused, long requiredBookieCut) {
+    record ObservedTail(AllocationIdentity allocation, long generation, long end, UUID closeOperation,
+                        long closeEpoch, long closeSequence) {
+        ReusedExtent extent() {
+            return new ReusedExtent(end, allocation.extentEnd());
+        }
+    }
+
+    record ReconstructionHistory(boolean committedMoves, int successfulFrees, int successfulReuses,
+                                 long requiredBookieCut) {
+        boolean reused() {
+            return successfulReuses > 0;
+        }
+
         ProfileClosedReconstruction.HistoryMode mode() {
+            if (reused()) {
+                return ProfileClosedReconstruction.HistoryMode.FULLY_SEALED_REUSE;
+            }
             if (successfulFrees > 0) {
                 return ProfileClosedReconstruction.HistoryMode.RETIRED;
             }
@@ -726,11 +741,19 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
 
         void requireMode(ProfileClosedReconstruction.HistoryMode expected, long bookieCut,
-                boolean hasSelectors, int retiredSlots) throws IOException {
-            if (reused || mode() != expected || retiredSlots != successfulFrees || bookieCut < requiredBookieCut
+                boolean hasSelectors, int retiredSlots, long currentReused, Map<Long, ObservedTail> tails)
+                throws IOException {
+            if (mode() != expected || retiredSlots != successfulFrees - successfulReuses
+                    || bookieCut < requiredBookieCut
                     || (hasSelectors && !committedMoves)
                     || (expected == ProfileClosedReconstruction.HistoryMode.COMMITTED_MOVE && !hasSelectors)) {
                 throw new IOException("CLOSED reconstruction mode or original control history differs");
+            }
+            if (currentReused != tails.size()) {
+                throw new IOException("CLOSED reconstruction lacks an exact preceding healthy CLOSE tail");
+            }
+            if (tails.values().stream().anyMatch(tail -> tail.end() != tail.allocation().extentEnd())) {
+                throw new IOException("CLOSED reconstruction requires every reused extent to be fully sealed");
             }
         }
     }
@@ -739,7 +762,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                                 ReconstructionHistory history, boolean reconstructionCapacity, String historyDigest,
                                 List<ObservedGrant> grants, List<ObservedStream> streams,
                                 Map<EntryKey, SelectedMove> selections, Map<Long, Map<CopyKey, String>> copies,
-                                List<ObservedRetirement> retiredSlots, List<RetiredRange> retiredRanges) {
+                                List<ObservedRetirement> retiredSlots, List<RetiredRange> retiredRanges,
+                                Map<Long, ObservedTail> tails) {
         int committedCopyCount() {
             return copies.values().stream().mapToInt(Map::size).sum();
         }
@@ -763,7 +787,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
     synchronized ReconstructionHistory reconstructionHistory() {
         boolean moves = false;
         int successfulFrees = 0;
-        boolean reused = false;
+        int successfulReuses = 0;
         long bookieCut = -1;
         for (var operation : appliedOperations.values()) {
             if (operation.status() != Status.APPLIED_DURABLE) {
@@ -776,15 +800,52 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 successfulFrees++;
                 bookieCut = Math.max(bookieCut, free.facts().bookieCut());
             } else if (operation.command() instanceof Allocation allocation && allocation.expectedGeneration() > 0) {
-                reused = true;
+                successfulReuses++;
             }
         }
-        return new ReconstructionHistory(moves, successfulFrees, reused, bookieCut);
+        return new ReconstructionHistory(moves, successfulFrees, successfulReuses, bookieCut);
     }
 
     synchronized void requireReconstructionMode(ProfileClosedReconstruction.HistoryMode mode, long bookieCut)
             throws IOException {
-        reconstructionHistory().requireMode(mode, bookieCut, !selectedMoves.isEmpty(), retiredSlots.size());
+        long currentReused = currentAllocations.values().stream()
+                .filter(grant -> grant.command().expectedGeneration() > 0).count();
+        reconstructionHistory().requireMode(mode, bookieCut, !selectedMoves.isEmpty(), retiredSlots.size(),
+                currentReused, currentReused == 0 ? Map.of() : observeReconstructionTails());
+    }
+
+    private Map<Long, ObservedTail> observeReconstructionTails() {
+        if (sealedTails.isEmpty()) {
+            return Map.of();
+        }
+        long openSequence = -1;
+        var tails = new HashMap<Long, ObservedTail>();
+        for (var operation : appliedOperations.values()) {
+            if (operation.status() != Status.APPLIED_DURABLE || !(operation.command() instanceof DataSession session)) {
+                continue;
+            }
+            long epoch = session.operationGeneration().value();
+            if (session.open() && epoch == sessionEpoch) {
+                openSequence = operation.sequence();
+            } else if (!session.open() && epoch < sessionEpoch) {
+                for (var tail : session.tails()) {
+                    var grant = currentAllocations.get(tail.allocationId());
+                    if (grant == null || grant.command().expectedGeneration() == 0
+                            || grant.generation() != tail.generation()
+                            || !tail.equals(sealedTails.get(tail.allocationId()))) {
+                        continue;
+                    }
+                    var previous = tails.get(tail.allocationId());
+                    if (previous == null || previous.closeSequence() < operation.sequence()) {
+                        tails.put(tail.allocationId(), new ObservedTail(AllocationIdentity.of(grant.command()),
+                                tail.generation(), tail.end(), session.operationId(), epoch, operation.sequence()));
+                    }
+                }
+            }
+        }
+        long before = openSequence;
+        tails.values().removeIf(tail -> tail.closeSequence() >= before);
+        return Map.copyOf(tails);
     }
 
     /** Only the caller's existing lock scope and owned readers participate in this observation. */
@@ -799,8 +860,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
         observed.validateStorageFiles(identity, readyDataPaths);
         observed.recover(identity);
         long copyRows = observed.committedCopies.values().stream().mapToLong(Map::size).sum();
+        long tailRows = observed.currentAllocations.values().stream()
+                .filter(grant -> grant.command().expectedGeneration() > 0).count();
         if ((long) observed.currentAllocations.size() + observed.streamStarts.size() + observed.selectedMoves.size()
-                + observed.retiredSlots.size() + observed.retiredRanges.size() + copyRows > maximumRows) {
+                + observed.retiredSlots.size() + observed.retiredRanges.size() + copyRows + tailRows > maximumRows) {
             throw new IOException("Arena recovery dependency observation exceeds its row limit");
         }
         var copies = new HashMap<Long, Map<CopyKey, String>>();
@@ -823,7 +886,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
                                 .thenComparingLong(ObservedStream::generation)).toList(),
                 Map.copyOf(observed.selectedMoves), Map.copyOf(copies),
                 observed.retiredSlots.values().stream().map(free -> new ObservedRetirement(free.operationId(),
-                        free.operationGeneration(), free.facts())).toList(), List.copyOf(observed.retiredRanges));
+                        free.operationGeneration(), free.facts())).toList(), List.copyOf(observed.retiredRanges),
+                tailRows == 0 ? Map.of() : observed.observeReconstructionTails());
         if (observed.channel != original) {
             observed.channel.close();
         }
@@ -1464,7 +1528,15 @@ final class SegmentArenaControlLog implements AutoCloseable {
         return tail.end();
     }
 
-    record ReusedExtent(long usedEnd, long end) { }
+    record ReusedExtent(long usedEnd, long end) {
+        boolean isSuffix(long offset) {
+            return offset >= usedEnd;
+        }
+
+        boolean containsBatch(long offset, int length) {
+            return length <= usedEnd - offset;
+        }
+    }
 
     synchronized Optional<ReusedExtent> reusedExtent(int file, long offset) throws IOException {
         requireOpenHistory();

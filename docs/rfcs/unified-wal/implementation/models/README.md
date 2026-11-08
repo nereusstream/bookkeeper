@@ -1855,3 +1855,14 @@ TLC 1.7.4 的正向配置生成 1,088 个状态，544 个不同状态，队列 0
 python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" \
   --config-prefix c-closed-retired-image --config-prefix ce-closed-retired-image
 ```
+
+## 完整封口复用后的 CLOSED 映像检查
+
+`ClosedSealedReuse.tla` 投影一个复用 extent 的两页。原生重放提供健康 CLOSE 的来源、generation 和相对原 OPEN 的顺序，扫描要求完整封口、两页均为当前记录以及精确 selector 命中。部分封口后的第二页可以是新 OPEN 写入的孤立 COPY。实际控制重放、完整文件扫描与崩溃切点由 Java 用例验证。[完整封口复用后的真实重建](../local-storage/README.md#完整封口复用后的-closed-重建)
+
+TLC 1.7.4 的正向配置生成 233 个状态，224 个不同状态，队列 0。放行部分封口、忽略 CLOSE 来源、忽略 selector 的三个故障配置分别触发指定性质。已核对 1,227 个源码输入和 947 个文件校验和。原始轨迹位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-sealed-reuse-evidence-78d9d847/model`。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" \
+  --config-prefix c-closed-sealed-reuse --config-prefix ce-closed-sealed-reuse
+```

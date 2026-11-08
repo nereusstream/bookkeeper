@@ -669,6 +669,7 @@ final class SegmentDataRecovery {
         private final HashMap<Long, SegmentArenaControlLog.ObservedGrant> grants = new HashMap<>();
         private final HashMap<StreamKey, Long> nextSequence = new HashMap<>();
         private final Map<Integer, TreeMap<Long, Long>> retiredExtents = new HashMap<>();
+        private final Map<Integer, TreeMap<Long, SegmentArenaControlLog.ReusedExtent>> reusedExtents = new HashMap<>();
         private final Map<StreamKey, StreamProgress> retiredStreams = new HashMap<>();
         private final MessageDigest entryDigest = sha256();
         private final ByteBuffer page;
@@ -705,7 +706,7 @@ final class SegmentDataRecovery {
                 var retired = retirement.facts().allocation();
                 long start = retired.offset();
                 long end = retired.extentEnd();
-                if (retirement.generation().value() != 2 || retired.file() < 0 || retired.file() >= config.dataFiles()
+                if (retirement.generation().value() < 2 || retired.file() < 0 || retired.file() >= config.dataFiles()
                         || retired.ownerShard() < 0 || retired.ownerShard() >= config.logicalShards()
                         || retired.ownerShard() % config.dataFiles() != retired.file()
                         || start < config.alignment()
@@ -725,9 +726,19 @@ final class SegmentDataRecovery {
                 }
                 grants.put(allocation.allocationId(), grant);
             }
+            for (var tail : arena.tails().values()) {
+                var allocation = tail.allocation();
+                var extent = tail.extent();
+                if (extent.usedEnd() < allocation.offset() || extent.usedEnd() > extent.end()
+                        || extent.end() > config.bytesPerFile() || extent.usedEnd() % config.alignment() != 0) {
+                    throw new IOException("CLOSED reconstruction has an invalid healthy reused extent");
+                }
+                reusedExtents.computeIfAbsent(allocation.file(), ignored -> new TreeMap<>())
+                        .put(allocation.offset(), extent);
+            }
             for (var stream : arena.streams()) {
                 var key = new StreamKey(stream.shard(), new Generation(stream.generation()));
-                if (retiredExtents.isEmpty()) {
+                if (arena.history().successfulFrees() == 0) {
                     nextSequence.put(key, stream.firstSequence());
                 } else {
                     retiredStreams.put(key, new StreamProgress(stream.firstSequence()));
@@ -767,11 +778,14 @@ final class SegmentDataRecovery {
             identity.validate(page, config, fileIndex);
             imageDigest.update(page.rewind());
             var retired = retiredExtents.get(fileIndex);
+            var reusedFile = reusedExtents.get(fileIndex);
             boolean moved = arena.history().committedMoves();
             for (long offset = config.alignment(); offset < bytes;) {
                 Long retiredEnd = retired == null ? null : retired.get(offset);
+                var reuse = reusedFile == null ? null : reusedFile.floorEntry(offset);
+                var reused = reuse == null || offset >= reuse.getValue().end() ? null : reuse.getValue();
                 if (retiredEnd != null) {
-                    // A successful FREE ended record authority, not custody of the original file bytes.
+                    // Preserve all bytes even where the original FREE ended record authority.
                     do {
                         SegmentFileIo.readFully(data, page.clear(), offset);
                         imageDigest.update(page);
@@ -782,6 +796,9 @@ final class SegmentDataRecovery {
                 page.clear();
                 SegmentFileIo.readFully(data, page, offset);
                 if (allZero(page)) {
+                    if (reused != null) {
+                        throw new IOException("CLOSED reconstruction has an unwritten page before its healthy tail");
+                    }
                     imageDigest.update(page);
                     offset += config.alignment();
                     continue;
@@ -797,6 +814,7 @@ final class SegmentDataRecovery {
                         || !grant.ownerGeneration().equals(address.streamGeneration())
                         || grant.generation() != address.generation().value() || offset < grant.offset()
                         || batchLength > grant.offset() + grant.blocks() * SegmentArenaControlLog.BLOCK_BYTES - offset
+                        || (reused != null && !reused.containsBatch(offset, batchLength))
                         || (progress == null && address.sequence() != nextSequence.getOrDefault(stream, -1L))
                         || address.sequence() == Long.MAX_VALUE) {
                     throw new IOException("CLOSED reconstruction batch has no exact grant or continuous stream");
@@ -1536,7 +1554,7 @@ final class SegmentDataRecovery {
                         continue;
                     }
                     Optional<SegmentArenaControlLog.ReusedExtent> reused = authority.reusedExtent(file, offset);
-                    if (reused.isPresent() && offset >= reused.get().usedEnd()) {
+                    if (reused.isPresent() && reused.get().isSuffix(offset)) {
                         offset = reused.get().end();
                         continue;
                     }
@@ -1579,7 +1597,7 @@ final class SegmentDataRecovery {
                         int length = SegmentBatchParser.batchLength(page.slice(0, 128), address,
                                 config.bytesPerFile());
                         int parsedRecords = page.getInt(76); // Validated by batchLength before any record allocation.
-                        if (reused.isPresent() && length > reused.get().usedEnd() - offset) {
+                        if (reused.isPresent() && !reused.get().containsBatch(offset, length)) {
                             throw new IOException("Current reused DATA exceeds its healthy CLOSED tail");
                         }
                         if (!authority.hasAppliedGrant(file, offset, length, address.shard(),

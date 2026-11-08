@@ -44,7 +44,9 @@
 
 步骤 9→7/12 接通已有成功 MOVE、尚无成功 FREE 或复用的 CLOSED 重建。v5 ADMITTED 声明该模式，原完整扫描要求解释每条 COPY 且找到每个精确当前 target。真实维护进程在 MOVE 应用后、FREE 前退出，原身份重写完整文件并在重建索引后读回原数据。已有 FREE/复用、孤立 COPY、损坏数据及一般异常恢复仍待各自验收。详见 [MOVE 已提交且尚未 FREE 的 CLOSED 重建](local-storage/README.md#move-已提交且尚未-free-的-closed-重建)。
 
-步骤 9→7/12 接通成功 FREE、尚未复用的 CLOSED 重建。v6 ADMITTED 绑定确切退休范围及序号，保留完整文件字节。真实 compaction、FREE 和控制轮转后退出，原身份重建并读回当前 COPY，随后以新 grant 正常复用退休 slot。复用后再次异常退出仍待单独验收。详见 [FREE 已提交且尚未复用的 CLOSED 重建](local-storage/README.md#free-已提交且尚未复用的-closed-重建)。
+步骤 9→7/12 接通成功 FREE、尚未复用的 CLOSED 重建。v6 ADMITTED 绑定确切退休范围及序号，保留完整文件字节。真实 compaction、FREE 和控制轮转后退出，原身份重建并读回当前 COPY，随后以新 grant 正常复用退休 slot。详见 [FREE 已提交且尚未复用的 CLOSED 重建](local-storage/README.md#free-已提交且尚未复用的-closed-重建)。
+
+步骤 9→7/12 的 v7 ADMITTED 扩展到已有成功复用、每个存续复用 extent 都由原 OPEN 前的健康 CLOSE 封至末端的 CLOSED 集合。真实 3/3/3 SDK 写满复用块、健康 CLOSE，后继 owned OPEN 在控制轮转后退出。原身份重建、全索引丢失后读回、新 grant 与健康冷启已通过。真实部分封口后的孤立 COPY 及缺失健康封口均拒绝。一般已授权 OPEN 和完整步骤 16 验收保持 OPEN。详见 [完整封口复用后的 CLOSED 重建](local-storage/README.md#完整封口复用后的-closed-重建)。
 
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 

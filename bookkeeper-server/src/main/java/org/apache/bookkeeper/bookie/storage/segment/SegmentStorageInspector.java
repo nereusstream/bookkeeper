@@ -100,8 +100,10 @@ public final class SegmentStorageInspector {
             ProfileClosedReconstruction.HistoryMode mode)
             throws IOException {
         var arena = dependencies.arena();
+        long currentReused = arena.grants().stream()
+                .filter(grant -> grant.allocation().expectedGeneration() > 0).count();
         arena.history().requireMode(mode, dependencies.bookie().observedSequence(),
-                !arena.selections().isEmpty(), arena.retiredSlots().size());
+                !arena.selections().isEmpty(), arena.retiredSlots().size(), currentReused, arena.tails());
     }
 
     static void requireEmptyReconstructionMember(SegmentBookieControlLog.ObservedLedger local,

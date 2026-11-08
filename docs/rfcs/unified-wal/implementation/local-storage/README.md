@@ -1010,6 +1010,18 @@ Native ADMITTED v2 按 ledger ID 严格递增编码完整 context、原 CLOSED �
 
 六项编码、两项真实控制、五项 socket 回归和样式检查全部通过。实际范围为 macOS 单 Arena、单 DATA 文件和 JVM 退出。复用后再次异常退出、损坏恢复、批准 Linux 和真实掉电仍待验收，生产 Gate 保持 OPEN。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-retired-evidence-3b71ba64`。[退休完整扫描的有限投影](../models/README.md#free-后-closed-映像的完整扫描)
 
+### 完整封口复用后的 CLOSED 重建
+
+ADMITTED v7 依据原成功复用历史选择模式。Arena 重放以成功 FREE 与复用的差额复核仍退休的 slot，并从原成功 DATA session 命令取出每个存续复用 grant 的封口操作、epoch 和 sequence。封口必须与原 OPEN 的顺序、当前 allocation ID、generation、文件及 extent 一致，且到达 extent 末端。原控制切点和全量历史摘要仍覆盖这些依赖。READY 续接与首次 OPEN 复验同一模式。
+
+完整扫描读取复用范围的每个批次，零页、旧 generation、无法解释的 COPY、缺失的当前 selector 和跨 grant 批次均拒绝。当前记录与成功 FREE 的历史序号按原 grant order 拼接。现仍退休的范围保留全部原始字节，供整文件校验和复制。部分健康封口之后，新 OPEN 的 compaction 可以在原尾部之后 force COPY。即使此前的封口前缀包含全部当前条目、原 selector 尚未变更，部分封口仍拒绝重建。
+
+真实 3/3/3 SDK 用例在 generation 2 的 1 MiB extent 写满 256 个 4 KiB batch，完成 ledger CLOSE 和 storage 健康 CLOSE。后继 owned OPEN 在控制轮转后退出。v7 完成原身份的全文件重建和 action 6，删除派生索引及 coverage 后，从真实 mTLS 读回原 ledger 和复用 ledger 首末 entry。旧 grant 受原追加截止约束，下一笔写入使用新 grant，后续健康冷启读回数据。父版 `78d9d847a0` 拒绝同一真实 scope，也在原生读入口拒绝实际 v7。将完整封口内最后一页置零时，当前版拒绝准入。
+
+首次健康 CLOSE 前的复用异常退出拒绝。部分封口用例保留原 foreground 与 maintenance reserve，使用真实 COPY/MOVE 消耗最后一个可用 slot，并以派生索引 force 失败保留源 extent。随后健康 CLOSE，另一个 owned OPEN 实际走 retained-tail compaction，在旧封口外 force COPY，首个 MOVE 字节前退出。原 selector 未选择该 COPY，v7 仍拒绝；将该处临时置零或写成不可解析字节也拒绝。恢复部分封口前缀策略的故障变体在同一带孤立 COPY 的真实映像上错误准入。
+
+六项编码、两项真实控制及八项 socket 回归全部通过，Spotless 和 Checkstyle 通过。范围为 macOS 单 Arena、单 DATA 文件的受控 JVM 退出。批准 Linux、掉电、一般已授权 OPEN 及生产 Gate 保持 OPEN。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-sealed-reuse-evidence-78d9d847`。[完整封口的有限模型](../models/README.md#完整封口复用后的-closed-映像检查)
+
 ## Profile 普通 Add 的真实接线
 
 2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。
