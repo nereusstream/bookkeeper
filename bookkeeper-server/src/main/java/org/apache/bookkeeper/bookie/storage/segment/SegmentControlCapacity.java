@@ -52,22 +52,44 @@ final class SegmentControlCapacity {
             throw new IOException("Invalid storage CONTROL capacity geometry");
         }
         try {
-            long codec = sum(SegmentControlCheckpoint.WORKING_SET_BYTES,
-                    // The existing codec amount counts backing contents. Include their headers and views too.
-                    times(8, layout.bytes(0)), times(16, layout.buffer()));
-            return sum(codec, SegmentBookieControlLog.controlCapacity(layout, logBytes, pending),
-                    SegmentArenaControlLog.controlCapacity(layout, logBytes, pending, files),
-                    SegmentArenaControlDriver.controlCapacity(layout, pending, files, shards),
-                    layout.object(SegmentBookieControlDriver.class),
-                    layout.object(java.util.concurrent.atomic.AtomicBoolean.class),
-                    layout.object(SegmentOwnerLoop.Ticket.class),
-                    layout.object(java.util.concurrent.atomic.AtomicReference.class),
-                    // One Bookie driver request: append/owner/I/O/completion closures, with at most eight captures.
-                    times(8, layout.captured(8)));
+            return sum(bookieAndCodec(layout, logBytes, pending), arena(layout, logBytes, pending, files, shards));
         } catch (ArithmeticException | IllegalArgumentException unsupported) {
             throw new IOException("Storage CONTROL capacity cannot be represented by the supported heap model",
                     unsupported);
         }
+    }
+
+    static long requiredForManifest(SegmentArenaManifest manifest, IsolatedSegmentConfig runtime, long logBytes)
+            throws IOException {
+        var layout = Layout.hotSpot();
+        try {
+            long bytes = bookieAndCodec(layout, logBytes, runtime.maxPendingEntries());
+            for (var member : manifest.arenas()) {
+                bytes = sum(bytes, arena(layout, logBytes, runtime.maxPendingEntries(), member.dataFiles(),
+                        runtime.logicalShards()));
+            }
+            return bytes;
+        } catch (ArithmeticException | IllegalArgumentException unsupported) {
+            throw new IOException("Manifest CONTROL capacity cannot be represented", unsupported);
+        }
+    }
+
+    private static long bookieAndCodec(Layout layout, long logBytes, int pending) {
+        return sum(SegmentControlCheckpoint.WORKING_SET_BYTES,
+                // The existing codec amount counts backing contents. Include their headers and views too.
+                times(8, layout.bytes(0)), times(16, layout.buffer()),
+                SegmentBookieControlLog.controlCapacity(layout, logBytes, pending),
+                layout.object(SegmentBookieControlDriver.class),
+                layout.object(java.util.concurrent.atomic.AtomicBoolean.class),
+                layout.object(SegmentOwnerLoop.Ticket.class),
+                layout.object(java.util.concurrent.atomic.AtomicReference.class),
+                // One Bookie driver request: append/owner/I/O/completion closures, with at most eight captures.
+                times(8, layout.captured(8)));
+    }
+
+    private static long arena(Layout layout, long logBytes, int pending, int files, int shards) {
+        return sum(SegmentArenaControlLog.controlCapacity(layout, logBytes, pending, files),
+                SegmentArenaControlDriver.controlCapacity(layout, pending, files, shards));
     }
 
     static long imageBytes(long logBytes) {

@@ -253,11 +253,15 @@ record SegmentArenaManifest(StorageIncarnation incarnation, BookieId bookieId,
 
     /** Create once inside the externally protected control root. Failure never authorizes adoption or replacement. */
     void writeNew(SegmentFileIo io) throws IOException {
+        writeNew(io, null);
+    }
+
+    void writeNew(SegmentFileIo io, SegmentOwnedFiles files) throws IOException {
         Path file = path();
         if (!file.getParent().equals(file.getParent().toRealPath())) {
             throw new IOException("Arena manifest control root must be canonical and contain no symbolic links");
         }
-        try (FileChannel output = FileChannel.open(file,
+        try (FileChannel output = SegmentOwnedFiles.open(files, file,
                 java.util.Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.READ, StandardOpenOption.WRITE,
                         LinkOption.NOFOLLOW_LINKS), PosixFilePermissions.asFileAttribute(
                                 PosixFilePermissions.fromString("rw-------")))) {

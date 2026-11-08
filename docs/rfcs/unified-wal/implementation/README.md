@@ -269,7 +269,9 @@ DATA durable → hot locator → local result
 
 单Arena读写回收稳定后加入第二个Arena，验证同Bookie的route/fence/tombstone一致性、required device部分失败与共享filesystem预算，不实现跨Arena搬迁。
 
-用户2026-10-28已冻结首版多Arena边界：固定Arena/device清单及显式shard→Arena映射纳入受保护manifest；同一storage incarnation内不增删Arena、不重新分配shard，变更通过新incarnation bootstrap。不能从可读设备子集重算映射；当前服务图仍限单Arena；2026-10-30已接有界完整manifest与显式v2身份基础，但独立Bookie owner/per-Arena control/index/固定shard与本地恢复已接入真实组合，完整服务发布、维护协同及全局预算仍未接线，不因此标记步骤10完成。
+用户于 2026-10-28 冻结首版多 Arena 边界。固定 Arena/device 清单及显式 shard→Arena 映射纳入受保护 manifest。同一 storage incarnation 内的成员和映射固定，拓扑变更经新 incarnation bootstrap。已有显式 v2 身份、独立 Bookie 控制与 per-Arena DATA、control、index。
+
+[固定多 Arena 的统一本地 owner](local-storage/README.md#固定多-arena-的统一本地-owner) 接通一组全局 worker/I/O/input 和每 Arena 独立的分配、DATA、索引及恢复。整图预算在打开资源前检查，健康重开使用同一批持锁预检。实际读写、跨成员故障排空和受保护 FREE 限于本地能力，网络服务仍采用单 Arena。步骤 10 的长期压力、维护协同和共享 filesystem 预算仍待验收。
 
 亲和性沿用B18的分离对照，worker数、batch、I/O、TLS范围、E/W/A和维护负载保持相同：
 

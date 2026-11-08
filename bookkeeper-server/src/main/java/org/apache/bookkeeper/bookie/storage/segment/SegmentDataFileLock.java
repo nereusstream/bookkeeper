@@ -73,6 +73,10 @@ final class SegmentDataFileLock implements AutoCloseable {
         return acquire(directory.resolve("isolated.lock"), false, false);
     }
 
+    static SegmentDataFileLock dataOwner(Path directory, boolean create) {
+        return new SegmentDataFileLock(directory.resolve("isolated.lock"), create, false);
+    }
+
     static SegmentDataFileLock openControl(Path path) throws IOException {
         return acquire(path, false, true);
     }

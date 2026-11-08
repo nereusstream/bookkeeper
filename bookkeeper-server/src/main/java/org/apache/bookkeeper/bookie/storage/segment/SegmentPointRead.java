@@ -566,7 +566,8 @@ final class SegmentPointRead {
                         address.generation().value())) {
             throw new IOException("Point read has no current Arena grant or valid DATA range");
         }
-        try (FileChannel data = FileChannel.open(IsolatedSegmentFiles.dataPath(config, address.fileIndex()),
+        try (FileChannel data = SegmentOwnedFiles.open(authority.ownedFiles(),
+                IsolatedSegmentFiles.dataPath(config, address.fileIndex()),
                 StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
             if (data.size() != config.bytesPerFile()) {
                 throw new IOException("DATA file size mismatch");

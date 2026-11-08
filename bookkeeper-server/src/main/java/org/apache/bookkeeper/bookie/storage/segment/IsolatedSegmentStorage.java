@@ -1045,7 +1045,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
-    private static void await(FutureTask<Void> task, long end) throws IOException, InterruptedException {
+    static void await(FutureTask<Void> task, long end) throws IOException, InterruptedException {
         try {
             long remaining = end - System.nanoTime();
             if (remaining <= 0) {
@@ -1080,42 +1080,49 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     || controlRotation != null || controlCapacityPaused() || dataCapacityPaused()) {
                 return false;
             }
-            Objects.requireNonNull(context, "context");
-            Objects.requireNonNull(credential, "credential");
-            Objects.requireNonNull(entry, "entry");
-            Objects.requireNonNull(request, "request");
-            SegmentBookieControlLog.Admission admission = bookie.admitNormal(context, credential).orElse(null);
-            if (admission == null) {
+            int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards());
+            boolean accepted = submitLocalNormal(execution, bookie, writes[shard], context, credential,
+                    entry, request);
+            if (!accepted) {
+                controlCapacityPaused();
+            }
+            return accepted;
+        }
+    }
+
+    static boolean submitLocalNormal(SegmentExecutionGroup execution, SegmentBookieControlLog bookie,
+            SegmentDataPhysicalDriver.NormalBatcher batcher, ProfileLedgerContext context, byte[] credential,
+            ByteBuf entry, SegmentDataPhysicalDriver.NormalRequest request) throws IOException {
+        Objects.requireNonNull(context, "context");
+        Objects.requireNonNull(credential, "credential");
+        Objects.requireNonNull(entry, "entry");
+        Objects.requireNonNull(request, "request");
+        SegmentBookieControlLog.Admission admission = bookie.admitNormal(context, credential).orElse(null);
+        if (admission == null) {
+            return false;
+        }
+        SegmentEntryInputs.Input input = null;
+        try {
+            input = execution.inputs().acquire(context, entry.readableBytes(),
+                    ProfileInboundPipeline.inputCopyAllocator(entry));
+            if (input == null) {
+                admission.physicalTerminal();
                 return false;
             }
-            SegmentEntryInputs.Input input = null;
-            try {
-                input = execution.inputs().acquire(context, entry.readableBytes(),
-                        ProfileInboundPipeline.inputCopyAllocator(entry));
-                if (input == null) {
-                    admission.physicalTerminal();
-                    return false;
-                }
-                input.bytes().writeBytes(entry, entry.readerIndex(), entry.readableBytes());
-            } catch (RuntimeException | Error failure) {
-                if (input != null) {
-                    input.close();
-                }
-                admission.physicalTerminal();
-                throw failure;
-            }
-            int shard = SegmentOwnerLoop.shardFor(context.ledgerId(), config.logicalShards());
-            try {
-                boolean accepted = writes[shard].submit(input, admission, request);
-                if (!accepted) {
-                    controlCapacityPaused();
-                }
-                return accepted;
-            } catch (IOException | RuntimeException | Error failure) {
+            input.bytes().writeBytes(entry, entry.readerIndex(), entry.readableBytes());
+        } catch (RuntimeException | Error failure) {
+            if (input != null) {
                 input.close();
-                admission.releaseUnclaimed();
-                throw failure;
             }
+            admission.physicalTerminal();
+            throw failure;
+        }
+        try {
+            return batcher.submit(input, admission, request);
+        } catch (IOException | RuntimeException | Error failure) {
+            input.close();
+            admission.releaseUnclaimed();
+            throw failure;
         }
     }
 
@@ -1442,7 +1449,12 @@ final class IsolatedSegmentStorage implements AutoCloseable {
                     || compaction != null || deleteInspection || controlRotation != null || controlCapacityPaused()) {
                 return false;
             }
-            FreeOperation operation = new FreeOperation(operationId, allocationId, request);
+            FreeOperation operation = new FreeOperation(operationId, allocationId, request, execution, arena,
+                    files, bookie, allocator, () -> {
+                        synchronized (gate) {
+                            freeOperation = null;
+                        }
+                    });
             freeOperation = operation;
             try {
                 if (execution.owner(0).submit(0, operation)) {
@@ -2359,18 +2371,32 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
     }
 
-    private final class FreeOperation implements SegmentOwnerLoop.Command {
+    static final class FreeOperation implements SegmentOwnerLoop.Command {
         private final UUID operationId;
         private final long allocationId;
         private final FreeRequest request;
+        private final SegmentExecutionGroup execution;
+        private final SegmentArenaControlLog arena;
+        private final IsolatedSegmentFiles files;
+        private final SegmentBookieControlLog bookie;
+        private final SegmentArenaControlDriver allocator;
+        private final Runnable finished;
         private SegmentOwnerLoop.Ticket ticket;
         private SegmentBufferPool.Lease buffer;
         private SegmentArenaControlLog.Free command;
 
-        private FreeOperation(UUID operationId, long allocationId, FreeRequest request) {
+        FreeOperation(UUID operationId, long allocationId, FreeRequest request, SegmentExecutionGroup execution,
+                SegmentArenaControlLog arena, IsolatedSegmentFiles files, SegmentBookieControlLog bookie,
+                SegmentArenaControlDriver allocator, Runnable finished) {
             this.operationId = operationId;
             this.allocationId = allocationId;
             this.request = request;
+            this.execution = execution;
+            this.arena = arena;
+            this.files = files;
+            this.bookie = bookie;
+            this.allocator = allocator;
+            this.finished = finished;
         }
 
         @Override
@@ -2423,9 +2449,7 @@ final class IsolatedSegmentStorage implements AutoCloseable {
         }
 
         private void finish(FreeStatus status, SegmentArenaControlLog.Result result, Throwable failure) {
-            synchronized (gate) {
-                freeOperation = null;
-            }
+            finished.run();
             request.complete(new FreeResult(status, result), failure);
         }
 

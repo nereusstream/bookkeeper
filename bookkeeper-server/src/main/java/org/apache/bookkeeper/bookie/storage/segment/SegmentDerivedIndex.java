@@ -148,18 +148,57 @@ final class SegmentDerivedIndex implements AutoCloseable {
 
     static SegmentDerivedIndex open(IsolatedSegmentConfig config, SegmentFileHeader identity, int maxEntries)
             throws IOException {
-        return new SegmentDerivedIndex(config, identity, maxEntries);
+        return open(config, identity, maxEntries, null);
     }
 
-    private SegmentDerivedIndex(IsolatedSegmentConfig config, SegmentFileHeader identity, int maxEntries)
-            throws IOException {
+    static SegmentDerivedIndex open(IsolatedSegmentConfig config, SegmentFileHeader identity, int maxEntries,
+            SegmentOwnedFiles files) throws IOException {
+        return new SegmentDerivedIndex(config, identity, maxEntries, files);
+    }
+
+    /** A disposable index may be absent. An existing index must belong to this exact member. */
+    static void requireExistingScope(IsolatedSegmentConfig config, SegmentFileHeader identity) throws IOException {
+        Path directory = directory(config);
+        try {
+            var attrs = Files.readAttributes(directory, java.nio.file.attribute.BasicFileAttributes.class,
+                    LinkOption.NOFOLLOW_LINKS);
+            if (!attrs.isDirectory() || !directory.equals(directory.toRealPath())) {
+                throw new IOException("Derived index directory must be canonical");
+            }
+        } catch (java.nio.file.NoSuchFileException absent) {
+            return;
+        }
+        RocksDB.loadLibrary();
+        try (var options = new Options().setCreateIfMissing(false);
+                var logger = new org.rocksdb.Logger(options) {
+                    @Override
+                    protected void log(org.rocksdb.InfoLogLevel level, String message) {
+                        // Scope inspection does not publish an info log in the existing index.
+                    }
+                };
+                var db = RocksDB.openReadOnly(options.setLogger(logger), directory.toString())) {
+            byte[] binding = new byte[BINDING_BYTES];
+            if (db.get(BINDING_KEY, binding) != binding.length) {
+                throw new IOException("Missing or invalid derived index binding");
+            }
+            decodeBinding(binding, digest().digest(identity.encode(config, -4).array()));
+        } catch (RocksDBException failure) {
+            throw new IOException("Cannot inspect existing derived index", failure);
+        }
+    }
+
+    private final SegmentOwnedFiles ownedFiles;
+
+    private SegmentDerivedIndex(IsolatedSegmentConfig config, SegmentFileHeader identity, int maxEntries,
+            SegmentOwnedFiles files) throws IOException {
         this.config = Objects.requireNonNull(config, "config");
         this.identity = Objects.requireNonNull(identity, "identity");
+        this.ownedFiles = files;
         if (maxEntries < 1) {
             throw new IllegalArgumentException("Positive derived rebuild capacity required");
         }
         this.maxEntries = maxEntries;
-        identity.requireStoredManifest(config, -4);
+        identity.requireStoredManifest(config, -4, files);
         scope = digest().digest(identity.encode(config, identity.manifest() == null ? -3 : -4).array());
         RocksDB.loadLibrary();
         cache = new LRUCache(BLOCK_CACHE_BYTES, -1, true);
@@ -185,7 +224,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
                 db.flush(flush);
                 IsolatedSegmentFiles.syncDirectory(config.directory());
             } else {
-                readBinding(binding);
+                indexGeneration = decodeBinding(binding, scope);
             }
         } catch (RocksDBException failure) {
             close();
@@ -202,7 +241,7 @@ final class SegmentDerivedIndex implements AutoCloseable {
                 .put(scope).array();
     }
 
-    private void readBinding(byte[] bytes) throws IOException {
+    private static UUID decodeBinding(byte[] bytes, byte[] scope) throws IOException {
         if (bytes.length != 64) {
             throw new IOException("Invalid derived index binding length");
         }
@@ -211,10 +250,11 @@ final class SegmentDerivedIndex implements AutoCloseable {
                 || !Arrays.equals(scope, Arrays.copyOfRange(bytes, 32, 64))) {
             throw new IOException("Derived index scope or format mismatch");
         }
-        indexGeneration = new UUID(b.getLong(), b.getLong());
-        if (indexGeneration.equals(new UUID(0, 0))) {
+        var generation = new UUID(b.getLong(), b.getLong());
+        if (generation.equals(new UUID(0, 0))) {
             throw new IOException("Invalid derived index generation");
         }
+        return generation;
     }
 
     /** A fresh Get returns a physical locator only, never payload success or permission authority. */
@@ -872,7 +912,9 @@ final class SegmentDerivedIndex implements AutoCloseable {
 
     private Published readPublication(Path path) throws IOException {
         ByteBuffer b = ByteBuffer.allocate(4096);
-        try (FileChannel file = FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+        try (FileChannel file = ownedFiles == null
+                ? FileChannel.open(path, StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
+                : SegmentOwnedFiles.openRegularReadOnly(ownedFiles, path)) {
             if (file.size() != 4096) {
                 throw new IOException("Invalid index coverage page size");
             }

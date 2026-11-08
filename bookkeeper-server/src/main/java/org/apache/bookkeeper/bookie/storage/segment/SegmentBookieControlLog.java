@@ -1176,17 +1176,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         SegmentDataFileLock writerLock = SegmentDataFileLock.openControl(
                 config.directory().resolve("bookie-control.lock"));
         try {
-            // Persist the full commissioned topology before any member identity or control state.
-            manifest.writeNew(io);
-            IsolatedSegmentFiles.writeIdentity(config.directory().resolve("superblock-a"),
-                    identity.encode(config, -1), io);
-            IsolatedSegmentFiles.writeIdentity(config.directory().resolve("superblock-b"),
-                    identity.encode(config, -2), io);
-            IsolatedSegmentFiles.writeIdentity(config.directory().resolve("bookie-control"),
-                    identity.encode(config, -3), io);
-            io.force(writerLock.channel(), true);
-            IsolatedSegmentFiles.syncDirectory(config.directory());
-            IsolatedSegmentFiles.syncDirectory(config.directory().getParent());
+            formatManifestControl(config, identity, writerLock, null, io);
         } catch (IOException | RuntimeException | Error failure) {
             try {
                 writerLock.close();
@@ -1196,6 +1186,57 @@ final class SegmentBookieControlLog implements AutoCloseable {
             throw failure;
         }
         return openWhileLocked(config, identity, maxLogBytes, key, validator, io, writerLock, routeBinding);
+    }
+
+    static void formatManifestControl(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SegmentDataFileLock guard, SegmentOwnedFiles files, SegmentFileIo io) throws IOException {
+        guard.requireHeld(config.directory().resolve("bookie-control.lock"));
+        // Persist the complete topology before creating any control or member identity.
+        identity.manifest().writeNew(io, files);
+        IsolatedSegmentFiles.writeIdentity(config.directory().resolve("superblock-a"),
+                identity.encode(config, -1), io, files);
+        IsolatedSegmentFiles.writeIdentity(config.directory().resolve("superblock-b"),
+                identity.encode(config, -2), io, files);
+        IsolatedSegmentFiles.writeIdentity(config.directory().resolve("bookie-control"),
+                identity.encode(config, -3), io, files);
+        io.force(guard.channel(), true);
+        IsolatedSegmentFiles.syncDirectory(config.directory(), files);
+        IsolatedSegmentFiles.syncDirectory(config.directory().getParent(), files);
+    }
+
+    static long inspectManifestWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator, SegmentDataFileLock guard,
+            SegmentOwnedFiles files) throws IOException {
+        guard.requireHeld(config.directory().resolve("bookie-control.lock"));
+        requireRouteBinding(identity, null);
+        try (FileChannel original = SegmentOwnedFiles.openRegularReadOnly(files,
+                config.directory().resolve("bookie-control"))) {
+            var log = new SegmentBookieControlLog(config, identity, maxLogBytes, new SegmentFileIo(),
+                    key, validator, original, null, null, files, true);
+            try {
+                log.validateStorageFiles();
+                log.recover();
+                return log.appliedThrough();
+            } finally {
+                if (log.channel != original) {
+                    log.channel.close();
+                }
+            }
+        }
+    }
+
+    static SegmentBookieControlLog openManifestWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator, SegmentFileIo io,
+            SegmentDataFileLock guard, SegmentOwnedFiles files) throws IOException {
+        guard.requireHeld(config.directory().resolve("bookie-control.lock"));
+        requireRouteBinding(identity, null);
+        FileChannel original = SegmentOwnedFiles.open(files, config.directory().resolve("bookie-control"),
+                StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
+        var log = new SegmentBookieControlLog(config, identity, maxLogBytes, io, key, validator,
+                original, null, null, files);
+        log.validateStorageFiles();
+        log.recover();
+        return log;
     }
 
     private static void requireRouteBinding(SegmentFileHeader identity, RouteBinding binding) throws IOException {
@@ -4056,7 +4097,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
-    private synchronized void retireOwned() throws IOException {
+    synchronized void retireOwned() throws IOException {
         if (ownedFiles == null) {
             throw new IllegalStateException("An explicit control file owner is required");
         }
@@ -4067,7 +4108,7 @@ final class SegmentBookieControlLog implements AutoCloseable {
         }
     }
 
-    private synchronized void releaseClosedState() {
+    synchronized void releaseClosedState() {
         // Keep bounded diagnostics, but release history and container backing from a retained closed service.
         ledgers = new HashMap<>();
         tombstones = new HashMap<>();

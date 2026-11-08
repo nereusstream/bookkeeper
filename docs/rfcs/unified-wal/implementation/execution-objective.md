@@ -50,6 +50,8 @@
 
 步骤 9→7/12 的 v8 扩展到至少一个存续复用 extent 缺少完整健康封口、但所有存续复用 extent 均可逐批完整验证的 CLOSED 集合。全组文件完成原持久发布后，独立 action 7 终结原 OPEN 并记录可重放的完整读取尾界。未写满、旧 generation、坏批次及未提交 COPY 继续拒绝。详见 [独立读取尾界的 CLOSED 重建](local-storage/README.md#独立读取尾界的-closed-重建)。
 
+步骤 10 接通固定 Profile-only manifest 的统一本地多 Arena owner。一个 Bookie 控制 owner 和一个执行组负责原全局 shard，各 Arena 持有独立 DATA、allocator 和派生索引。冷启在同一组排他锁下预检全部成员，确认实际健康 CLOSE 后准备整图，随后开放本地请求。网络发布、自动维护协同和长期共享 filesystem 预算继续开放。详见 [固定多 Arena 的统一本地 owner](local-storage/README.md#固定多-arena-的统一本地-owner)。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。

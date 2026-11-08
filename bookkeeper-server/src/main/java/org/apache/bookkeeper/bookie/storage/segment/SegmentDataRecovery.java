@@ -69,6 +69,17 @@ final class SegmentDataRecovery {
                 authority.recoveryAllocationCount(), seeded);
     }
 
+    /** Bound a manifest member's scan before replay by the original minimum control record sizes. */
+    static long manifestScanCapacity(IsolatedSegmentConfig config, long controlBytes, int entries)
+            throws IOException {
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        long wire = SegmentControlCapacity.wireBytes(controlBytes);
+        return SegmentControlCapacity.sum(scanCapacity(layout, entries, config.logicalShards(),
+                        config.dataFiles(), wire / 252, wire / 272, wire / 192, true),
+                2L * config.alignment(), SegmentBatchFormat.MAX_BATCH,
+                SegmentBatchParser.workspaceCapacity(layout, SegmentBatchFormat.MAX_RECORDS));
+    }
+
     /** One quiesced scan, including the old optional seed until the new inventory passes all checks. */
     static long scanCapacity(SegmentControlCapacity.Layout layout, int entries, int streams, int files,
                              long moves, long retired, long allocations, boolean seeded) throws IOException {
@@ -1522,9 +1533,9 @@ final class SegmentDataRecovery {
         }
         for (int file = 0; file < config.dataFiles(); file++) {
             try (FileChannel data = syncIo == null
-                    ? FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
+                    ? SegmentOwnedFiles.open(authority.ownedFiles(), IsolatedSegmentFiles.dataPath(config, file),
                             StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)
-                    : FileChannel.open(IsolatedSegmentFiles.dataPath(config, file),
+                    : SegmentOwnedFiles.open(authority.ownedFiles(), IsolatedSegmentFiles.dataPath(config, file),
                             StandardOpenOption.READ, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
                     var headerCredit = recoveryBudget == null ? null
                             : recoveryBudget.reserveDataWorkingSet(4096)) {

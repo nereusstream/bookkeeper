@@ -59,12 +59,19 @@ final class SegmentBookieControlDriver {
     private final SegmentOwnerLoop owner;
     private final SegmentIoExecutor io;
     private final SegmentBookieControlLog log;
+    private final java.util.function.BooleanSupplier admission;
     private final AtomicBoolean busy = new AtomicBoolean();
 
     SegmentBookieControlDriver(SegmentOwnerLoop owner, SegmentIoExecutor io, SegmentBookieControlLog log) {
+        this(owner, io, log, () -> true);
+    }
+
+    SegmentBookieControlDriver(SegmentOwnerLoop owner, SegmentIoExecutor io, SegmentBookieControlLog log,
+            java.util.function.BooleanSupplier admission) {
         this.owner = Objects.requireNonNull(owner, "owner");
         this.io = Objects.requireNonNull(io, "io");
         this.log = Objects.requireNonNull(log, "log");
+        this.admission = Objects.requireNonNull(admission, "admission");
     }
 
     boolean isOwnerThread() {
@@ -88,7 +95,11 @@ final class SegmentBookieControlDriver {
     }
 
     boolean reserveMaintenance() {
-        return busy.compareAndSet(false, true);
+        return admission.getAsBoolean() && busy.compareAndSet(false, true);
+    }
+
+    private boolean admitControl() {
+        return admission.getAsBoolean() && !log.rotationRequired() && busy.compareAndSet(false, true);
     }
 
     void releaseMaintenance() {
@@ -125,7 +136,7 @@ final class SegmentBookieControlDriver {
 
     private boolean submitDurableBatch(DurableAppend append, BatchCompletion completion, Runnable terminal) {
         Objects.requireNonNull(completion, "completion");
-        if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
+        if (!admitControl()) {
             return false;
         }
         boolean accepted;
@@ -196,7 +207,7 @@ final class SegmentBookieControlDriver {
     private boolean submitHandoffAppend(HandoffAppend append, LacCompletion completion, Runnable terminal) {
         Objects.requireNonNull(completion, "completion");
         Objects.requireNonNull(terminal, "terminal");
-        if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
+        if (!admitControl()) {
             return false;
         }
         boolean accepted;
@@ -250,7 +261,7 @@ final class SegmentBookieControlDriver {
     boolean submitFence(ProfileOperationCodec.FenceLedger request, FenceCompletion completion) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(completion, "completion");
-        if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
+        if (!admitControl()) {
             return false;
         }
         boolean accepted;
@@ -339,7 +350,7 @@ final class SegmentBookieControlDriver {
     private boolean submitClose(java.util.concurrent.Callable<SegmentBookieControlLog.RecoveryCloseAttempt> prepare,
             RecoveryCloseCompletion completion) {
         Objects.requireNonNull(completion, "completion");
-        if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
+        if (!admitControl()) {
             return false;
         }
         boolean accepted;
@@ -417,7 +428,7 @@ final class SegmentBookieControlDriver {
     boolean submitExplicitLac(ProfileOperationCodec.WriteLac request, LacCompletion completion) {
         Objects.requireNonNull(request, "request");
         Objects.requireNonNull(completion, "completion");
-        if (log.rotationRequired() || !busy.compareAndSet(false, true)) {
+        if (!admitControl()) {
             return false;
         }
         boolean accepted;

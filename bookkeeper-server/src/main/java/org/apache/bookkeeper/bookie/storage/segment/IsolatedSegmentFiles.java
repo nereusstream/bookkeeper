@@ -318,6 +318,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     private long restoredAllocationThrough = -1;
     private final boolean[] failed;
     private final SegmentDataFileLock writerLock;
+    private final SegmentOwnedFiles ownedFiles;
     private final boolean appendOnlyRecovery;
     private SegmentDataRecovery.PhysicalInventory startupInventory;
     private int pendingReservations;
@@ -333,10 +334,11 @@ final class IsolatedSegmentFiles implements AutoCloseable {
 
     private IsolatedSegmentFiles(IsolatedSegmentConfig config, SegmentFileHeader identity,
                                  SegmentDataFileLock writerLock, boolean appendOnlyRecovery,
-                                 SegmentDataRecovery.PhysicalInventory startupInventory) {
+                                 SegmentDataRecovery.PhysicalInventory startupInventory, SegmentOwnedFiles ownedFiles) {
         this.config = config;
         this.identity = identity;
         this.writerLock = writerLock;
+        this.ownedFiles = ownedFiles;
         this.appendOnlyRecovery = appendOnlyRecovery;
         this.startupInventory = startupInventory;
         nextOffset = new long[config.dataFiles()];
@@ -358,11 +360,21 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         // Never adopt, clean or truncate an existing directory, including symlinks to an existing scope.
         Files.createDirectory(config.directory());
         SegmentDataFileLock guard = SegmentDataFileLock.create(config.directory());
+        return createWhileLocked(config, identity, io, guard, null);
+    }
+
+    static IsolatedSegmentFiles createWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SegmentFileIo io, SegmentDataFileLock guard, SegmentOwnedFiles ownedFiles) throws IOException {
         IsolatedSegmentFiles result = null;
         try {
-            result = new IsolatedSegmentFiles(config, identity, guard, false, null);
+            if (ownedFiles != null) {
+                guard.requireHeld(config.directory().resolve("isolated.lock"));
+                identity.requireStoredManifest(config, -4, ownedFiles);
+            }
+            result = new IsolatedSegmentFiles(config, identity, guard, false, null, ownedFiles);
             for (int i = 0; i < config.dataFiles(); i++) {
-                FileChannel channel = FileChannel.open(dataPath(config, i), StandardOpenOption.CREATE_NEW,
+                FileChannel channel = SegmentOwnedFiles.open(ownedFiles, dataPath(config, i),
+                        StandardOpenOption.CREATE_NEW,
                         StandardOpenOption.READ, StandardOpenOption.WRITE);
                 result.data.add(channel);
                 // Write the entire declared capacity, not a sparse seek-to-last-byte allocation.
@@ -376,21 +388,22 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 io.writeFully(channel, identity.encode(config, i), 0);
                 io.force(channel, true);
             }
-            writeIdentity(config.directory().resolve("superblock-a"), identity.encode(config, -1), io);
-            writeIdentity(config.directory().resolve("superblock-b"), identity.encode(config, -2), io);
+            writeIdentity(config.directory().resolve("superblock-a"), identity.encode(config, -1), io, ownedFiles);
+            writeIdentity(config.directory().resolve("superblock-b"), identity.encode(config, -2), io, ownedFiles);
             if (identity.manifest() == null) {
-                writeIdentity(config.directory().resolve("bookie-control"), identity.encode(config, -3), io);
+                writeIdentity(config.directory().resolve("bookie-control"), identity.encode(config, -3), io,
+                        ownedFiles);
             }
-            writeIdentity(config.directory().resolve("arena-control"), identity.encode(config, -4), io);
+            writeIdentity(config.directory().resolve("arena-control"), identity.encode(config, -4), io, ownedFiles);
             io.force(guard.channel(), true);
-            syncDirectory(config.directory());
-            syncDirectory(config.directory().getParent());
+            syncDirectory(config.directory(), ownedFiles);
+            syncDirectory(config.directory().getParent(), ownedFiles);
             return result;
         } catch (IOException | RuntimeException | Error failure) {
             try {
                 if (result != null) {
                     result.close();
-                } else {
+                } else if (ownedFiles == null) {
                     guard.close();
                 }
             } catch (IOException closeFailure) {
@@ -466,7 +479,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                     ProfileReceiveBudget recoveryBudget) throws IOException {
         try {
             return openLocalResultsWhileExcluded(config, identity, authority, bookie,
-                    recoveryIo, maxEntries, maxStreams, index, startupLock, recoveryBudget);
+                    recoveryIo, maxEntries, maxStreams, index, startupLock, recoveryBudget, null);
         } catch (IOException | RuntimeException | Error failure) {
             if (startupLock != null) {
                 try {
@@ -479,11 +492,20 @@ final class IsolatedSegmentFiles implements AutoCloseable {
         }
     }
 
+    static IsolatedSegmentFiles prepareLocalResults(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SegmentArenaControlLog authority, SegmentBookieControlLog bookie, SegmentFileIo recoveryIo,
+            int maxEntries, int maxStreams, SegmentDerivedIndex index, SegmentDataFileLock guard,
+            SegmentOwnedFiles files) throws IOException {
+        guard.requireHeld(config.directory().resolve("isolated.lock"));
+        return openLocalResultsWhileExcluded(config, identity, authority, bookie, recoveryIo, maxEntries, maxStreams,
+                index, guard, null, Objects.requireNonNull(files));
+    }
+
     private static IsolatedSegmentFiles openLocalResultsWhileExcluded(
             IsolatedSegmentConfig config, SegmentFileHeader identity, SegmentArenaControlLog authority,
             SegmentBookieControlLog bookie, SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
             SegmentDerivedIndex index, SegmentDataFileLock startupLock,
-            ProfileReceiveBudget recoveryBudget) throws IOException {
+            ProfileReceiveBudget recoveryBudget, SegmentOwnedFiles ownedFiles) throws IOException {
         Objects.requireNonNull(bookie, "bookie");
         if (maxEntries < 1 || maxStreams < 1) {
             throw new IllegalArgumentException("Positive restart locator and stream capacities required");
@@ -500,7 +522,7 @@ final class IsolatedSegmentFiles implements AutoCloseable {
             }
             long cut = bookie.recoveryReadCut(config, identity);
             IsolatedSegmentFiles result = openAppendOnly(config, identity, authority, bookie,
-                    recoveryIo, maxEntries, maxStreams, index, startupLock, recoveryBudget);
+                    recoveryIo, maxEntries, maxStreams, index, startupLock, recoveryBudget, ownedFiles);
             try {
                 if (index != null) {
                     if (result.startupInventory.usesIndexCoverage()) {
@@ -509,7 +531,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                         index.rebuild(result.startupInventory, authority, bookie);
                     }
                 }
-                result.startSession(authority);
+                if (ownedFiles == null) {
+                    result.startSession(authority);
+                }
                 if (cut != bookie.recoveryReadCut(config, identity)) {
                     throw new IOException("Bookie control cut changed during local-result restart");
                 }
@@ -555,6 +579,14 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                                                        SegmentFileIo recoveryIo, int maxEntries, int maxStreams,
                                                        SegmentDerivedIndex index, SegmentDataFileLock startupLock,
                                                        ProfileReceiveBudget recoveryBudget) throws IOException {
+        return openAppendOnly(config, identity, authority, bookie, recoveryIo, maxEntries, maxStreams, index,
+                startupLock, recoveryBudget, null);
+    }
+
+    private static IsolatedSegmentFiles openAppendOnly(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            SegmentArenaControlLog authority, SegmentBookieControlLog bookie, SegmentFileIo recoveryIo,
+            int maxEntries, int maxStreams, SegmentDerivedIndex index, SegmentDataFileLock startupLock,
+            ProfileReceiveBudget recoveryBudget, SegmentOwnedFiles ownedFiles) throws IOException {
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(identity, "identity");
         Objects.requireNonNull(authority, "authority");
@@ -578,9 +610,10 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                             identity, authority, bookie, recoveryIo, maxEntries, maxStreams,
                             guard.lock(), index, recoveryBudget);
                 }
-                result = new IsolatedSegmentFiles(config, identity, guard, true, inventory);
+                result = new IsolatedSegmentFiles(config, identity, guard, true, inventory, ownedFiles);
                 for (int file = 0; file < config.dataFiles(); file++) {
-                    FileChannel data = FileChannel.open(dataPath(config, file), StandardOpenOption.READ,
+                    FileChannel data = SegmentOwnedFiles.open(ownedFiles, dataPath(config, file),
+                            StandardOpenOption.READ,
                             StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS);
                     result.data.add(data);
                     if (data.size() != config.bytesPerFile()) {
@@ -603,9 +636,9 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 return result;
             } catch (IOException | RuntimeException | Error failure) {
                 try {
-                    if (result == null) {
+                    if (result == null && ownedFiles == null) {
                         guard.close();
-                    } else {
+                    } else if (result != null) {
                         result.close();
                     }
                 } catch (IOException closeFailure) {
@@ -939,16 +972,30 @@ final class IsolatedSegmentFiles implements AutoCloseable {
     }
 
     static void writeIdentity(Path path, ByteBuffer bytes, SegmentFileIo io) throws IOException {
-        try (FileChannel channel = FileChannel.open(path, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+        writeIdentity(path, bytes, io, null);
+    }
+
+    static void writeIdentity(Path path, ByteBuffer bytes, SegmentFileIo io, SegmentOwnedFiles files)
+            throws IOException {
+        try (FileChannel channel = SegmentOwnedFiles.open(files, path, StandardOpenOption.CREATE_NEW,
+                StandardOpenOption.WRITE)) {
             io.writeFully(channel, bytes, 0);
             io.force(channel, true);
         }
     }
 
     static void syncDirectory(Path directory) throws IOException {
-        try (FileChannel channel = FileChannel.open(directory, StandardOpenOption.READ)) {
+        syncDirectory(directory, null);
+    }
+
+    static void syncDirectory(Path directory, SegmentOwnedFiles files) throws IOException {
+        try (FileChannel channel = SegmentOwnedFiles.open(files, directory, StandardOpenOption.READ)) {
             channel.force(true);
         }
+    }
+
+    synchronized boolean closedForDrain() {
+        return closed;
     }
 
     @Override
@@ -989,13 +1036,15 @@ final class IsolatedSegmentFiles implements AutoCloseable {
                 }
             }
         }
-        try {
-            writerLock.close();
-        } catch (IOException failure) {
-            if (first == null) {
-                first = failure;
-            } else {
-                first.addSuppressed(failure);
+        if (ownedFiles == null) {
+            try {
+                writerLock.close();
+            } catch (IOException failure) {
+                if (first == null) {
+                    first = failure;
+                } else {
+                    first.addSuppressed(failure);
+                }
             }
         }
         if (first != null) {

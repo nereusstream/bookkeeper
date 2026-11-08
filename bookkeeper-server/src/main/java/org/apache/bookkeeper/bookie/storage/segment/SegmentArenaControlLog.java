@@ -964,15 +964,33 @@ final class SegmentArenaControlLog implements AutoCloseable {
         Path lockPath = config.directory().resolve("arena-control.lock");
         SegmentDataFileLock writerLock = inspectionOnly ? SegmentDataFileLock.openExistingControl(lockPath)
                 : SegmentDataFileLock.openControl(lockPath);
+        return openWhileLocked(config, identity, maxLogBytes, io, writerLock, inspectionOnly, null);
+    }
+
+    static SegmentArenaControlLog openManifestWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SegmentFileIo io, SegmentDataFileLock guard, SegmentOwnedFiles files,
+            boolean inspectionOnly) throws IOException {
+        guard.requireHeld(config.directory().resolve("arena-control.lock"));
+        identity.requireStoredManifest(config, -4, files);
+        return openWhileLocked(config, identity, maxLogBytes, io, null, inspectionOnly, files);
+    }
+
+    SegmentOwnedFiles ownedFiles() {
+        return inspectionFiles;
+    }
+
+    private static SegmentArenaControlLog openWhileLocked(IsolatedSegmentConfig config, SegmentFileHeader identity,
+            long maxLogBytes, SegmentFileIo io, SegmentDataFileLock writerLock, boolean inspectionOnly,
+            SegmentOwnedFiles files) throws IOException {
         FileChannel original = null;
         SegmentArenaControlLog result = null;
         try {
             Path path = config.directory().resolve("arena-control");
-            original = inspectionOnly ? SegmentOwnedFiles.openRegularReadOnly(null, path)
-                    : FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE,
+            original = inspectionOnly ? SegmentOwnedFiles.openRegularReadOnly(files, path)
+                    : SegmentOwnedFiles.open(files, path, StandardOpenOption.READ, StandardOpenOption.WRITE,
                             LinkOption.NOFOLLOW_LINKS);
             result = new SegmentArenaControlLog(config, identity, maxLogBytes, io, original, writerLock,
-                    inspectionOnly);
+                    inspectionOnly, files);
             result.validateStorageFiles(identity);
             result.recover(identity);
             return result;
@@ -991,10 +1009,12 @@ final class SegmentArenaControlLog implements AutoCloseable {
                     failure.addSuppressed(cleanup);
                 }
             }
-            try {
-                writerLock.close();
-            } catch (IOException cleanup) {
-                failure.addSuppressed(cleanup);
+            if (writerLock != null) {
+                try {
+                    writerLock.close();
+                } catch (IOException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
             }
             throw failure;
         }
@@ -2312,6 +2332,10 @@ final class SegmentArenaControlLog implements AutoCloseable {
     /** Clean restart continues the same stream; it cannot choose among unretired generations. */
     synchronized Optional<SingleStream> restartStreamForShard(int shard) throws IOException {
         requireWritable();
+        return uniqueRestartStream(shard);
+    }
+
+    private Optional<SingleStream> uniqueRestartStream(int shard) throws IOException {
         if (shard < 0 || shard >= config.logicalShards()) {
             throw new IllegalArgumentException("Invalid restart shard");
         }
@@ -2351,6 +2375,35 @@ final class SegmentArenaControlLog implements AutoCloseable {
         if (sessionOpen || sessionOwner != null) {
             throw new IOException("Unclosed DATA writer session prevents physical reopen");
         }
+    }
+
+    synchronized void requireHealthyManifestRestart(long bookieCut) throws IOException {
+        if (!inspectionOnly || identity.manifest() == null || sessionOpen || sessionEpoch == 0
+                || pendingReconstruction != null || bookieCut < requiredMoveBookieCut()
+                || bookieCut < requiredRetiredBookieCut() || !inspection().recordedQuarantineFiles().isEmpty()
+                || appliedOperations.values().stream().noneMatch(operation ->
+                        operation.status() == Status.APPLIED_DURABLE
+                                && operation.command() instanceof DataSession session && !session.open()
+                                && session.operationGeneration().value() == sessionEpoch)) {
+            throw new IOException("Manifest Arena requires a healthy closed session and its original Bookie cut");
+        }
+        for (int shard = 0; shard < config.logicalShards(); shard++) {
+            if (identity.ownsShard(shard)) {
+                uniqueRestartStream(shard);
+            }
+        }
+    }
+
+    synchronized boolean manifestAccepting() {
+        if (failed || closed || !sessionOpen || sessionOwner == null) {
+            return false;
+        }
+        for (boolean blocked : dataBlocked) {
+            if (blocked) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void requireQuiescentControl(IsolatedSegmentConfig otherConfig,
@@ -3001,7 +3054,7 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
         if (command instanceof ResolveClosedReconstruction resolution) {
             var binding = resolution.binding();
-            if (sessionEpoch != resolution.expectedGeneration() || !canResolveSession()
+            if (identity.manifest() != null || sessionEpoch != resolution.expectedGeneration() || !canResolveSession()
                     || binding.arenaCut() != appliedThrough - 1
                     || currentAllocations.isEmpty() || binding.image().length() != config.bytesPerFile()
                     || binding.arenaCut() <= reconstructionNoAppendThrough) {

@@ -169,7 +169,7 @@ public class SegmentBookieControlLogTest {
                 4L * 1024 * 1024, 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
     }
 
-    private SegmentFileHeader identity() {
+    private static SegmentFileHeader identity() {
         return new SegmentFileHeader(new StorageIncarnation(filled(16, (byte) 7)), new UUID(0, 9),
                 BookieId.parse("isolated:3181"));
     }
@@ -1084,11 +1084,502 @@ public class SegmentBookieControlLogTest {
     }
 
     private SegmentArenaManifest multiArenaManifest(String name) throws IOException {
-        Path parent = temporary.getRoot().toPath().toRealPath();
+        return multiArenaManifest(temporary.getRoot().toPath().toRealPath(), name);
+    }
+
+    private static SegmentArenaManifest multiArenaManifest(Path parent, String name) {
         return new SegmentArenaManifest(identity().incarnation(), identity().bookieId(),
                 List.of(new SegmentArenaManifest.Arena(new UUID(0, 9), parent.resolve(name + "-a"), 1, 4194304),
                         new SegmentArenaManifest.Arena(new UUID(0, 10), parent.resolve(name + "-b"), 1, 4194304)),
                 parent.resolve(name + "-control"), List.of(1, 0, 1, 0));
+    }
+
+    private static IsolatedSegmentConfig manifestRuntime(SegmentArenaManifest manifest) {
+        return new IsolatedSegmentConfig(manifest.controlDirectory(), 1, 4, 1, 4194304, 4096, 1024, 8,
+                "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+    }
+
+    private static IsolatedSegmentStorage.Limits manifestLimits() {
+        return new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30)));
+    }
+
+    private static SegmentExecutionGroup.Settings manifestExecution(int workers, long inputBytes) {
+        return new SegmentExecutionGroup.Settings(workers, 3, 4, 4, 4096, inputBytes,
+                4 * (4096L + 4095) + inputBytes, Duration.ofSeconds(5));
+    }
+
+    private static ProfileReceiveBudget manifestBudget(long dataBytes, long controlBytes) {
+        return new ProfileReceiveBudget(dataBytes + controlBytes + 1, controlBytes, 1, 1, 1, 1);
+    }
+
+    private static ManifestSegmentStorage manifestStorage(SegmentArenaManifest manifest,
+            SegmentExecutionGroup.Settings settings, ProfileReceiveBudget budget) throws IOException {
+        return new ManifestSegmentStorage(manifest, manifest.identity(), manifestRuntime(manifest), key((byte) 3),
+                VALIDATOR, settings, manifestLimits(), budget);
+    }
+
+    private static Object manifestField(Object owner, String name) throws Exception {
+        var field = owner.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(owner);
+    }
+
+    private static Object manifestMemberField(ManifestSegmentStorage owner, int member, String name)
+            throws Exception {
+        return manifestField(((List<?>) manifestField(owner, "members")).get(member), name);
+    }
+
+    private static void assertManifestControls(ManifestSegmentStorage storage,
+            ProtectedProfileStateStore.Transition... transitions) throws Exception {
+        var result = new CompletableFuture<List<SegmentBookieControlLog.Result>>();
+        assertTrue(storage.controls().submitBatch(List.of(transitions), (rows, failure) -> {
+            if (failure == null) {
+                result.complete(rows);
+            } else {
+                result.completeExceptionally(failure);
+            }
+        }));
+        for (var row : result.get(5, TimeUnit.SECONDS)) {
+            assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, row.status());
+        }
+    }
+
+    private static SegmentDataPhysicalDriver.NormalRequest manifestWriteRequest(
+            CompletableFuture<SegmentDataPhysicalDriver.NormalResult> result) {
+        return new SegmentDataPhysicalDriver.NormalRequest((row, failure) -> {
+            if (failure == null) {
+                result.complete(row);
+            } else {
+                result.completeExceptionally(failure);
+            }
+        });
+    }
+
+    private static ReadReply manifestRead(ManifestSegmentStorage storage, long ledger) throws Exception {
+        return manifestRead(storage, ledger, 0);
+    }
+
+    private static ReadReply manifestRead(ManifestSegmentStorage storage, long ledger, long entryId) throws Exception {
+        var result = new CompletableFuture<ReadReply>();
+        assertTrue(storage.submitRead(context(ledger), entryId,
+                new SegmentPointRead.ReadRequest((status, row, failure) ->
+                        result.complete(new ReadReply(status, row, failure)))));
+        return result.get(5, TimeUnit.SECONDS);
+    }
+
+    @Test
+    public void manifestOwnerRoutesRealWritesUsesOneBudgetAndDrainsReadLeases() throws Exception {
+        var manifest = multiArenaManifest("local-owner");
+        var runtime = manifestRuntime(manifest);
+        ByteBuf first = entry(context(44), 0, -1, 600, (byte) 44, 600);
+        ByteBuf second = entry(context(45), 0, -1, 600, (byte) 45, 600);
+        int bytes = first.readableBytes() + second.readableBytes();
+        var settings = manifestExecution(2, bytes);
+        var cap = ManifestSegmentStorage.capacity(manifest, runtime, settings, manifestLimits());
+        var budget = manifestBudget(cap.dataBytes(), cap.controlBytes());
+        SegmentPointRead.Location a;
+        SegmentPointRead.Location b;
+        try (var storage = manifestStorage(manifest, settings, budget)) {
+            storage.startNew();
+            assertEquals(cap.dataBytes(), budget.used(ProfileReceiveBudget.Lane.DATA));
+            assertEquals(cap.controlBytes(), budget.used(ProfileReceiveBudget.Lane.CONTROL));
+            assertManifestControls(storage, install(44, 1, (byte) 6), activate(44, 2),
+                    install(45, 3, (byte) 5), activate(45, 4));
+            var execution = (SegmentExecutionGroup) manifestField(storage, "execution");
+            var bookie = (SegmentBookieControlLog) manifestField(storage, "bookie");
+            var bookieIo = (SegmentFileIo) manifestField(bookie, "io");
+            int controlForces = bookieIo.forces;
+            var entered = new CountDownLatch(2);
+            var release = new CountDownLatch(1);
+            var one = new CompletableFuture<SegmentDataPhysicalDriver.NormalResult>();
+            var two = new CompletableFuture<SegmentDataPhysicalDriver.NormalResult>();
+            try {
+                for (int i = 0; i < 2; i++) {
+                    assertTrue(execution.owner(i).control(() -> {
+                        entered.countDown();
+                        await(release);
+                    }));
+                }
+                assertTrue(entered.await(5, TimeUnit.SECONDS));
+                assertTrue(storage.submitNormal(context(44), filled(20, (byte) 6), first, manifestWriteRequest(one)));
+                assertTrue(storage.submitNormal(context(45), filled(20, (byte) 5), second, manifestWriteRequest(two)));
+                assertEquals(bytes, execution.inputs().usedBytes());
+                assertFalse(storage.submitNormal(context(44), filled(20, (byte) 6), first,
+                        new SegmentDataPhysicalDriver.NormalRequest((row, failure) -> fail("Denied input completed"))));
+                assertEquals(bytes, execution.inputs().usedBytes());
+            } finally {
+                release.countDown();
+            }
+            var firstWrite = one.get(5, TimeUnit.SECONDS);
+            var secondWrite = two.get(5, TimeUnit.SECONDS);
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, firstWrite.status());
+            assertEquals(SegmentDataPhysicalDriver.NormalStatus.LOCAL_DURABLE, secondWrite.status());
+            a = secondWrite.candidate();
+            b = firstWrite.candidate();
+            assertEquals(a.address().allocation(), b.address().allocation());
+            assertEquals(a.address().fileIndex(), b.address().fileIndex());
+            assertEquals(a.address().offset(), b.address().offset());
+            assertNotEquals(a.address().shard(), b.address().shard());
+            assertEquals(controlForces, bookieIo.forces);
+            for (int member = 0; member < 2; member++) {
+                var files = (IsolatedSegmentFiles) manifestMemberField(storage, member, "files");
+                assertTrue(bookie.matchesScope(files));
+                assertEquals(1, files.dataIo.forces);
+                assertFalse(Files.exists(files.config().directory().resolve("bookie-control")));
+            }
+            var read = manifestRead(storage, 44);
+            assertEquals(SegmentPointRead.ReadStatus.FOUND, read.status());
+            try (var lease = read.result()) {
+                assertEquals(context(44), lease.result().record().context());
+                assertEquals(first.nioBuffer(), lease.result().record().entry());
+                assertFalse(storage.close(Duration.ofMillis(75)));
+                assertThrows(IOException.class, () -> SegmentDataFileLock.open(manifest.arenas().get(1).directory()));
+                assertThrows(IllegalStateException.class, storage::controls);
+                assertEquals(cap.dataBytes(), budget.used(ProfileReceiveBudget.Lane.DATA));
+            }
+            assertTrue(storage.close(Duration.ofSeconds(5)));
+        } finally {
+            first.release();
+            second.release();
+        }
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+        for (int member = 0; member < 2; member++) {
+            var config = manifest.arenaConfig(runtime, member);
+            org.apache.commons.io.FileUtils.deleteDirectory(SegmentDerivedIndex.directory(config).toFile());
+            Files.deleteIfExists(SegmentDerivedIndex.publication(config, 0));
+            Files.deleteIfExists(SegmentDerivedIndex.publication(config, 1));
+        }
+        var restartSettings = manifestExecution(1, bytes);
+        var restartCap = ManifestSegmentStorage.capacity(manifest, runtime, restartSettings, manifestLimits());
+        try (var storage = manifestStorage(manifest, restartSettings,
+                manifestBudget(restartCap.dataBytes(), restartCap.controlBytes()))) {
+            storage.restart();
+            for (long ledger : new long[]{44, 45}) {
+                var read = manifestRead(storage, ledger);
+                assertEquals(SegmentPointRead.ReadStatus.FOUND, read.status());
+                try (var lease = read.result()) {
+                    assertEquals(context(ledger), lease.result().record().context());
+                    assertEquals(0, lease.result().record().entryId());
+                }
+            }
+            var fenced = new CompletableFuture<SegmentBookieControlLog.FenceResult>();
+            assertTrue(storage.controls().submitFence(fence(10, (byte) 6), (result, failure) -> {
+                if (failure == null) {
+                    fenced.complete(result);
+                } else {
+                    fenced.completeExceptionally(failure);
+                }
+            }));
+            assertEquals(SegmentBookieControlLog.FenceStatus.APPLIED_DURABLE,
+                    fenced.get(5, TimeUnit.SECONDS).status());
+            ownerBarrier(((SegmentExecutionGroup) manifestField(storage, "execution")).owner(0));
+            ByteBuf refused = entry(context(44), 1);
+            try {
+                assertFalse(storage.submitNormal(context(44), filled(20, (byte) 6), refused,
+                        new SegmentDataPhysicalDriver.NormalRequest((row, failure) -> fail("Fenced write completed"))));
+            } finally {
+                refused.release();
+            }
+            assertManifestControls(storage, tombstone(45, 11));
+            var deleted = manifestRead(storage, 45);
+            assertNotEquals(SegmentPointRead.ReadStatus.FOUND, deleted.status());
+            assertNull(deleted.result());
+            var reclaimed = new CompletableFuture<IsolatedSegmentStorage.FreeResult>();
+            assertTrue(storage.reclaimAllocation(0, new UUID(0, 12), a.address().allocation(),
+                    new IsolatedSegmentStorage.FreeRequest((result, failure) -> {
+                        if (failure == null) {
+                            reclaimed.complete(result);
+                        } else {
+                            reclaimed.completeExceptionally(failure);
+                        }
+                    })));
+            assertEquals(IsolatedSegmentStorage.FreeStatus.APPLIED_DURABLE,
+                    reclaimed.get(5, TimeUnit.SECONDS).status());
+            var other = (SegmentArenaControlLog) manifestMemberField(storage, 1, "arena");
+            assertEquals(b.address().allocation(), other.currentAllocation(b.address().allocation()).allocationId());
+            var read = manifestRead(storage, 44);
+            assertEquals(SegmentPointRead.ReadStatus.FOUND, read.status());
+            try (var lease = read.result()) {
+                assertEquals(context(44), lease.result().record().context());
+            }
+            assertManifestRecovery(storage);
+        }
+    }
+
+    private static void assertManifestRecovery(ManifestSegmentStorage storage) throws Exception {
+        var grant = new CompletableFuture<List<SegmentBookieControlLog.Result>>();
+        assertTrue(storage.controls().submitRecoveryGrant(recoveryGrant(13, 3, 7, 9), (results, cause) -> {
+            if (cause == null) {
+                grant.complete(results);
+            } else {
+                grant.completeExceptionally(cause);
+            }
+        }));
+        assertEquals(SegmentBookieControlLog.Status.APPLIED_DURABLE, grant.get(5, TimeUnit.SECONDS).get(0).status());
+        var recovered = new CompletableFuture<SegmentDataPhysicalDriver.RecoveryResult>();
+        ByteBuf payload = entry(context(44), 2);
+        try {
+            assertTrue(storage.submitRecovery(recoveryAddWithEntry(payload.nioBuffer()),
+                    new SegmentDataPhysicalDriver.RecoveryRequest((result, cause) -> {
+                        if (cause == null) {
+                            recovered.complete(result);
+                        } else {
+                            recovered.completeExceptionally(cause);
+                        }
+                    })));
+            var row = recovered.get(5, TimeUnit.SECONDS);
+            assertEquals(SegmentDataPhysicalDriver.RecoveryStatus.LOCAL_DURABLE, row.status());
+            assertEquals(0, row.candidate().address().shard());
+            var read = manifestRead(storage, 44, 2);
+            assertEquals(SegmentPointRead.ReadStatus.FOUND, read.status());
+            try (var lease = read.result()) {
+                assertEquals(payload.nioBuffer(), lease.result().record().entry());
+            }
+        } finally {
+            payload.release();
+        }
+    }
+
+    @Test
+    public void manifestOwnerPreflightsEveryMemberBeforeRecreatingTheFirstIndex() throws Exception {
+        var manifest = multiArenaManifest("local-preflight");
+        var runtime = manifestRuntime(manifest);
+        var settings = manifestExecution(1, 2048);
+        var cap = ManifestSegmentStorage.capacity(manifest, runtime, settings, manifestLimits());
+        var budget = manifestBudget(cap.dataBytes(), cap.controlBytes());
+        try (var owner = manifestStorage(manifest, settings, budget)) {
+            owner.startNew();
+        }
+        var a = manifest.arenaConfig(runtime, 0);
+        var b = manifest.arenaConfig(runtime, 1);
+        Path indexA = SegmentDerivedIndex.directory(a);
+        Path indexB = SegmentDerivedIndex.directory(b);
+        Path temporaryIndex = indexA.resolveSibling("swapped-index");
+        swapManifestPaths(indexA, indexB, temporaryIndex);
+        try {
+            assertManifestRestartRejected(manifest, settings, budget);
+        } finally {
+            swapManifestPaths(indexA, indexB, temporaryIndex);
+        }
+        org.apache.commons.io.FileUtils.deleteDirectory(indexA.toFile());
+        Path dataA = IsolatedSegmentFiles.dataPath(a, 0);
+        Path dataB = IsolatedSegmentFiles.dataPath(b, 0);
+        Path moved = dataB.resolveSibling("parked-data");
+        Files.move(dataB, moved);
+        var forceCalls = new AtomicInteger();
+        try (var factory = org.mockito.Mockito.mockStatic(FileChannel.class, invocation -> {
+            Object result = invocation.callRealMethod();
+            if (invocation.getArgument(0).equals(dataA) && !(result instanceof SegmentDataFileLockTest.FaultChannel)) {
+                var channel = new SegmentDataFileLockTest.FaultChannel((FileChannel) result);
+                channel.beforeForce = forceCalls::incrementAndGet;
+                return channel;
+            }
+            return result;
+        })) {
+            assertManifestRestartRejected(manifest, settings, budget);
+            assertFalse(Files.exists(dataB));
+            assertFalse("Preflight must reject before creating the first index", Files.exists(indexA));
+            assertEquals(0, forceCalls.get());
+        } finally {
+            Files.move(moved, dataB);
+        }
+        swapManifestPaths(dataA, dataB, moved);
+        try {
+            assertManifestRestartRejected(manifest, settings, budget);
+            assertFalse(Files.exists(indexA));
+        } finally {
+            swapManifestPaths(dataA, dataB, moved);
+        }
+        Path lockA = a.directory().resolve("isolated.lock");
+        Path lockB = b.directory().resolve("isolated.lock");
+        Path saved = lockB.resolveSibling("parked-lock");
+        Files.move(lockB, saved);
+        Files.createLink(lockB, lockA);
+        try {
+            assertManifestRestartRejected(manifest, settings, budget);
+            assertFalse(Files.exists(indexA));
+        } finally {
+            Files.delete(lockB);
+            Files.move(saved, lockB);
+        }
+        var remapped = new SegmentArenaManifest(manifest.incarnation(), manifest.bookieId(),
+                manifest.arenas(), manifest.controlDirectory(), List.of(0, 1, 0, 1));
+        assertThrows(IOException.class, () -> new ManifestSegmentStorage(remapped, manifest.identity(), runtime,
+                key((byte) 3), VALIDATOR, settings, manifestLimits(), budget));
+        assertManifestRestartRejected(remapped, settings, budget);
+        try (var owner = manifestStorage(manifest, settings, budget)) {
+            owner.restart();
+        }
+    }
+
+    private static void swapManifestPaths(Path first, Path second, Path spare) throws IOException {
+        Files.move(first, spare);
+        Files.move(second, first);
+        Files.move(spare, second);
+    }
+
+    private static void assertManifestRestartRejected(SegmentArenaManifest manifest,
+            SegmentExecutionGroup.Settings settings, ProfileReceiveBudget budget) throws Exception {
+        try (var owner = manifestStorage(manifest, settings, budget)) {
+            assertThrows(IOException.class, owner::restart);
+            assertThrows(IllegalStateException.class, owner::controls);
+        }
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+    }
+
+    @Test
+    public void manifestOwnerRejectsInsufficientGraphBudgetAndNeverAdoptsAPartialFreshScope() throws Exception {
+        var manifest = multiArenaManifest("local-budget");
+        var settings = manifestExecution(1, 2048);
+        var cap = ManifestSegmentStorage.capacity(manifest, manifestRuntime(manifest), settings, manifestLimits());
+        var budget = manifestBudget(cap.dataBytes(), cap.controlBytes() - 1);
+        try (var owner = manifestStorage(manifest, settings, budget)) {
+            assertTrue(assertThrows(IOException.class, owner::startNew).getMessage().contains("Insufficient budget"));
+        }
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertFalse(Files.exists(manifest.controlDirectory()));
+        for (var arena : manifest.arenas()) {
+            assertFalse(Files.exists(arena.directory()));
+        }
+        Files.createDirectory(manifest.arenas().get(1).directory());
+        try (var owner = manifestStorage(manifest, settings, manifestBudget(cap.dataBytes(), cap.controlBytes()))) {
+            assertTrue(assertThrows(IOException.class, owner::startNew).getMessage().contains("cannot adopt"));
+        }
+        assertFalse(Files.exists(manifest.controlDirectory()));
+        assertFalse(Files.exists(manifest.arenas().get(0).directory()));
+    }
+
+    @Test
+    public void manifestOwnerRetainsTheFailedMemberGuardAndClosesIndependentResources() throws Exception {
+        Path root = temporary.getRoot().toPath().toRealPath();
+        var manifest = multiArenaManifest(root, "first-close");
+        Path log = root.resolve("manifest-close.log");
+        Path ready = root.resolve("manifest-close-ready");
+        var child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("java.class.path"), ManifestCloseProbe.class.getName(),
+                root.toString()).redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        try {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (!Files.exists(ready) && child.isAlive() && System.nanoTime() < deadline) {
+                LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(5));
+            }
+            assertTrue(Files.readString(log), Files.exists(ready) && child.isAlive());
+            try (var healthy = SegmentDataFileLock.open(manifest.arenas().get(0).directory());
+                    var bookie = SegmentDataFileLock.openExistingControl(
+                            manifest.controlDirectory().resolve("bookie-control.lock"))) {
+                assertTrue(healthy.lock().isValid());
+                assertTrue(bookie.lock().isValid());
+                assertThrows(IOException.class, () -> SegmentDataFileLock.open(manifest.arenas().get(1).directory()));
+            }
+            child.getOutputStream().write(1);
+            child.getOutputStream().flush();
+            assertTrue(child.waitFor(10, TimeUnit.SECONDS));
+            assertEquals(Files.readString(log), 0, child.exitValue());
+        } finally {
+            if (child.isAlive()) {
+                child.destroyForcibly();
+                assertTrue(child.waitFor(5, TimeUnit.SECONDS));
+            }
+        }
+        var runtime = manifestRuntime(manifest);
+        var a = manifest.arenaConfig(runtime, 0);
+        var b = manifest.arenaConfig(runtime, 1);
+        assertFalse(SegmentArenaControlLog.inspect(a, SegmentFileHeader.forArena(manifest, 0),
+                manifestLimits().controlLogBytes()).sessionOpen());
+        assertTrue(SegmentArenaControlLog.inspect(b, SegmentFileHeader.forArena(manifest, 1),
+                manifestLimits().controlLogBytes()).sessionOpen());
+        org.apache.commons.io.FileUtils.deleteDirectory(SegmentDerivedIndex.directory(a).toFile());
+        var settings = manifestExecution(1, 2048);
+        var cap = ManifestSegmentStorage.capacity(manifest, runtime, settings, manifestLimits());
+        assertManifestRestartRejected(manifest, settings, manifestBudget(cap.dataBytes(), cap.controlBytes()));
+        assertFalse(Files.exists(SegmentDerivedIndex.directory(a)));
+    }
+
+    @Test
+    public void manifestOwnerStopsEveryArenaAfterAnActualDataForceFailure() throws Exception {
+        var manifest = multiArenaManifest("force-failure");
+        var settings = manifestExecution(2, 2048);
+        var runtime = manifestRuntime(manifest);
+        var cap = ManifestSegmentStorage.capacity(manifest, runtime, settings, manifestLimits());
+        var storage = manifestStorage(manifest, settings, manifestBudget(cap.dataBytes(), cap.controlBytes()));
+        storage.startNew();
+        try {
+            assertManifestControls(storage, install(44, 1, (byte) 5), activate(44, 2),
+                    install(45, 3, (byte) 5), activate(45, 4));
+            var controls = storage.controls();
+            var failed = (IsolatedSegmentFiles) manifestMemberField(storage, 1, "files");
+            failed.dataIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 1, false);
+            var result = new CompletableFuture<SegmentDataPhysicalDriver.NormalResult>();
+            var cause = new AtomicReference<Throwable>();
+            ByteBuf first = entry(context(44), 0);
+            ByteBuf other = entry(context(45), 0);
+            try {
+                assertTrue(storage.submitNormal(context(44), filled(20, (byte) 5), first,
+                        new SegmentDataPhysicalDriver.NormalRequest((row, failure) -> {
+                            cause.set(failure);
+                            result.complete(row);
+                        })));
+                assertEquals(SegmentDataPhysicalDriver.NormalStatus.UNKNOWN,
+                        result.get(5, TimeUnit.SECONDS).status());
+                assertNotNull(cause.get());
+                assertEquals(1, failed.dataIo.forces);
+                assertFalse(controls.submitBatch(List.of(tombstone(45, 5)),
+                        (rows, failure) -> fail("Graph remained live")));
+                assertFalse(storage.submitNormal(context(45), filled(20, (byte) 5), other,
+                        new SegmentDataPhysicalDriver.NormalRequest((row, failure) -> fail("Graph remained live"))));
+                assertFalse(storage.submitRead(context(45), 0,
+                        new SegmentPointRead.ReadRequest((status, row, failure) -> fail("Graph remained live"))));
+                assertThrows(IllegalStateException.class, storage::controls);
+            } finally {
+                first.release();
+                other.release();
+            }
+        } finally {
+            IOException failed = assertThrows(IOException.class, storage::close);
+            assertSame(failed, assertThrows(IOException.class, storage::close));
+        }
+        assertFalse(SegmentArenaControlLog.inspect(manifest.arenaConfig(runtime, 0),
+                SegmentFileHeader.forArena(manifest, 0), manifestLimits().controlLogBytes()).sessionOpen());
+        assertTrue(SegmentArenaControlLog.inspect(manifest.arenaConfig(runtime, 1),
+                SegmentFileHeader.forArena(manifest, 1), manifestLimits().controlLogBytes()).sessionOpen());
+    }
+
+    public static final class ManifestCloseProbe {
+        public static void main(String[] args) throws Exception {
+            Path root = Path.of(args[0]);
+            var manifest = multiArenaManifest(root, "first-close");
+            var settings = manifestExecution(1, 2048);
+            var runtime = manifestRuntime(manifest);
+            var cap = ManifestSegmentStorage.capacity(manifest, runtime, settings, manifestLimits());
+            var owner = manifestStorage(manifest, settings, manifestBudget(cap.dataBytes(), cap.controlBytes()));
+            Path data = IsolatedSegmentFiles.dataPath(manifest.arenaConfig(runtime, 1), 0);
+            var injected = new IOException("Original manifest DATA first close failed");
+            var fault = new AtomicReference<SegmentDataFileLockTest.FaultChannel>();
+            try (var factory = org.mockito.Mockito.mockStatic(FileChannel.class, invocation -> {
+                Object result = invocation.callRealMethod();
+                if (invocation.getArgument(0).equals(data) && fault.get() == null) {
+                    var channel = new SegmentDataFileLockTest.FaultChannel((FileChannel) result);
+                    channel.closeFailure = injected;
+                    fault.set(channel);
+                    return channel;
+                }
+                return result;
+            })) {
+                owner.startNew();
+            }
+            assertNotNull(fault.get());
+            var first = assertThrows(IOException.class, owner::close);
+            assertSame(injected, first.getCause());
+            assertSame(first, assertThrows(IOException.class, owner::close));
+            assertEquals(1, fault.get().closes.get());
+            assertTrue(fault.get().actual.isOpen());
+            assertThrows(IllegalStateException.class, owner::controls);
+            Files.writeString(root.resolve("manifest-close-ready"), "first close retained");
+            assertEquals(1, System.in.read());
+        }
     }
 
     private static SegmentDataPhysicalDriver.NormalResult writeManifestEntry(SegmentExecutionGroup group,

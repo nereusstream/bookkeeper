@@ -144,6 +144,16 @@ final class SegmentExecutionGroup {
         return start(config, settings, POOLS);
     }
 
+    /** The local graph retains this owner even if thread initialization or its first drain fails. */
+    static SegmentExecutionGroup prepareOff(IsolatedSegmentConfig config, Settings settings) {
+        if (!config.affinity().equals("OFF") || settings.workers() > config.logicalShards()
+                || settings.workers() > config.maxPendingEntries()) {
+            throw new IllegalArgumentException("Invalid local execution geometry");
+        }
+        return new SegmentExecutionGroup(config, settings,
+                ExecutionPlacementPlan.off(config.logicalShards(), settings.workers()), POOLS, null);
+    }
+
     static SegmentExecutionGroup start(IsolatedSegmentConfig config, Settings settings, PoolFactory pools)
             throws IOException {
         if (settings.workers() > config.logicalShards() || settings.workers() > config.maxPendingEntries()) {
@@ -201,7 +211,7 @@ final class SegmentExecutionGroup {
         owners = new SegmentOwnerLoop[settings.workers()];
     }
 
-    private void startThreads() throws IOException {
+    void startThreads() throws IOException {
         try {
             for (int worker = 0; worker < owners.length; worker++) {
                 owners[worker] = new SegmentOwnerLoop(config.logicalShards(), owners.length, worker,
@@ -423,6 +433,15 @@ final class SegmentExecutionGroup {
         return accepting;
     }
 
+    boolean onOwnerThread() {
+        for (SegmentOwnerLoop owner : owners) {
+            if (owner != null && owner.isOwnerThread()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** A cleanup error can be reported after all threads stopped; resource owners must distinguish that case. */
     boolean terminated() {
         for (ThreadState state : threads) {
@@ -442,12 +461,14 @@ final class SegmentExecutionGroup {
         long end = System.nanoTime() + timeout.toNanos();
         for (SegmentOwnerLoop owner : owners) {
             long remaining = end - System.nanoTime();
-            if (remaining <= 0 || !owner.awaitTermination(Duration.ofNanos(remaining))) {
+            if (owner != null && (remaining <= 0 || !owner.awaitTermination(Duration.ofNanos(remaining)))) {
                 return false;
             }
         }
         // Accepted owner commands may still submit I/O while draining, so shut services down last.
-        io.shutdown();
+        if (io != null) {
+            io.shutdown();
+        }
         stopMonitor();
         long remaining = end - System.nanoTime();
         if (remaining <= 0 || !joinThreads(Duration.ofNanos(remaining))) {

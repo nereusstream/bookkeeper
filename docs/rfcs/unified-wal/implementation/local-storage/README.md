@@ -2178,6 +2178,20 @@ per-Arena create/open消费已存完整manifest，只创建本Arena的DATA、sup
 当前IsolatedSegmentStorage和SegmentProfileService的运行/发布图仍为单Arena，v2构造拒绝保持；新本地creator不生产commissioning、旧服务退役/UID隔离、Main输入或registration authority。共同Classic/Profile route claim及全部legacy入口、完整多Arena startup/readiness、每Arena维护/coverage协同、全局buffer/CONTROL/index/filesystem预算仍须接线并验收；本地组合不关闭步骤10/B11/B17、完整G1或生产Gate。全16步目标active，默认OFF/SYSTEM/PARK和disabled能力保持；Linux NUMA、真实掉电、正式性能/canary仍NOT_EXECUTED。
 
 
+## 固定多 Arena 的统一本地 owner
+
+`ManifestSegmentStorage` 接受完整 Profile-only manifest、外部期望 identity、原密钥与 descriptor 校验器，以及一套执行配置和预算。固定映射决定每个全局 shard 的 DATA、allocator、hot 和索引归属。一个 Bookie owner 和 driver 处理原控制命令，一个执行组负责全部 worker、I/O 和输入缓冲。各 Arena 的 allocator 使用其映射内的 worker。
+
+初建先检查全组根及父路径，再按原 CREATE_NEW 路径建文件。健康冷启先按稳定顺序取得独立 Bookie 根及全部 Arena 的控制和 DATA 锁。在同一批锁下只读校验完整 manifest、必需文件的身份和几何、原 Bookie cut、各 Arena 实际健康 CLOSE 与已有索引绑定。随后准备所有成员的 DATA 同步和索引，逐个启用受管 OPEN，待全体 shard 驱动准备好才开放本地请求。派生索引缺失时沿用原恢复重建。固定布局沿用现有 v2 文件及原控制记录。
+
+配置额度先于打开文件预留。执行组、输入和池及全局 shard 工作集只计算一次，逐 Arena 相加控制、索引和恢复额度。任一 Arena 的 DATA force 返回 `UNKNOWN` 后，全图停止接纳请求，已取得的 Bookie driver 也拒绝新命令。停止等待实际 owner、I/O 和已交付读租约。关闭逐个尝试独立成员。实际首次关闭无法确认的成员保留对应排他锁和失败，其他已终结成员正常释放。受保护 FREE 使用原回收证明及全局 Bookie cut。
+
+五项新增回归使用两个实际 Arena，覆盖共享输入额度用满、两边正常写入、读租约排空、健康重开后的索引重建和恢复写入，以及全局 FENCE、tombstone 与单 Arena FREE。另覆盖整图预算不足、局部根已存在、身份或映射错误、锁别名、必需文件缺失或被换、实际首次关闭失败和 DATA force 失败。独立进程验证关闭失败的 Arena 持有原 OS 锁，健康 Arena 与 Bookie 锁可以重取。反向验证只保留第一个 Arena 的预检时，第二个 Arena 缺 DATA 导致第一个索引提前被创建。
+
+最终源码分两轮运行八类定向用例，116 项通过，5 项 Linux 亲和性用例按平台条件跳过。旧 v8 真实服务重建用例使用隔离 APFS 临时卷及既有 macOS JNI 夹具，宿主默认临时目录触发磁盘使用率门槛的结果单独归档。Spotless、Checkstyle 通过。源码哈希、原始 XML 和反向验证位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-local-owner-evidence-ab6af1c6`。
+
+当前入口限本地 OFF/SYSTEM/PARK。网络与注册、Main、共同 Classic route、自动维护协同、跨 Arena 异常 OPEN 恢复和长期 filesystem 预算仍待对应验收。
+
 ## 共同 ROUTE 的持久命令与恢复
 
 2026-10-30在父源码`8269cd03282396f0f1ffdc9e71ba06d5df9ac1d0`上，原唯一Bookie control owner增加真实ROUTE variant，原Profile scope/descriptor/context不用于表示Classic。共同域用新的manifest schema2纳入完整Classic journal/ledger/有效index根及合并角色，原schema1字节、摘要域和旧构造保持；身份页继续显式v2并绑定新的完整digest，已绑定拓扑不原地修改。实际Classic根的canonical/alias、marker及commissioning检查仍属于后续启动装配，native清单读取不发行这些证明。
