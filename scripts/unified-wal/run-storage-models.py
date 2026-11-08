@@ -31,6 +31,11 @@ import time
 
 
 MATRIX = {
+    'c-closed-reconstructed-tail': None,
+    'ce-closed-reconstructed-tail-required-only': 'AdmissionHasFullCurrentExtent',
+    'ce-closed-reconstructed-tail-copy': 'AdmissionHasCommittedCopy',
+    'ce-closed-reconstructed-tail-publication': 'ResolutionFollowsPublication',
+    'ce-closed-reconstructed-tail-source': 'ReplayPublishesReconstructedEnd',
     'c-closed-sealed-reuse': None,
     'ce-closed-sealed-reuse-partial': 'AdmittedHasFullHealthySeal',
     'ce-closed-sealed-reuse-provenance': 'AdmittedHasFullHealthySeal',
@@ -1077,6 +1082,7 @@ def main():
                    else "ClosedReconstructionPublication.tla" if "closed-reconstruction" in name
                    else "ClosedMovedImage.tla" if "closed-moved-image" in name
                    else "ClosedRetiredImage.tla" if "closed-retired-image" in name
+                   else "ClosedReconstructedTail.tla" if "closed-reconstructed-tail" in name
                    else "ClosedSealedReuse.tla" if "closed-sealed-reuse" in name
                    else "ProfileDeleteRetention.tla" if "profile-delete-retention" in name
                    else "ProfileDeleteEffective.tla" if "profile-delete-effective" in name

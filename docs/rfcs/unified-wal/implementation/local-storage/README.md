@@ -1022,6 +1022,22 @@ ADMITTED v7 依据原成功复用历史选择模式。Arena 重放以成功 FREE
 
 六项编码、两项真实控制及八项 socket 回归全部通过，Spotless 和 Checkstyle 通过。范围为 macOS 单 Arena、单 DATA 文件的受控 JVM 退出。批准 Linux、掉电、一般已授权 OPEN 及生产 Gate 保持 OPEN。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-sealed-reuse-evidence-78d9d847`。[完整封口的有限模型](../models/README.md#完整封口复用后的-closed-映像检查)
 
+### 独立读取尾界的 CLOSED 重建
+
+ADMITTED v8 覆盖至少一个存续复用 extent 缺少完整健康封口的原 OPEN。原三锁下从每个当前复用 grant 的起点逐批扫描至固定末端。每个批次需要精确当前 allocation ID、generation、文件、shard 与 stream。零页、残留旧批次、坏批次和未提交 COPY 拒绝。当前 selector、连续序号、完整 CLOSED SELF/EMPTY 集合及两个当前来源仍需逐项验证。
+
+新读取尾界依据 fresh inode 上的全文件重写、force、readback、首次 close 和整组名称发布与同步。完成清理后，原私有发布凭据提交 action 7。该动作在同一控制结算中终结原 epoch、禁止旧 grant 继续追加，并按原 grant 的固定几何记录重建读取尾界。旧写入的 ACK、force 与 ledger CLOSE 继续依原证据判定。
+
+重放保持重建尾界与健康 CLOSE 的来源区别。首次 owned OPEN 仍验证原生 v8 READY、文件向量与当前成员生命周期。后继 writer 健康关闭时记录真实健康尾界。成功 FREE 移除当前有效尾界，后续新 allocation ID 和 generation 使用各自的读取证明。旧操作精确重试只认可原已应用的 action 7。
+
+真实 3/3/3 SDK 写满 generation 2 的 1 MiB extent，完成 ledger CLOSE 后在首次 storage CLOSE 前退出。全文件已发布而首个 action 7 字节尚未写入时，原 epoch 仍 OPEN，读取尾界尚未发布。action 7 force 后、apply 前退出，冷重放与轮转均得到同一重建尾界。删除派生索引与 coverage 后，同身份 owned 服务重开，实际 mTLS 读回首、中、末 entry，公开 SDK 核对 CLOSED 边界和中间条目。原 grant 的追加截止、新 grant 写入、健康关闭及再次冷启均经过原路径。
+
+另一个真实用例从健康 CLOSE 的 86 页部分尾界继续，由维护路径提交 170 页 COPY 和对应 MOVE，填满复用 extent 后退出。v8 根据完整候选建立新读取尾界。真实孤立 COPY、零页、破损末页、未出现的当前 selector 及旧 generation 均拒绝。父版 `9462425965` 拒绝同一无健康封口的完整 scope、实际原生 v8、原日志 action 7 及包含 action 7 的轮转检查点。仅移除复用范围零页检查的故障变体错误准入了只写两页的真实映像。
+
+实际 compaction 与 FREE 后，同一 extent 的 generation 3 以新 ID 写入两页，冷重放未继承旧读取尾界。旧 v8 操作重试保留新的 OPEN 和 cut。后续重建根据实际残留的 generation 2 批次拒绝准入。
+
+六项编码、三项真实控制及十项 socket 回归全部通过，Spotless 和 Checkstyle 通过。这些证据限定于 macOS 单 Arena、单 DATA 文件的受控 JVM 退出。批准 Linux、真实掉电、一般已授权 OPEN 和完整生产 Gate 保持 OPEN。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-unsealed-full-evidence-94624259`。[读取尾界的有限模型](../models/README.md#closed-重建读取尾界的发布与重放)
+
 ## Profile 普通 Add 的真实接线
 
 2026-10-06 步骤11增量：[真实隔离普通 Add 接线](../profile-wire/README.md#真实隔离普通-add-接线)把 mTLS/HELLO、固定布局与本地 N 上限、credential/context/CRC/entry 坐标、既有有界同步输入复制、真实 DATA 结果和完整 status 三元组接通。声明的 N+1 在 body 分配前关闭；force 前不回 OK，实际 UNKNOWN 不回 NONE；断连只停止等待。排队 completion 和下游持有的响应在真实消费/write promise 终结前继续计费。八个真实 socket 场景（含取消额度红绿）与相关14类383项中378通过、5项macOS上的Linux亲和性跳过；Spotless/Checkstyle通过。有限矩阵39正向完整PASS/122指定反例。HELLO identity来自实际存储，readiness generation仍为显式调用输入（测试为0）；生产listener、控制操作授权、TLS/socket及存储总账、完整startup/readiness、quorum和性能对照仍未完成，步骤11/B18与生产Gate保持OPEN。

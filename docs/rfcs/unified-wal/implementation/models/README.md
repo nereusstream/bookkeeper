@@ -1866,3 +1866,14 @@ TLC 1.7.4 的正向配置生成 233 个状态，224 个不同状态，队列 0�
 python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" \
   --config-prefix c-closed-sealed-reuse --config-prefix ce-closed-sealed-reuse
 ```
+
+## CLOSED 重建读取尾界的发布与重放
+
+`ClosedReconstructedTail.tla` 投影一个完整复用 extent 及其来源、原生 READY 和全组文件发布。准入要求完整当前 extent 与已提交 COPY。force 和冷重放是两个状态，重放得到固定读取尾界及旧 grant 追加截止，首次 OPEN 仍依赖原 READY。四个故障配置分别允许只看 required entry、忽略 COPY 选择、提前 force 和将重建尾界记成健康 CLOSE。[真实文件与进程用例](../local-storage/README.md#独立读取尾界的-closed-重建)
+
+TLC 1.7.4 的正向配置生成 41 个状态，41 个不同状态，队列 0。四个故障配置各触发指定性质。已核对 1,233 个源码输入和 955 个文件校验和。原始轨迹位于 `/Users/liusinan/.codex/artifacts/unified-wal/reconstruction-unsealed-full-evidence-94624259/model`。
+
+```bash
+python3 scripts/unified-wal/run-storage-models.py --tool "$UW_TLC_JAR" \
+  --config-prefix c-closed-reconstructed-tail --config-prefix ce-closed-reconstructed-tail
+```

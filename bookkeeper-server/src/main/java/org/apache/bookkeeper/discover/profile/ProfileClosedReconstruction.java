@@ -50,6 +50,7 @@ public final class ProfileClosedReconstruction {
     private static final int COMMITTED_MOVE_VERSION = 5;
     private static final int RETIRED_VERSION = 6;
     private static final int SEALED_REUSE_VERSION = 7;
+    private static final int RECONSTRUCTED_REUSE_VERSION = 8;
     private static final int READY_VECTOR_VERSION = 2;
     private static final int MAX_BYTES = 8192;
     public static final int MAX_MEMBERS = 16;
@@ -95,7 +96,7 @@ public final class ProfileClosedReconstruction {
 
     public enum Kind { NONEMPTY_SELF, EMPTY_TERMINAL }
 
-    public enum HistoryMode { ORIGINAL, COMMITTED_MOVE, RETIRED, FULLY_SEALED_REUSE }
+    public enum HistoryMode { ORIGINAL, COMMITTED_MOVE, RETIRED, FULLY_SEALED_REUSE, RECONSTRUCTED_FULL_REUSE }
 
     /** Legacy v1 stores just the ledger ID here, with its complete identity bound by the CLOSED digest. */
     public record Member(long ledger, ProfileLedgerContext context, String closed, String sources, Kind kind) {
@@ -232,6 +233,7 @@ public final class ProfileClosedReconstruction {
                     case COMMITTED_MOVE -> COMMITTED_MOVE_VERSION;
                     case RETIRED -> RETIRED_VERSION;
                     case FULLY_SEALED_REUSE -> SEALED_REUSE_VERSION;
+                    case RECONSTRUCTED_FULL_REUSE -> RECONSTRUCTED_REUSE_VERSION;
                 });
                 writeScope(out, scope);
                 writeId(out, operation);
@@ -278,7 +280,8 @@ public final class ProfileClosedReconstruction {
                 int version = in.readInt();
                 if (version != VERSION && version != COHORT_VERSION && version != MIXED_VERSION
                         && version != FILE_VECTOR_VERSION && version != COMMITTED_MOVE_VERSION
-                        && version != RETIRED_VERSION && version != SEALED_REUSE_VERSION) {
+                        && version != RETIRED_VERSION && version != SEALED_REUSE_VERSION
+                        && version != RECONSTRUCTED_REUSE_VERSION) {
                     throw new IOException("Unknown reconstruction admission version");
                 }
                 var scope = new Scope(in.readUTF(), new StorageIncarnation(in.readNBytes(16)), readId(in),
@@ -297,6 +300,7 @@ public final class ProfileClosedReconstruction {
                     case COMMITTED_MOVE_VERSION -> HistoryMode.COMMITTED_MOVE;
                     case RETIRED_VERSION -> HistoryMode.RETIRED;
                     case SEALED_REUSE_VERSION -> HistoryMode.FULLY_SEALED_REUSE;
+                    case RECONSTRUCTED_REUSE_VERSION -> HistoryMode.RECONSTRUCTED_FULL_REUSE;
                     default -> HistoryMode.ORIGINAL;
                 };
                 boolean vector = historyMode != HistoryMode.ORIGINAL || version == FILE_VECTOR_VERSION;

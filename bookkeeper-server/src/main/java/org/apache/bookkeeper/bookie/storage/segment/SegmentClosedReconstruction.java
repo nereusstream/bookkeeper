@@ -248,7 +248,7 @@ public final class SegmentClosedReconstruction {
                         closed.getLength()));
             }
             SegmentStorageInspector.requireClosedReconstructionScope(deps, proofs);
-            var historyMode = deps.arena().history().mode();
+            var historyMode = deps.arena().mode();
             var files = new SegmentOwnedFiles(locks);
             try (AutoCloseable cleanup = () -> requireDrained(files, data)) {
                 var rootObject = observeDirectory(files, nativeIo, root);

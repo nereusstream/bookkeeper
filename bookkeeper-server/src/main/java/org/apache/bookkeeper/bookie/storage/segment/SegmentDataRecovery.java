@@ -669,7 +669,7 @@ final class SegmentDataRecovery {
         private final HashMap<Long, SegmentArenaControlLog.ObservedGrant> grants = new HashMap<>();
         private final HashMap<StreamKey, Long> nextSequence = new HashMap<>();
         private final Map<Integer, TreeMap<Long, Long>> retiredExtents = new HashMap<>();
-        private final Map<Integer, TreeMap<Long, SegmentArenaControlLog.ReusedExtent>> reusedExtents = new HashMap<>();
+        private final Map<Integer, TreeMap<Long, Long>> reusedExtents = new HashMap<>();
         private final Map<StreamKey, StreamProgress> retiredStreams = new HashMap<>();
         private final MessageDigest entryDigest = sha256();
         private final ByteBuffer page;
@@ -719,22 +719,16 @@ final class SegmentDataRecovery {
             }
             for (var grant : arena.grants()) {
                 var allocation = grant.allocation();
+                long end = allocation.offset() + allocation.blocks() * SegmentArenaControlLog.BLOCK_BYTES;
                 if (allocation.file() != allocation.ownerShard() % config.dataFiles()
-                        || overlapsRetirement(allocation.file(), allocation.offset(),
-                                allocation.offset() + allocation.blocks() * SegmentArenaControlLog.BLOCK_BYTES)) {
+                        || overlapsRetirement(allocation.file(), allocation.offset(), end)) {
                     throw new IOException("CLOSED reconstruction grant is outside its shard file or overlaps FREE");
                 }
-                grants.put(allocation.allocationId(), grant);
-            }
-            for (var tail : arena.tails().values()) {
-                var allocation = tail.allocation();
-                var extent = tail.extent();
-                if (extent.usedEnd() < allocation.offset() || extent.usedEnd() > extent.end()
-                        || extent.end() > config.bytesPerFile() || extent.usedEnd() % config.alignment() != 0) {
-                    throw new IOException("CLOSED reconstruction has an invalid healthy reused extent");
+                if (allocation.expectedGeneration() > 0) {
+                    reusedExtents.computeIfAbsent(allocation.file(), ignored -> new TreeMap<>())
+                            .put(allocation.offset(), end);
                 }
-                reusedExtents.computeIfAbsent(allocation.file(), ignored -> new TreeMap<>())
-                        .put(allocation.offset(), extent);
+                grants.put(allocation.allocationId(), grant);
             }
             for (var stream : arena.streams()) {
                 var key = new StreamKey(stream.shard(), new Generation(stream.generation()));
@@ -782,8 +776,6 @@ final class SegmentDataRecovery {
             boolean moved = arena.history().committedMoves();
             for (long offset = config.alignment(); offset < bytes;) {
                 Long retiredEnd = retired == null ? null : retired.get(offset);
-                var reuse = reusedFile == null ? null : reusedFile.floorEntry(offset);
-                var reused = reuse == null || offset >= reuse.getValue().end() ? null : reuse.getValue();
                 if (retiredEnd != null) {
                     // Preserve all bytes even where the original FREE ended record authority.
                     do {
@@ -796,8 +788,9 @@ final class SegmentDataRecovery {
                 page.clear();
                 SegmentFileIo.readFully(data, page, offset);
                 if (allZero(page)) {
-                    if (reused != null) {
-                        throw new IOException("CLOSED reconstruction has an unwritten page before its healthy tail");
+                    var reuse = reusedFile == null ? null : reusedFile.floorEntry(offset);
+                    if (reuse != null && offset < reuse.getValue()) {
+                        throw new IOException("CLOSED reconstruction has an unwritten page in a reused extent");
                     }
                     imageDigest.update(page);
                     offset += config.alignment();
@@ -814,7 +807,6 @@ final class SegmentDataRecovery {
                         || !grant.ownerGeneration().equals(address.streamGeneration())
                         || grant.generation() != address.generation().value() || offset < grant.offset()
                         || batchLength > grant.offset() + grant.blocks() * SegmentArenaControlLog.BLOCK_BYTES - offset
-                        || (reused != null && !reused.containsBatch(offset, batchLength))
                         || (progress == null && address.sequence() != nextSequence.getOrDefault(stream, -1L))
                         || address.sequence() == Long.MAX_VALUE) {
                     throw new IOException("CLOSED reconstruction batch has no exact grant or continuous stream");
@@ -1598,7 +1590,7 @@ final class SegmentDataRecovery {
                                 config.bytesPerFile());
                         int parsedRecords = page.getInt(76); // Validated by batchLength before any record allocation.
                         if (reused.isPresent() && !reused.get().containsBatch(offset, length)) {
-                            throw new IOException("Current reused DATA exceeds its healthy CLOSED tail");
+                            throw new IOException("Current reused DATA exceeds its durable read boundary");
                         }
                         if (!authority.hasAppliedGrant(file, offset, length, address.shard(),
                                 address.streamGeneration().value(), address.allocation(),

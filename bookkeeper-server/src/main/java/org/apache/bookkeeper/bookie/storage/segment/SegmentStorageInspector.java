@@ -81,7 +81,7 @@ public final class SegmentStorageInspector {
                 || bookie.deleteHandoff() || bookie.deleteEffective()) {
             throw new IOException("Original scope has unsupported CLOSED reconstruction dependencies");
         }
-        requireReconstructionMode(dependencies, arena.history().mode());
+        requireReconstructionMode(dependencies, arena.mode());
         var remaining = new HashMap<ProfileLedgerContext, SegmentBookieControlLog.ObservedLedger>();
         for (var local : bookie.ledgers()) {
             remaining.put(local.context(), local);
@@ -100,10 +100,8 @@ public final class SegmentStorageInspector {
             ProfileClosedReconstruction.HistoryMode mode)
             throws IOException {
         var arena = dependencies.arena();
-        long currentReused = arena.grants().stream()
-                .filter(grant -> grant.allocation().expectedGeneration() > 0).count();
         arena.history().requireMode(mode, dependencies.bookie().observedSequence(),
-                !arena.selections().isEmpty(), arena.retiredSlots().size(), currentReused, arena.tails());
+                !arena.selections().isEmpty(), arena.retiredSlots().size(), arena.currentReused(), arena.tails());
     }
 
     static void requireEmptyReconstructionMember(SegmentBookieControlLog.ObservedLedger local,

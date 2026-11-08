@@ -147,6 +147,8 @@ action 6 只接受原发布 owner 验证全组 active 并清理完成后构造�
 
 有成功复用的原 scope 使用 ADMITTED v7，字节布局沿用 v6，仅版本字段变化。原 Arena 重放须为每个存续复用 grant 找到原 OPEN 前成功应用的健康 CLOSE，绑定操作 UUID、epoch、原 sequence、allocation ID、generation 与 extent，并证明记录的封口位置等于 extent 末端。封口依据来自原控制历史，受既有依赖摘要约束，ADMITTED 不添加第二份尾部字段。READY、action 6、健康 CLOSE、FREE 与 DATA 字节沿用原格式。[完整封口复用后的 CLOSED 重建](README.md#完整封口复用后的-closed-重建)
 
+至少一个存续复用 grant 缺少完整健康封口、全部存续复用 extent 均通过完整当前 DATA 审计时，使用 ADMITTED v8。沿用 v7 的完整文件和 typed 成员布局，仅版本字段变化。全部已有完整健康封口的 scope 仍使用 v7。v8 配对 `DEVICE_STATE` v2 action 7，沿用 action 6 的 208 字节 body、外层 UUID、epoch 及原始 native 绑定，将 body 的 action 字段置为 7。控制重放从原 cut 处的当前 grant ID、generation 与固定几何确定读取尾界，来源为重建。普通健康 CLOSE 继续产生独立的原 tail 记录。[独立读取尾界的 CLOSED 重建](README.md#独立读取尾界的-closed-重建)
+
 文件隔离后续 ALLOC 条件失败，原 grant 和 stream 起点仍保留。实际故障可先设置易失准入 gate，只有日志中的 DEVICE_STATE 改变重放状态。持久隔离和无法解析的 OPEN 在控制重放后阻止物理重开。缺少隔离记录或后续 DATA sync 成功均无法解除该限制。实际 driver 和生命周期验证见[本地状态](README.md)。
 
 实际绑定的DATA合批路径在I/O前为该记录共享预留每文件160字节逻辑控制日志容量（128-byte header、16-byte body、16-byte footer）及原owner通知完成槽。普通控制追加不能占用这份容量，未知结果不释放实际I/O资源；成功DATA不写故障记录，只在I/O/owner终结后归还预留。控制忙时每文件保留一条通知并按原序执行，停收仍使用原ticket排空；预留不足先背压，Arena关闭/物理重开拒绝未终结通知。这不预分配实际文件系统空间，也不证明记录落盘前退出、实际控制I/O或owner失败已可跨重启解析。

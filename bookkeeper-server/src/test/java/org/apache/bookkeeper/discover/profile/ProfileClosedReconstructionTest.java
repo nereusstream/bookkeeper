@@ -204,6 +204,14 @@ public class ProfileClosedReconstructionTest {
         ByteBuffer.wrap(sealedGolden).putInt(4, 7);
         assertArrayEquals(sealedGolden, sealed.encode());
         assertEquals(sealed, ProfileClosedReconstruction.Admission.decode(sealedGolden));
+        var reconstructed = new ProfileClosedReconstruction.Admission(base.scope(), base.operation(), base.arenaCut(),
+                base.bookieCut(), base.publisherPid(), base.publisherStartMillis(), base.publisherSession(),
+                base.directory(), base.directoryObject(), base.stagingObject(), List.of(original),
+                base.dependencies(), List.of(member), ProfileClosedReconstruction.HistoryMode.RECONSTRUCTED_FULL_REUSE);
+        byte[] reconstructedGolden = sealedGolden.clone();
+        ByteBuffer.wrap(reconstructedGolden).putInt(4, 8);
+        assertArrayEquals(reconstructedGolden, reconstructed.encode());
+        assertEquals(reconstructed, ProfileClosedReconstruction.Admission.decode(reconstructedGolden));
     }
 
     private static ProfileClosedReconstruction.Ready ready(List<ProfileClosedReconstruction.FileImage> files) {
