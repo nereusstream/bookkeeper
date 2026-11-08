@@ -23,11 +23,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.OverlappingFileLockException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -41,10 +46,12 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 
 /** Point-in-time access observation of one offline Profile manifest, with no publication authority. */
 final class SegmentManifestAccessObservation {
     private static final String SCHEMA = "UWNS2";
+    private static final String DRAIN_SCHEMA = "UWNS2_DRAIN_V1";
     private static final int MAX_INPUT = 16_384;
     private static final int MAX_OUTPUT = 262_144;
     private static final int MAX_INVENTORY = 128;
@@ -93,7 +100,9 @@ final class SegmentManifestAccessObservation {
         }
     }
 
-    private record ProbeReply(byte[] bytes, boolean succeeded) { }
+    private record Request(SegmentArenaManifest manifest, IsolatedSegmentConfig runtime, OldScope old, long newUid,
+            Set<Path> requiredWrites, List<Map<String, String>> expected, Map<String, String> scope, String nonce,
+            List<String> writable) { }
 
     private final ManifestIdentity manifestIdentity;
     private final List<Map<String, String>> expectedRoots;
@@ -113,9 +122,9 @@ final class SegmentManifestAccessObservation {
         this.receipt = receipt;
     }
 
-    static SegmentManifestAccessObservation observe(SegmentArenaManifest manifest, IsolatedSegmentConfig runtime,
+    static Probe startProbe(SegmentArenaManifest manifest, IsolatedSegmentConfig runtime,
             OldScope old, long newUid, Path script, Set<Path> requiredWrites, Duration timeout)
-            throws IOException, InterruptedException {
+            throws IOException {
         if (newUid < 0 || newUid > 0xffff_ffffL || old.uid() == newUid
                 || old.bookieId().equals(manifest.bookieId().toString())
                 || timeout.compareTo(Duration.ofSeconds(1)) < 0 || timeout.compareTo(Duration.ofMinutes(1)) > 0) {
@@ -132,15 +141,25 @@ final class SegmentManifestAccessObservation {
         if (input.length > MAX_INPUT) {
             throw new IOException("Manifest access request exceeds its bounded envelope");
         }
-        var observed = probe(script, input, timeout);
-        var reply = JSON.readTree(observed.bytes());
+        var request = new Request(manifest, runtime, old, newUid, Set.copyOf(requiredWrites), expected,
+                scope, nonce, writable);
+        return new Probe(request, input, script, timeout);
+    }
+
+    private static SegmentManifestAccessObservation bind(Request request, JsonNode reply, boolean succeeded)
+            throws IOException {
+        var manifest = request.manifest();
+        var old = request.old();
+        var expected = request.expected();
+        String nonce = request.nonce();
+        var requiredWrites = request.requiredWrites();
         if (reply == null || !SCHEMA.equals(reply.path("schema").asText())
-                || !(observed.succeeded() ? "VERIFIED" : "REJECTED").equals(reply.path("status").asText())
+                || !(succeeded ? "VERIFIED" : "REJECTED").equals(reply.path("status").asText())
                 || !"ACCESS_SNAPSHOT_ONLY".equals(reply.path("authority").asText())
                 || !"NOT_VERIFIED".equals(reply.path("oldServiceDisposition").asText())
                 || !nonce.equals(reply.path("nonce").asText()) || number(reply, "oldChildExitCode") != 0
-                || !JSON.valueToTree(scope).equals(reply.path("scope"))
-                || !JSON.valueToTree(writable).equals(reply.path("requiredWrites"))) {
+                || !JSON.valueToTree(request.scope()).equals(reply.path("scope"))
+                || !JSON.valueToTree(request.writable()).equals(reply.path("requiredWrites"))) {
             throw new IOException("Probe result does not bind the original manifest access request");
         }
         var roots = new HashMap<Path, Identity>();
@@ -165,53 +184,177 @@ final class SegmentManifestAccessObservation {
             probed.add(Path.of(root.get("path")).resolve(".uw-scope-readable-" + nonce));
         }
         requireActor(reply.path("oldActor"), old.uid(), nonce, expected, probed, requiredWrites, false);
-        requireActor(reply.path("newActor"), newUid, nonce, expected, probed, requiredWrites, true);
-        if (!observed.succeeded()) {
+        requireActor(reply.path("newActor"), request.newUid(), nonce, expected, probed, requiredWrites, true);
+        if (!succeeded) {
             throw new IOException("Actual manifest access probe refused the scope");
         }
         var result = new SegmentManifestAccessObservation(manifest.identity(), expected, roots, files,
-                requiredWrites, observed.bytes());
-        result.requireCurrent(manifest, runtime, requiredWrites);
+                requiredWrites, JSON.writeValueAsBytes(reply));
+        result.requireCurrent(manifest, request.runtime(), requiredWrites);
         return result;
     }
 
-    private static ProbeReply probe(Path script, byte[] input, Duration timeout)
-            throws IOException, InterruptedException {
-        var exchange = Files.createTempDirectory("uw-manifest-access-");
-        var request = exchange.resolve("request.json");
-        var output = exchange.resolve("receipt.json");
-        Process process = null;
-        try {
-            Files.write(request, input);
-            process = new ProcessBuilder("/usr/bin/python3", "-I", "-B", script.toRealPath().toString(),
-                    "--timeout", Double.toString(timeout.toMillis() / 2000.0))
-                    .redirectInput(request.toFile())
-                    .redirectOutput(output.toFile()).redirectError(ProcessBuilder.Redirect.DISCARD).start();
-            if (!process.waitFor(timeout.toNanos(), TimeUnit.NANOSECONDS)) {
+    /** Owns the private exchange after the caller's result deadline, without a background Java waiter. */
+    static final class Probe {
+        private final Request request;
+        private final Path exchange;
+        private final Path operationLock;
+        private final FileChannel operationFile;
+        private final Identity lockIdentity;
+        private final String requestDigest;
+        private final Process collector;
+        private IOException cleanupFailure;
+
+        private Probe(Request request, byte[] input, Path script, Duration timeout) throws IOException {
+            this.request = request;
+            requestDigest = sha256(input);
+            var temporary = Path.of(System.getProperty("java.io.tmpdir")).toRealPath();
+            exchange = Files.createTempDirectory(temporary, "uw-manifest-access-");
+            operationLock = exchange.resolve("operation.lock");
+            FileChannel opened = null;
+            try {
+                Files.write(exchange.resolve("request.json"), input, StandardOpenOption.CREATE_NEW);
+                opened = FileChannel.open(operationLock, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE,
+                        LinkOption.NOFOLLOW_LINKS);
+                lockIdentity = Identity.current(operationLock, false);
+                var descriptor = new NativeIOImpl().fileIdentity(opened);
+                if (descriptor.device() != lockIdentity.device() || descriptor.inode() != lockIdentity.inode()) {
+                    throw new IOException("Manifest access operation descriptor differs from its original path");
+                }
+                String binding = DRAIN_SCHEMA + ":" + request.nonce() + ":" + requestDigest + ":"
+                        + lockIdentity.device() + ":" + lockIdentity.inode();
+                collector = new ProcessBuilder("/usr/bin/python3", "-I", "-B", script.toRealPath().toString(),
+                        "--owned-exchange", exchange.toString(), "--operation-binding", binding,
+                        "--timeout", Double.toString(timeout.toMillis() / 2000.0))
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                        .redirectError(ProcessBuilder.Redirect.DISCARD).start();
+                operationFile = opened;
+            } catch (IOException | RuntimeException | Error startup) {
+                if (opened != null) {
+                    try {
+                        opened.close();
+                    } catch (IOException cleanup) {
+                        startup.addSuppressed(cleanup);
+                    }
+                }
+                try {
+                    deleteExchange();
+                } catch (IOException cleanup) {
+                    startup.addSuppressed(cleanup);
+                }
+                throw startup;
+            }
+        }
+
+        SegmentManifestAccessObservation await(Duration timeout) throws IOException, InterruptedException {
+            if (!collector.waitFor(timeout.toNanos(), TimeUnit.NANOSECONDS)) {
                 throw new IOException("Actual manifest access probe did not complete successfully");
             }
-            int exit = process.exitValue();
+            var terminal = inspectTerminal(false);
+            if (terminal == null) {
+                throw new IOException("Manifest probe operation is still draining");
+            }
+            int exit = (int) number(terminal, "exitCode");
+            if (exit != collector.exitValue()) {
+                throw new IOException("Manifest probe collector did not confirm the operation result");
+            }
             if (exit != 0 && exit != 1) {
                 throw new IOException("Actual manifest access probe unavailable with exit " + exit);
             }
-            try (var stream = Files.newInputStream(output)) {
-                byte[] bytes = stream.readNBytes(MAX_OUTPUT + 1);
-                if (bytes.length > MAX_OUTPUT) {
-                    throw new IOException("Manifest access probe output exceeds its bound");
-                }
-                return new ProbeReply(bytes, exit == 0);
+            return bind(request, terminal.path("receipt"), exit == 0);
+        }
+
+        boolean closeWhenDrained() throws IOException {
+            if (cleanupFailure != null) {
+                throw cleanupFailure;
             }
-        } finally {
+            if (collector.isAlive() || inspectTerminal(true) == null) {
+                return false;
+            }
             try {
-                if (process != null && process.isAlive()) {
-                    process.destroyForcibly();
-                    process.waitFor(1, TimeUnit.SECONDS);
-                }
-            } finally {
-                Files.deleteIfExists(output);
-                Files.deleteIfExists(request);
-                Files.deleteIfExists(exchange);
+                operationFile.close();
+            } catch (IOException failure) {
+                cleanupFailure = failure;
+                throw failure;
             }
+            return true;
+        }
+
+        private JsonNode inspectTerminal(boolean cleanup) throws IOException {
+            Path terminal = exchange.resolve("terminal.json");
+            if (!Files.isRegularFile(terminal, LinkOption.NOFOLLOW_LINKS)) {
+                return null;
+            }
+            requireOriginalLock();
+            boolean deleting = false;
+            try (var lock = operationFile.tryLock(0, 1, false)) {
+                if (lock == null) {
+                    return null;
+                }
+                requireOriginalLock();
+                JsonNode record;
+                try (var stream = Files.newInputStream(terminal, LinkOption.NOFOLLOW_LINKS)) {
+                    byte[] bytes = stream.readNBytes(MAX_OUTPUT + 1);
+                    if (bytes.length > MAX_OUTPUT) {
+                        throw new IOException("Manifest access terminal record exceeds its bound");
+                    }
+                    record = JSON.readTree(bytes);
+                }
+                if (record == null || !DRAIN_SCHEMA.equals(record.path("schema").asText())
+                        || !request.nonce().equals(record.path("nonce").asText())
+                        || !requestDigest.equals(record.path("requestSha256").asText())
+                        || number(record, "device") != lockIdentity.device()
+                        || number(record, "inode") != lockIdentity.inode()) {
+                    throw new IOException("Manifest access terminal record does not bind the original operation");
+                }
+                long exit = number(record, "exitCode");
+                if (exit < 0 || exit > 2 || !record.has("cleanupFailure")
+                        || (exit < 2 ? !record.path("receipt").isObject() : !record.path("receipt").isNull())) {
+                    throw new IOException("Invalid manifest access operation terminal state");
+                }
+                if (!record.path("cleanupFailure").isNull()) {
+                    if (cleanupFailure == null) {
+                        cleanupFailure = new IOException("Manifest access nonce cleanup failed: "
+                                + record.path("cleanupFailure").asText());
+                    }
+                    throw cleanupFailure;
+                }
+                if (cleanup) {
+                    deleting = true;
+                    deleteExchange();
+                }
+                return record;
+            } catch (OverlappingFileLockException stillOwned) {
+                return null;
+            } catch (IOException failure) {
+                if (deleting && cleanupFailure == null) {
+                    cleanupFailure = failure;
+                }
+                throw failure;
+            }
+        }
+
+        private void requireOriginalLock() throws IOException {
+            if (!lockIdentity.equals(Identity.current(operationLock, false))) {
+                throw new IOException("Manifest access operation lock identity changed");
+            }
+        }
+
+        private void deleteExchange() throws IOException {
+            Files.deleteIfExists(exchange.resolve("terminal.json"));
+            Files.deleteIfExists(exchange.resolve("terminal.pending"));
+            Files.deleteIfExists(exchange.resolve("operation.started"));
+            Files.deleteIfExists(exchange.resolve("request.json"));
+            Files.deleteIfExists(operationLock);
+            Files.deleteIfExists(exchange);
+        }
+    }
+
+    private static String sha256(byte[] bytes) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
         }
     }
 

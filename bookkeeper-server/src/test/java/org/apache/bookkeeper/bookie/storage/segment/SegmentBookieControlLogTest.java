@@ -65,6 +65,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -1418,6 +1419,329 @@ public class SegmentBookieControlLogTest {
         Files.move(first, spare);
         Files.move(second, first);
         Files.move(spare, second);
+    }
+
+    @Test
+    public void manifestAccessTimeoutRetainsGuardsWhileActualOldWorkerIsAlive() throws Exception {
+        verifyHeldManifestProbe(false);
+    }
+
+    @Test
+    public void manifestAccessInterruptionRetiresOnlyTheResultWait() throws Exception {
+        verifyHeldManifestProbe(true);
+    }
+
+    @Test
+    public void manifestAccessWithoutOriginalTerminalCannotDrainAfterOperationExit() throws Exception {
+        SegmentNewScopeAccessTest.requireCredentials();
+        var root = temporary.newFolder("probe-unknown").toPath().toRealPath();
+        var signals = Files.createTempDirectory(Path.of("/tmp"), "uw-unknown-probe-").toRealPath();
+        Files.setAttribute(signals, "unix:mode", 01777);
+        var log = root.resolve("child.log");
+        var command = new ArrayList<String>();
+        command.add(Path.of(System.getProperty("java.home"), "bin", "java").toString());
+        command.add("-Djava.io.tmpdir=" + root);
+        var nativeLibrary = System.getProperty("bookkeeper.native.io.library.path");
+        if (nativeLibrary != null) {
+            command.add("-Dbookkeeper.native.io.library.path=" + nativeLibrary);
+        }
+        command.addAll(List.of("-cp", System.getProperty("surefire.test.class.path",
+                System.getProperty("java.class.path")), ManifestProbeWithoutTerminal.class.getName(),
+                root.toString(), signals.toString()));
+        try {
+            var child = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile()).start();
+            try {
+                assertTrue(Files.readString(log), child.waitFor(30, TimeUnit.SECONDS));
+                assertEquals(Files.readString(log), 0, child.exitValue());
+                assertTrue(Files.readString(log), Files.readString(log).contains("PROBE_TERMINAL_UNKNOWN"));
+            } finally {
+                if (child.isAlive()) {
+                    Files.writeString(signals.resolve("release"), "release");
+                    if (!child.waitFor(10, TimeUnit.SECONDS)) {
+                        child.destroyForcibly();
+                        assertTrue(child.waitFor(10, TimeUnit.SECONDS));
+                    }
+                }
+            }
+            var manifest = multiArenaManifest(root, "no-terminal");
+            var settings = manifestExecution(1, 2048);
+            var cap = ManifestSegmentStorage.capacity(manifest, manifestRuntime(manifest), settings, manifestLimits());
+            try (var recovered = manifestStorage(manifest, settings,
+                    manifestBudget(cap.dataBytes(), cap.controlBytes()))) {
+                recovered.restart();
+            }
+        } finally {
+            org.apache.commons.io.FileUtils.deleteDirectory(signals.toFile());
+        }
+    }
+
+    /** A fixture JVM owns the intentionally undrainable probe until its actual process exit. */
+    public static final class ManifestProbeWithoutTerminal {
+        public static void main(String[] args) throws Exception {
+            Path root = Path.of(args[0]);
+            Path signals = Path.of(args[1]);
+            var manifest = multiArenaManifest(root, "no-terminal");
+            var settings = manifestExecution(1, 2048);
+            var cap = ManifestSegmentStorage.capacity(manifest, manifestRuntime(manifest), settings, manifestLimits());
+            var budget = manifestBudget(cap.dataBytes(), cap.controlBytes());
+            try (var owner = manifestStorage(manifest, settings, budget)) {
+                owner.startNew();
+            }
+            var script = heldProbeScript(signals, "");
+            String source = Files.readString(script);
+            String publish = "    os.link(pending, exchange / \"terminal.json\")";
+            Files.writeString(script, source.replace(publish, "    os._exit(7)"));
+            var old = manifestProbeOldScope(signals);
+            var owner = manifestStorage(manifest, settings, budget);
+            var wait = new FutureTask<>(() -> assertThrows(IOException.class,
+                    () -> owner.observeAccess(old, manifestProbeUid(manifest), script, Duration.ofSeconds(6))));
+            new Thread(wait, "manifest-probe-no-terminal").start();
+            ProcessHandle worker;
+            ProcessHandle operation;
+            Path exchange;
+            try {
+                worker = probeProcess(awaitProbeSignal(signals, "ready").split(" ")[0]);
+                String[] operator = awaitProbeSignal(signals, "operation").split("\n");
+                operation = probeProcess(operator[0]);
+                exchange = Path.of(operator[1]);
+            } finally {
+                Files.writeString(signals.resolve("release"), "release");
+            }
+            assertTrue(wait.get(8, TimeUnit.SECONDS).getMessage().contains("operation is still draining"));
+            worker.onExit().get(8, TimeUnit.SECONDS);
+            operation.onExit().get(8, TimeUnit.SECONDS);
+            assertFalse(Files.exists(exchange.resolve("terminal.json")));
+            try (var file = FileChannel.open(exchange.resolve("operation.lock"), StandardOpenOption.WRITE);
+                    var lock = file.tryLock(0, 1, false)) {
+                assertNotNull("Kernel lock was released without the original terminal", lock);
+            }
+            assertManifestProbeStillOwnsScope(owner, manifest, settings, cap, budget);
+            System.out.println("PROBE_TERMINAL_UNKNOWN");
+        }
+    }
+
+    private void verifyHeldManifestProbe(boolean interrupt) throws Exception {
+        SegmentNewScopeAccessTest.requireCredentials();
+        var manifest = multiArenaManifest("probe-drain");
+        var settings = manifestExecution(1, 2048);
+        var cap = ManifestSegmentStorage.capacity(manifest, manifestRuntime(manifest), settings, manifestLimits());
+        var budget = manifestBudget(cap.dataBytes(), cap.controlBytes());
+        try (var owner = manifestStorage(manifest, settings, budget)) {
+            owner.startNew();
+        }
+        var retained = manifestProbeDigests(manifest);
+        Path signals = Files.createTempDirectory(Path.of("/tmp"), "uw-held-probe-").toRealPath();
+        Files.setAttribute(signals, "unix:mode", 01777);
+        try (var owner = manifestStorage(manifest, settings, budget)) {
+            var script = heldProbeScript(signals, interrupt ? "" : """
+                    signal = Path(__file__).resolve().parent
+                    (signal / "terminal-ready").touch()
+                    until = time.monotonic() + 30
+                    while not (signal / "terminal-release").exists() and time.monotonic() < until:
+                        time.sleep(0.01)
+                    """.indent(4));
+            var old = manifestProbeOldScope(signals);
+            var attempt = new FutureTask<Exception>(() -> {
+                try {
+                    owner.observeAccess(old, manifestProbeUid(manifest), script, Duration.ofSeconds(6));
+                    throw new AssertionError("Retired probe returned a usable observation");
+                } catch (InterruptedException interrupted) {
+                    assertTrue("Caller interrupt was lost", Thread.currentThread().isInterrupted());
+                    return interrupted;
+                } catch (IOException failure) {
+                    return failure;
+                }
+            });
+            var caller = new Thread(attempt, "manifest-probe-observer");
+            caller.start();
+            ProcessHandle oldWorker = null;
+            ProcessHandle collector = null;
+            ProcessHandle operation = null;
+            try {
+                String[] actor = awaitProbeSignal(signals, "ready").split(" ");
+                assertEquals(old.uid(), Long.parseLong(actor[1]));
+                oldWorker = ProcessHandle.of(Long.parseLong(actor[0])).orElseThrow();
+                collector = probeProcess(awaitProbeSignal(signals, "collector"));
+                String[] operator = awaitProbeSignal(signals, "operation").split("\n");
+                operation = probeProcess(operator[0]);
+                Path exchange = Path.of(operator[1]);
+                assertTrue(oldWorker.isAlive());
+
+                if (interrupt) {
+                    var close = new FutureTask<>(() -> owner.close(Duration.ofMillis(100)));
+                    new Thread(close, "manifest-probe-close").start();
+                    assertFalse("Close must return while observation is waiting", close.get(2, TimeUnit.SECONDS));
+                    caller.interrupt();
+                    assertTrue(attempt.get(2, TimeUnit.SECONDS) instanceof InterruptedException);
+                } else {
+                    var failure = attempt.get(9, TimeUnit.SECONDS);
+                    assertTrue(failure.toString(), failure instanceof IOException);
+                    assertTrue(failure.getMessage().contains("probe did not complete"));
+                }
+                assertTrue("Old UID worker remains held", oldWorker.isAlive());
+                assertManifestProbeStillOwnsScope(owner, manifest, settings, cap, budget);
+
+                if (!interrupt) {
+                    assertTrue(collector.destroyForcibly());
+                    collector.onExit().get(5, TimeUnit.SECONDS);
+                    assertFalse(collector.isAlive());
+                    assertTrue(oldWorker.isAlive());
+                    assertManifestProbeStillOwnsScope(owner, manifest, settings, cap, budget);
+                }
+
+                Files.createFile(signals.resolve("release"));
+                oldWorker.onExit().get(8, TimeUnit.SECONDS);
+                if (!interrupt) {
+                    awaitProbeSignal(signals, "terminal-ready");
+                    assertTrue(operation.isAlive());
+                    assertTrue(Files.isRegularFile(exchange.resolve("terminal.json")));
+                    assertManifestProbeStillOwnsScope(owner, manifest, settings, cap, budget);
+                    Files.createFile(signals.resolve("terminal-release"));
+                }
+                operation.onExit().get(8, TimeUnit.SECONDS);
+                collector.onExit().get(8, TimeUnit.SECONDS);
+                if (!interrupt) {
+                    assertManifestProbeRejectsWrongTerminal(owner, exchange);
+                }
+                assertTrue(owner.close(Duration.ofSeconds(2)));
+                assertFalse(Files.exists(exchange));
+                assertEquals(retained, manifestProbeDigests(manifest));
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+                assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                try (var recovered = manifestStorage(manifest, settings, budget)) {
+                    recovered.restart();
+                }
+            } finally {
+                Files.writeString(signals.resolve("release"), "release");
+                Files.writeString(signals.resolve("terminal-release"), "release");
+                caller.join(TimeUnit.SECONDS.toMillis(15));
+                for (var process : new ProcessHandle[] {oldWorker, operation, collector}) {
+                    if (process != null && process.isAlive()) {
+                        process.onExit().get(10, TimeUnit.SECONDS);
+                    }
+                }
+            }
+        } finally {
+            org.apache.commons.io.FileUtils.deleteDirectory(signals.toFile());
+        }
+    }
+
+    private static Path heldProbeScript(Path signals, String terminalHook) throws IOException {
+        String source = Files.readString(Path.of("../scripts/unified-wal/probe-new-scope-access.py"));
+        String owned = "        if args.owned_exchange is not None:\n";
+        String operation = "        if args.operation_exchange is not None:\n";
+        String worker = "        if args.worker:\n";
+        String terminal = "    os.link(pending, exchange / \"terminal.json\")\n";
+        assertTrue(source.contains(owned) && source.contains(operation) && source.contains(worker)
+                && source.contains(terminal));
+        source = source.replace(owned, owned + """
+                signal = Path(__file__).resolve().parent
+                (signal / "collector").write_text(str(os.getpid()))
+                """.indent(12));
+        source = source.replace(operation, operation + """
+                signal = Path(__file__).resolve().parent
+                (signal / "operation").write_text(f"{os.getpid()}\\n{args.operation_exchange}")
+                """.indent(12));
+        source = source.replace(worker, worker + """
+                signal = Path(__file__).resolve().parent
+                staged = signal / "ready-pending"
+                staged.write_text(f"{os.getpid()} {os.geteuid()}")
+                staged.rename(signal / "ready")
+                until = time.monotonic() + 30
+                while not (signal / "release").exists() and time.monotonic() < until:
+                    time.sleep(0.01)
+                """.indent(12));
+        Path script = Files.writeString(signals.resolve("probe.py"), source.replace(terminal, terminal + terminalHook));
+        Files.setPosixFilePermissions(script, PosixFilePermissions.fromString("rw-r--r--"));
+        return script;
+    }
+
+    private static String awaitProbeSignal(Path signals, String name) throws Exception {
+        Path signal = signals.resolve(name);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!Files.exists(signal) && System.nanoTime() < deadline) {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+        }
+        assertTrue("Missing actual probe signal " + name, Files.exists(signal));
+        return Files.readString(signal);
+    }
+
+    private static ProcessHandle probeProcess(String pid) {
+        return ProcessHandle.of(Long.parseLong(pid)).orElseThrow();
+    }
+
+    private static SegmentManifestAccessObservation.OldScope manifestProbeOldScope(Path signals) throws Exception {
+        var oldRoots = new ArrayList<Map<String, String>>();
+        for (String kind : List.of("JOURNAL", "LEDGER", "INDEX", "ARENA")) {
+            var root = Files.createDirectory(signals.resolve(kind.toLowerCase(java.util.Locale.ROOT)));
+            oldRoots.add(Map.of("kind", kind, "path", root.toString()));
+        }
+        var lookup = new ProcessBuilder("/usr/bin/id", "-u", "nobody").start();
+        long uid = Long.parseLong(new String(lookup.getInputStream().readAllBytes(),
+                StandardCharsets.US_ASCII).trim());
+        assertEquals(0, lookup.waitFor());
+        return new SegmentManifestAccessObservation.OldScope("127.0.0.1:19999", "nobody", uid, oldRoots);
+    }
+
+    private static long manifestProbeUid(SegmentArenaManifest manifest) throws IOException {
+        return Integer.toUnsignedLong(((Number) Files.getAttribute(
+                manifest.controlDirectory(), "unix:uid")).intValue());
+    }
+
+    private static void assertManifestProbeStillOwnsScope(ManifestSegmentStorage owner,
+            SegmentArenaManifest manifest, SegmentExecutionGroup.Settings settings,
+            ManifestSegmentStorage.Capacity cap, ProfileReceiveBudget budget) throws Exception {
+        assertFalse(owner.close(Duration.ofMillis(100)));
+        try (var contender = manifestStorage(manifest, settings,
+                manifestBudget(cap.dataBytes(), cap.controlBytes()))) {
+            assertThrows(IOException.class, contender::restart);
+        }
+        assertEquals(cap.dataBytes(), budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(cap.controlBytes(), budget.used(ProfileReceiveBudget.Lane.CONTROL));
+    }
+
+    private static void assertManifestProbeRejectsWrongTerminal(ManifestSegmentStorage owner, Path exchange)
+            throws Exception {
+        Path terminal = exchange.resolve("terminal.json");
+        Path original = exchange.resolve("terminal-saved");
+        Files.move(terminal, original);
+        try {
+            String record = Files.readString(original);
+            Files.writeString(terminal, record.replaceFirst("\"nonce\": \"[0-9a-f]{32}\"",
+                    "\"nonce\": \"00000000000000000000000000000000\""));
+            var wrong = assertThrows(IOException.class, () -> owner.close(Duration.ofMillis(100)));
+            assertTrue(wrong.toString(), wrong.getMessage().contains("does not bind"));
+        } finally {
+            Files.deleteIfExists(terminal);
+            Files.move(original, terminal);
+        }
+        Path lock = exchange.resolve("operation.lock");
+        Path saved = exchange.resolve("lock-saved");
+        Files.move(lock, saved);
+        try {
+            Files.createFile(lock);
+            var wrong = assertThrows(IOException.class, () -> owner.close(Duration.ofMillis(100)));
+            assertTrue(wrong.toString(), wrong.getMessage().contains("lock identity changed"));
+        } finally {
+            Files.deleteIfExists(lock);
+            Files.move(saved, lock);
+        }
+    }
+
+    private static Map<Path, String> manifestProbeDigests(SegmentArenaManifest manifest) throws Exception {
+        var roots = new ArrayList<Path>();
+        roots.add(manifest.controlDirectory());
+        manifest.arenas().forEach(arena -> roots.add(arena.directory()));
+        var digest = java.security.MessageDigest.getInstance("SHA-256");
+        var result = new TreeMap<Path, String>();
+        for (var root : roots) {
+            try (var files = Files.walk(root)) {
+                for (var file : files.filter(Files::isRegularFile).toList()) {
+                    result.put(file, HexFormat.of().formatHex(digest.digest(Files.readAllBytes(file))));
+                }
+            }
+        }
+        return result;
     }
 
     private static void assertManifestRestartRejected(SegmentArenaManifest manifest,

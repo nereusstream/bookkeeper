@@ -109,6 +109,8 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     private boolean cleanupAttempted;
     private IOException cleanupFailure;
     private boolean listenerBorrowed;
+    private SegmentManifestAccessObservation.Probe accessProbe;
+    private boolean observingAccess;
 
     ManifestSegmentStorage(SegmentArenaManifest manifest, ManifestIdentity expected, IsolatedSegmentConfig runtime,
             SecretKey key, ProfileDescriptorValidator validator, SegmentExecutionGroup.Settings settings,
@@ -208,19 +210,71 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         start(true, Objects.requireNonNull(observed));
     }
 
-    /** A one-use offline observer. Hold every original lock until the probe process has exited. */
+    /** A one-use offline observer. A timed-out result may leave the caller responsible for an explicit drain. */
     SegmentManifestAccessObservation observeAccess(SegmentManifestAccessObservation.OldScope old, long newUid,
             Path probe, Duration timeout) throws IOException, InterruptedException {
-        synchronized (lifecycle) {
-            claimStartup();
-            try (var owner = this) {
-                owner.reserveCapacity();
-                owner.requireRoots(true);
-                owner.acquireGuards(true);
+        boolean claimed = false;
+        Throwable failed = null;
+        try {
+            SegmentManifestAccessObservation.Probe pending;
+            synchronized (lifecycle) {
+                claimStartup();
+                claimed = true;
+                reserveCapacity();
+                requireRoots(true);
+                acquireGuards(true);
                 var requiredWrites = new HashSet<Path>();
-                owner.preflightRestart(requiredWrites);
-                return SegmentManifestAccessObservation.observe(manifest, control, old, newUid, probe,
+                preflightRestart(requiredWrites);
+                synchronized (gate) {
+                    if (stopping) {
+                        throw new IOException("Manifest access observation retired");
+                    }
+                }
+                pending = SegmentManifestAccessObservation.startProbe(manifest, control, old, newUid, probe,
                         requiredWrites, timeout);
+                accessProbe = pending;
+                observingAccess = true;
+            }
+            var result = pending.await(timeout);
+            if (Thread.interrupted()) {
+                throw new InterruptedException("Manifest access observation interrupted");
+            }
+            synchronized (gate) {
+                if (stopping) {
+                    throw new IOException("Manifest access observation retired");
+                }
+            }
+            return result;
+        } catch (IOException | InterruptedException | RuntimeException | Error failure) {
+            failed = failure;
+            throw failure;
+        } finally {
+            if (claimed) {
+                finishAccessObservation(failed);
+            }
+        }
+    }
+
+    private void finishAccessObservation(Throwable failed) throws IOException, InterruptedException {
+        boolean interrupted = failed instanceof InterruptedException;
+        synchronized (lifecycle) {
+            observingAccess = false;
+            try {
+                if (!close(Duration.ofSeconds(5)) && failed == null) {
+                    throw new IOException("Manifest access observation did not drain");
+                }
+            } catch (IOException | InterruptedException cleanup) {
+                interrupted |= cleanup instanceof InterruptedException;
+                if (failed == null) {
+                    throw cleanup;
+                }
+                if (failed != cleanup) {
+                    failed.addSuppressed(cleanup);
+                }
+            } finally {
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
     }
@@ -815,6 +869,10 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             }
         }
         synchronized (lifecycle) {
+            if (observingAccess || accessProbe != null && !accessProbe.closeWhenDrained()) {
+                return false;
+            }
+            accessProbe = null;
             if (!cleanupAttempted) {
                 if (!drainExecution(nanos)) {
                     return false;

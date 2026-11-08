@@ -383,6 +383,14 @@ mvn -o -P '!cargo-zigbuild' apache-rat:check
 
 父源码 `c4690c16575719265d99bcf20ba25823c96b280a`。定向验证 40 项全部通过，无失败、错误或跳过。单行删除根身份覆盖校验的变体在同一个真实用例中接受了缺 CONTROL 的回执，使预期拒绝断言失败。Spotless、Checkstyle 和 Python 源码编译通过。根 RAT 因 431 个父源码中已跟踪路径的许可识别问题失败。测试选择、XML、两种原始回执和 RED 变体见 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-root-proof-baseline-c4690c16`。Linux D2、掉电及生产验证本轮未执行。
 
+### UWNS2 结果超时与实际进程排空
+
+在 `082200468c` 上，真实旧 UID worker 被暂停时，原 collector 的超时失败已让另一个 owner 重开同一 manifest。修复后，Java 创建私有 exchange 和一次性 operation lock，保留原 descriptor 并校验实际 inode。UWNS2 的独立 operation 在同一 inode 和字节范围上获取 POSIX record lock 后，才读取原请求并开始探针。operation 独立持有原 sudo/worker、结果和 nonce 清理。原结果期限到达后，它继续等待实际退出；collector 异常退出也不接管或取消 operation。
+
+operation 确认旧 worker 实际返回同 nonce 的结果，并清理原身份的临时文件后，才原子写入受保护终态。终态绑定协议版本、nonce、原完整请求摘要和 lock 的 device/inode。operation 持原 fd 至退出。Java 只在 collector 实际退出、能取得同一原 lock 且原终态验证成功时清理私有 exchange，再释放 Bookie/Arena guards 与 DATA/CONTROL 额度。终态缺失、inode 替换或实际清理失败时保留原 owner。超时、中断和并发 close 会退休结果等待，调用方可以在原 owner 上显式重试 `close(timeout)`。仍有未排空工作时该方法返回 `false`。已退休的调用不能取得迟到的访问观测。UWNS2 须经该 owner 启动。独立命令行的默认 UWNS1 保持原入口。
+
+在 macOS 上验证了 Python `lockf` 和 Java `FileChannel.tryLock` 对同一字节的真实互斥。最终 30 项定向测试全部通过，无失败、错误或跳过。真实进程用例覆盖 caller deadline、中断、collector 先退出、终态已写但 operation 仍持锁、operation 异常退出且无终态、错误 nonce 和锁 inode 替换。实际排空后原文件摘要一致，同 scope 可冷重开。缺终态用例由独立 JVM 保有原资源至实际退出。Spotless、Checkstyle 和 Python 编译通过。根 RAT 的 431 个路径均在父源码中。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-recovery-facts-baseline-08220046`，前一切片 40 项证据保留原源码绑定。Linux 和生产资格保持未验证。 [Java FileLock](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/nio/channels/FileLock.html) · [Python lockf](https://docs.python.org/3/library/fcntl.html#fcntl.lockf)
+
 2026-10-12 [显式Profile listener与actual network drain](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)已复用original graph/pipeline并管理native parent/child、worker handoff与receive ledger终态；cold/frame/backing保留至实际归还，caller future不能伪造drain，borrowed graph/cold/loops由caller续接。actual mTLS/held cold/bind failure/queued accepted socket验证完成，46项Java/13配置模型得到预期结果、style通过，RAT443历史问题无新增。它是full startup owner的必要接线，尚未把required/physical proof、端口和registration组成default服务入口，生产Gate继续OPEN。
 
 ## 显式 Profile 服务启动与 owner 排空

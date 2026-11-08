@@ -20,6 +20,7 @@ It only creates/removes its own nonce files; it never chmods, renames, or change
 """
 import argparse
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -33,6 +34,7 @@ import uuid
 
 KINDS = {"JOURNAL", "LEDGER", "INDEX", "ARENA"}
 MANIFEST_SCHEMA = "UWNS2"
+DRAIN_SCHEMA = "UWNS2_DRAIN_V1"
 MAX_MANIFEST_ROOTS = 1 + 2 * 64
 MAX_INPUT = 16384
 MAX_WORK_INPUT = 262144
@@ -172,9 +174,18 @@ def inventory(scope_roots):
     return [entries[path] for path in sorted(entries)]
 
 
-def readable_marker(path, nonce):
+class ProbeCleanupFailure(RuntimeError):
+    pass
+
+
+def readable_marker(path, nonce, owned=False):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    own = os.fstat(fd)
+    try:
+        own = os.fstat(fd)
+    except OSError as failure:
+        if owned:
+            raise ProbeCleanupFailure(str(failure)) from failure
+        raise
     complete = False
     try:
         os.fchmod(fd, 0o666)
@@ -189,12 +200,17 @@ def readable_marker(path, nonce):
         complete = True
         return (own.st_dev, own.st_ino)
     finally:
-        os.close(fd)
-        if not complete:
-            current = os.stat(path, follow_symlinks=False)
-            if (current.st_dev, current.st_ino) != (own.st_dev, own.st_ino):
-                raise RuntimeError("partial probe marker identity changed")
-            os.unlink(path)
+        try:
+            os.close(fd)
+            if not complete:
+                current = os.stat(path, follow_symlinks=False)
+                if (current.st_dev, current.st_ino) != (own.st_dev, own.st_ino):
+                    raise RuntimeError("partial probe marker identity changed")
+                os.unlink(path)
+        except (OSError, RuntimeError) as failure:
+            if owned:
+                raise ProbeCleanupFailure(str(failure)) from failure
+            raise
 
 
 def operation(action):
@@ -211,9 +227,14 @@ def opened(path, flags):
     os.close(fd)
 
 
-def created(path, nonce):
+def created(path, nonce, owned=False):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    own = os.fstat(fd)
+    try:
+        own = os.fstat(fd)
+    except OSError as failure:
+        if owned:
+            raise ProbeCleanupFailure(str(failure)) from failure
+        raise
     try:
         content = nonce.encode("ascii")
         done = 0
@@ -224,11 +245,16 @@ def created(path, nonce):
             done += count
         os.fsync(fd)
     finally:
-        os.close(fd)
-        current = os.stat(path, follow_symlinks=False)
-        if (current.st_dev, current.st_ino) != (own.st_dev, own.st_ino):
-            raise OSError(errno.EIO, "probe file identity changed")
-        os.unlink(path)
+        try:
+            os.close(fd)
+            current = os.stat(path, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != (own.st_dev, own.st_ino):
+                raise OSError(errno.EIO, "probe file identity changed")
+            os.unlink(path)
+        except OSError as failure:
+            if owned:
+                raise ProbeCleanupFailure(str(failure)) from failure
+            raise
 
 
 def worker(request):
@@ -236,6 +262,7 @@ def worker(request):
     nonce = request["nonce"]
     require_nonce(nonce)
     manifest = request.get("schema") == MANIFEST_SCHEMA
+    owned = manifest and request.get("operation") == DRAIN_SCHEMA
     if manifest:
         manifest_roots(request["roots"])
     else:
@@ -264,7 +291,10 @@ def worker(request):
         path = root["path"]
         read = operation(lambda: opened(path, os.O_RDONLY | os.O_DIRECTORY))
         write_path = os.path.join(path, ".uw-scope-access-" + nonce + "-" + str(actor["uid"]))
-        write = operation(lambda: created(write_path, nonce))
+        try:
+            write = operation(lambda: created(write_path, nonce, owned))
+        except ProbeCleanupFailure as failure:
+            return {"nonce": nonce, "actor": actor, "cleanupFailure": str(failure)}
         observations.append(dict({key: root[key] for key in fields}, directoryRead=read, createWriteSync=write))
     return {"nonce": nonce, "actor": actor, "roots": observations, "files": file_observations}
 
@@ -276,7 +306,24 @@ def read_input(max_bytes):
     return json.loads(value.decode("utf-8"))
 
 
-def probe(request, timeout):
+def observe_old(command, encoded, timeout, owned):
+    options = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                   cwd="/", close_fds=True, env={"PATH": "/usr/bin:/bin"})
+    if owned is None:
+        return subprocess.run(command, input=encoded, timeout=timeout, **options), False
+    # A result deadline can expire without transferring ownership of the worker or its I/O.
+    owned["worker_pending"] = True
+    with subprocess.Popen(command, stdin=subprocess.PIPE, **options) as child:
+        late = False
+        try:
+            stdout, stderr = child.communicate(encoded, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            late = True
+            stdout, stderr = child.communicate()
+        return subprocess.CompletedProcess(command, child.returncode, stdout, stderr), late
+
+
+def probe(request, timeout, owned=None):
     manifest = request.get("schema") == MANIFEST_SCHEMA
     scope = manifest_scope(request) if manifest else None
     fields = ("kind", "arena", "path") if manifest else ("kind", "path")
@@ -309,32 +356,53 @@ def probe(request, timeout):
         # World-readable probes detect searchable-but-not-listable directories even when initially empty.
         for root in new_roots:
             path = os.path.join(root["path"], ".uw-scope-readable-" + nonce)
-            markers[path] = readable_marker(path, nonce)
+            markers[path] = readable_marker(path, nonce, owned is not None)
         work = {"nonce": nonce, "roots": [{k: v[k] for k in fields} for v in new_roots],
                 "files": sorted([value["path"] for value in before_files] + list(markers))}
         if manifest:
             work["schema"] = MANIFEST_SCHEMA
+        if owned is not None:
+            work["operation"] = DRAIN_SCHEMA
         encoded = json.dumps(work).encode()
         if len(encoded) > MAX_WORK_INPUT:
             raise ValueError("oversized worker inventory")
         new = worker(work)
-        child = subprocess.run(command, input=encoded, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               timeout=timeout, cwd="/", close_fds=True, env={"PATH": "/usr/bin:/bin"})
+        if owned is not None and "cleanupFailure" in new:
+            raise ProbeCleanupFailure(new["cleanupFailure"])
+        child, late = observe_old(command, encoded, timeout, owned)
         if child.returncode != 0 or len(child.stdout) > MAX_OUTPUT:
             raise RuntimeError("actual old-credential child did not complete successfully")
         old = json.loads(child.stdout.decode("utf-8"))
         if old.get("nonce") != nonce or old.get("actor", {}).get("uid") != old_uid:
             raise RuntimeError("old-credential child identity or nonce mismatch")
+        if owned is not None:
+            # Both the trusted sudo command's actual exit and the exact old-worker response are required.
+            owned["worker_pending"] = False
+            if "cleanupFailure" in old:
+                raise ProbeCleanupFailure(old["cleanupFailure"])
+        if late:
+            raise subprocess.TimeoutExpired(command, timeout)
         if [{k: v[k] for k in fields} for v in old.get("roots", [])] != work["roots"]:
             raise RuntimeError("old-credential child scope mismatch")
         if [value["path"] for value in old.get("files", [])] != work["files"]:
             raise RuntimeError("old-credential child file inventory mismatch")
+    except ProbeCleanupFailure as failure:
+        if owned is not None:
+            owned["cleanup_failure"] = str(failure)
+        raise
     finally:
-        for path, own in markers.items():
-            current_marker = os.stat(path, follow_symlinks=False)
-            if (current_marker.st_dev, current_marker.st_ino) != own:
-                raise RuntimeError("private probe marker identity changed")
-            os.unlink(path)
+        if owned is None or not owned["worker_pending"]:
+            for path, own in markers.items():
+                try:
+                    current_marker = os.stat(path, follow_symlinks=False)
+                    if (current_marker.st_dev, current_marker.st_ino) != own:
+                        raise RuntimeError("private probe marker identity changed")
+                    os.unlink(path)
+                except (OSError, RuntimeError) as failure:
+                    if owned is None:
+                        raise
+                    if owned["cleanup_failure"] is None:
+                        owned["cleanup_failure"] = str(failure)
     after = observe_new(request["newRoots"])
     if after != new_roots or inventory(new_roots) != before_files or manifest and roots(request["oldRoots"]) != old_roots:
         raise RuntimeError("scope root/file identity/mode/owner changed during the probe")
@@ -370,16 +438,84 @@ def probe(request, timeout):
     return receipt
 
 
+def run_manifest_operation(exchange, binding, timeout):
+    protocol, nonce, request_digest, device, inode = binding.split(":")
+    if protocol != DRAIN_SCHEMA or exchange.resolve(strict=True) != exchange:
+        raise ValueError("invalid operation protocol or exchange path")
+    require_nonce(nonce)
+    lock_path = exchange / "operation.lock"
+    # This fd is never closed or reopened by this process. Kernel release happens at os._exit.
+    lock = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+    expected = int(device), int(inode)
+    info = os.fstat(lock)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or (info.st_dev, info.st_ino) != expected:
+        raise ValueError("operation lock identity differs from the original")
+    fcntl.lockf(lock, fcntl.LOCK_EX, 1, 0)
+    named = os.stat(lock_path, follow_symlinks=False)
+    if (named.st_dev, named.st_ino) != expected:
+        raise ValueError("operation lock was replaced")
+    if (exchange / "terminal.pending").exists() or (exchange / "terminal.json").exists():
+        raise ValueError("operation already ended")
+    with (exchange / "request.json").open("rb") as request_file:
+        encoded = request_file.read(MAX_INPUT + 1)
+    if len(encoded) > MAX_INPUT or hashlib.sha256(encoded).hexdigest() != request_digest:
+        raise ValueError("operation request differs from the original")
+    request = json.loads(encoded.decode("utf-8"))
+    if request.get("schema") != MANIFEST_SCHEMA or request.get("nonce") != nonce:
+        raise ValueError("operation protocol or nonce differs from the original")
+    # The same attempt cannot be run again even after an abnormal exit before publishing a terminal.
+    with (exchange / "operation.started").open("xb") as started:
+        started.write(binding.encode("ascii"))
+
+    owned = {"worker_pending": False, "cleanup_failure": None}
+    try:
+        result = probe(request, timeout, owned)
+        code = 0 if result["status"] == "VERIFIED" else 1
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired, KeyError, TypeError, AttributeError):
+        result = None
+        code = 2
+    if owned["worker_pending"]:
+        # An abnormal wrapper exit gives no proof that the old worker stopped. Preserve the exchange and scope.
+        os._exit(2)
+    record = {"schema": DRAIN_SCHEMA, "nonce": nonce, "requestSha256": request_digest,
+              "device": expected[0], "inode": expected[1], "exitCode": code,
+              "receipt": result, "cleanupFailure": owned["cleanup_failure"]}
+    output = json.dumps(record, sort_keys=True).encode()
+    if len(output) > MAX_OUTPUT:
+        record["exitCode"], record["receipt"] = 2, None
+        code = 2
+        output = json.dumps(record, sort_keys=True).encode()
+    pending = exchange / "terminal.pending"
+    with pending.open("xb") as terminal:
+        terminal.write(output)
+    os.link(pending, exchange / "terminal.json")
+    os._exit(code)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--owned-exchange", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--operation-exchange", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--operation-binding", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=float, default=10)
     args = parser.parse_args()
     schema = "UWNS1"
     try:
+        if args.owned_exchange is not None:
+            # The operation owns its files and I/O even if this collector exits abnormally.
+            command = [sys.executable, "-I", "-B", str(Path(__file__).resolve()),
+                       "--operation-exchange", str(args.owned_exchange),
+                       "--operation-binding", args.operation_binding, "--timeout", str(args.timeout)]
+            return subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True).returncode
+        if args.operation_exchange is not None:
+            run_manifest_operation(args.operation_exchange, args.operation_binding, args.timeout)
         request = read_input(MAX_WORK_INPUT if args.worker else MAX_INPUT)
         if request.get("schema") == MANIFEST_SCHEMA:
             schema = MANIFEST_SCHEMA
+            if not args.worker:
+                raise ValueError("UWNS2 requires the original owned operation")
         if args.worker:
             output = worker(request)
         else:
