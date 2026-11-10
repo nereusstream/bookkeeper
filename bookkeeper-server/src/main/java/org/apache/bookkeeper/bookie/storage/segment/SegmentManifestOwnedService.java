@@ -74,7 +74,7 @@ final class SegmentManifestOwnedService implements AutoCloseable {
     private boolean attempted;
     private boolean startupFinished;
     private boolean retired;
-    private boolean closed;
+    private volatile boolean closed;
     private ZKProfileEphemeralRegistrationStore.Admission admission;
     private ManifestSegmentStorage.OwnedListener ownedListener;
     private SegmentManifestColdPublication publication;
@@ -220,8 +220,11 @@ final class SegmentManifestOwnedService implements AutoCloseable {
         if (timeout.isNegative() || timeout.isZero()) {
             throw new IllegalArgumentException("Positive manifest service drain timeout required");
         }
+        return closeUntil(System.nanoTime() + timeout.toNanos());
+    }
+
+    boolean closeUntil(long deadline) throws IOException, InterruptedException {
         requireExternalThread();
-        long deadline = System.nanoTime() + timeout.toNanos();
         stopReceiving();
         synchronized (gate) {
             if (attempted && !startupFinished) {
@@ -244,6 +247,10 @@ final class SegmentManifestOwnedService implements AutoCloseable {
         } finally {
             closeGate.unlock();
         }
+    }
+
+    boolean isDrained() {
+        return closed;
     }
 
     private boolean drain(long deadline) throws IOException, InterruptedException {

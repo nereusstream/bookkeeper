@@ -38,7 +38,9 @@ import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.control.ProfileControlAuthorizer;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.control.ProfileStaticOperationAuthorizer;
+import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
+import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
@@ -67,6 +69,25 @@ public final class SegmentProfileOwnedResources {
             Duration timeout, Duration pollInterval, int networkWorkers, int coldWorkers, int coldQueueSlots) {
         public Settings {
             Objects.requireNonNull(policy, "policy");
+            acls = new ResourceSettings(requirementsRoot, readinessRoot, reservationRoot, acls, domain, maxEvents,
+                    timeout, pollInterval, networkWorkers, coldWorkers, coldQueueSlots).acls;
+        }
+
+        @Override
+        public List<ACL> acls() {
+            return copyAcls(acls);
+        }
+
+        private ResourceSettings resources() {
+            return new ResourceSettings(requirementsRoot, readinessRoot, reservationRoot, acls, domain, maxEvents,
+                    timeout, pollInterval, networkWorkers, coldWorkers, coldQueueSlots);
+        }
+    }
+
+    record ResourceSettings(String requirementsRoot, String readinessRoot, String reservationRoot,
+            List<ACL> acls, String domain, int maxEvents, Duration timeout, Duration pollInterval,
+            int networkWorkers, int coldWorkers, int coldQueueSlots) {
+        ResourceSettings {
             Objects.requireNonNull(domain, "domain");
             for (String path : List.of(requirementsRoot, readinessRoot, reservationRoot)) {
                 PathUtils.validatePath(path);
@@ -94,8 +115,16 @@ public final class SegmentProfileOwnedResources {
 
     record Environment(SegmentProfileService.Startup startup, SegmentProfileService.Transport transport) { }
 
+    record ManifestEnvironment(SegmentManifestOwnedService.Startup startup,
+            SegmentProfileService.Transport transport) { }
+
+    private record Connected(ZKProfileStartupRequirementsStore requirements, ZKProfileRegistrationStore persistent,
+            ZKProfileEphemeralRegistrationStore publisher, ZKProfileReservationStore source,
+            ProfileLedgerMetadataStore metadata, ZooKeeperWatcherBase watcher) { }
+
     private final ServerConfiguration configuration;
     private final Settings settings;
+    private final ResourceSettings resources;
     private TLSContextFactory tls;
     private final boolean ownsTls;
     private final ProfileReceiveBudget budget;
@@ -124,8 +153,9 @@ public final class SegmentProfileOwnedResources {
             InetSocketAddress address, ProfileStaticOperationAuthorizer staticAuthorizer,
             ProfileControlAuthorizer exactAuthorizer, SegmentProfileReadConfig read,
             ProfileDescriptorValidator validator) {
-        this(configuration, settings, Objects.requireNonNull(tls, "tls"), false, budget, connectionBytes,
-                connectionBaseBytes, trustDomain, address, staticAuthorizer, exactAuthorizer, read, validator);
+        this(configuration, settings, settings.resources(), Objects.requireNonNull(tls, "tls"), false, budget,
+                legacyListenerSettings(settings, connectionBytes, connectionBaseBytes, trustDomain),
+                address, staticAuthorizer, exactAuthorizer, read, validator);
     }
 
     SegmentProfileOwnedResources(ServerConfiguration configuration, Settings settings,
@@ -133,22 +163,36 @@ public final class SegmentProfileOwnedResources {
             InetSocketAddress address, ProfileStaticOperationAuthorizer staticAuthorizer,
             ProfileControlAuthorizer exactAuthorizer, SegmentProfileReadConfig read,
             ProfileDescriptorValidator validator) {
-        this(configuration, settings, null, true, budget, connectionBytes, connectionBaseBytes, trustDomain,
+        this(configuration, settings, settings.resources(), null, true, budget,
+                legacyListenerSettings(settings, connectionBytes, connectionBaseBytes, trustDomain),
                 address, staticAuthorizer, exactAuthorizer, read, validator);
     }
 
-    private SegmentProfileOwnedResources(ServerConfiguration configuration, Settings settings, TLSContextFactory tls,
-            boolean ownsTls, ProfileReceiveBudget budget, int connectionBytes, int connectionBaseBytes,
-            String trustDomain, InetSocketAddress address, ProfileStaticOperationAuthorizer staticAuthorizer,
+    SegmentProfileOwnedResources(ServerConfiguration configuration, ResourceSettings resources,
+            ProfileReceiveBudget budget, SegmentProfileListener.Settings listenerSettings,
+            InetSocketAddress address, ProfileStaticOperationAuthorizer staticAuthorizer,
+            ProfileControlAuthorizer exactAuthorizer, SegmentProfileReadConfig read,
+            ProfileDescriptorValidator validator) {
+        this(new ServerConfiguration(configuration), null, resources, null, true, budget, listenerSettings,
+                address, staticAuthorizer, exactAuthorizer, read, validator);
+        if (!address.getAddress().isLoopbackAddress() || read == null) {
+            throw new IllegalArgumentException("Owned manifest resources require loopback transport and reads");
+        }
+    }
+
+    private SegmentProfileOwnedResources(ServerConfiguration configuration, Settings settings,
+            ResourceSettings resources, TLSContextFactory tls, boolean ownsTls, ProfileReceiveBudget budget,
+            SegmentProfileListener.Settings listenerSettings, InetSocketAddress address,
+            ProfileStaticOperationAuthorizer staticAuthorizer,
             ProfileControlAuthorizer exactAuthorizer, SegmentProfileReadConfig read,
             ProfileDescriptorValidator validator) {
         this.configuration = configuration;
         this.settings = settings;
+        this.resources = Objects.requireNonNull(resources, "resources");
         this.tls = tls;
         this.ownsTls = ownsTls;
         this.budget = Objects.requireNonNull(budget, "budget");
-        listenerSettings = new SegmentProfileListener.Settings(connectionBytes, connectionBaseBytes, trustDomain,
-                settings.policy().targetReadinessGeneration().value());
+        this.listenerSettings = Objects.requireNonNull(listenerSettings, "listenerSettings");
         this.address = Objects.requireNonNull(address, "address");
         if (address.isUnresolved() || address.getAddress().isAnyLocalAddress()) {
             throw new IllegalArgumentException("Explicit resolved Profile address required");
@@ -157,6 +201,12 @@ public final class SegmentProfileOwnedResources {
         this.exactAuthorizer = Objects.requireNonNull(exactAuthorizer, "exactAuthorizer");
         this.read = read;
         this.validator = validator;
+    }
+
+    private static SegmentProfileListener.Settings legacyListenerSettings(Settings settings, int connectionBytes,
+            int connectionBaseBytes, String trustDomain) {
+        return new SegmentProfileListener.Settings(connectionBytes, connectionBaseBytes, trustDomain,
+                settings.policy().targetReadinessGeneration().value());
     }
 
     private static List<ACL> copyAcls(List<ACL> acls) {
@@ -177,8 +227,39 @@ public final class SegmentProfileOwnedResources {
         });
     }
 
-    @SuppressWarnings("deprecation")
     Environment open() throws IOException, InterruptedException {
+        var policy = settings.policy();
+        var compatibility = policy.compatibility();
+        var connected = connect(compatibility.bookieId());
+        var startup = new SegmentProfileService.Startup(connected.requirements(), policy, connected.persistent(),
+                connected.publisher(), connected.source(), connected.metadata(), connected.watcher(),
+                resources.domain(), scheduler, cold, resources.maxEvents(), resources.timeout(),
+                resources.pollInterval());
+        return new Environment(startup,
+                transport(connected, compatibility.bookieId(), compatibility.storageIncarnation()));
+    }
+
+    ManifestEnvironment openManifest(SegmentManifestStartupPolicy policy, IsolatedSegmentConfig runtime,
+            SegmentManifestAccessObservation access, Generation capabilities, List<Integer> hints)
+            throws IOException, InterruptedException {
+        if (settings != null) {
+            throw new IllegalStateException("Manifest requires its own resource settings and owned TLS");
+        }
+        var manifest = policy.manifest();
+        String bookie = manifest.bookieId().toString();
+        var connected = connect(bookie);
+        connected.requirements().bindDeleteAssignments(connected.source());
+        var source = connected.requirements().readManifest(bookie).observation()
+                .orElseThrow(() -> new IOException("Owned manifest startup requirements unavailable"));
+        var preflight = policy.preflight(runtime, connected.requirements(), source, connected.source());
+        var startup = new SegmentManifestOwnedService.Startup(preflight, access, connected.metadata(),
+                connected.persistent(), connected.publisher(), connected.watcher(), resources.domain(), scheduler,
+                cold, resources.maxEvents(), resources.timeout(), resources.pollInterval(), capabilities, hints);
+        return new ManifestEnvironment(startup, transport(connected, bookie, manifest.incarnation()));
+    }
+
+    @SuppressWarnings("deprecation")
+    private Connected connect(String bookie) throws IOException, InterruptedException {
         try {
             var uri = URI.create(configuration.getMetadataServiceUri());
             String connect = ZKMetadataDriverBase.getZKServersFromServiceUri(uri);
@@ -190,9 +271,9 @@ public final class SegmentProfileOwnedResources {
                 tls.init(SecurityHandlerFactory.NodeType.Server, configuration, UnpooledByteBufAllocator.DEFAULT);
             }
             acceptor = new NioEventLoopGroup(1, new DefaultThreadFactory("profile-acceptor"));
-            worker = new NioEventLoopGroup(settings.networkWorkers(), new DefaultThreadFactory("profile-worker"));
-            cold = new ThreadPoolExecutor(settings.coldWorkers(), settings.coldWorkers(), 0, TimeUnit.MILLISECONDS,
-                    new ArrayBlockingQueue<>(settings.coldQueueSlots()), drainThreadFactory("profile-cold"));
+            worker = new NioEventLoopGroup(resources.networkWorkers(), new DefaultThreadFactory("profile-worker"));
+            cold = new ThreadPoolExecutor(resources.coldWorkers(), resources.coldWorkers(), 0, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<>(resources.coldQueueSlots()), drainThreadFactory("profile-cold"));
             scheduler = new ScheduledThreadPoolExecutor(1, drainThreadFactory("profile-delete"));
             scheduler.setRemoveOnCancelPolicy(true);
             scheduler.setExecuteExistingDelayedTasksAfterShutdownPolicy(false);
@@ -213,40 +294,17 @@ public final class SegmentProfileOwnedResources {
                 throw new IOException("Owned Profile bootstrap requires the original ZK ledger manager");
             }
             manager = (AbstractZkLedgerManager) created;
-            var source = new ZKProfileReservationStore(zk, settings.reservationRoot(), settings.acls(),
-                    settings.timeout());
-            var metadata = new ProfileLedgerMetadataStore(zk, manager, settings.acls(), settings.timeout());
-            var policy = settings.policy();
-            var bookie = policy.compatibility().bookieId();
-            var install = source.installAuthorityReader(bookie, metadata);
-            var activate = source.activationAuthorityReader(bookie, manager);
-            var replacement = source.replacementAuthorityReader(bookie, metadata);
-            var repair = source.repairAuthorityReader(bookie, metadata);
-            var delete = source.deleteAuthorityReader(bookie, policy.compatibility().storageIncarnation().value(),
-                    metadata);
-            ProfileControlStore authorities = key -> switch (key.purpose()) {
-                case PREPARING_INSTALL -> {
-                    var initial = install.read(key);
-                    yield initial.status() == ProfileControlStore.ReadStatus.NOT_FOUND ? repair.read(key) : initial;
-                }
-                case POST_MEMBERSHIP_REPLACEMENT -> replacement.read(key);
-                case TOMBSTONE_OR_DELETE -> delete.read(key);
-                case RECOVERY_GRANT, RECOVERY_GRANT_CLOSE, RECOVERY_TERMINAL_CLOSE -> repair.read(key);
-                default -> activate.read(key);
-            };
-            var startup = new SegmentProfileService.Startup(
-                    new ZKProfileStartupRequirementsStore(zk, settings.requirementsRoot(), settings.acls(),
-                            settings.timeout()),
-                    policy, new ZKProfileRegistrationStore(zk, settings.readinessRoot(), settings.acls(),
-                            settings.timeout()),
-                    new ZKProfileEphemeralRegistrationStore(zk, settings.readinessRoot(), bookie,
-                            settings.acls(), settings.timeout()),
-                    source, metadata, watcher, settings.domain(), scheduler, cold, settings.maxEvents(),
-                    settings.timeout(), settings.pollInterval());
-            var control = new SegmentProfileControlConfig(validator, staticAuthorizer, authorities, exactAuthorizer,
-                    cold, settings.timeout());
-            return new Environment(startup, new SegmentProfileService.Transport(tls, budget,
-                    listenerSettings, address, acceptor, worker, control, read));
+            var source = new ZKProfileReservationStore(zk, resources.reservationRoot(), resources.acls(),
+                    resources.timeout());
+            var metadata = new ProfileLedgerMetadataStore(zk, manager, resources.acls(), resources.timeout());
+            return new Connected(
+                    new ZKProfileStartupRequirementsStore(zk, resources.requirementsRoot(), resources.acls(),
+                            resources.timeout()),
+                    new ZKProfileRegistrationStore(zk, resources.readinessRoot(), resources.acls(),
+                            resources.timeout()),
+                    new ZKProfileEphemeralRegistrationStore(zk, resources.readinessRoot(), bookie,
+                            resources.acls(), resources.timeout()),
+                    source, metadata, watcher);
         } catch (org.apache.bookkeeper.tls.SecurityException failure) {
             throw new IOException("Owned Profile TLS initialization failed", failure);
         } catch (org.apache.commons.configuration2.ex.ConfigurationException
@@ -254,6 +312,31 @@ public final class SegmentProfileOwnedResources {
                 | org.apache.zookeeper.KeeperException failure) {
             throw new IOException("Owned Profile metadata initialization failed", failure);
         }
+    }
+
+    private SegmentProfileService.Transport transport(Connected connected, String bookie,
+            StorageIncarnation incarnation) {
+        var source = connected.source();
+        var metadata = connected.metadata();
+        var install = source.installAuthorityReader(bookie, metadata);
+        var activate = source.activationAuthorityReader(bookie, manager);
+        var replacement = source.replacementAuthorityReader(bookie, metadata);
+        var repair = source.repairAuthorityReader(bookie, metadata);
+        var delete = source.deleteAuthorityReader(bookie, incarnation.value(), metadata);
+        ProfileControlStore authorities = key -> switch (key.purpose()) {
+            case PREPARING_INSTALL -> {
+                var initial = install.read(key);
+                yield initial.status() == ProfileControlStore.ReadStatus.NOT_FOUND ? repair.read(key) : initial;
+            }
+            case POST_MEMBERSHIP_REPLACEMENT -> replacement.read(key);
+            case TOMBSTONE_OR_DELETE -> delete.read(key);
+            case RECOVERY_GRANT, RECOVERY_GRANT_CLOSE, RECOVERY_TERMINAL_CLOSE -> repair.read(key);
+            default -> activate.read(key);
+        };
+        var control = new SegmentProfileControlConfig(validator, staticAuthorizer, authorities, exactAuthorizer,
+                cold, resources.timeout());
+        return new SegmentProfileService.Transport(tls, budget, listenerSettings, address, acceptor, worker,
+                control, read);
     }
 
     void retire() {

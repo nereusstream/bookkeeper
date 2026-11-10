@@ -22,6 +22,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
@@ -19277,7 +19278,7 @@ public class SegmentProfileInitialSocketClientTest {
                         metadata, scheduler, timeout, SOCKET_SERVICE_READINESS,
                         new InetSocketAddress("127.0.0.1", 0), 1)) {
                     address = service.start();
-                    oldPeer = assertRegisteredManifest(fixture, registry, bookie, address, 1);
+                    oldPeer = assertRegisteredManifest(registry, bookie, address, 1, fixture.zk.getSessionId());
                     oldSessionMarker = manifestSessionMarker(fixture, registration);
                     writeClosedPublicProfileLedger(sdk, firstRequest, firstPayload);
                     writeClosedPublicProfileLedger(sdk, secondRequest, secondPayload);
@@ -19310,7 +19311,7 @@ public class SegmentProfileInitialSocketClientTest {
                 try (var reopened = ownedManifestService(fixture, layout, layout.owner(reopenedBudget), reopenedBudget,
                         required, verified, metadata, scheduler, timeout, SOCKET_SERVICE_READINESS, address, 2)) {
                     assertEquals(address, reopened.start());
-                    var current = assertRegisteredManifest(fixture, registry, bookie, address, 2);
+                    var current = assertRegisteredManifest(registry, bookie, address, 2, fixture.zk.getSessionId());
                     assertEquals(oldPeer.projection().storageIncarnation(), current.projection().storageIncarnation());
                     assertNotEquals(oldSessionMarker, manifestSessionMarker(fixture, registration));
                     assertEquals(required.source().sourceIdentity(),
@@ -19346,6 +19347,225 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    @Test
+    public void manifestResourceServiceOwnsRegisteredSdkAndWaitsForMetadataDrain() throws Exception {
+        assumeTrue("Unix permission-bit experiment requires a non-root target credential",
+                ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
+        try (var fixture = new Fixture(false, false, true, 3, 3, true, true);
+                var classic = new SegmentClassicScopeEpisodeTest.Episode(fixture.cluster.getZooKeeperConnectString(),
+                        "/old-classic-manifest-resources")) {
+            var layout = replaceWithManifest(fixture, 0);
+            try (var created = layout.owner(manifestWireBudget(layout.capacity()))) {
+                created.startNew();
+            }
+            var access = observeRetainedManifest(classic, layout);
+            String requirementsRoot = "/manifest-resources-required";
+            var required = provisionManifestPreflightRequirements(fixture, layout.manifest(), requirementsRoot,
+                    2, 2, List.of(1, 2), 2);
+            var source = required.source().sourceIdentity();
+            try (var second = publicProfileSingleArenaPeer(fixture, 1);
+                    var third = publicProfileSingleArenaPeer(fixture, 2);
+                    var sdk = sdk(fixture)) {
+                second.replaceNode(fixture, 1, false);
+                third.replaceNode(fixture, 2, false);
+                var registry = second.persistent;
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var initializer = new ProfileInitialLifecycleCoordinator(fixture.reservations, metadata,
+                        VALIDATOR, fixture.cold);
+                var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                var pool = publicProfilePeerPool(fixture, registry);
+                sdk.enableProfile(initializer, coordinator, VALIDATOR, pool, 4);
+                var request = publicCreateRequest(fixture, 44);
+                fixture.retainedReadContexts = Set.of(publicProfileCreateContext(request));
+                byte[] payload = bytes(23, 42);
+                String bookie = layout.manifest().bookieId().toString();
+                InetSocketAddress address;
+                long firstSession;
+                try (var current = manifestResourceService(fixture, layout, requirementsRoot, source, access,
+                        new InetSocketAddress("127.0.0.1", 0), 1)) {
+                    address = current.start();
+                    var resources = manifestField(current, "resources", SegmentProfileOwnedResources.class);
+                    var core = manifestField(current, "service", SegmentManifestOwnedService.class);
+                    firstSession = assertManifestResourceSource(fixture, resources, core, required);
+                    var peer = assertRegisteredManifest(registry, bookie, address, 1, firstSession);
+                    var cold = manifestField(resources, "cold", ThreadPoolExecutor.class);
+                    cold.submit(() -> assertThrows(IllegalStateException.class,
+                            () -> current.close(Duration.ofSeconds(1)))).get(5, TimeUnit.SECONDS);
+                    assertNotNull(registry.revalidatePeer(peer).peer());
+
+                    writeClosedPublicProfileLedger(sdk, request, payload);
+                    assertPublicProfilePayload(sdk, fixture, 44, payload);
+                    assertPublicProfilePoolDrained(pool);
+                    assertManifestResourceWaitsForManager(current, resources, core);
+                    assertNull(registry.readPeer(bookie).peer());
+                }
+
+                var script = Path.of("../scripts/unified-wal/probe-new-scope-access.py").toRealPath();
+                var observed = manifestAccess(layout, access.old(), access.newUid(), script);
+                var verified = new RetainedManifestAccess(observed, access.old(), access.newUid(),
+                        access.disposition());
+                try (var reopened = manifestResourceService(fixture, layout, requirementsRoot, source, verified,
+                        address, 2)) {
+                    assertEquals(address, reopened.start());
+                    var resources = manifestField(reopened, "resources", SegmentProfileOwnedResources.class);
+                    var core = manifestField(reopened, "service", SegmentManifestOwnedService.class);
+                    long newSession = assertManifestResourceSource(fixture, resources, core, required);
+                    assertNotEquals(firstSession, newSession);
+                    assertRegisteredManifest(registry, bookie, address, 2, newSession);
+                    second.service.close();
+                    third.service.close();
+                    assertPublicProfilePayload(sdk, fixture, 44, payload);
+                    assertPublicProfilePoolDrained(pool);
+                    var tls = nativeTlsContext(tlsContext(manifestField(resources, "tls", TLSContextFactory.class)));
+                    assertTrue(reopened.close(Duration.ofSeconds(5)));
+                    assertEquals(0, tls.refCnt());
+                    assertManifestResourcesTerminated(resources);
+                }
+            }
+        }
+    }
+
+    @Test
+    public void manifestResourceServiceClosesUnstartedAndRejectsWrongSourceBeforeMutableOpen() throws Exception {
+        assumeTrue("Unix permission-bit experiment requires a non-root target credential",
+                ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
+        try (var fixture = new Fixture(false, false, true, 3, 3, true, true);
+                var classic = new SegmentClassicScopeEpisodeTest.Episode(fixture.cluster.getZooKeeperConnectString(),
+                        "/old-classic-manifest-resources-source")) {
+            var layout = replaceWithManifest(fixture, 0);
+            try (var created = layout.owner(manifestWireBudget(layout.capacity()))) {
+                created.startNew();
+            }
+            var access = observeRetainedManifest(classic, layout);
+            String requirementsRoot = "/manifest-resources-required";
+            var required = provisionManifestPreflightRequirements(fixture, layout.manifest(), requirementsRoot,
+                    2, 2, List.of(1, 2), 2);
+            fixture.zk.create(SOCKET_SERVICE_READINESS, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    CreateMode.PERSISTENT);
+            var source = required.source().sourceIdentity();
+            var address = new InetSocketAddress("127.0.0.1", 0);
+            var before = manifestTreeDigests(layout);
+            try (var unopened = manifestResourceService(fixture, layout, requirementsRoot, source, access,
+                    address, 1)) {
+                assertTrue(unopened.close(Duration.ofSeconds(5)));
+                assertThrows(IllegalStateException.class, unopened::start);
+                var resources = manifestField(unopened, "resources", SegmentProfileOwnedResources.class);
+                for (String field : List.of("tls", "acceptor", "worker", "cold", "scheduler", "zk",
+                        "driver", "manager")) {
+                    assertNull(manifestField(resources, field, Object.class));
+                }
+            }
+            var wrong = new ZKProfileStartupRequirementsStore.SourceIdentity(source.nodePath(), UUID.randomUUID(),
+                    source.birthZxid(), source.modifiedZxid(), source.version(), source.sha256());
+            try (var rejected = manifestResourceService(fixture, layout, requirementsRoot, wrong, access,
+                    address, 1)) {
+                var failure = assertThrows(java.io.IOException.class, rejected::start);
+                assertEquals("Declared policy does not bind a distinct complete manifest startup scope",
+                        failure.getMessage());
+                var resources = manifestField(rejected, "resources", SegmentProfileOwnedResources.class);
+                assertNotNull(manifestField(resources, "manager", AbstractZkLedgerManager.class));
+                assertTrue(manifestField(resources, "zk", ZooKeeper.class).getState().isConnected());
+                assertNull(manifestField(rejected, "service", SegmentManifestOwnedService.class));
+                var tls = nativeTlsContext(tlsContext(manifestField(resources, "tls", TLSContextFactory.class)));
+                assertTrue(rejected.close(Duration.ofSeconds(5)));
+                assertEquals(0, tls.refCnt());
+                assertManifestResourcesTerminated(resources);
+            }
+            assertNull(fixture.zk.exists(manifestRegistration(SOCKET_SERVICE_READINESS, layout), false));
+            assertEquals(before, manifestTreeDigests(layout));
+            assertEquals(source, required.store().readManifest(layout.manifest().bookieId().toString())
+                    .observation().orElseThrow().sourceIdentity());
+        }
+    }
+
+    private static SegmentManifestResourceService manifestResourceService(Fixture fixture, ManifestWireLayout layout,
+            String requirementsRoot, ZKProfileStartupRequirementsStore.SourceIdentity source,
+            RetainedManifestAccess access, InetSocketAddress address, long generation) throws Exception {
+        var policy = new SegmentManifestStartupPolicy(source, layout.manifest(),
+                SegmentManifestAccessObservation.expectedRoots(layout.manifest(), layout.runtime()), access.old(),
+                access.newUid(), access.disposition());
+        var configuration = new ServerConfiguration();
+        configureOwnedProfileService(configuration, fixture.cluster.getZooKeeperConnectString());
+        var disk = new org.apache.bookkeeper.util.DiskChecker(configuration.getDiskUsageThreshold(),
+                configuration.getDiskUsageWarnThreshold());
+        var options = new SegmentProfileOwnedResources.ResourceSettings(requirementsRoot, SOCKET_SERVICE_READINESS,
+                "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE, "ledger-profile", 8, Duration.ofSeconds(7),
+                Duration.ofMillis(50), 2, 4, 64);
+        var budget = manifestWireBudget(layout.capacity());
+        var control = fixture.controlConfigs.get(0);
+        var read = new SegmentProfileReadConfig((caller, query) -> fixture.permitsReadContext(query.context()),
+                (caller, query) -> fixture.permitsReadContext(query.context()));
+        var resources = new SegmentProfileOwnedResources(configuration, options, budget,
+                new SegmentProfileListener.Settings(131072, 64, "socket-test", generation),
+                address, control.staticAuthorizer(), control.exactAuthorizer(), read, VALIDATOR);
+        configuration.setMetadataServiceUri("unused://configuration-mutated-after-construction");
+        return new SegmentManifestResourceService(layout.owner(budget), policy, layout.runtime(), access.observed(),
+                new Generation(1), List.of(1), resources, disk);
+    }
+
+    private static long assertManifestResourceSource(Fixture fixture, SegmentProfileOwnedResources resources,
+            SegmentManifestOwnedService service, ManifestRequirements original) throws Exception {
+        var zk = manifestField(resources, "zk", ZooKeeper.class);
+        assertNotEquals(fixture.zk.getSessionId(), zk.getSessionId());
+        var startup = manifestField(service, "startup", SegmentManifestOwnedService.Startup.class);
+        var preflight = startup.preflight();
+        assertNotSame(original.source(), preflight.source);
+        assertEquals(original.source().sourceIdentity(), preflight.source.sourceIdentity());
+        assertSame(zk, manifestField(preflight.requirements, "zk", ZooKeeper.class));
+        assertSame(zk, manifestField(preflight.reservations, "zk", ZooKeeper.class));
+        assertSame(zk, manifestField(startup.metadata(), "mutationClient", ZooKeeper.class));
+        assertSame(zk, manifestField(startup.persistent(), "zk", ZooKeeper.class));
+        return zk.getSessionId();
+    }
+
+    private static void assertManifestResourceWaitsForManager(SegmentManifestResourceService service,
+            SegmentProfileOwnedResources resources, SegmentManifestOwnedService core) throws Exception {
+        var manager = manifestField(resources, "manager", AbstractZkLedgerManager.class);
+        var scheduler = AbstractZkLedgerManager.class.getDeclaredField("scheduler");
+        scheduler.setAccessible(true);
+        var executor = (java.util.concurrent.ScheduledExecutorService) scheduler.get(manager);
+        var tls = nativeTlsContext(tlsContext(manifestField(resources, "tls", TLSContextFactory.class)));
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var held = executor.submit(() -> {
+            entered.countDown();
+            await(release);
+        });
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            assertFalse(service.close(Duration.ofSeconds(2)));
+            assertTrue(core.isDrained());
+            assertFalse(held.isDone());
+            assertFalse(manifestField(resources, "managerClosed", Boolean.class));
+            assertFalse(manifestField(resources, "driverClosed", Boolean.class));
+            assertTrue(manifestField(resources, "zk", ZooKeeper.class).getState().isConnected());
+            assertFalse(manifestField(resources, "worker", EventLoopGroup.class).isShuttingDown());
+            assertFalse(manifestField(resources, "acceptor", EventLoopGroup.class).isShuttingDown());
+            assertTrue(tls.refCnt() > 0);
+        } finally {
+            release.countDown();
+        }
+        held.get(5, TimeUnit.SECONDS);
+        assertTrue(service.close(Duration.ofSeconds(5)));
+        assertTrue(executor.isTerminated());
+        assertEquals(0, tls.refCnt());
+        assertManifestResourcesTerminated(resources);
+    }
+
+    private static void assertManifestResourcesTerminated(SegmentProfileOwnedResources resources) throws Exception {
+        assertTrue(manifestField(resources, "managerClosed", Boolean.class));
+        assertTrue(manifestField(resources, "driverClosed", Boolean.class));
+        assertTrue(manifestField(resources, "zkClosed", Boolean.class));
+        assertEquals(ZooKeeper.States.CLOSED, manifestField(resources, "zk", ZooKeeper.class).getState());
+        assertTrue(manifestField(resources, "scheduler", java.util.concurrent.ScheduledThreadPoolExecutor.class)
+                .isTerminated());
+        assertTrue(manifestField(resources, "cold", ThreadPoolExecutor.class).isTerminated());
+        assertTrue(manifestField(resources, "worker", EventLoopGroup.class).isTerminated());
+        assertTrue(manifestField(resources, "acceptor", EventLoopGroup.class).isTerminated());
+        assertNull(tlsContext(manifestField(resources, "tls", TLSContextFactory.class)));
+    }
+
     private ServiceEpisode publicProfileSingleArenaPeer(Fixture fixture, int target) throws Exception {
         var original = files(fixture.nodes.get(target)).config();
         var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("sdk-single-arena"),
@@ -19355,13 +19575,14 @@ public class SegmentProfileInitialSocketClientTest {
                 new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup);
     }
 
-    private static ZKProfileRegistrationStore.RegisteredPeer assertRegisteredManifest(Fixture fixture,
-            ZKProfileRegistrationStore registry, String bookie, InetSocketAddress address, long generation) {
+    private static ZKProfileRegistrationStore.RegisteredPeer assertRegisteredManifest(
+            ZKProfileRegistrationStore registry, String bookie, InetSocketAddress address, long generation,
+            long session) {
         var peer = registry.readPeer(bookie).peer();
         assertNotNull(peer);
         assertEquals("tls://127.0.0.1:" + address.getPort(), peer.projection().endpoint());
         assertEquals(generation, peer.projection().readinessGeneration().value());
-        assertEquals(fixture.zk.getSessionId(), peer.publisherSession());
+        assertEquals(session, peer.publisherSession());
         assertEquals(1, peer.readiness().protocolMajor());
         assertEquals(0, peer.readiness().protocolMinor());
         return peer;

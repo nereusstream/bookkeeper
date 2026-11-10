@@ -441,6 +441,18 @@ ZooKeeper `Op.check` 校验路径与 data version。正常 provisioning 的新 U
 
 后续[公开 SDK 经注册池访问固定 manifest](../profile-wire/README.md#公开-sdk-经注册池访问固定-manifest)在同一原生 registry 混用 schema 2 双 Arena 服务和两个 v1 单 Arena 服务。双 Arena 服务实际 drain 后撤销 writable 与旧 session marker。用新 UWNS2 重新核对同一组文件，在同地址以新 readiness generation 和 nonce 重开，schema 2 requirements 的原 source birth 保持。原注册池拒绝旧观察，公开 SDK 使用新观察读回原 CLOSED 账本。初次服务 drain 后的 receive bytes 和 connections、每次 SDK 读写完结后的 pool 配额均归还。
 
+## 固定 manifest 服务的自有资源
+
+包内 `SegmentManifestResourceService` 接管健康重开所需的原 storage 和独占资源 owner。它和 v1 共用 `SegmentProfileOwnedResources` 的 TLS、acceptor/worker、有界 cold pool、scheduler、ZooKeeper client/watcher、metadata driver/factory/manager 创建和关闭路径。构造冻结配置及 ACL，实际资源在 `start()` 创建。新 owner 自己的 ZooKeeper client 绑定 reservations，再读 schema 2 requirements 并核对声明的原 source birth、Bookie、incarnation、完整 manifest 与格式。由该次读取形成 `PreOpen`，metadata、控制读取、注册发布和 G1 也使用同一 owner 的 client。核心继续核对原 UWNS2 和实际根，在原有界启动流程完成 first-open。外层资源初始化与核心启动各沿现有期限。
+
+关闭在退休前检查实际 executor、ZooKeeper callback、manager 和 network event loop，拒绝自排空。启动尚在运行时保留该 caller 与已创建的部分资源，退休后的结果无法开启流量。关闭以同一截止时间先等待核心的 follower、原 publication/demotion callbacks、listener、graph/files 与 DLR，再沿原资源路径等待 cold/scheduler、manager、factory/driver、ZooKeeper、network loops 和 TLS。核心用独立终态标记报告实际排空。先前的清理错误继续保留。已经排空的核心可释放其外层资源，未达到终态时继续保留依赖。部分启动失败由同一 handle 续接关闭。
+
+真实 ZooKeeper 与 mTLS 用例用一个自有资源的双 Arena 目标和两个原单 Arena 目标，经公开 SDK 完成 3/3/3 create、Add、CLOSE 与读取。双 Arena 服务用独立于 commissioning/SDK 的原生会话发布，同地址健康重开使用新的自有会话并从原 schema 2 birth 读回。停掉另两个目标后仍可由双 Arena 目标读取。实际 manager 任务挂起时，核心排空后外层继续保留该 manager、ZooKeeper、网络和 TLS，任务终止后同一 handle 完成关闭，native TLS 引用归零。自有 cold worker 自排空请求在退休前拒绝，原 admission 随后实际写读。未启动关闭不产生外部资源。错 source birth 在实际连接后、打开本地 storage 之前拒绝，原文件字节和注册均保持原值，实际部分资源可排空。
+
+2026-11-11，父版本 `3df0a15819`。在 macOS owner-enabled APFS/JNI 上，两个新增集成用例及九项相关回归共 11 项全部通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。回归覆盖 v1 自有与借用 TLS、资源排空、受控 manifest first-open/G1 与 G2 退休，以及既有注册池。原树五项父基线与最终测试、selector 和源码哈希分别归档在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-resources-parent-3df0a158`。
+
+入口保持包内、loopback 和健康 CLOSED restart 范围。公共服务工厂、Main、生产 issuer、持续隔离、Linux D2、真实掉电、异常同身份重开和完整 16 步资格仍待验收。
+
 ## 显式 Profile 服务启动与 owner 排空
 
 2026-10-12，`SegmentProfileService` 将原 graph、DLR receipt、session admission、listener 和 delete consumer 接成一个显式隔离服务 episode。构造 owner 不打开目录、创建 graph 或绑定端口；`start(existing)` 由外部 cold caller 执行，先读取原 immutable requirements、运行原 version/scope/new-scope 检查，再核对 fallback 的 ARENA/INDEX 根与将要打开的原生目录。已存在的祖先通过 real path 解析，未创建的后缀保持计划路径；错根、相对根及与任一 old root 的祖先/后代重叠拒绝。此检查只绑定路径，不生产 Unix access、old-service disposition 或永久隔离事实，物理 proof issuer 仍由调用方提供。

@@ -425,6 +425,8 @@ DATA durable → hot locator → local result
 
 [受控固定 manifest 服务](startup-readiness/README.md#受控固定-manifest-服务) 将实际回环 listener、同 session 首次开流量、原生 G1 在线 follower 和实际 owner 排空接入健康 CLOSED 重开。公共 owned factory、生产 issuer、持续隔离及生产 Gate 仍 OPEN。
 
+[固定 manifest 服务的自有资源](startup-readiness/README.md#固定-manifest-服务的自有资源) 在受控 loopback 重开中复用 v1 资源 owner，以实际新会话重读原 schema 2 来源。核心先达到真实终态，随后关闭自有 metadata、执行器、ZooKeeper、网络和 TLS。
+
 依赖步骤14，首版删除要求fenced-close。将步骤9的本地能力接入集群流程：
 
 ```text
