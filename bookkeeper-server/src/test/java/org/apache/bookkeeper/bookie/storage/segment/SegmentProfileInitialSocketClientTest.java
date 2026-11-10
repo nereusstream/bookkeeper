@@ -28,6 +28,9 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assume.assumeTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.bootstrap.ServerBootstrap;
@@ -53,7 +56,9 @@ import io.netty.handler.ssl.SslProvider;
 import io.netty.util.ReferenceCounted;
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -92,6 +97,9 @@ import org.apache.bookkeeper.client.ProfileRecoveryReadHandle;
 import org.apache.bookkeeper.client.RoundRobinDistributionSchedule;
 import org.apache.bookkeeper.client.api.DigestType;
 import org.apache.bookkeeper.client.api.LedgerMetadata;
+import org.apache.bookkeeper.common.component.Lifecycle;
+import org.apache.bookkeeper.common.component.LifecycleComponentStack;
+import org.apache.bookkeeper.common.component.LifecycleListener;
 import org.apache.bookkeeper.common.profile.DurabilityMode;
 import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.PayloadFormat;
@@ -171,6 +179,8 @@ import org.apache.bookkeeper.meta.ZkLayoutManager;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.proto.checksum.DigestManager;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
+import org.apache.bookkeeper.server.EmbeddedServer;
+import org.apache.bookkeeper.server.conf.BookieConfiguration;
 import org.apache.bookkeeper.test.ZooKeeperUtil;
 import org.apache.bookkeeper.tls.SecurityHandlerFactory;
 import org.apache.bookkeeper.tls.TLSContextFactory;
@@ -19391,22 +19401,43 @@ public class SegmentProfileInitialSocketClientTest {
                 String bookie = layout.manifest().bookieId().toString();
                 InetSocketAddress address;
                 long firstSession;
+                var classicRoot = layout.manifest().controlDirectory().getParent().resolve("unopened-classic");
+                var embeddedConfig = manifestEmbeddedConfiguration(classicRoot);
+                var beforeBuild = manifestTreeDigests(layout);
                 try (var current = manifestResourceService(fixture, layout, requirementsRoot, source, access,
-                        new InetSocketAddress("127.0.0.1", 0), 1)) {
-                    address = current.start();
+                            new InetSocketAddress("127.0.0.1", 0), 1);
+                        var stack = assertManifestEmbeddedAssembly(embeddedConfig, current, second.service)) {
                     var resources = manifestField(current, "resources", SegmentProfileOwnedResources.class);
+                    assertNull(manifestField(resources, "zk", ZooKeeper.class));
+                    assertNull(manifestField(current, "service", SegmentManifestOwnedService.class));
+                    assertEquals(beforeBuild, manifestTreeDigests(layout));
+                    var component = stack.getComponent(1);
+                    assertEquals(Lifecycle.State.INITIALIZED, component.lifecycleState());
+                    assertThrows(IllegalStateException.class, current::lifecycle);
+                    var callbacks = mock(LifecycleListener.class);
+                    component.addLifecycleListener(callbacks);
+                    stack.start();
+                    assertEquals(Lifecycle.State.STARTED, component.lifecycleState());
+                    verify(callbacks).afterStart();
                     var core = manifestField(current, "service", SegmentManifestOwnedService.class);
                     firstSession = assertManifestResourceSource(fixture, resources, core, required);
+                    var discovered = registry.readPeer(bookie).peer();
+                    assertNotNull(discovered);
+                    var endpoint = URI.create(discovered.projection().endpoint());
+                    address = new InetSocketAddress(endpoint.getHost(), endpoint.getPort());
                     var peer = assertRegisteredManifest(registry, bookie, address, 1, firstSession);
                     var cold = manifestField(resources, "cold", ThreadPoolExecutor.class);
-                    cold.submit(() -> assertThrows(IllegalStateException.class,
-                            () -> current.close(Duration.ofSeconds(1)))).get(5, TimeUnit.SECONDS);
+                    cold.submit(() -> assertThrows(IllegalStateException.class, stack::close))
+                            .get(5, TimeUnit.SECONDS);
+                    verify(callbacks, never()).beforeStop();
+                    verify(callbacks, never()).beforeClose();
                     assertNotNull(registry.revalidatePeer(peer).peer());
 
                     writeClosedPublicProfileLedger(sdk, request, payload);
                     assertPublicProfilePayload(sdk, fixture, 44, payload);
                     assertPublicProfilePoolDrained(pool);
-                    assertManifestResourceWaitsForManager(current, resources, core);
+                    assertManifestResourceWaitsForManager(stack, resources, core);
+                    assertThrows(IllegalStateException.class, component::start);
                     assertNull(registry.readPeer(bookie).peer());
                 }
 
@@ -19415,8 +19446,10 @@ public class SegmentProfileInitialSocketClientTest {
                 var verified = new RetainedManifestAccess(observed, access.old(), access.newUid(),
                         access.disposition());
                 try (var reopened = manifestResourceService(fixture, layout, requirementsRoot, source, verified,
-                        address, 2)) {
-                    assertEquals(address, reopened.start());
+                            address, 2);
+                        var stack = manifestEmbedded(embeddedConfig, reopened)) {
+                    stack.start();
+                    assertEquals(Lifecycle.State.STARTED, stack.getComponent(1).lifecycleState());
                     var resources = manifestField(reopened, "resources", SegmentProfileOwnedResources.class);
                     var core = manifestField(reopened, "service", SegmentManifestOwnedService.class);
                     long newSession = assertManifestResourceSource(fixture, resources, core, required);
@@ -19427,10 +19460,14 @@ public class SegmentProfileInitialSocketClientTest {
                     assertPublicProfilePayload(sdk, fixture, 44, payload);
                     assertPublicProfilePoolDrained(pool);
                     var tls = nativeTlsContext(tlsContext(manifestField(resources, "tls", TLSContextFactory.class)));
-                    assertTrue(reopened.close(Duration.ofSeconds(5)));
+                    stack.stop();
+                    assertEquals(Lifecycle.State.STOPPED, stack.getComponent(1).lifecycleState());
+                    stack.close();
+                    assertEquals(Lifecycle.State.CLOSED, stack.getComponent(1).lifecycleState());
                     assertEquals(0, tls.refCnt());
                     assertManifestResourcesTerminated(resources);
                 }
+                assertFalse(Files.exists(classicRoot));
                 assertPublicProfileMetadataUnchanged(originalLayout, readPublicProfileMetadata(fixture, ledgerLayout));
             }
         }
@@ -19542,28 +19579,86 @@ public class SegmentProfileInitialSocketClientTest {
 
         fixture.zk.create(path, layoutBytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
         var existing = readPublicProfileMetadata(fixture, path);
+        var classic = layout.manifest().controlDirectory().getParent().resolve("unopened-classic");
         try (var owner = manifestResourceService(fixture, layout, requirementsRoot, source, access,
                     address, 1, manifestLedgerConfiguration(fixture, ledgerRoot));
+                var stack = manifestEmbedded(manifestEmbeddedConfiguration(classic), owner);
                 var held = new HeldNativeLayoutRead(fixture.cluster, path)) {
-            var starting = fixture.cold.submit(owner::start);
+            var component = stack.getComponent(1);
+            var callbacks = mock(LifecycleListener.class);
+            component.addLifecycleListener(callbacks);
+            var notified = new AtomicReference<Throwable>();
+            stack.setExceptionHandler((thread, failure) -> notified.set(failure));
+            var starting = fixture.cold.submit(stack::start);
             var resources = assertLayoutReadOwned(owner, held);
             var zk = manifestField(resources, "zk", ZooKeeper.class);
             var tls = nativeTlsContext(tlsContext(manifestField(resources, "tls", TLSContextFactory.class)));
-            assertFalse(owner.close(Duration.ofMillis(200)));
+            assertThrows(UncheckedIOException.class, stack::stop);
+            assertThrows(UncheckedIOException.class, stack::close);
+            assertEquals(Lifecycle.State.INITIALIZED, component.lifecycleState());
+            assertEquals(Lifecycle.State.STARTED, stack.getComponent(0).lifecycleState());
+            verify(callbacks, never()).afterStop();
+            verify(callbacks, never()).afterClose();
             assertFalse(starting.isDone());
             assertTrue(zk.getState().isConnected());
             assertFalse(manifestField(resources, "worker", EventLoopGroup.class).isShuttingDown());
             assertTrue(tls.refCnt() > 0);
             held.release();
             var failure = assertThrows(ExecutionException.class, () -> starting.get(5, TimeUnit.SECONDS));
-            assertEquals("Owned manifest resource episode is retired", failure.getCause().getMessage());
+            assertTrue(failure.getCause() instanceof IllegalStateException);
+            assertSame(failure.getCause().getCause(), notified.get());
+            assertEquals("Owned manifest resource episode is retired", notified.get().getMessage());
+            assertEquals(Lifecycle.State.INITIALIZED, component.lifecycleState());
+            verify(callbacks, never()).afterStart();
             assertNotNull(manifestField(resources, "manager", AbstractZkLedgerManager.class));
             assertNull(manifestField(owner, "service", SegmentManifestOwnedService.class));
-            assertTrue(owner.close(Duration.ofSeconds(5)));
+            stack.close();
+            assertEquals(Lifecycle.State.CLOSED, component.lifecycleState());
+            assertEquals(Lifecycle.State.CLOSED, stack.getComponent(0).lifecycleState());
+            verify(callbacks).afterClose();
             assertEquals(0, tls.refCnt());
             assertManifestResourcesTerminated(resources);
         }
+        assertFalse(Files.exists(classic));
         assertPublicProfileMetadataUnchanged(existing, readPublicProfileMetadata(fixture, path));
+    }
+
+    private static ServerConfiguration manifestEmbeddedConfiguration(Path classic) {
+        var configuration = new ServerConfiguration().setMetadataServiceUri("do-not-open-classic://invalid")
+                .setJournalDirName(classic.resolve("journal").toString())
+                .setLedgerDirNames(new String[] {classic.resolve("ledger").toString()})
+                .setIndexDirName(new String[] {classic.resolve("index").toString()});
+        configuration.setProperty(SegmentProfileService.CONFIG_PREFIX + "Mode", "ISOLATED");
+        return configuration;
+    }
+
+    private static LifecycleComponentStack assertManifestEmbeddedAssembly(ServerConfiguration configuration,
+            SegmentManifestResourceService manifest, SegmentProfileService v1) throws Exception {
+        var conf = new BookieConfiguration(configuration);
+        assertThrows(IllegalStateException.class, () -> EmbeddedServer.builder(conf).build());
+        assertThrows(IllegalStateException.class, () -> EmbeddedServer.builder(conf)
+                .experimentalManifestProfileService(manifest).experimentalProfileService(v1, false));
+        assertThrows(IllegalStateException.class, () -> EmbeddedServer.builder(conf)
+                .experimentalProfileService(v1, false).experimentalManifestProfileService(manifest));
+        assertThrows(IllegalArgumentException.class, () -> EmbeddedServer.builder(conf)
+                .experimentalManifestProfileService(manifest).allocator(UnpooledByteBufAllocator.DEFAULT).build());
+        var extras = new ServerConfiguration(configuration).setExtraServerComponents(new String[] {"invalid-extra"});
+        assertThrows(IllegalArgumentException.class, () -> EmbeddedServer.builder(new BookieConfiguration(extras))
+                .experimentalManifestProfileService(manifest).build());
+        return manifestEmbedded(configuration, manifest);
+    }
+
+    private static LifecycleComponentStack manifestEmbedded(ServerConfiguration configuration,
+            SegmentManifestResourceService owner) throws Exception {
+        var server = EmbeddedServer.builder(new BookieConfiguration(configuration))
+                .experimentalManifestProfileService(owner).build();
+        assertNull(server.getBookieService());
+        assertNull(server.getRegistrationManager());
+        assertNull(server.getLedgerManagerFactory());
+        var stack = server.getLifecycleComponentStack();
+        assertEquals(2, stack.getNumComponents());
+        assertEquals("experimental-segment-profile-manifest", stack.getComponent(1).getName());
+        return stack;
     }
 
     private static SegmentProfileOwnedResources assertLayoutReadOwned(SegmentManifestResourceService owner,
@@ -19700,7 +19795,7 @@ public class SegmentProfileInitialSocketClientTest {
         return zk.getSessionId();
     }
 
-    private static void assertManifestResourceWaitsForManager(SegmentManifestResourceService service,
+    private static void assertManifestResourceWaitsForManager(LifecycleComponentStack stack,
             SegmentProfileOwnedResources resources, SegmentManifestOwnedService core) throws Exception {
         var manager = manifestField(resources, "manager", AbstractZkLedgerManager.class);
         var scheduler = AbstractZkLedgerManager.class.getDeclaredField("scheduler");
@@ -19715,7 +19810,10 @@ public class SegmentProfileInitialSocketClientTest {
         });
         try {
             assertTrue(entered.await(5, TimeUnit.SECONDS));
-            assertFalse(service.close(Duration.ofSeconds(2)));
+            var pending = assertThrows(UncheckedIOException.class, stack::close);
+            assertEquals("Owned manifest resource cleanup pending; retain the owner", pending.getCause().getMessage());
+            assertEquals(Lifecycle.State.STARTED, stack.getComponent(1).lifecycleState());
+            assertEquals(Lifecycle.State.STARTED, stack.getComponent(0).lifecycleState());
             assertTrue(core.isDrained());
             assertFalse(held.isDone());
             assertFalse(manifestField(resources, "managerClosed", Boolean.class));
@@ -19728,7 +19826,9 @@ public class SegmentProfileInitialSocketClientTest {
             release.countDown();
         }
         held.get(5, TimeUnit.SECONDS);
-        assertTrue(service.close(Duration.ofSeconds(5)));
+        stack.close();
+        assertEquals(Lifecycle.State.CLOSED, stack.getComponent(1).lifecycleState());
+        assertEquals(Lifecycle.State.CLOSED, stack.getComponent(0).lifecycleState());
         assertTrue(executor.isTerminated());
         assertEquals(0, tls.refCnt());
         assertManifestResourcesTerminated(resources);

@@ -72,6 +72,8 @@
 
 步骤 12 的 manifest restart 要求原生 ledger layout 已存在。实际读取时发现缺失或不兼容则拒绝，避免失败启动补写布局。在实际 ZooKeeper 读取挂起时退休原 owner，迟到结果无法开启核心，原 handle 可续接排空。详见 [健康重开使用已存在的 ledger layout](startup-readiness/README.md#健康重开使用已存在的-ledger-layout)。
 
+步骤 12 的受控 manifest owner 接入显式 EmbeddedServer 生命周期。实际启动和排空结果决定 manifest 组件状态。真实 GET 或 manager 工作未终结时，栈保留该 owner 与前置统计组件。公开 SDK 在实际栈上完成 3/3/3 写读、CLOSE 和健康重开。详见 [显式 EmbeddedServer manifest 生命周期](startup-readiness/README.md#显式-embeddedserver-manifest-生命周期)。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。

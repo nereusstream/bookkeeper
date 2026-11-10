@@ -461,6 +461,16 @@ ZooKeeper `Op.check` 校验路径与 data version。正常 provisioning 的新 U
 
 2026-11-11，父版本 `efed68da6d`。完整入口 RED 留下 67 字节原生 `LAYOUT` 和新出生 Stat。首次修复验证发现正向夹具只创建了内存中的 manager，由夹具的显式准备阶段补充原生 layout。最终 11 项全部通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。真实用例还核对已有不兼容 layout 的拒绝与原字节保留，以及默认 lazy-create 和两种缓存模式。父版 EmbeddedServer 四项基线、完整 RED 和最终回执分开保存在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-bootstrap-parent-efed68da`。
 
+### 显式 EmbeddedServer manifest 生命周期
+
+`EmbeddedServer.Builder.experimentalManifestProfileService` 接受一个已经准备好的具体 manifest owner。它与 v1 的显式入口占用同一个延迟绑定位置。Classic 资源及额外组件的原隔离检查通过后才绑定一次生命周期。组装阶段不打开存储、网络或 ZooKeeper，manifest 的构造及 proof 输入仍由包内调用方提供。
+
+manifest 组件在 owner 成功启动且仍存活时才进入 `STARTED`。启动失败直接传回调用方，即使异常处理器返回也不会触发 `afterStart`。停机前先拒绝自排空。实际 close 未完成时，组件抛出原错误且保留原状态，栈的反序关闭停在该组件并保留前置统计组件。后续用原栈续接实际排空后才进入 `STOPPED` 或 `CLOSED`。生命周期枚举表示该组件的启动或排空状态，实际 writable 由原生注册及 admission 决定。`LifecycleComponentStack.lifecycleState()` 仍返回首个组件状态。
+
+真实栈用例覆盖一个 manifest 和两个 v1 目标上的公开 SDK 3/3/3 写入、正常 CLOSE 与同地址新会话读回。已启动组件在实际 manager 任务挂起时保留网络、ZooKeeper、TLS 和前置统计组件。另一个用例在实际 owned ZooKeeper GET 挂起时调用栈的 stop 和 close，释放 GET 后仍拒绝迟到的启动，后续同一栈完成排空。范围是显式实验组装与健康重开。公共工厂、Main 和生产资格继续待验收。
+
+2026-11-11，父版本 `37293de782`。macOS owner-enabled APFS/JNI 上，两个实际 manifest 栈用例与四个相关 v1/配置回归共 6 项全部通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。父版四项基线和最终 XML、源码哈希分别保存在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-entry-parent-37293de`。
+
 ## 显式 Profile 服务启动与 owner 排空
 
 2026-10-12，`SegmentProfileService` 将原 graph、DLR receipt、session admission、listener 和 delete consumer 接成一个显式隔离服务 episode。构造 owner 不打开目录、创建 graph 或绑定端口；`start(existing)` 由外部 cold caller 执行，先读取原 immutable requirements、运行原 version/scope/new-scope 检查，再核对 fallback 的 ARENA/INDEX 根与将要打开的原生目录。已存在的祖先通过 real path 解析，未创建的后缀保持计划路径；错根、相对根及与任一 old root 的祖先/后代重叠拒绝。此检查只绑定路径，不生产 Unix access、old-service disposition 或永久隔离事实，物理 proof issuer 仍由调用方提供。

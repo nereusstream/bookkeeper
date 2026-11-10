@@ -19,17 +19,23 @@
 package org.apache.bookkeeper.bookie.storage.segment;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import org.apache.bookkeeper.common.component.Lifecycle;
+import org.apache.bookkeeper.common.component.LifecycleComponent;
+import org.apache.bookkeeper.common.component.LifecycleListener;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.util.DiskChecker;
 
 /** One deferred loopback restart, taking exclusive ownership of a fresh graph and resource owner. */
-final class SegmentManifestResourceService implements AutoCloseable {
+public final class SegmentManifestResourceService implements AutoCloseable {
     private final Object gate = new Object();
     private final ReentrantLock closeGate = new ReentrantLock();
     private final ManifestSegmentStorage storage;
@@ -43,6 +49,7 @@ final class SegmentManifestResourceService implements AutoCloseable {
     private boolean attempted;
     private boolean startupFinished;
     private boolean retired;
+    private boolean lifecycleBound;
     private SegmentManifestOwnedService service;
     private boolean closed;
     private IOException firstCleanupFailure;
@@ -162,6 +169,125 @@ final class SegmentManifestResourceService implements AutoCloseable {
     private void retainCleanupFailure(IOException failure) {
         if (firstCleanupFailure == null) {
             firstCleanupFailure = failure;
+        }
+    }
+
+    /** Bind this prepared owner once for explicit experimental server assembly. */
+    public LifecycleComponent lifecycle() {
+        resources.requireExternalThread();
+        synchronized (gate) {
+            if (lifecycleBound || attempted || retired) {
+                throw new IllegalStateException("Manifest lifecycle must be bound once before startup");
+            }
+            lifecycleBound = true;
+            return new ManifestLifecycle();
+        }
+    }
+
+    private final class ManifestLifecycle implements LifecycleComponent {
+        private final Set<LifecycleListener> listeners = new CopyOnWriteArraySet<>();
+        private volatile Lifecycle.State state = Lifecycle.State.INITIALIZED;
+        private volatile Thread.UncaughtExceptionHandler handler;
+
+        @Override
+        public String getName() {
+            return "experimental-segment-profile-manifest";
+        }
+
+        @Override
+        public Lifecycle.State lifecycleState() {
+            return state;
+        }
+
+        @Override
+        public void addLifecycleListener(LifecycleListener listener) {
+            listeners.add(Objects.requireNonNull(listener, "listener"));
+        }
+
+        @Override
+        public void removeLifecycleListener(LifecycleListener listener) {
+            listeners.remove(listener);
+        }
+
+        @Override
+        public void setExceptionHandler(Thread.UncaughtExceptionHandler handler) {
+            this.handler = handler;
+        }
+
+        @Override
+        public void start() {
+            resources.requireExternalThread();
+            synchronized (gate) {
+                if (state == Lifecycle.State.STARTED && !retired) {
+                    return;
+                }
+                if (state != Lifecycle.State.INITIALIZED || attempted || retired) {
+                    throw new IllegalStateException("Use a fresh manifest episode to restart storage");
+                }
+            }
+            listeners.forEach(LifecycleListener::beforeStart);
+            try {
+                SegmentManifestResourceService.this.start();
+                synchronized (gate) {
+                    requireLive();
+                    state = Lifecycle.State.STARTED;
+                }
+            } catch (IOException | InterruptedException | RuntimeException | Error failure) {
+                if (failure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                var notify = handler;
+                if (notify != null) {
+                    try {
+                        notify.uncaughtException(Thread.currentThread(), failure);
+                    } catch (RuntimeException callbackFailure) {
+                        if (callbackFailure != failure) {
+                            failure.addSuppressed(callbackFailure);
+                        }
+                    }
+                }
+                throw new IllegalStateException("Manifest Profile service failed to start", failure);
+            }
+            listeners.forEach(LifecycleListener::afterStart);
+        }
+
+        @Override
+        public void stop() {
+            resources.requireExternalThread();
+            if (state == Lifecycle.State.STOPPED || state == Lifecycle.State.CLOSED) {
+                return;
+            }
+            listeners.forEach(LifecycleListener::beforeStop);
+            try {
+                SegmentManifestResourceService.this.close();
+            } catch (IOException failure) {
+                // Keep the component and the stack's earlier dependencies until the original owner drains.
+                throw new UncheckedIOException(failure);
+            }
+            synchronized (gate) {
+                if (state == Lifecycle.State.STOPPED || state == Lifecycle.State.CLOSED) {
+                    return;
+                }
+                state = Lifecycle.State.STOPPED;
+            }
+            listeners.forEach(LifecycleListener::afterStop);
+        }
+
+        @Override
+        public void close() {
+            resources.requireExternalThread();
+            if (state == Lifecycle.State.CLOSED) {
+                return;
+            }
+            stop();
+            listeners.forEach(LifecycleListener::beforeClose);
+            synchronized (gate) {
+                if (state == Lifecycle.State.CLOSED) {
+                    return;
+                }
+                state = Lifecycle.State.CLOSED;
+            }
+            listeners.forEach(LifecycleListener::afterClose);
         }
     }
 

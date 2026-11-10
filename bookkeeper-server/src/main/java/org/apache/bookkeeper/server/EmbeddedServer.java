@@ -63,12 +63,14 @@ import org.apache.bookkeeper.bookie.datainteg.DataIntegrityService;
 import org.apache.bookkeeper.bookie.datainteg.EntryCopier;
 import org.apache.bookkeeper.bookie.datainteg.EntryCopierImpl;
 import org.apache.bookkeeper.bookie.storage.segment.ClassicRouteStartup;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentManifestResourceService;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileService;
 import org.apache.bookkeeper.client.BookKeeper;
 import org.apache.bookkeeper.client.BookKeeperAdmin;
 import org.apache.bookkeeper.common.allocator.ByteBufAllocatorWithOomHandler;
 import org.apache.bookkeeper.common.component.AutoCloseableLifecycleComponent;
 import org.apache.bookkeeper.common.component.ComponentInfoPublisher;
+import org.apache.bookkeeper.common.component.LifecycleComponent;
 import org.apache.bookkeeper.common.component.LifecycleComponentStack;
 import org.apache.bookkeeper.common.component.RxSchedulerLifecycleComponent;
 import org.apache.bookkeeper.conf.ClientConfiguration;
@@ -214,8 +216,7 @@ public class EmbeddedServer {
         private ByteBufAllocator allocator;
         private UncleanShutdownDetection uncleanShutdownDetection;
 
-        private SegmentProfileService experimentalProfileService;
-        private boolean existingProfileStorage;
+        private Supplier<LifecycleComponent> experimentalProfileLifecycle;
 
         private Builder(BookieConfiguration conf) {
             checkNotNull(conf, "bookieConfiguration cannot be null");
@@ -274,12 +275,24 @@ public class EmbeddedServer {
          * Omitting this opt-in retains the existing Classic default.
          */
         public Builder experimentalProfileService(SegmentProfileService service, boolean existingStorage) {
-            if (experimentalProfileService != null) {
+            requireNoExperimentalProfileOwner();
+            checkNotNull(service, "profile service");
+            experimentalProfileLifecycle = () -> service.lifecycle(existingStorage);
+            return this;
+        }
+
+        /** Select one prepared experimental manifest owner for an existing fixed Profile graph. */
+        public Builder experimentalManifestProfileService(SegmentManifestResourceService service) {
+            requireNoExperimentalProfileOwner();
+            checkNotNull(service, "manifest profile service");
+            experimentalProfileLifecycle = service::lifecycle;
+            return this;
+        }
+
+        private void requireNoExperimentalProfileOwner() {
+            if (experimentalProfileLifecycle != null) {
                 throw new IllegalStateException("Profile service already supplied");
             }
-            experimentalProfileService = checkNotNull(service, "profile service");
-            existingProfileStorage = existingStorage;
-            return this;
         }
 
         /**
@@ -301,11 +314,11 @@ public class EmbeddedServer {
         public EmbeddedServer build() throws Exception {
 
             boolean configuredProfile = SegmentProfileService.isolatedConfigurationEnabled(conf.getServerConf());
-            if (configuredProfile && experimentalProfileService == null) {
+            if (configuredProfile && experimentalProfileLifecycle == null) {
                 throw new IllegalStateException("ISOLATED configuration requires an explicit Profile bootstrap owner");
             }
 
-            if (experimentalProfileService != null) {
+            if (experimentalProfileLifecycle != null) {
                 return buildExperimentalProfile();
             }
 
@@ -571,7 +584,7 @@ public class EmbeddedServer {
                 statsProvider = stats.getStatsProvider();
                 stack.addComponent(stats);
             }
-            stack.addComponent(experimentalProfileService.lifecycle(existingProfileStorage));
+            stack.addComponent(experimentalProfileLifecycle.get());
             // Classic getters are absent in this explicitly selected mode; no cookie/directory/storage open occurred.
             return new EmbeddedServer(stack.build(), statsProvider, null, null, null, null, null,
                     null, null, null, null);

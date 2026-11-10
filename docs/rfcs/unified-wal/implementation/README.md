@@ -427,6 +427,8 @@ DATA durable → hot locator → local result
 
 [固定 manifest 服务的自有资源](startup-readiness/README.md#固定-manifest-服务的自有资源) 在受控 loopback 重开中复用 v1 资源 owner，以实际新会话重读原 schema 2 来源。核心先达到真实终态，随后关闭自有 metadata、执行器、ZooKeeper、网络和 TLS。
 
+[显式 EmbeddedServer manifest 生命周期](startup-readiness/README.md#显式-embeddedserver-manifest-生命周期) 复用实验 Profile 隔离分支，依据该组件的实际启动和排空推进状态。栈的默认聚合状态保持原定义。
+
 依赖步骤14，首版删除要求fenced-close。将步骤9的本地能力接入集群流程：
 
 ```text
