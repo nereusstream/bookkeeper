@@ -4503,6 +4503,11 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     private ManifestWireLayout replaceWithManifest(Fixture fixture, int target) throws Exception {
+        return replaceWithManifest(fixture, target, 1, 4L * 1024 * 1024);
+    }
+
+    private ManifestWireLayout replaceWithManifest(Fixture fixture, int target, int secondFiles, long secondFileBytes)
+            throws Exception {
         fixture.listeners.get(target).close().sync();
         fixture.nodes.get(target).close();
         var identity = fixture.identities.get(target);
@@ -4510,7 +4515,8 @@ public class SegmentProfileInitialSocketClientTest {
         long fileBytes = 4L * 1024 * 1024;
         var manifest = new SegmentArenaManifest(identity.incarnation(), identity.bookieId(), List.of(
                 new SegmentArenaManifest.Arena(new UUID(0, 19), root.resolve("arena-a"), 1, fileBytes),
-                new SegmentArenaManifest.Arena(new UUID(0, 20), root.resolve("arena-b"), 1, fileBytes)),
+                new SegmentArenaManifest.Arena(new UUID(0, 20), root.resolve("arena-b"), secondFiles,
+                        secondFileBytes)),
                 root.resolve("bookie"), List.of(1, 0));
         var runtime = new IsolatedSegmentConfig(manifest.controlDirectory(), 1, 2, 1, fileBytes, 4096, 1024, 16,
                 "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
@@ -19370,7 +19376,7 @@ public class SegmentProfileInitialSocketClientTest {
         try (var fixture = new Fixture(false, false, true, 3, 3, true, true);
                 var classic = new SegmentClassicScopeEpisodeTest.Episode(fixture.cluster.getZooKeeperConnectString(),
                         "/old-classic-manifest-resources")) {
-            var layout = replaceWithManifest(fixture, 0);
+            var layout = replaceWithManifest(fixture, 0, 2, 3L * 1024 * 1024);
             try (var created = layout.owner(manifestWireBudget(layout.capacity()))) {
                 created.startNew();
             }
@@ -19380,6 +19386,7 @@ public class SegmentProfileInitialSocketClientTest {
             var required = provisionManifestPreflightRequirements(fixture, layout.manifest(), requirementsRoot,
                     2, 2, List.of(1, 2), 2);
             var source = required.source().sourceIdentity();
+            assertManifestConfigurationRejected(fixture, layout, requirementsRoot, source, access);
             try (var second = publicProfileSingleArenaPeer(fixture, 1);
                     var third = publicProfileSingleArenaPeer(fixture, 2);
                     var sdk = sdk(fixture)) {
@@ -19394,10 +19401,14 @@ public class SegmentProfileInitialSocketClientTest {
                 var pool = publicProfilePeerPool(fixture, registry);
                 sdk.enableProfile(initializer, coordinator, VALIDATOR, pool, 4);
                 var request = publicCreateRequest(fixture, 44);
-                fixture.retainedReadContexts = Set.of(publicProfileCreateContext(request));
+                var otherRequest = publicCreateRequest(fixture, 45);
+                var firstContext = publicProfileCreateContext(request);
+                var secondContext = publicProfileCreateContext(otherRequest);
+                fixture.retainedReadContexts = Set.of(firstContext, secondContext);
                 String ledgerLayout = "/socket-ledgers/LAYOUT";
                 var originalLayout = readPublicProfileMetadata(fixture, ledgerLayout);
                 byte[] payload = bytes(23, 42);
+                byte[] otherPayload = bytes(31, 43);
                 String bookie = layout.manifest().bookieId().toString();
                 InetSocketAddress address;
                 long firstSession;
@@ -19434,7 +19445,13 @@ public class SegmentProfileInitialSocketClientTest {
                     assertNotNull(registry.revalidatePeer(peer).peer());
 
                     writeClosedPublicProfileLedger(sdk, request, payload);
+                    writeClosedPublicProfileLedger(sdk, otherRequest, otherPayload);
+                    var storage = manifestField(current, "storage", ManifestSegmentStorage.class);
+                    assertOwnedManifestRoute(storage, layout, firstContext, 0);
+                    assertOwnedManifestRoute(storage, layout, secondContext, 1);
+                    assertManifestFileGeometry(layout);
                     assertPublicProfilePayload(sdk, fixture, 44, payload);
+                    assertPublicProfilePayload(sdk, fixture, 45, otherPayload);
                     assertPublicProfilePoolDrained(pool);
                     assertManifestResourceWaitsForManager(stack, resources, core);
                     assertThrows(IllegalStateException.class, component::start);
@@ -19458,6 +19475,8 @@ public class SegmentProfileInitialSocketClientTest {
                     second.service.close();
                     third.service.close();
                     assertPublicProfilePayload(sdk, fixture, 44, payload);
+                    assertPublicProfilePayload(sdk, fixture, 45, otherPayload);
+                    assertManifestFileGeometry(layout);
                     assertPublicProfilePoolDrained(pool);
                     var tls = nativeTlsContext(tlsContext(manifestField(resources, "tls", TLSContextFactory.class)));
                     stack.stop();
@@ -19681,9 +19700,7 @@ public class SegmentProfileInitialSocketClientTest {
         private boolean released;
 
         HeldNativeLayoutRead(ZooKeeperUtil cluster, String path) throws Exception {
-            var serverField = ZooKeeperUtil.class.getDeclaredField("zks");
-            serverField.setAccessible(true);
-            server = (ZooKeeperServer) serverField.get(cluster);
+            server = fixtureZooKeeperServer(cluster);
             processor = ZooKeeperServer.class.getDeclaredField("firstProcessor");
             processor.setAccessible(true);
             delegate = (RequestProcessor) processor.get(server);
@@ -19733,6 +19750,71 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private static ZooKeeperServer fixtureZooKeeperServer(ZooKeeperUtil cluster) throws Exception {
+        var field = ZooKeeperUtil.class.getDeclaredField("zks");
+        field.setAccessible(true);
+        return (ZooKeeperServer) field.get(cluster);
+    }
+
+    private static void assertManifestConfigurationRejected(Fixture fixture, ManifestWireLayout layout,
+            String requirementsRoot, ZKProfileStartupRequirementsStore.SourceIdentity source,
+            RetainedManifestAccess access) throws Exception {
+        var address = new InetSocketAddress("127.0.0.1", 0);
+        var disk = manifestTreeDigests(layout);
+        var server = fixtureZooKeeperServer(fixture.cluster);
+        int connections = server.getNumAliveConnections();
+        var workers = profileResourceThreads();
+        var invalid = Map.<String, Object>of("Mode", "OFF", "UnknownManifestKey", 1,
+                "Workers", List.of(1, 2), "Directory", layout.manifest().controlDirectory().toString(),
+                "LogicalShards", layout.manifest().shardArenas().size(), "DataFiles", 1,
+                "BytesPerFile", layout.manifest().arenas().get(0).bytesPerFile(), "BufferBudgetBytes", 1);
+        for (var entry : invalid.entrySet()) {
+            var configuration = manifestLedgerConfiguration(fixture, "/socket-ledgers");
+            applyManifestExecutionConfiguration(configuration, layout);
+            configuration.setProperty(SegmentProfileService.CONFIG_PREFIX + entry.getKey(), entry.getValue());
+            assertThrows(entry.getKey(), IllegalArgumentException.class,
+                    () -> configuredManifestOwner(fixture, layout, requirementsRoot, source, access, address, 1,
+                            configuration));
+        }
+        var limits = manifestLedgerConfiguration(fixture, "/socket-ledgers");
+        applyManifestExecutionConfiguration(limits, layout);
+        limits.setProperty(SegmentProfileService.CONFIG_PREFIX + "PoolBlocks", 2);
+        var capacity = assertThrows(IOException.class, () -> configuredManifestOwner(fixture, layout,
+                requirementsRoot, source, access, address, 1, limits));
+        assertEquals("Each manifest DATA file needs its foreground pool and maintenance reserve",
+                capacity.getMessage());
+        var scope = manifestLedgerConfiguration(fixture, "/socket-ledgers");
+        applyManifestExecutionConfiguration(scope, layout);
+        var mismatch = new RetainedManifestAccess(access.observed(), access.old(),
+                access.newUid() == 0 ? 1 : 0, access.disposition());
+        var refusal = assertThrows(IOException.class, () -> configuredManifestOwner(fixture, layout,
+                requirementsRoot, source, mismatch, address, 1, scope));
+        assertEquals("Access observation differs from the declared complete policy scope", refusal.getMessage());
+        assertEquals(connections, server.getNumAliveConnections());
+        assertEquals(workers, profileResourceThreads());
+        assertEquals(disk, manifestTreeDigests(layout));
+        assertNull(fixture.zk.exists(manifestRegistration(SOCKET_SERVICE_READINESS, layout), false));
+    }
+
+    private static Set<Thread> profileResourceThreads() {
+        return Thread.getAllStackTraces().keySet().stream().filter(thread -> thread.getName().startsWith("profile-"))
+                .collect(java.util.stream.Collectors.toSet());
+    }
+
+    private static void assertManifestFileGeometry(ManifestWireLayout layout) throws IOException {
+        for (int index = 0; index < layout.manifest().arenas().size(); index++) {
+            var member = layout.manifest().arenas().get(index);
+            var config = layout.manifest().arenaConfig(layout.runtime(), index);
+            try (var files = Files.list(config.directory())) {
+                assertEquals(member.dataFiles(),
+                        files.filter(file -> file.getFileName().toString().matches("data-[0-9]+")).count());
+            }
+            for (int file = 0; file < member.dataFiles(); file++) {
+                assertEquals(member.bytesPerFile(), Files.size(IsolatedSegmentFiles.dataPath(config, file)));
+            }
+        }
+    }
+
     private static void commissionManifestLedgerLayout(Fixture fixture) throws Exception {
         var factory = new LongHierarchicalLedgerManagerFactory();
         new ZkLayoutManager(fixture.zk, "/socket-ledgers", ZooDefs.Ids.OPEN_ACL_UNSAFE)
@@ -19760,11 +19842,45 @@ public class SegmentProfileInitialSocketClientTest {
             String requirementsRoot, ZKProfileStartupRequirementsStore.SourceIdentity source,
             RetainedManifestAccess access, InetSocketAddress address, long generation,
             ServerConfiguration configuration) throws Exception {
+        applyManifestExecutionConfiguration(configuration, layout);
+        var owner = configuredManifestOwner(fixture, layout, requirementsRoot, source, access, address, generation,
+                configuration);
+        configuration.setMetadataServiceUri("unused://configuration-mutated-after-construction");
+        configuration.setProperty(SegmentProfileService.CONFIG_PREFIX + "Workers", 0);
+        configuration.setProperty(SegmentProfileService.CONFIG_PREFIX + "MaxPayloadBytes", 1);
+        return owner;
+    }
+
+    private static void applyManifestExecutionConfiguration(
+            ServerConfiguration configuration, ManifestWireLayout layout) {
+        var runtime = layout.runtime();
+        var execution = layout.execution();
+        var limits = layout.limits();
+        var batches = limits.batches();
+        var parameters = Map.ofEntries(Map.entry("Mode", "ISOLATED"),
+                Map.entry("MaxPayloadBytes", runtime.maxPayloadBytes()),
+                Map.entry("MaxPendingEntries", runtime.maxPendingEntries()), Map.entry("Workers", execution.workers()),
+                Map.entry("IoThreads", execution.ioThreads()), Map.entry("ControlSlots", execution.controlSlots()),
+                Map.entry("Buffers", execution.buffers()), Map.entry("BufferBytes", execution.bufferBytes()),
+                Map.entry("InputBudgetBytes", execution.inputBudgetBytes()),
+                Map.entry("BufferBudgetBytes", execution.bufferBudgetBytes()),
+                Map.entry("StartupTimeoutMillis", execution.startupTimeout().toMillis()),
+                Map.entry("ControlLogBytes", limits.controlLogBytes()), Map.entry("HotEntries", limits.hotEntries()),
+                Map.entry("IndexedEntries", limits.indexedEntries()), Map.entry("PoolBlocks", limits.poolBlocks()),
+                Map.entry("MaintenanceBlocks", limits.maintenanceBlocks()), Map.entry("BatchBytes", batches.bytes()),
+                Map.entry("BatchEntries", batches.entries()),
+                Map.entry("BatchDelayMillis", batches.delay().toMillis()));
+        parameters.forEach((name, value) -> configuration.setProperty(SegmentProfileService.CONFIG_PREFIX + name,
+                value));
+    }
+
+    private static SegmentManifestResourceService configuredManifestOwner(Fixture fixture, ManifestWireLayout layout,
+            String requirementsRoot, ZKProfileStartupRequirementsStore.SourceIdentity source,
+            RetainedManifestAccess access, InetSocketAddress address, long generation,
+            ServerConfiguration configuration) throws Exception {
         var policy = new SegmentManifestStartupPolicy(source, layout.manifest(),
                 SegmentManifestAccessObservation.expectedRoots(layout.manifest(), layout.runtime()), access.old(),
                 access.newUid(), access.disposition());
-        var disk = new org.apache.bookkeeper.util.DiskChecker(configuration.getDiskUsageThreshold(),
-                configuration.getDiskUsageWarnThreshold());
         var options = new SegmentProfileOwnedResources.ResourceSettings(requirementsRoot, SOCKET_SERVICE_READINESS,
                 "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE, "ledger-profile", 8, Duration.ofSeconds(7),
                 Duration.ofMillis(50), 2, 4, 64);
@@ -19772,12 +19888,10 @@ public class SegmentProfileInitialSocketClientTest {
         var control = fixture.controlConfigs.get(0);
         var read = new SegmentProfileReadConfig((caller, query) -> fixture.permitsReadContext(query.context()),
                 (caller, query) -> fixture.permitsReadContext(query.context()));
-        var resources = new SegmentProfileOwnedResources(configuration, options, budget,
+        return SegmentManifestResourceService.fromConfiguration(configuration,
+                new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, policy, access.observed(), options, budget,
                 new SegmentProfileListener.Settings(131072, 64, "socket-test", generation),
-                address, control.staticAuthorizer(), control.exactAuthorizer(), read, VALIDATOR);
-        configuration.setMetadataServiceUri("unused://configuration-mutated-after-construction");
-        return new SegmentManifestResourceService(layout.owner(budget), policy, layout.runtime(), access.observed(),
-                new Generation(1), List.of(1), resources, disk);
+                address, control.staticAuthorizer(), control.exactAuthorizer(), read, new Generation(1), List.of(1));
     }
 
     private static long assertManifestResourceSource(Fixture fixture, SegmentProfileOwnedResources resources,

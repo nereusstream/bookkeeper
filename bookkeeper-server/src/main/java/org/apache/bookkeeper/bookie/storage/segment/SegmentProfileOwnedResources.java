@@ -168,12 +168,12 @@ public final class SegmentProfileOwnedResources {
                 address, staticAuthorizer, exactAuthorizer, read, validator);
     }
 
-    SegmentProfileOwnedResources(ServerConfiguration configuration, ResourceSettings resources,
+    SegmentProfileOwnedResources(ServerConfiguration frozenConfiguration, ResourceSettings resources,
             ProfileReceiveBudget budget, SegmentProfileListener.Settings listenerSettings,
             InetSocketAddress address, ProfileStaticOperationAuthorizer staticAuthorizer,
             ProfileControlAuthorizer exactAuthorizer, SegmentProfileReadConfig read,
             ProfileDescriptorValidator validator) {
-        this(new ServerConfiguration(configuration), null, resources, null, true, budget, listenerSettings,
+        this(frozenConfiguration, null, resources, null, true, budget, listenerSettings,
                 address, staticAuthorizer, exactAuthorizer, read, validator);
         if (!address.getAddress().isLoopbackAddress() || read == null) {
             throw new IllegalArgumentException("Owned manifest resources require loopback transport and reads");

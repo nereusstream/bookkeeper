@@ -189,33 +189,18 @@ public final class SegmentProfileService implements AutoCloseable {
             throw new IllegalArgumentException("Explicit absolute experimental Segment directory required");
         }
         var defaults = IsolatedSegmentConfig.defaults(Path.of(directory));
-        var config = new IsolatedSegmentConfig(defaults.directory(), 1,
+        var config = configuredRuntime(configuration, defaults,
                 optionalInt(configuration, "LogicalShards", defaults.logicalShards()),
                 optionalInt(configuration, "DataFiles", defaults.dataFiles()),
-                optionalLong(configuration, "BytesPerFile", defaults.bytesPerFile()), 4096,
-                optionalInt(configuration, "MaxPayloadBytes", defaults.maxPayloadBytes()),
-                optionalInt(configuration, "MaxPendingEntries", defaults.maxPendingEntries()),
-                configuration.getString(CONFIG_PREFIX + "Backend", defaults.backend()),
-                configuration.getString(CONFIG_PREFIX + "Affinity", defaults.affinity()),
-                configuration.getString(CONFIG_PREFIX + "NumaPolicy", defaults.numaPolicy()),
-                configuration.getString(CONFIG_PREFIX + "WaitStrategy", defaults.waitStrategy()));
-        var execution = new SegmentExecutionGroup.Settings(requiredInt(configuration, "Workers"),
-                requiredInt(configuration, "IoThreads"), requiredInt(configuration, "ControlSlots"),
-                requiredInt(configuration, "Buffers"), requiredInt(configuration, "BufferBytes"),
-                requiredLong(configuration, "InputBudgetBytes"), requiredLong(configuration, "BufferBudgetBytes"),
-                Duration.ofMillis(requiredLong(configuration, "StartupTimeoutMillis")));
-        var batches = new SegmentDataPhysicalDriver.BatchLimits(requiredInt(configuration, "BatchBytes"),
-                requiredInt(configuration, "BatchEntries"),
-                Duration.ofMillis(requiredLong(configuration, "BatchDelayMillis")));
-        var limits = new IsolatedSegmentStorage.Limits(requiredLong(configuration, "ControlLogBytes"),
-                requiredInt(configuration, "HotEntries"), requiredInt(configuration, "IndexedEntries"),
-                requiredInt(configuration, "PoolBlocks"), requiredInt(configuration, "MaintenanceBlocks"), batches);
+                optionalLong(configuration, "BytesPerFile", defaults.bytesPerFile()));
+        var execution = configuredExecution(configuration);
+        var limits = configuredLimits(configuration);
         long blocks = (config.bytesPerFile() - 4096) / SegmentArenaControlLog.BLOCK_BYTES;
         int largestEntry = SegmentBatchFormat.maxPayload(config) + SegmentBatchFormat.ENTRY_OVERHEAD;
         if (execution.workers() > config.logicalShards() || execution.workers() > config.maxPendingEntries()
                 || limits.hotEntries() < config.logicalShards()
                 || (long) limits.poolBlocks() + limits.maintenanceBlocks() > blocks
-                || batches.bytes() > execution.bufferBytes()
+                || limits.batches().bytes() > execution.bufferBytes()
                 || SegmentBatchFormat.alignedLength(SegmentBatchFormat.RECORD_HEADER + largestEntry)
                     > execution.bufferBytes() || largestEntry > execution.inputBudgetBytes()) {
             throw new IllegalArgumentException("Incompatible experimental Segment layout/execution/batch bounds");
@@ -229,6 +214,34 @@ public final class SegmentProfileService implements AutoCloseable {
                 BookieId.parse(policy.compatibility().bookieId()));
         return new LocalParameters(config, identity, execution, limits,
                 configuration.getDiskUsageThreshold(), configuration.getDiskUsageWarnThreshold());
+    }
+
+    static IsolatedSegmentConfig configuredRuntime(ServerConfiguration configuration, IsolatedSegmentConfig defaults,
+            int logicalShards, int dataFiles, long bytesPerFile) {
+        return new IsolatedSegmentConfig(defaults.directory(), 1, logicalShards, dataFiles, bytesPerFile, 4096,
+                optionalInt(configuration, "MaxPayloadBytes", defaults.maxPayloadBytes()),
+                optionalInt(configuration, "MaxPendingEntries", defaults.maxPendingEntries()),
+                configuration.getString(CONFIG_PREFIX + "Backend", defaults.backend()),
+                configuration.getString(CONFIG_PREFIX + "Affinity", defaults.affinity()),
+                configuration.getString(CONFIG_PREFIX + "NumaPolicy", defaults.numaPolicy()),
+                configuration.getString(CONFIG_PREFIX + "WaitStrategy", defaults.waitStrategy()));
+    }
+
+    static SegmentExecutionGroup.Settings configuredExecution(ServerConfiguration configuration) {
+        return new SegmentExecutionGroup.Settings(requiredInt(configuration, "Workers"),
+                requiredInt(configuration, "IoThreads"), requiredInt(configuration, "ControlSlots"),
+                requiredInt(configuration, "Buffers"), requiredInt(configuration, "BufferBytes"),
+                requiredLong(configuration, "InputBudgetBytes"), requiredLong(configuration, "BufferBudgetBytes"),
+                Duration.ofMillis(requiredLong(configuration, "StartupTimeoutMillis")));
+    }
+
+    static IsolatedSegmentStorage.Limits configuredLimits(ServerConfiguration configuration) {
+        var batches = new SegmentDataPhysicalDriver.BatchLimits(requiredInt(configuration, "BatchBytes"),
+                requiredInt(configuration, "BatchEntries"),
+                Duration.ofMillis(requiredLong(configuration, "BatchDelayMillis")));
+        return new IsolatedSegmentStorage.Limits(requiredLong(configuration, "ControlLogBytes"),
+                requiredInt(configuration, "HotEntries"), requiredInt(configuration, "IndexedEntries"),
+                requiredInt(configuration, "PoolBlocks"), requiredInt(configuration, "MaintenanceBlocks"), batches);
     }
 
     /** Deferred owned initialization; caller retains this handle when startup fails. TLS stays borrowed. */

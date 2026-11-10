@@ -471,6 +471,14 @@ manifest 组件在 owner 成功启动且仍存活时才进入 `STARTED`。启动
 
 2026-11-11，父版本 `37293de782`。macOS owner-enabled APFS/JNI 上，两个实际 manifest 栈用例与四个相关 v1/配置回归共 6 项全部通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。父版四项基线和最终 XML、源码哈希分别保存在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-entry-parent-37293de`。
 
+### 固定 manifest 的包内配置工厂
+
+`SegmentManifestResourceService.fromConfiguration` 复制原 `ServerConfiguration`，共用 v1 的 opt-in、未知键和多值检查，以及 execution、buffer、pool 与 batch 参数解析。manifest 入口拒绝显式的 `experimentalSegmentDirectory`、`experimentalSegmentLogicalShards`、`experimentalSegmentDataFiles` 和 `experimentalSegmentBytesPerFile`，即使这些值恰好匹配某个成员。CONTROL 根、完整 shard map、各 Arena 的根及 DATA 几何均由传入的固定 manifest 提供。首个有序 Arena 的几何供 Bookie 本地 runtime 对象使用，实际 DATA 仍按各成员组装并检查每个成员的池容量。
+
+工厂校验已有 UWNS2 对象与声明 scope 的字段匹配，再组装共用原预算的 storage 与 deferred resources。构造阶段不读取文件或 ZooKeeper，也不执行探针、打开 TLS 或启动线程。实际启动仍重读原生 schema 2 来源、要求既有 ledger layout，并沿原 preflight 校验文件身份和健康 CLOSE。工厂使用同一份冻结配置，后续修改原对象不会改变启动的 metadata URI 或本地执行参数。该入口接受已准备的包内 policy 与访问观测。UWNS2 的权限仍为 `ACCESS_SNAPSHOT_ONLY`，外部退休证明、公共工厂和 Main 继续待验收。
+
+2026-11-11，父版本 `380d18503d`。真实异构双 Arena 分别使用 1 个 4 MiB DATA 文件和 2 个 3 MiB 文件。两条 3/3/3 ledger 经工厂、显式 EmbeddedServer 和公开 SDK 在不同 Arena 写入并关闭，同地址新会话仅由 manifest 目标读回，两侧物理文件数和大小保持原布局。拒绝覆盖 OFF、未知键、多值、四个拓扑键、buffer 容量、较小 Arena 的池容量和访问 scope。拒绝前后核对了实际文件摘要、ZooKeeper 连接数和资源线程。最终 6 项通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。父版基线和最终源码及 XML 分开归档在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-config-parent-380d185`。
+
 ## 显式 Profile 服务启动与 owner 排空
 
 2026-10-12，`SegmentProfileService` 将原 graph、DLR receipt、session admission、listener 和 delete consumer 接成一个显式隔离服务 episode。构造 owner 不打开目录、创建 graph 或绑定端口；`start(existing)` 由外部 cold caller 执行，先读取原 immutable requirements、运行原 version/scope/new-scope 检查，再核对 fallback 的 ARENA/INDEX 根与将要打开的原生目录。已存在的祖先通过 real path 解析，未创建的后缀保持计划路径；错根、相对根及与任一 old root 的祖先/后代重叠拒绝。此检查只绑定路径，不生产 Unix access、old-service disposition 或永久隔离事实，物理 proof issuer 仍由调用方提供。

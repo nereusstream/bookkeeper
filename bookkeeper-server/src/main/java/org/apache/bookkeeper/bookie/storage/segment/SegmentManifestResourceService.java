@@ -28,10 +28,16 @@ import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.component.Lifecycle;
 import org.apache.bookkeeper.common.component.LifecycleComponent;
 import org.apache.bookkeeper.common.component.LifecycleListener;
+import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
+import org.apache.bookkeeper.common.profile.control.ProfileControlAuthorizer;
+import org.apache.bookkeeper.common.profile.control.ProfileStaticOperationAuthorizer;
 import org.apache.bookkeeper.common.profile.startup.Generation;
+import org.apache.bookkeeper.conf.ServerConfiguration;
+import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.util.DiskChecker;
 
 /** One deferred loopback restart, taking exclusive ownership of a fresh graph and resource owner. */
@@ -54,7 +60,7 @@ public final class SegmentManifestResourceService implements AutoCloseable {
     private boolean closed;
     private IOException firstCleanupFailure;
 
-    SegmentManifestResourceService(ManifestSegmentStorage storage, SegmentManifestStartupPolicy policy,
+    private SegmentManifestResourceService(ManifestSegmentStorage storage, SegmentManifestStartupPolicy policy,
             IsolatedSegmentConfig runtime, SegmentManifestAccessObservation access, Generation capabilities,
             List<Integer> hints, SegmentProfileOwnedResources resources, DiskChecker diskChecker) {
         this.storage = Objects.requireNonNull(storage, "storage");
@@ -65,6 +71,41 @@ public final class SegmentManifestResourceService implements AutoCloseable {
         this.hints = List.copyOf(hints);
         this.resources = Objects.requireNonNull(resources, "resources");
         this.diskChecker = Objects.requireNonNull(diskChecker, "diskChecker");
+    }
+
+    /** Freeze local bounds for the supplied manifest scope. Actual startup owns all file and metadata I/O. */
+    static SegmentManifestResourceService fromConfiguration(ServerConfiguration configuration, SecretKey key,
+            ProfileDescriptorValidator validator, SegmentManifestStartupPolicy policy,
+            SegmentManifestAccessObservation access, SegmentProfileOwnedResources.ResourceSettings options,
+            ProfileReceiveBudget budget, SegmentProfileListener.Settings listener, InetSocketAddress address,
+            ProfileStaticOperationAuthorizer staticAuthorizer, ProfileControlAuthorizer exactAuthorizer,
+            SegmentProfileReadConfig read, Generation capabilities, List<Integer> hints) throws IOException {
+        var frozen = new ServerConfiguration(configuration);
+        if (!SegmentProfileService.isolatedConfigurationEnabled(frozen)) {
+            throw new IllegalArgumentException("Experimental Segment configuration is OFF");
+        }
+        for (String field : List.of("Directory", "LogicalShards", "DataFiles", "BytesPerFile")) {
+            String keyName = SegmentProfileService.CONFIG_PREFIX + field;
+            if (frozen.containsKey(keyName)) {
+                throw new IllegalArgumentException("Fixed manifest supplies topology instead of " + keyName);
+            }
+        }
+        var manifest = policy.manifest();
+        var first = manifest.arenas().get(0);
+        var defaults = IsolatedSegmentConfig.defaults(manifest.controlDirectory());
+        // The Bookie runtime carries local geometry. The manifest supplies each actual DATA member.
+        var runtime = SegmentProfileService.configuredRuntime(frozen, defaults, manifest.shardArenas().size(),
+                first.dataFiles(), first.bytesPerFile());
+        var execution = SegmentProfileService.configuredExecution(frozen);
+        var limits = SegmentProfileService.configuredLimits(frozen);
+        access.requirePolicyScope(policy);
+        var storage = new ManifestSegmentStorage(manifest, manifest.identity(), runtime, key, validator,
+                execution, limits, budget);
+        var resources = new SegmentProfileOwnedResources(frozen, options, budget, listener, address,
+                staticAuthorizer, exactAuthorizer, read, validator);
+        var disk = new DiskChecker(frozen.getDiskUsageThreshold(), frozen.getDiskUsageWarnThreshold());
+        return new SegmentManifestResourceService(storage, policy, runtime, access, capabilities, hints,
+                resources, disk);
     }
 
     InetSocketAddress start() throws IOException, InterruptedException {
