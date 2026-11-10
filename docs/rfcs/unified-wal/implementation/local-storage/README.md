@@ -904,6 +904,12 @@ OPEN 记录可能来自进程退出，或来自尚未来得及持久化隔离的
 
 本次覆盖进程退出和实际控制文件回执。现有有限模型未覆盖此解析转移。已授予 DATA 的 OPEN、掉电及生产资格仍待验收。
 
+### 固定 manifest 的无 grant OPEN 重开
+
+固定 Profile-only 图在原 CONTROL、全部 DATA 和 Arena 控制锁下先只读检查全图。每个 Arena 必须具备同一 epoch 的健康 CLOSE、已经实际应用的 action 4/5，或由原 replay 谓词证明当前 OPEN 可用 action 4/5 结算。action 5 仍要求原 OPEN 的 grant-free 条件，当前 allocation 为空或本次未接收写请求均不足以证明资格。任一成员缺少必要证据时，整图在打开可变控制、索引或 DATA 前拒绝。原 Bookie cut、隔离和单流限制仍参与检查。
+
+冷预检保存共同 Bookie cut 和逐 Arena 的 epoch、cut、OPEN 状态及结算类别。实际重开在原锁下核对全部可变控制 owner 的重放结果，再复用原 action 4/5 的 append、force 和 apply。已结算成员沿原持久动作续接，全部成员完成后才进入索引和 DATA 恢复及新 epoch。部分执行可以留下真实持久的结算前缀，后继从该前缀继续。当前协议处理有原无 grant 证明的本地 DATA writer 会话，ledger 元数据和一般已授权 DATA 写者的恢复分别走各自的合同。
+
 ### 已授予 DATA 的 OPEN 会话恢复证据
 
 基线 `1fcb9c5016`。现有 `IsolatedSegmentStorage.start` 先持原 DATA 排他锁，再重放 Arena。原锁排除同目录的合作写者。健康 `DEVICE_STATE CLOSE` 由 DATA 实际停收、I/O 排空和文件关闭后的原 writer 产生，保留复用 allocation 的有效尾界。异常退出缺 CLOSE 时，冷读无法判断上次 force 是否完成，或是否有尚未来得及持久化的隔离通知。持久 quarantine、未决控制与已授权 OPEN 均在打开 Bookie control 或索引前拒绝。

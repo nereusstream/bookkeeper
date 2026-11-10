@@ -2026,18 +2026,11 @@ final class SegmentArenaControlLog implements AutoCloseable {
     /** Only startup under the original DATA lock may settle an OPEN epoch without DATA write authority. */
     synchronized void resolveUnclosedDataSession(SegmentDataFileLock dataLock) throws IOException {
         requireQuiescentControl(config, identity);
-        if (checkpointing || durableThrough != appliedThrough || !canResolveSession()) {
-            throw new IOException("Unclosed DATA writer session prevents physical reopen");
-        }
+        var resolution = requireUnclosedResolution();
         var epoch = new Generation(sessionEpoch);
-        Command command;
-        if (neverAllocated()) {
-            command = new ResolveNeverAllocatedSession(UUID.randomUUID(), epoch);
-        } else if (grantFreeSession) {
-            command = new ResolveGrantFreeSession(UUID.randomUUID(), epoch);
-        } else {
-            throw new IOException("Unclosed DATA writer session prevents physical reopen");
-        }
+        Command command = resolution == SessionEnd.NEVER_ALLOCATED
+                ? new ResolveNeverAllocatedSession(UUID.randomUUID(), epoch)
+                : new ResolveGrantFreeSession(UUID.randomUUID(), epoch);
         synchronized (dataLock) {
             dataLock.requireHeld(config.directory().toRealPath().resolve("isolated.lock"));
             preparedSessionEnd = command;
@@ -2049,6 +2042,18 @@ final class SegmentArenaControlLog implements AutoCloseable {
                 preparedSessionEnd = null;
             }
         }
+    }
+
+    private SessionEnd requireUnclosedResolution() throws IOException {
+        if (!checkpointing && durableThrough == appliedThrough && canResolveSession()) {
+            if (neverAllocated()) {
+                return SessionEnd.NEVER_ALLOCATED;
+            }
+            if (grantFreeSession) {
+                return SessionEnd.GRANT_FREE;
+            }
+        }
+        throw new IOException("Unclosed DATA writer session prevents physical reopen");
     }
 
     private boolean neverAllocated() {
@@ -2377,21 +2382,46 @@ final class SegmentArenaControlLog implements AutoCloseable {
         }
     }
 
-    synchronized void requireHealthyManifestRestart(long bookieCut) throws IOException {
-        if (!inspectionOnly || identity.manifest() == null || sessionOpen || sessionEpoch == 0
+    enum SessionEnd { HEALTHY_CLOSE, NEVER_ALLOCATED, GRANT_FREE }
+
+    record ManifestRestart(long epoch, long cut, boolean open, SessionEnd end) { }
+
+    /** Read the Arena restart facts under its original guards. This check grants no DATA authority. */
+    synchronized ManifestRestart manifestRestart(long bookieCut) throws IOException {
+        requireQuiescentState();
+        if (identity.manifest() == null || sessionEpoch == 0 || sessionOwner != null
+                || checkpointing || durableThrough != appliedThrough
                 || pendingReconstruction != null || bookieCut < requiredMoveBookieCut()
-                || bookieCut < requiredRetiredBookieCut() || !inspection().recordedQuarantineFiles().isEmpty()
-                || appliedOperations.values().stream().noneMatch(operation ->
-                        operation.status() == Status.APPLIED_DURABLE
-                                && operation.command() instanceof DataSession session && !session.open()
-                                && session.operationGeneration().value() == sessionEpoch)) {
-            throw new IOException("Manifest Arena requires a healthy closed session and its original Bookie cut");
+                || bookieCut < requiredRetiredBookieCut() || !inspection().recordedQuarantineFiles().isEmpty()) {
+            throw new IOException("Manifest Arena requires a recoverable session and its original Bookie cut");
         }
+        var end = sessionOpen ? requireUnclosedResolution() : requireDurableSessionEnd();
         for (int shard = 0; shard < config.logicalShards(); shard++) {
             if (identity.ownsShard(shard)) {
                 uniqueRestartStream(shard);
             }
         }
+        return new ManifestRestart(sessionEpoch, appliedThrough, sessionOpen, end);
+    }
+
+    private SessionEnd requireDurableSessionEnd() throws IOException {
+        for (var operation : appliedOperations.values()) {
+            var command = operation.command();
+            if (operation.status() != Status.APPLIED_DURABLE
+                    || command.operationGeneration().value() != sessionEpoch) {
+                continue;
+            }
+            if (command instanceof DataSession session && !session.open()) {
+                return SessionEnd.HEALTHY_CLOSE;
+            }
+            if (command instanceof ResolveNeverAllocatedSession) {
+                return SessionEnd.NEVER_ALLOCATED;
+            }
+            if (command instanceof ResolveGrantFreeSession) {
+                return SessionEnd.GRANT_FREE;
+            }
+        }
+        throw new IOException("Manifest Arena is missing its original durable session end");
     }
 
     synchronized Path manifestRestartJournal() {
@@ -2413,7 +2443,14 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     private void requireQuiescentControl(IsolatedSegmentConfig otherConfig,
                                          SegmentFileHeader otherIdentity) throws IOException {
-        if (!matchesScope(otherConfig, otherIdentity) || writing || pending != null || rotating != null) {
+        if (!matchesScope(otherConfig, otherIdentity)) {
+            throw new IOException("Arena authority is unavailable or has unresolved control I/O");
+        }
+        requireQuiescentState();
+    }
+
+    private void requireQuiescentState() throws IOException {
+        if (closed || failed || writing || pending != null || rotating != null) {
             throw new IOException("Arena authority is unavailable or has unresolved control I/O");
         }
         for (boolean blocked : dataBlocked) {

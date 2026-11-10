@@ -475,9 +475,17 @@ manifest 组件在 owner 成功启动且仍存活时才进入 `STARTED`。启动
 
 `SegmentManifestResourceService.fromConfiguration` 复制原 `ServerConfiguration`，共用 v1 的 opt-in、未知键和多值检查，以及 execution、buffer、pool 与 batch 参数解析。manifest 入口拒绝显式的 `experimentalSegmentDirectory`、`experimentalSegmentLogicalShards`、`experimentalSegmentDataFiles` 和 `experimentalSegmentBytesPerFile`，即使这些值恰好匹配某个成员。CONTROL 根、完整 shard map、各 Arena 的根及 DATA 几何均由传入的固定 manifest 提供。首个有序 Arena 的几何供 Bookie 本地 runtime 对象使用，实际 DATA 仍按各成员组装并检查每个成员的池容量。
 
-工厂校验已有 UWNS2 对象与声明 scope 的字段匹配，再组装共用原预算的 storage 与 deferred resources。构造阶段不读取文件或 ZooKeeper，也不执行探针、打开 TLS 或启动线程。实际启动仍重读原生 schema 2 来源、要求既有 ledger layout，并沿原 preflight 校验文件身份和健康 CLOSE。工厂使用同一份冻结配置，后续修改原对象不会改变启动的 metadata URI 或本地执行参数。该入口接受已准备的包内 policy 与访问观测。UWNS2 的权限仍为 `ACCESS_SNAPSHOT_ONLY`，外部退休证明、公共工厂和 Main 继续待验收。
+工厂校验已有 UWNS2 对象与声明 scope 的字段匹配，再组装共用原预算的 storage 与 deferred resources。构造阶段不读取文件或 ZooKeeper，也不执行探针、打开 TLS 或启动线程。实际启动仍重读原生 schema 2 来源、要求既有 ledger layout，并沿原 preflight 校验文件身份及各 Arena 的会话恢复资格。工厂使用同一份冻结配置，后续修改原对象不会改变启动的 metadata URI 或本地执行参数。该入口接受已准备的包内 policy 与访问观测。UWNS2 的权限仍为 `ACCESS_SNAPSHOT_ONLY`，外部退休证明、公共工厂和 Main 继续待验收。
 
 2026-11-11，父版本 `380d18503d`。真实异构双 Arena 分别使用 1 个 4 MiB DATA 文件和 2 个 3 MiB 文件。两条 3/3/3 ledger 经工厂、显式 EmbeddedServer 和公开 SDK 在不同 Arena 写入并关闭，同地址新会话仅由 manifest 目标读回，两侧物理文件数和大小保持原布局。拒绝覆盖 OFF、未知键、多值、四个拓扑键、buffer 容量、较小 Arena 的池容量和访问 scope。拒绝前后核对了实际文件摘要、ZooKeeper 连接数和资源线程。最终 6 项通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。父版基线和最终源码及 XML 分开归档在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-config-parent-380d185`。
+
+### 固定 manifest 服务的无 grant 进程重开
+
+UWNS2 对满足[原 action 4/5 条件的全图](../local-storage/README.md#固定-manifest-的无-grant-open-重开)可在原锁下检查文件用途和访问。此步骤保持只读。服务启动重读同一 native requirements 和 retained G1，在原期限内重新核对该观测和全图切点。各 Arena 完成必要的原生会话结算后，服务才恢复原索引、DATA 和新 writer epoch，并进入原 G1/readiness 发布流程。持有未获准恢复的 OPEN 成员时，服务保持不可用。
+
+2026-11-11，父版本 `9561daeed1`。原受控 manifest 服务在子 JVM 中实际注册后异常退出，旧 session 的临时注册自然消失。重放确认首个 Arena 从未分配 DATA，第二个 Arena 曾有已回收的 grant 且当前 OPEN 符合原 grant-free 谓词。父版在获取 fresh UWNS2 时拒绝该图。最终版的实际访问观测保持文件摘要。独立子进程在原全图锁下调用原 Arena 结算原语，持久应用首个成员的 action 4 后退出，留下真实混合前缀。后继完整 owner 续接该前缀，只为剩余成员写入 action 5，按原端点发布新的会话，随后由公开 SDK 以 3/3/3 写入、关闭，并仅从 manifest 目标读回。重开后的原 DATA 摘要保持。另一次实际服务退出保留后部成员的活跃 grant，整图拒绝，前部成员的控制 cut 和各根文件摘要保持。
+
+最终 9 项定向回归全部通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-open-parent-9561dae`，包含父版 RED、首次接线误用可写 guard 的阶段回执、最终源码哈希、XML 和真实子进程标记。该验证覆盖有原无 grant 证据的服务进程重开。一般已授权 OPEN、Linux D2、真实掉电和生产资格仍待验收。
 
 ## 显式 Profile 服务启动与 owner 排空
 

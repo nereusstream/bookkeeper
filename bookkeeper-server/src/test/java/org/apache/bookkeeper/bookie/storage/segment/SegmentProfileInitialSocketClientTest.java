@@ -19493,6 +19493,364 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     @Test
+    public void manifestRestartsActualHaltedNoGrantEpochsAndRejectsLaterGrantedArena() throws Exception {
+        assumeTrue("Unix permission-bit experiment requires a non-root target credential",
+                ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
+        try (var fixture = new Fixture(false, false, true, 3, 3, true, true);
+                var classic = new SegmentClassicScopeEpisodeTest.Episode(fixture.cluster.getZooKeeperConnectString(),
+                        "/old-classic-manifest-open")) {
+            var layout = replaceWithManifest(fixture, 0);
+            try (var created = layout.owner(manifestWireBudget(layout.capacity()))) {
+                created.startNew();
+            }
+            var access = observeRetainedManifest(classic, layout);
+            commissionManifestLedgerLayout(fixture);
+            String requiredRoot = "/manifest-open-required";
+            var required = provisionManifestPreflightRequirements(fixture, layout.manifest(), requiredRoot,
+                    2, 2, List.of(1, 2), 2);
+            var source = required.source().sourceIdentity();
+            var script = Path.of("../scripts/unified-wal/probe-new-scope-access.py").toRealPath();
+            String bookie = layout.manifest().bookieId().toString();
+            try (var second = publicProfileSingleArenaPeer(fixture, 1);
+                    var third = publicProfileSingleArenaPeer(fixture, 2);
+                    var sdk = sdk(fixture)) {
+                second.replaceNode(fixture, 1, false);
+                third.replaceNode(fixture, 2, false);
+                var registry = second.persistent;
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var pool = publicProfilePeerPool(fixture, registry);
+                sdk.enableProfile(new ProfileInitialLifecycleCoordinator(fixture.reservations, metadata,
+                        VALIDATOR, fixture.cold), new ProfileRecoveryCoordinator(fixture.reservations, metadata,
+                        fixture.cold), VALIDATOR, pool, 4);
+                var request = publicCreateRequest(fixture, 44);
+                var later = publicCreateRequest(fixture, 46);
+                fixture.retainedReadContexts = Set.of(publicProfileCreateContext(request),
+                        publicProfileCreateContext(later));
+                InetSocketAddress address;
+                try (var history = manifestResourceService(fixture, layout, requiredRoot, source, access,
+                        new InetSocketAddress("127.0.0.1", 0), 1)) {
+                    address = history.start();
+                    writeClosedPublicProfileLedger(sdk, request, bytes(15, 7));
+                    var storage = manifestField(history, "storage", ManifestSegmentStorage.class);
+                    reclaimManifestCrashHistory(fixture, sdk, metadata, storage);
+                }
+                var oldPeer = haltRegisteredManifest(fixture, layout, requiredRoot, source, access,
+                        registry, address, 2);
+                var first = inspectManifestCrashArena(layout, 0);
+                var secondOpen = inspectManifestCrashArena(layout, 1);
+                assertTrue(first.open());
+                assertEquals(0, first.allocationHighWatermark());
+                assertTrue(secondOpen.open());
+                assertTrue(secondOpen.grantFree());
+                assertTrue(secondOpen.allocationHighWatermark() > 0);
+                assertEquals(0, secondOpen.currentAllocations());
+                var beforeObservation = manifestTreeDigests(layout);
+                manifestAccess(layout, access.old(), access.newUid(), script);
+                assertEquals(beforeObservation, manifestTreeDigests(layout));
+
+                haltAfterFirstManifestResolution(fixture, layout, requiredRoot, source, access, address);
+                var prefix = inspectManifestCrashArena(layout, 0);
+                assertFalse(prefix.open());
+                assertEquals(first.epoch(), prefix.epoch());
+                assertEquals(first.cut() + 1, prefix.cut());
+                assertManifestResolutionAction(layout, 0, prefix, prefix.cut(), 4, 0);
+                assertEquals(secondOpen, inspectManifestCrashArena(layout, 1));
+                var fresh = new RetainedManifestAccess(manifestAccess(layout, access.old(), access.newUid(), script),
+                        access.old(), access.newUid(), access.disposition());
+                var dataBefore = manifestDataDigests(layout);
+                try (var restarted = manifestResourceService(fixture, layout, requiredRoot, source, fresh,
+                        address, 3)) {
+                    assertEquals(address, restarted.start());
+                    var resources = manifestField(restarted, "resources", SegmentProfileOwnedResources.class);
+                    long session = manifestField(resources, "zk", ZooKeeper.class).getSessionId();
+                    assertNotEquals(oldPeer.publisherSession(), session);
+                    assertRegisteredManifest(registry, bookie, address, 3, session);
+                    assertNull(registry.revalidatePeer(oldPeer).peer());
+                    var storage = manifestField(restarted, "storage", ManifestSegmentStorage.class);
+                    var arenaA = manifestMember(storage, 0, "arena", SegmentArenaControlLog.class);
+                    var arenaB = manifestMember(storage, 1, "arena", SegmentArenaControlLog.class);
+                    assertEquals(prefix.cut() + 1, arenaA.appliedThrough());
+                    assertEquals(secondOpen.cut() + 2, arenaB.appliedThrough());
+                    assertEquals(prefix.epoch() + 1, arenaA.dataSessionEpoch());
+                    assertEquals(secondOpen.epoch() + 1, arenaB.dataSessionEpoch());
+                    assertManifestResolutionAction(layout, 1, secondOpen, secondOpen.cut() + 1, 5, 1);
+                    assertEquals(dataBefore, manifestDataDigests(layout));
+                    byte[] payload = bytes(25, 9);
+                    writeClosedPublicProfileLedger(sdk, later, payload);
+                    assertOwnedManifestRoute(storage, layout, publicProfileCreateContext(later), 0);
+                    second.service.close();
+                    third.service.close();
+                    assertPublicProfilePayload(sdk, fixture, 46, payload);
+                    assertPublicProfilePoolDrained(pool);
+                }
+                haltRegisteredManifest(fixture, layout, requiredRoot, source, access, registry, address, 4);
+                var earlier = inspectManifestCrashArena(layout, 0);
+                var laterGranted = inspectManifestCrashArena(layout, 1);
+                assertTrue(earlier.open());
+                assertEquals(0, earlier.allocationHighWatermark());
+                assertTrue(laterGranted.open());
+                assertFalse(laterGranted.grantFree());
+                assertTrue(laterGranted.currentAllocations() > 0);
+                var beforeRefusal = manifestTreeDigests(layout);
+                assertThrows(IOException.class, () -> manifestAccess(layout, access.old(), access.newUid(), script));
+                try (var refused = layout.owner(manifestWireBudget(layout.capacity()))) {
+                    assertThrows(IOException.class, refused::restart);
+                }
+                assertEquals(beforeRefusal, manifestTreeDigests(layout));
+                assertEquals(earlier, inspectManifestCrashArena(layout, 0));
+                assertEquals(laterGranted, inspectManifestCrashArena(layout, 1));
+                assertNull(registry.readPeer(bookie).peer());
+            }
+        }
+    }
+
+    private static void reclaimManifestCrashHistory(Fixture fixture, BookKeeper sdk,
+            ProfileLedgerMetadataStore metadata, ManifestSegmentStorage storage) throws Exception {
+        var arena = manifestMember(storage, 1, "arena", SegmentArenaControlLog.class);
+        var allocations = arena.compactionCandidates(0, -1, arena.appliedThrough()).allocations();
+        assertEquals(1, allocations.size());
+        commitManifestColdDelete(new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold), sdk, 44);
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (storage.profileDeleteProgress() == null && System.nanoTime() < until) {
+            Thread.sleep(10);
+        }
+        assertNotNull(storage.profileDeleteProgress());
+        var free = new CompletableFuture<IsolatedSegmentStorage.FreeResult>();
+        assertTrue(storage.reclaimAllocation(1, UUID.randomUUID(), allocations.get(0).allocationId(),
+                new IsolatedSegmentStorage.FreeRequest((result, failure) -> {
+                    if (failure == null) {
+                        free.complete(result);
+                    } else {
+                        free.completeExceptionally(failure);
+                    }
+                })));
+        assertEquals(IsolatedSegmentStorage.FreeStatus.APPLIED_DURABLE,
+                free.get(5, TimeUnit.SECONDS).status());
+    }
+
+    private static Map<Path, String> manifestDataDigests(ManifestWireLayout layout) throws Exception {
+        var data = manifestTreeDigests(layout);
+        data.keySet().removeIf(path -> !path.getFileName().toString().matches("data-[0-9]+"));
+        return data;
+    }
+
+    private record ManifestCrashArena(long epoch, long cut, Generation physicalGeneration,
+                                      boolean open, long allocationHighWatermark,
+                                      boolean grantFree, int currentAllocations) { }
+
+    private static ManifestCrashArena inspectManifestCrashArena(ManifestWireLayout layout, int member)
+            throws Exception {
+        var config = layout.manifest().arenaConfig(layout.runtime(), member);
+        try (var guard = SegmentDataFileLock.existingControlOwner(config.directory().resolve("arena-control.lock"))) {
+            guard.initialize();
+            try (var arena = SegmentArenaControlLog.openManifestWhileLocked(config,
+                    SegmentFileHeader.forArena(layout.manifest(), member), layout.limits().controlLogBytes(),
+                    new SegmentFileIo(), guard, new SegmentOwnedFiles(), true)) {
+                return new ManifestCrashArena(arena.dataSessionEpoch(), arena.appliedThrough(),
+                        manifestField(arena, "physicalGeneration", Generation.class),
+                        arena.hasUnclosedDataSession(), manifestField(arena, "allocationHighWatermark", Long.class),
+                        manifestField(arena, "grantFreeSession", Boolean.class),
+                        manifestField(arena, "currentAllocations", Map.class).size());
+            }
+        }
+    }
+
+    private static void assertManifestResolutionAction(ManifestWireLayout layout, int member, ManifestCrashArena state,
+            long sequence, int action, int laterFrames) throws IOException {
+        var config = layout.manifest().arenaConfig(layout.runtime(), member);
+        try (var file = java.nio.channels.FileChannel.open(config.directory().resolve("arena-control"),
+                java.nio.file.StandardOpenOption.READ)) {
+            int frameBytes = 160;
+            var frame = java.nio.ByteBuffer.allocate(frameBytes);
+            SegmentFileIo.readFully(file, frame, file.size() - (long) frameBytes * (1 + laterFrames));
+            var command = SegmentControlParser.parse(frame, SegmentControlFormat.Owner.ARENA,
+                    state.physicalGeneration(), sequence);
+            assertEquals(SegmentControlFormat.Type.DEVICE_STATE, command.type());
+            assertEquals(state.epoch(), command.expectedGeneration());
+            assertEquals(java.nio.ByteBuffer.allocate(16).putInt(1).putInt(action).putLong(state.epoch()).flip(),
+                    command.body());
+        }
+    }
+
+    private ZKProfileRegistrationStore.RegisteredPeer haltRegisteredManifest(Fixture fixture, ManifestWireLayout layout,
+            String requiredRoot, ZKProfileStartupRequirementsStore.SourceIdentity source, RetainedManifestAccess access,
+            ZKProfileRegistrationStore registry, InetSocketAddress address, long generation) throws Exception {
+        try (var child = new ManifestCrashProcess(fixture, layout, requiredRoot, source, access, address, generation)) {
+            String marker = child.awaitReady();
+            var bookie = layout.manifest().bookieId().toString();
+            var peer = registry.readPeer(bookie).peer();
+            assertNotNull(peer);
+            assertEquals(child.process.pid() + " " + peer.publisherSession(), marker);
+            assertRegisteredManifest(registry, bookie, address, generation, peer.publisherSession());
+            child.process.getOutputStream().write('H');
+            child.process.getOutputStream().flush();
+            child.awaitExit(23, "UW_MANIFEST_SERVICE_HALT " + marker);
+            awaitLostServiceRegistration(fixture.zk, registry, bookie, manifestRegistration(SOCKET_SERVICE_READINESS,
+                    layout));
+            return peer;
+        }
+    }
+
+    private void haltAfterFirstManifestResolution(Fixture fixture, ManifestWireLayout layout, String requiredRoot,
+            ZKProfileStartupRequirementsStore.SourceIdentity source, RetainedManifestAccess access,
+            InetSocketAddress address) throws Exception {
+        try (var child = new ManifestCrashProcess(fixture, layout, requiredRoot, source, access, address, 0)) {
+            child.awaitExit(24, "UW_MANIFEST_FIRST_RESOLUTION_DURABLE");
+        }
+    }
+
+    private final class ManifestCrashProcess implements AutoCloseable {
+        private final Process process;
+        private final Path ready;
+        private final Path log;
+
+        ManifestCrashProcess(Fixture fixture, ManifestWireLayout layout, String requiredRoot,
+                ZKProfileStartupRequirementsStore.SourceIdentity source, RetainedManifestAccess access,
+                InetSocketAddress address, long generation) throws Exception {
+            var directory = temporary.newFolder().toPath();
+            ready = directory.resolve("ready");
+            log = directory.resolve("child.log");
+            var config = manifestLedgerConfiguration(fixture, "/socket-ledgers");
+            applyManifestExecutionConfiguration(config, layout);
+            var properties = new java.util.Properties();
+            config.getKeys().forEachRemaining(name -> properties.setProperty(name, config.getString(name)));
+            var configuration = directory.resolve("service.properties");
+            try (var out = Files.newOutputStream(configuration)) {
+                properties.store(out, "Disposable manifest halt fixture");
+            }
+            var input = directory.resolve("input.json");
+            new ObjectMapper().writeValue(input.toFile(), Map.of("manifest", layout.manifest().path().toString(),
+                    "manifestIdentity", layout.manifest().identity().value(), "source", source, "old", access.old(),
+                    "newUid", access.newUid(), "requiredRoot", requiredRoot, "port", address.getPort(),
+                    "generation", generation));
+            var command = new ArrayList<>(List.of(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                    "-Xmx256m", "-XX:MaxDirectMemorySize=64m"));
+            String nativeIo = System.getProperty("bookkeeper.native.io.library.path");
+            if (nativeIo != null) {
+                command.add("-Dbookkeeper.native.io.library.path=" + nativeIo);
+            }
+            command.addAll(List.of("-cp", System.getProperty("java.class.path"), ManifestCrashProbe.class.getName(),
+                    configuration.toString(), input.toString(), ready.toString()));
+            process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        }
+
+        String awaitReady() throws Exception {
+            long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (!Files.exists(ready) && process.isAlive() && System.nanoTime() < until) {
+                Thread.sleep(10);
+            }
+            assertTrue(Files.readString(log), Files.exists(ready) && process.isAlive());
+            return Files.readString(ready);
+        }
+
+        void awaitExit(int code, String terminal) throws Exception {
+            boolean exited = process.waitFor(20, TimeUnit.SECONDS);
+            String output = Files.readString(log);
+            assertTrue(output, exited);
+            assertEquals(output, code, process.exitValue());
+            assertTrue(output, output.lines().anyMatch(terminal::equals));
+            System.out.println("UW_MANIFEST_CHILD\n" + output);
+        }
+
+        @Override
+        public void close() throws Exception {
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                assertTrue(Files.readString(log), process.waitFor(5, TimeUnit.SECONDS));
+            }
+        }
+    }
+
+    /** Disposable child exercising the actual registered owner or a single durable original resolution. */
+    public static final class ManifestCrashProbe {
+        public static void main(String[] args) throws Exception {
+            var config = new ServerConfiguration();
+            config.loadConf(Path.of(args[0]).toUri().toURL());
+            var mapper = new ObjectMapper();
+            var input = mapper.readTree(Path.of(args[1]).toFile());
+            var manifest = SegmentArenaManifest.read(Path.of(input.required("manifest").asText()),
+                    new ManifestIdentity(input.required("manifestIdentity").binaryValue()));
+            var first = manifest.arenas().get(0);
+            var runtime = SegmentProfileService.configuredRuntime(config,
+                    IsolatedSegmentConfig.defaults(manifest.controlDirectory()), manifest.shardArenas().size(),
+                    first.dataFiles(), first.bytesPerFile());
+            var execution = SegmentProfileService.configuredExecution(config);
+            var limits = SegmentProfileService.configuredLimits(config);
+            var layout = new ManifestWireLayout(manifest, runtime, execution, limits,
+                    ManifestSegmentStorage.capacity(manifest, runtime, execution, limits));
+            long generation = input.required("generation").asLong();
+            if (generation == 0) {
+                haltAfterOriginalResolution(layout);
+                return;
+            }
+            var source = mapper.treeToValue(input.required("source"),
+                    ZKProfileStartupRequirementsStore.SourceIdentity.class);
+            var old = mapper.treeToValue(input.required("old"), SegmentManifestAccessObservation.OldScope.class);
+            long uid = input.required("newUid").asLong();
+            var access = manifestAccess(layout, old, uid,
+                    Path.of("../scripts/unified-wal/probe-new-scope-access.py").toRealPath());
+            var policy = new SegmentManifestStartupPolicy(source, manifest,
+                    SegmentManifestAccessObservation.expectedRoots(manifest, runtime), old, uid,
+                    SegmentManifestStartupPolicy.OldDisposition.DRAINED);
+            var options = new SegmentProfileOwnedResources.ResourceSettings(input.required("requiredRoot").asText(),
+                    SOCKET_SERVICE_READINESS, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE, "ledger-profile",
+                    8, Duration.ofSeconds(7), Duration.ofMillis(50), 2, 4, 64);
+            var principal = socketProfilePrincipal();
+            var address = new InetSocketAddress("127.0.0.1", input.required("port").asInt());
+            var service = SegmentManifestResourceService.fromConfiguration(config,
+                    new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR, policy, access, options,
+                    manifestWireBudget(layout.capacity()),
+                    new SegmentProfileListener.Settings(131072, 64, "socket-test", generation),
+                    address, (caller, operation) -> caller.equals(principal),
+                    (caller, scope, authority) -> caller.equals(principal) && scope.equals(authority.scope())
+                            ? Decision.ALLOW : Decision.DENY,
+                    new SegmentProfileReadConfig((caller, query) -> caller.equals(principal)),
+                    new Generation(1), List.of(1));
+            assertEquals(address, service.start());
+            var resources = manifestField(service, "resources", SegmentProfileOwnedResources.class);
+            String marker = ProcessHandle.current().pid() + " " + manifestField(resources, "zk", ZooKeeper.class)
+                    .getSessionId();
+            System.out.println("UW_MANIFEST_SERVICE_READY " + marker);
+            Path ready = Path.of(args[2]);
+            var pending = ready.resolveSibling("ready.pending");
+            Files.writeString(pending, marker);
+            Files.move(pending, ready, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            assertEquals('H', System.in.read());
+            System.out.println("UW_MANIFEST_SERVICE_HALT " + marker);
+            System.out.flush();
+            Runtime.getRuntime().halt(23);
+        }
+
+        private static void haltAfterOriginalResolution(ManifestWireLayout layout) throws Exception {
+            var manifest = layout.manifest();
+            var bookie = SegmentDataFileLock.existingControlOwner(
+                    manifest.controlDirectory().resolve("bookie-control.lock"));
+            var first = manifest.arenaConfig(layout.runtime(), 0);
+            var second = manifest.arenaConfig(layout.runtime(), 1);
+            try (bookie;
+                    var dataA = SegmentDataFileLock.dataOwner(first.directory(), false);
+                    var controlA = SegmentDataFileLock.existingControlOwner(
+                            first.directory().resolve("arena-control.lock"));
+                    var dataB = SegmentDataFileLock.dataOwner(second.directory(), false);
+                    var controlB = SegmentDataFileLock.existingControlOwner(
+                            second.directory().resolve("arena-control.lock"))) {
+                for (var guard : List.of(bookie, dataA, controlA, dataB, controlB)) {
+                    guard.initialize();
+                }
+                try (var arena = SegmentArenaControlLog.openManifestWhileLocked(first,
+                        SegmentFileHeader.forArena(manifest, 0), layout.limits().controlLogBytes(),
+                        new SegmentFileIo(), controlA, new SegmentOwnedFiles(), false)) {
+                    arena.resolveUnclosedDataSession(dataA);
+                    System.out.println("UW_MANIFEST_FIRST_RESOLUTION_DURABLE");
+                    System.out.flush();
+                    Runtime.getRuntime().halt(24);
+                }
+            }
+        }
+    }
+
+    @Test
     public void manifestResourceServiceClosesUnstartedAndRejectsWrongSourceBeforeMutableOpen() throws Exception {
         assumeTrue("Unix permission-bit experiment requires a non-root target credential",
                 ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);

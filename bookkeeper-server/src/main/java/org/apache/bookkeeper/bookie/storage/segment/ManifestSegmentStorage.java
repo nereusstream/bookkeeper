@@ -124,6 +124,8 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     record StartupPreflightAttempt(RecoveryFactsAttempt recovery, CheckedStartup checked) { }
 
+    private record RestartPlan(long bookieCut, List<SegmentArenaControlLog.ManifestRestart> arenas) { }
+
     record PreflightEpisode(SegmentManifestStartupPolicy.PreOpen preflight,
             ProfileLedgerMetadataStore metadata, ZKProfileReservationStore.RetainedG1DeleteReplay retained,
             long deadline) { }
@@ -436,24 +438,22 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 reserveCapacity();
                 requireRoots(existing);
                 acquireGuards(existing);
-                long bookieCut = -1;
+                RestartPlan restart = null;
                 if (existing) {
                     Set<Path> writes = observed == null ? null : new HashSet<>();
-                    bookieCut = preflightRestart(writes);
+                    restart = preflightRestart(writes);
                     if (observed != null) {
                         observed.requireCurrent(manifest, control, writes);
                     }
-                    if (preflight != null && System.nanoTime() >= preflight.deadline()) {
-                        throw new IOException("Manifest startup preflight deadline elapsed before mutable recovery");
-                    }
+                    requireRestartTime(preflight);
                 } else {
                     SegmentBookieControlLog.formatManifestControl(control, bookieIdentity, bookieGuard, bookieFiles,
                             new SegmentFileIo());
                 }
                 bookie = SegmentBookieControlLog.openManifestWhileLocked(control, bookieIdentity,
                         limits.controlLogBytes(), key, validator, new SegmentFileIo(), bookieGuard, bookieFiles);
-                if (existing && bookie.appliedThrough() != bookieCut) {
-                    throw new IOException("Shared Bookie cut changed after manifest preflight");
+                if (restart != null) {
+                    settleRestartSessions(restart, preflight);
                 }
                 for (Member member : members) {
                     prepareMember(member, existing);
@@ -575,10 +575,11 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
     }
 
-    private long preflightRestart(Set<Path> writes) throws IOException {
+    private RestartPlan preflightRestart(Set<Path> writes) throws IOException {
         var bookieInspection = SegmentBookieControlLog.inspectManifestWhileLocked(control, bookieIdentity,
                 limits.controlLogBytes(), key, validator, bookieGuard, bookieFiles);
         long bookieCut = bookieInspection.cut();
+        var arenas = new ArrayList<SegmentArenaControlLog.ManifestRestart>(members.size());
         if (writes != null) {
             writes.addAll(lockPaths);
             writes.add(control.directory().resolve("bookie-control"));
@@ -594,7 +595,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             member.dataGuard.requireHeld(member.config.directory().resolve("isolated.lock"));
             try (var arena = SegmentArenaControlLog.openManifestWhileLocked(member.config, member.identity,
                     limits.controlLogBytes(), new SegmentFileIo(), member.controlGuard, member.owned, true)) {
-                arena.requireHealthyManifestRestart(bookieCut);
+                arenas.add(arena.manifestRestart(bookieCut));
                 if (writes != null) {
                     writes.add(member.config.directory().resolve("arena-control"));
                     writes.add(arena.manifestRestartJournal());
@@ -621,22 +622,58 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 }
             }
         }
-        return bookieCut;
+        return new RestartPlan(bookieCut, List.copyOf(arenas));
+    }
+
+    private void settleRestartSessions(RestartPlan restart, PreflightEpisode preflight)
+            throws IOException, InterruptedException {
+        if (bookie.appliedThrough() != restart.bookieCut()) {
+            throw new IOException("Shared Bookie cut changed after manifest preflight");
+        }
+        for (int index = 0; index < members.size(); index++) {
+            requireRestartTime(preflight);
+            Member member = members.get(index);
+            openMemberControl(member);
+            if (!restart.arenas().get(index).equals(member.arena.manifestRestart(restart.bookieCut()))) {
+                throw new IOException("Arena session or cut changed after manifest preflight");
+            }
+        }
+        for (int index = 0; index < members.size(); index++) {
+            if (restart.arenas().get(index).open()) {
+                requireRestartTime(preflight);
+                Member member = members.get(index);
+                member.arena.resolveUnclosedDataSession(member.dataGuard);
+            }
+        }
+        requireRestartTime(preflight);
+    }
+
+    private static void requireRestartTime(PreflightEpisode preflight) throws IOException, InterruptedException {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new InterruptedException("Manifest restart interrupted before mutable recovery");
+        }
+        if (preflight != null && System.nanoTime() >= preflight.deadline()) {
+            throw new IOException("Manifest startup preflight deadline elapsed before mutable recovery");
+        }
     }
 
     private void prepareMember(Member member, boolean existing) throws IOException {
         if (!existing) {
             member.files = IsolatedSegmentFiles.createWhileLocked(member.config, member.identity,
                     new SegmentFileIo(), member.dataGuard, member.owned);
+            openMemberControl(member);
         }
-        member.arena = SegmentArenaControlLog.openManifestWhileLocked(member.config, member.identity,
-                limits.controlLogBytes(), new SegmentFileIo(), member.controlGuard, member.owned, false);
         member.index = SegmentDerivedIndex.open(member.config, member.identity, limits.indexedEntries(), member.owned);
         if (existing) {
             member.files = IsolatedSegmentFiles.prepareLocalResults(member.config, member.identity, member.arena,
                     bookie, new SegmentFileIo(), limits.indexedEntries(), writes.length, member.index,
                     member.dataGuard, member.owned);
         }
+    }
+
+    private void openMemberControl(Member member) throws IOException {
+        member.arena = SegmentArenaControlLog.openManifestWhileLocked(member.config, member.identity,
+                limits.controlLogBytes(), new SegmentFileIo(), member.controlGuard, member.owned, false);
     }
 
     private void bootstrapShards() throws IOException, InterruptedException {
