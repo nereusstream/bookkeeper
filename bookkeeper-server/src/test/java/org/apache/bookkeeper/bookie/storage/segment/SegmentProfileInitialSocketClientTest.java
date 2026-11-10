@@ -175,6 +175,7 @@ import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.data.Stat;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -3231,9 +3232,14 @@ public class SegmentProfileInitialSocketClientTest {
     }
 
     private static final String MANIFEST_OWNED_READINESS = "/manifest-owned-readiness";
+    private static final String SOCKET_SERVICE_READINESS = "/socket-service-readiness";
 
     private static String ownedManifestRegistration(ManifestWireLayout layout) {
-        return MANIFEST_OWNED_READINESS + "/" + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+        return manifestRegistration(MANIFEST_OWNED_READINESS, layout);
+    }
+
+    private static String manifestRegistration(String root, ManifestWireLayout layout) {
+        return root + "/" + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
                 layout.manifest().bookieId().toString().getBytes(StandardCharsets.UTF_8));
     }
 
@@ -3241,23 +3247,32 @@ public class SegmentProfileInitialSocketClientTest {
             ManifestSegmentStorage storage, ProfileReceiveBudget budget, ManifestRequirements requirements,
             RetainedManifestAccess access, ProfileLedgerMetadataStore metadata,
             java.util.concurrent.ScheduledExecutorService scheduler, Duration timeout) throws IOException {
+        return ownedManifestService(fixture, layout, storage, budget, requirements, access, metadata, scheduler,
+                timeout, MANIFEST_OWNED_READINESS, new InetSocketAddress("127.0.0.1", 0), 1);
+    }
+
+    private static SegmentManifestOwnedService ownedManifestService(Fixture fixture, ManifestWireLayout layout,
+            ManifestSegmentStorage storage, ProfileReceiveBudget budget, ManifestRequirements requirements,
+            RetainedManifestAccess access, ProfileLedgerMetadataStore metadata,
+            java.util.concurrent.ScheduledExecutorService scheduler, Duration timeout, String registrationRoot,
+            InetSocketAddress address, long generation) throws IOException {
         var manifest = layout.manifest();
         var policy = new SegmentManifestStartupPolicy(requirements.source().sourceIdentity(), manifest,
                 SegmentManifestAccessObservation.expectedRoots(manifest, layout.runtime()), access.old(),
                 access.newUid(), access.disposition());
         var preflight = policy.preflight(layout.runtime(), requirements.store(), requirements.source(),
                 fixture.reservations);
-        var persistent = new ZKProfileRegistrationStore(fixture.zk, MANIFEST_OWNED_READINESS,
+        var persistent = new ZKProfileRegistrationStore(fixture.zk, registrationRoot,
                 ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
-        var publisher = new ZKProfileEphemeralRegistrationStore(fixture.zk, MANIFEST_OWNED_READINESS,
+        var publisher = new ZKProfileEphemeralRegistrationStore(fixture.zk, registrationRoot,
                 manifest.bookieId().toString(), ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
         var startup = new SegmentManifestOwnedService.Startup(preflight, access.observed(), metadata, persistent,
                 publisher, fixture.zkWatcher, "ledger-profile", scheduler, fixture.cold, 8, timeout,
-                Duration.ofMillis(50), new Generation(1), List.of(1));
+                Duration.ofMillis(50), new Generation(generation), List.of(1));
         var read = new SegmentProfileReadConfig((caller, query) -> fixture.permitsReadContext(query.context()),
                 (caller, query) -> fixture.permitsReadContext(query.context()));
-        var transport = new SegmentProfileService.Transport(fixture.serverTls, budget, 131072, 64, "socket-test", 1,
-                new InetSocketAddress("127.0.0.1", 0), fixture.acceptor, fixture.worker,
+        var transport = new SegmentProfileService.Transport(fixture.serverTls, budget, 131072, 64, "socket-test",
+                generation, address, fixture.acceptor, fixture.worker,
                 fixture.controlConfigs.get(0), read);
         var config = new ServerConfiguration();
         var disk = new org.apache.bookkeeper.util.DiskChecker(config.getDiskUsageThreshold(),
@@ -5191,7 +5206,7 @@ public class SegmentProfileInitialSocketClientTest {
                     ? new HeldServicePublicationClient(fixture.cluster.getZooKeeperConnectString(), watcher)
                     : new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher);
             watcher.waitForConnection();
-            String root = "/socket-service-readiness";
+            String root = SOCKET_SERVICE_READINESS;
             String requiredRoot = "/socket-service-required-" + target + "-"
                     + Integer.toUnsignedString(config.directory().hashCode());
             for (String path : List.of(root, requiredRoot)) {
@@ -18030,10 +18045,7 @@ public class SegmentProfileInitialSocketClientTest {
         }
 
         ProfileRecoveryPeerPool newPeerPool() {
-            var cohort = fixture.identities.stream().map(identity -> identity.bookieId()).toList();
-            return new ProfileRecoveryPeerPool(episodes.get(0).persistent, fixture.clientGroup, fixture.peerTls,
-                    fixture.cold, cohort, new ProfileRecoveryPeerPool.Limits(
-                            2 * cohort.size(), 4 * cohort.size(), 2, 1060, Duration.ofSeconds(5)));
+            return publicProfilePeerPool(fixture, episodes.get(0).persistent);
         }
 
         @Override
@@ -18069,6 +18081,14 @@ public class SegmentProfileInitialSocketClientTest {
                 fixture.credential, bytes(16, 4), bytes(32, 5),
                 new ProfileCreateRequest.WriterLimits(8, 1024, 3, Duration.ofSeconds(5),
                         Duration.ofMillis(5), 4, Duration.ofSeconds(30)));
+    }
+
+    private static ProfileRecoveryPeerPool publicProfilePeerPool(Fixture fixture,
+            ZKProfileRegistrationStore registry) {
+        var cohort = fixture.identities.stream().map(identity -> identity.bookieId()).toList();
+        return new ProfileRecoveryPeerPool(registry, fixture.clientGroup, fixture.peerTls,
+                fixture.cold, cohort, new ProfileRecoveryPeerPool.Limits(
+                        2 * cohort.size(), 4 * cohort.size(), 2, 1060, Duration.ofSeconds(5)));
     }
 
     private static ProfileCreateRequest publicCreateRequest(Fixture fixture, long ledger) {
@@ -19206,6 +19226,223 @@ public class SegmentProfileInitialSocketClientTest {
                 }
             }
         }
+    }
+
+    @Test
+    public void publicProfileSdkUsesRegisteredManifestThroughHealthyRoll() throws Exception {
+        assumeTrue("Unix permission-bit experiment requires a non-root target credential",
+                ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
+        try (var fixture = new Fixture(false, false, true, 3, 3, true, true);
+                var classic = new SegmentClassicScopeEpisodeTest.Episode(fixture.cluster.getZooKeeperConnectString(),
+                        "/old-classic-manifest-public-sdk")) {
+            var layout = replaceWithManifest(fixture, 0);
+            var manifest = layout.manifest();
+            var bookie = manifest.bookieId().toString();
+            try (var created = layout.owner(manifestWireBudget(layout.capacity()))) {
+                created.startNew();
+            }
+            var access = observeRetainedManifest(classic, layout);
+            var required = provisionManifestPreflightRequirements(fixture, manifest, "/manifest-sdk-required",
+                    2, 2, List.of(1, 2), 2);
+            try (var second = publicProfileSingleArenaPeer(fixture, 1);
+                    var third = publicProfileSingleArenaPeer(fixture, 2);
+                    var sdk = sdk(fixture)) {
+                second.replaceNode(fixture, 1, false);
+                third.replaceNode(fixture, 2, false);
+                var registry = second.persistent;
+                var pool = publicProfilePeerPool(fixture, registry);
+                var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var initializer = new ProfileInitialLifecycleCoordinator(fixture.reservations, metadata,
+                        VALIDATOR, fixture.cold);
+                var coordinator = new ProfileRecoveryCoordinator(fixture.reservations, metadata, fixture.cold);
+                sdk.enableProfile(initializer, coordinator, VALIDATOR, pool, 4);
+
+                var firstRequest = publicCreateRequest(fixture, 44);
+                var secondRequest = publicCreateRequest(fixture, 45);
+                var firstContext = publicProfileCreateContext(firstRequest);
+                var secondContext = publicProfileCreateContext(secondRequest);
+                fixture.retainedReadContexts = Set.of(firstContext, secondContext);
+                var firstPayload = bytes(16, 44);
+                var secondPayload = bytes(24, 45);
+                var timeout = Duration.ofSeconds(7);
+                var scheduler = sdk.getClientCtx().getScheduler();
+                var budget = manifestWireBudget(layout.capacity());
+                var storage = layout.owner(budget);
+                var registration = manifestRegistration(SOCKET_SERVICE_READINESS, layout);
+                InetSocketAddress address;
+                ZKProfileRegistrationStore.RegisteredPeer oldPeer;
+                String oldSessionMarker;
+                try (var service = ownedManifestService(fixture, layout, storage, budget, required, access,
+                        metadata, scheduler, timeout, SOCKET_SERVICE_READINESS,
+                        new InetSocketAddress("127.0.0.1", 0), 1)) {
+                    address = service.start();
+                    oldPeer = assertRegisteredManifest(fixture, registry, bookie, address, 1);
+                    oldSessionMarker = manifestSessionMarker(fixture, registration);
+                    writeClosedPublicProfileLedger(sdk, firstRequest, firstPayload);
+                    writeClosedPublicProfileLedger(sdk, secondRequest, secondPayload);
+                    assertOwnedManifestRoute(storage, layout, firstContext, 0);
+                    assertOwnedManifestRoute(storage, layout, secondContext, 1);
+                    assertPublicProfilePayload(sdk, fixture, firstContext.ledgerId(), firstPayload);
+                    assertPublicProfilePayload(sdk, fixture, secondContext.ledgerId(), secondPayload);
+                    assertPublicProfilePoolDrained(pool);
+                }
+                var manager = (AbstractZkLedgerManager) fixture.manager;
+                var firstPath = manager.getLedgerPath(firstContext.ledgerId());
+                var secondPath = manager.getLedgerPath(secondContext.ledgerId());
+                var firstClosed = readPublicProfileMetadata(fixture, firstPath);
+                var secondClosed = readPublicProfileMetadata(fixture, secondPath);
+                assertNull(fixture.zk.exists(registration + "/writable", false));
+                assertNull(fixture.zk.exists(registration + "/" + oldSessionMarker, false));
+                assertNull(registry.readPeer(bookie).peer());
+                for (var lane : ProfileReceiveBudget.Lane.values()) {
+                    assertEquals(0, budget.used(lane));
+                    assertEquals(0, budget.usedConnections(lane));
+                }
+                assertPublicProfileCreateRequiresManifest(sdk, fixture, registry);
+                assertPublicProfilePoolDrained(pool);
+
+                var script = Path.of("../scripts/unified-wal/probe-new-scope-access.py").toRealPath();
+                var observed = manifestAccess(layout, access.old(), access.newUid(), script);
+                var verified = new RetainedManifestAccess(observed, access.old(), access.newUid(),
+                        access.disposition());
+                var reopenedBudget = manifestWireBudget(layout.capacity());
+                try (var reopened = ownedManifestService(fixture, layout, layout.owner(reopenedBudget), reopenedBudget,
+                        required, verified, metadata, scheduler, timeout, SOCKET_SERVICE_READINESS, address, 2)) {
+                    assertEquals(address, reopened.start());
+                    var current = assertRegisteredManifest(fixture, registry, bookie, address, 2);
+                    assertEquals(oldPeer.projection().storageIncarnation(), current.projection().storageIncarnation());
+                    assertNotEquals(oldSessionMarker, manifestSessionMarker(fixture, registration));
+                    assertEquals(required.source().sourceIdentity(),
+                            required.store().readManifest(bookie).observation().orElseThrow().sourceIdentity());
+                    assertNull(registry.revalidatePeer(oldPeer).peer());
+                    var stale = ProfileNormalDataClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                            registry, oldPeer, fixture.cold, 4, 1060, Duration.ofSeconds(5));
+                    try {
+                        assertThrows(ExecutionException.class, () -> stale.completion().get(5, TimeUnit.SECONDS));
+                    } finally {
+                        stale.closeAsync().get(5, TimeUnit.SECONDS);
+                    }
+                    assertEquals(0, stale.backingBytes());
+                    assertEquals(0, stale.codecWorkspaceBytes());
+                    assertPublicProfilePayload(sdk, fixture, firstContext.ledgerId(), firstPayload);
+                    assertPublicProfilePayload(sdk, fixture, secondContext.ledgerId(), secondPayload);
+                    assertPublicProfilePoolDrained(pool);
+
+                    // CLOSED reads retain the original ensemble but can serve data from its one available member.
+                    second.service.close();
+                    third.service.close();
+                    for (int target : List.of(1, 2)) {
+                        assertNull(registry.readPeer(fixture.identities.get(target).bookieId().toString()).peer());
+                    }
+                    assertPublicProfilePayload(sdk, fixture, firstContext.ledgerId(), firstPayload);
+                    assertPublicProfilePayload(sdk, fixture, secondContext.ledgerId(), secondPayload);
+                    assertPublicProfilePoolDrained(pool);
+                    assertPublicProfileMetadataUnchanged(firstClosed, readPublicProfileMetadata(fixture, firstPath));
+                    assertPublicProfileMetadataUnchanged(secondClosed, readPublicProfileMetadata(fixture, secondPath));
+                    sdk.close();
+                }
+            }
+        }
+    }
+
+    private ServiceEpisode publicProfileSingleArenaPeer(Fixture fixture, int target) throws Exception {
+        var original = files(fixture.nodes.get(target)).config();
+        var config = new IsolatedSegmentConfig(temporary.newFolder().toPath().resolve("sdk-single-arena"),
+                1, 1, 1, original.bytesPerFile(), 4096, 1024, 16, "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
+        var policy = servicePolicy(config, fixture.identities.get(target), 1);
+        return new ServiceEpisode(fixture, target, config, policy, policy.compatibility(),
+                new InetSocketAddress("127.0.0.1", 0), fixture.clientGroup);
+    }
+
+    private static ZKProfileRegistrationStore.RegisteredPeer assertRegisteredManifest(Fixture fixture,
+            ZKProfileRegistrationStore registry, String bookie, InetSocketAddress address, long generation) {
+        var peer = registry.readPeer(bookie).peer();
+        assertNotNull(peer);
+        assertEquals("tls://127.0.0.1:" + address.getPort(), peer.projection().endpoint());
+        assertEquals(generation, peer.projection().readinessGeneration().value());
+        assertEquals(fixture.zk.getSessionId(), peer.publisherSession());
+        assertEquals(1, peer.readiness().protocolMajor());
+        assertEquals(0, peer.readiness().protocolMinor());
+        return peer;
+    }
+
+    private static String manifestSessionMarker(Fixture fixture, String registration) throws Exception {
+        var markers = fixture.zk.getChildren(registration, false).stream()
+                .filter(child -> child.startsWith("session-")).toList();
+        assertEquals(1, markers.size());
+        return markers.get(0);
+    }
+
+    private static ProfileLedgerContext publicProfileCreateContext(ProfileCreateRequest request) {
+        var scope = request.reservation().installs().get(0);
+        return new ProfileLedgerContext(scope.ledgerId(), scope.ledgerInstanceId(),
+                scope.descriptorIdentity().toBytes());
+    }
+
+    private static void writeClosedPublicProfileLedger(BookKeeper sdk, ProfileCreateRequest request, byte[] payload)
+            throws Exception {
+        assertEquals(0, request.maxEnsembleChanges());
+        try (var writer = sdk.createProfileLedger(request).get(10, TimeUnit.SECONDS)) {
+            assertEquals(0, writer.addEntry(payload));
+            assertEquals(0, writer.getLastAddConfirmed());
+            assertEquals(payload.length, writer.getLength());
+            writer.closeAsync().get(30, TimeUnit.SECONDS);
+            var closed = writer.getLedgerMetadata();
+            assertEquals(LedgerMetadata.State.CLOSED, closed.getState());
+            assertEquals(0, closed.getLastEntryId());
+            assertEquals(payload.length, closed.getLength());
+            assertEquals(3, closed.getEnsembleSize());
+            assertEquals(3, closed.getWriteQuorumSize());
+            assertEquals(3, closed.getAckQuorumSize());
+        }
+    }
+
+    private static void assertPublicProfilePayload(BookKeeper sdk, Fixture fixture, long ledger, byte[] payload)
+            throws Exception {
+        try (var reader = sdk.openProfileLedgerReadOnly(ledger, fixture.password).get(10, TimeUnit.SECONDS);
+                var entries = reader.readAsync(0, 0).get(5, TimeUnit.SECONDS)) {
+            assertArrayEquals(payload, entries.getEntry(0).getEntryBytes());
+        }
+    }
+
+    private static void assertPublicProfilePoolDrained(ProfileRecoveryPeerPool pool) {
+        assertEquals(0, pool.usage().reservedConnections());
+        assertEquals(0, pool.usage().reservedRpcSlots());
+    }
+
+    private record PublicProfileMetadata(byte[] bytes, long birthZxid, int version) { }
+
+    private static PublicProfileMetadata readPublicProfileMetadata(Fixture fixture, String path) throws Exception {
+        var stat = new Stat();
+        byte[] bytes = fixture.zk.getData(path, false, stat);
+        return new PublicProfileMetadata(bytes, stat.getCzxid(), stat.getVersion());
+    }
+
+    private static void assertPublicProfileMetadataUnchanged(
+            PublicProfileMetadata before, PublicProfileMetadata after) {
+        assertEquals(before.birthZxid(), after.birthZxid());
+        assertEquals(before.version(), after.version());
+        assertArrayEquals(before.bytes(), after.bytes());
+    }
+
+    private static void assertPublicProfileCreateRequiresManifest(BookKeeper sdk, Fixture fixture,
+            ZKProfileRegistrationStore registry) throws Exception {
+        long ledger = 46;
+        var second = bookie(fixture.nodes.get(1));
+        var third = bookie(fixture.nodes.get(2));
+        long secondCut = second.appliedThrough();
+        long thirdCut = third.appliedThrough();
+        for (int target : List.of(1, 2)) {
+            assertNotNull(registry.readPeer(fixture.identities.get(target).bookieId().toString()).peer());
+        }
+        var refused = assertThrows(ExecutionException.class,
+                () -> sdk.createProfileLedger(publicCreateRequest(fixture, ledger)).get(10, TimeUnit.SECONDS));
+        assertEquals(BKException.Code.NotEnoughBookiesException, ((BKException) refused.getCause()).getCode());
+        assertEquals(ProfileControlStore.ReadStatus.NOT_FOUND, fixture.reservations.read(ledger).status());
+        assertNull(fixture.zk.exists(((AbstractZkLedgerManager) fixture.manager).getLedgerPath(ledger), false));
+        assertEquals(secondCut, second.appliedThrough());
+        assertEquals(thirdCut, third.appliedThrough());
     }
 
     @Test

@@ -439,6 +439,8 @@ ZooKeeper `Op.check` 校验路径与 data version。正常 provisioning 的新 U
 
 2026-11-11，父版本 `b5f194f9b4`。macOS owner-enabled APFS/JNI 上，真实 old Classic 排空与 UWNS2 后重开双 Arena，实际随机端口的 pending mTLS listener 完成 HELLO 并拒绝 READ、ADD 和 FENCE。原 session 发布的 endpoint 与实际 bind 一致，首次开门后读回两条历史 3/3/3 ledger，沿 preconnected SDK 在两个 Arena 新建、写入和正常关闭账本。跨过 startup deadline 后，G1 follower 从实际游标应用删除，单次 Bookie force，Arena 控制 cut 保持不变，物理删除回执仍缺席，邻接账本可读且后续新账本可写。原 legacy handoff 的空 G2 与 OPEN_ACL 下同字节、同 UUID 的 requirements 重建各触发实际在线退休和撤销。真实 DATA force 和已提交 demotion 的回调均被挂起时保留原 guard/额度，实际排空后健康重开；scheduler 拒绝从未标记 first-open。只绕过 owned first-open 的变体使 pending READ 从 PROFILE_NOT_READY_OR_STALE 变为 OK。最终 45 项定向回归全部通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-owned-parent-b5f194f9`。父版本的 5 项基线与更早 62 项冷发布验证分别保留。
 
+后续[公开 SDK 经注册池访问固定 manifest](../profile-wire/README.md#公开-sdk-经注册池访问固定-manifest)在同一原生 registry 混用 schema 2 双 Arena 服务和两个 v1 单 Arena 服务。双 Arena 服务实际 drain 后撤销 writable 与旧 session marker。用新 UWNS2 重新核对同一组文件，在同地址以新 readiness generation 和 nonce 重开，schema 2 requirements 的原 source birth 保持。原注册池拒绝旧观察，公开 SDK 使用新观察读回原 CLOSED 账本。初次服务 drain 后的 receive bytes 和 connections、每次 SDK 读写完结后的 pool 配额均归还。
+
 ## 显式 Profile 服务启动与 owner 排空
 
 2026-10-12，`SegmentProfileService` 将原 graph、DLR receipt、session admission、listener 和 delete consumer 接成一个显式隔离服务 episode。构造 owner 不打开目录、创建 graph 或绑定端口；`start(existing)` 由外部 cold caller 执行，先读取原 immutable requirements、运行原 version/scope/new-scope 检查，再核对 fallback 的 ARENA/INDEX 根与将要打开的原生目录。已存在的祖先通过 real path 解析，未创建的后缀保持计划路径；错根、相对根及与任一 old root 的祖先/后代重叠拒绝。此检查只绑定路径，不生产 Unix access、old-service disposition 或永久隔离事实，物理 proof issuer 仍由调用方提供。

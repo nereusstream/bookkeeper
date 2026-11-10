@@ -138,7 +138,17 @@ replacement candidate 的机器锁见 [`candidate.json`](candidate.json)，记�
 
 上述 READY 属于 ledger 初始化。`SegmentProfileService.withOwnedResources` 仍在构造时拒绝两个必需 Arena，未创建存储目录。Bookie owned startup readiness、ephemeral writable 注册、注册池及其 SDK 公共工厂、自动维护和生产 Gate 各有独立验收。
 
-[受控固定 manifest 服务](../startup-readiness/README.md#受控固定-manifest-服务) 使用同一 mTLS handler 和实际回环地址。pending listener 完成 HELLO 后拒绝业务请求，原 session 注册确认后才首次开门。这里的实际写读沿 preconnected SDK 链，公开 create/open 工厂与公共 owned 配置入口仍有独立验收。
+[受控固定 manifest 服务](../startup-readiness/README.md#受控固定-manifest-服务) 使用同一 mTLS handler 和实际回环地址。pending listener 完成 HELLO 后拒绝业务请求，原 session 注册确认后才首次开门。该节点的实际写读沿 preconnected SDK 链。
+
+## 公开 SDK 经注册池访问固定 manifest
+
+步骤 12→13 的集成用例在同一隔离 ZooKeeper registry 中启动一个受控双 Arena manifest 服务和两个原单 Arena 服务。双 Arena 服务使用新建的 schema 2 requirements、既有文件的健康 CLOSE、实际 Classic JVM 写读和有序退出后的 UWNS2。服务端校验本地 reader/writer 2/2 与必需特性 `[1,2]`。客户端沿 `BookKeeper.enableProfile`、`createProfileLedger` 和 `openProfileLedgerReadOnly` 使用原 `ProfileLedgerClient`。原 `ProfileRecoveryPeerPool` 从 `ZKProfileRegistrationStore` 发现并复核原生观察，经注册的 CONTROL/DATA mTLS 连接校验实际 endpoint、会话身份、incarnation、readiness generation 与 wire 1.0。
+
+两个 3/3/3 ledger 由原初始化协调器安装并激活，`maxEnsembleChanges=0`。公开 SDK 完成写入确认、正常 CLOSE 和读取，两个物理 Arena 各查到对应 ledger 的 DATA 记录。只滚动 manifest 服务，同 Bookie、incarnation、schema 2 source birth 和 loopback 地址以 generation 2 和新注册 nonce 重开。旧观察无法复核或用于重新连接。原服务缺席时，另外两个目标仍在线，公开 create 返回 `NotEnoughBookiesException`，目标 ledger 的原生 reservation 和 ledger metadata 缺席，两个存活目标的控制 cut 保持原值。健康滚动后用原 SDK 池重新发现并读取。随后停掉其余两个服务，仅由 manifest 服务读回两个 Arena 中的原字节。原 CLOSED 元数据的原生字节、出生 zxid 和版本均一致，SDK 连接槽和 RPC 槽随 handle 关闭归还。
+
+2026-11-11，父版本 `6c6afeeb54`。在 macOS owner-enabled APFS/JNI 上运行 `SegmentProfileInitialSocketClientTest#publicProfileSdkUsesRegisteredManifestThroughHealthyRoll` 与七项相关回归，覆盖原公开 create/readonly、真实滚动和连接身份、共享读 lease、Classic 路由边界、manifest first-open/G1 和 G2 退休。最终 8 项通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。父版独立的 3 项基线、最终 selector、原始 XML 与源码哈希位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-sdk-parent-6c6afeeb`。
+
+此用例验证既有生产调用链的受控组合。公共服务工厂、Main、生产 issuer、Linux D2、掉电、异常同身份重开和完整 16 步生产资格仍待验收。
 
 ## 真实隔离普通 Add 接线
 
