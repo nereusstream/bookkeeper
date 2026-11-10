@@ -1577,7 +1577,18 @@ public final class ZKProfileReservationStore {
     /** Read the historical native seal. Current candidate bytes and source registrations are separate observations. */
     public ProfileManifestClosedReady.Receipt readManifestClosedReady(ProfileManifestClosedAdmission.Scope scope)
             throws IOException, InterruptedException {
-        long deadline = System.nanoTime() + timeoutNanos;
+        return readManifestClosedReady(scope, System.nanoTime() + timeoutNanos);
+    }
+
+    /** Bound the original inspection episode by this store's native read budget. */
+    public long manifestReadyReadDeadline(long callerDeadline) {
+        long now = System.nanoTime();
+        return now + Math.min(callerDeadline - now, timeoutNanos);
+    }
+
+    public ProfileManifestClosedReady.Receipt readManifestClosedReady(ProfileManifestClosedAdmission.Scope scope,
+            long callerDeadline) throws IOException, InterruptedException {
+        long deadline = manifestReadyReadDeadline(callerDeadline);
         try {
             var admitted = readManifestClosedAdmission(scope, deadline);
             return admitted == null ? null : readManifestClosedReady(admitted, deadline);

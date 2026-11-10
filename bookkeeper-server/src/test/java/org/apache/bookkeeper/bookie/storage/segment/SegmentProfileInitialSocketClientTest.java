@@ -19690,9 +19690,14 @@ public class SegmentProfileInitialSocketClientTest {
         observeManifestNativeClosedCohort(ManifestClosedAudit.READY_SOURCE);
     }
 
+    @Test
+    public void manifestReadyObservesOnlyTheExactGlobalSwitchPrefixWithMissingActiveData() throws Exception {
+        observeManifestNativeClosedCohort(ManifestClosedAudit.SWITCH_PREFIX);
+    }
+
     private enum ManifestClosedAudit {
         OPEN, NATIVE, DATA, SOURCES, ADMISSION, ADMISSION_DELETE, ADMISSION_SOURCE, PREPARATION, PREPARATION_FORCE,
-        READY, READY_SOURCE
+        READY, READY_SOURCE, SWITCH_PREFIX
     }
 
     private void observeManifestNativeClosedCohort(ManifestClosedAudit audit) throws Exception {
@@ -19701,7 +19706,8 @@ public class SegmentProfileInitialSocketClientTest {
         boolean closeEmpty = audit != ManifestClosedAudit.OPEN;
         boolean preparation = audit == ManifestClosedAudit.PREPARATION
                 || audit == ManifestClosedAudit.PREPARATION_FORCE;
-        boolean ready = audit == ManifestClosedAudit.READY || audit == ManifestClosedAudit.READY_SOURCE;
+        boolean ready = audit == ManifestClosedAudit.READY || audit == ManifestClosedAudit.READY_SOURCE
+                || audit == ManifestClosedAudit.SWITCH_PREFIX;
         boolean imageFixture = preparation || ready;
         boolean admission = audit == ManifestClosedAudit.ADMISSION || audit == ManifestClosedAudit.ADMISSION_DELETE
                 || audit == ManifestClosedAudit.ADMISSION_SOURCE || imageFixture;
@@ -19851,8 +19857,10 @@ public class SegmentProfileInitialSocketClientTest {
                         assertManifestObservationReleased(budget);
                     }
                 }
-                try (var refused = layout.owner(manifestWireBudget(layout.capacity()))) {
-                    assertThrows(IOException.class, refused::restart);
+                if (audit != ManifestClosedAudit.SWITCH_PREFIX) {
+                    try (var refused = layout.owner(manifestWireBudget(layout.capacity()))) {
+                        assertThrows(IOException.class, refused::restart);
+                    }
                 }
                 if (!imageFixture) {
                     assertEquals(before, manifestTreeDigests(layout));
@@ -19951,13 +19959,17 @@ public class SegmentProfileInitialSocketClientTest {
                     assertNotNull(receipt);
                     assertEquals(admitted, receipt.admitted());
                     assertManifestReadyNative(fixture, zk.directAdmissionPath, holder, active, activeStat, receipt);
-                    var timedOut = assertThrows(ExecutionException.class, () -> result.get(17, TimeUnit.SECONDS));
-                    assertTrue(timedOut.getCause().toString(),
-                            timedOut.getCause().getMessage().contains("not confirmed within its original deadline"));
-                    assertFalse(owner.close(Duration.ofMillis(100)));
-                    assertManifestAdmissionHeld(layout, budget);
-                    zk.readyCallback.get(5, TimeUnit.SECONDS).run();
-                    assertTrue(owner.close(Duration.ofSeconds(5)));
+                    if (audit == ManifestClosedAudit.READY) {
+                        var timedOut = assertThrows(ExecutionException.class, () -> result.get(17, TimeUnit.SECONDS));
+                        assertTrue(timedOut.getCause().toString(), timedOut.getCause().getMessage()
+                                .contains("not confirmed within its original deadline"));
+                        assertFalse(owner.close(Duration.ofMillis(100)));
+                        assertManifestAdmissionHeld(layout, budget);
+                        zk.readyCallback.get(5, TimeUnit.SECONDS).run();
+                        assertTrue(owner.close(Duration.ofSeconds(5)));
+                    } else {
+                        assertEquals(receipt, result.get(5, TimeUnit.SECONDS));
+                    }
                 }
                 assertEquals(staged, manifestTreeDigests(layout));
                 assertManifestObservationReleased(budget);
@@ -19973,7 +19985,7 @@ public class SegmentProfileInitialSocketClientTest {
                 assertFalse(caller.isAlive());
             }
         }
-        if (receipt != null) {
+        if (receipt != null && audit == ManifestClosedAudit.READY) {
             assertManifestReadyImages(layout, stages, before, receipt);
             assertManifestReadyRetry(fixture, layout, metadata, reservations, budget, rows, bytes, timeout,
                     sources, publisher, operation, stages, receipt);
@@ -19991,6 +20003,130 @@ public class SegmentProfileInitialSocketClientTest {
                         root.resolve("data-" + file.index()), file.image().length()));
             }
         }
+        if (audit == ManifestClosedAudit.SWITCH_PREFIX) {
+            assertNotNull(receipt);
+            third.service.close();
+            assertManifestSwitchPrefixes(fixture, layout, rows, timeout, stages, receipt);
+        }
+    }
+
+    private static void assertManifestSwitchPrefixes(Fixture fixture, ManifestWireLayout layout, int rows,
+            Duration timeout, List<Path> stages, ProfileManifestClosedReady.Receipt ready) throws Exception {
+        var manifest = layout.manifest();
+        long required = ManifestSegmentStorage.manifestSwitchDataReadBytes(manifest);
+        long oneGraph = manifest.arenas().stream().mapToLong(arena -> arena.bytesPerFile() * arena.dataFiles()).sum();
+        assertEquals(4 * oneGraph + 6L * 4096 * 4, required);
+        var budget = manifestWireBudget(layout.capacity().withRecoveryDependencies(manifest.arenas().size(), rows)
+                .withAdditionalData(ManifestSegmentStorage.manifestImageDataBytes())
+                .withAdditionalControl(ManifestSegmentStorage.manifestSwitchControlBytes(manifest)));
+        var scope = ready.admitted().admission().scope();
+        var operation = ready.ready().operation();
+        var original = SegmentManifestSwitchPrefix.Phase.ORIGINAL;
+        var retained = SegmentManifestSwitchPrefix.Phase.RETAINED;
+        var installed = SegmentManifestSwitchPrefix.Phase.INSTALLED;
+        try (var owner = layout.owner(budget)) {
+            var tooSmall = assertThrows(IOException.class, () -> owner.observeClosedManifestSwitchPrefix(scope,
+                    operation, rows, required - 1, timeout, fixture.reservations));
+            assertTrue(tooSmall.toString(), tooSmall.getMessage().contains("full DATA read bound"));
+            assertManifestObservationReleased(budget);
+        }
+        assertManifestSwitchPrefix(fixture, layout, budget, rows, required, timeout, ready,
+                List.of(List.of(original), List.of(original, original), List.of(original)), null);
+
+        Path first = manifest.arenas().get(0).directory();
+        Path second = manifest.arenas().get(1).directory();
+        Path last = manifest.arenas().get(2).directory();
+        var nativeIo = new org.apache.bookkeeper.common.util.nativeio.NativeIOImpl();
+        // Materialize the exact filesystem states using native rename only in this controlled fixture.
+        moveManifestTestData(nativeIo, last.resolve("data-0"), stages.get(2).resolve("retained-old-0"));
+        moveManifestTestData(nativeIo, stages.get(2).resolve("image-0"), last.resolve("data-0"));
+        assertManifestSwitchPrefix(fixture, layout, budget, rows, required, timeout, ready, null,
+                "outside the global switch prefix");
+        moveManifestTestData(nativeIo, last.resolve("data-0"), stages.get(2).resolve("image-0"));
+        moveManifestTestData(nativeIo, stages.get(2).resolve("retained-old-0"), last.resolve("data-0"));
+
+        moveManifestTestData(nativeIo, first.resolve("data-0"), stages.get(0).resolve("retained-old-0"));
+        moveManifestTestData(nativeIo, stages.get(0).resolve("image-0"), first.resolve("data-0"));
+        moveManifestTestData(nativeIo, second.resolve("data-0"), stages.get(1).resolve("retained-old-0"));
+        assertFalse(Files.exists(second.resolve("data-0"), java.nio.file.LinkOption.NOFOLLOW_LINKS));
+        assertManifestSwitchPrefix(fixture, layout, budget, rows, required, timeout, ready,
+                List.of(List.of(installed), List.of(retained, original), List.of(original)), null);
+        try (var activeOnly = layout.owner(budget)) {
+            assertThrows(IOException.class, () -> activeOnly.withRecoveryDependencies(rows, timeout, result -> result));
+            assertManifestObservationReleased(budget);
+        }
+
+        moveManifestTestData(nativeIo, stages.get(1).resolve("image-0"), second.resolve("data-0"));
+        moveManifestTestData(nativeIo, second.resolve("data-1"), stages.get(1).resolve("retained-old-1"));
+        moveManifestTestData(nativeIo, stages.get(1).resolve("image-1"), second.resolve("data-1"));
+        moveManifestTestData(nativeIo, last.resolve("data-0"), stages.get(2).resolve("retained-old-0"));
+        moveManifestTestData(nativeIo, stages.get(2).resolve("image-0"), last.resolve("data-0"));
+        var installedPrefix = List.of(List.of(installed), List.of(installed, installed), List.of(installed));
+        assertManifestSwitchPrefix(fixture, layout, budget, rows, required, timeout, ready, installedPrefix, null);
+
+        Path lastActive = last.resolve("data-0");
+        Path saved = Files.move(lastActive, last.resolve("test-retained-active-0"));
+        try {
+            Files.copy(saved, lastActive);
+            assertManifestSwitchPrefix(fixture, layout, budget, rows, required, timeout, ready, null,
+                    "exact READY object");
+        } finally {
+            Files.deleteIfExists(lastActive);
+            Files.move(saved, lastActive);
+        }
+        var beforeStartup = manifestPlacementSnapshot(layout, stages);
+        try (var refused = layout.owner(manifestWireBudget(layout.capacity()))) {
+            assertThrows(IOException.class, refused::restart);
+        }
+        assertEquals(beforeStartup, manifestPlacementSnapshot(layout, stages));
+    }
+
+    private static void assertManifestSwitchPrefix(Fixture fixture, ManifestWireLayout layout,
+            ProfileReceiveBudget budget, int rows, long required, Duration timeout,
+            ProfileManifestClosedReady.Receipt ready, List<List<SegmentManifestSwitchPrefix.Phase>> expected,
+            String refusal) throws Exception {
+        var operation = ready.ready().operation();
+        var scope = ready.admitted().admission().scope();
+        var stages = layout.manifest().arenas().stream()
+                .map(arena -> arena.directory().resolve(".closed-manifest-image-" + operation)).toList();
+        var before = manifestPlacementSnapshot(layout, stages);
+        try (var owner = layout.owner(budget)) {
+            if (expected != null) {
+                var observed = owner.observeClosedManifestSwitchPrefix(scope, operation, rows, required, timeout,
+                        fixture.reservations);
+                assertEquals(ready, observed.ready());
+                assertEquals(expected, observed.arenas());
+            } else {
+                var failed = assertThrows(IOException.class, () -> owner.observeClosedManifestSwitchPrefix(
+                        scope, operation, rows, required, timeout, fixture.reservations));
+                assertTrue(failed.toString(), failed.getMessage().contains(refusal));
+            }
+            assertManifestObservationReleased(budget);
+        }
+        assertEquals(before, manifestPlacementSnapshot(layout, stages));
+        assertEquals(ready, fixture.reservations.readManifestClosedReady(scope));
+    }
+
+    private record ManifestPlacementSnapshot(Map<Path, String> digests, Map<Path, Object> objects) { }
+
+    private static ManifestPlacementSnapshot manifestPlacementSnapshot(ManifestWireLayout layout, List<Path> stages)
+            throws Exception {
+        var digests = manifestTreeDigests(layout);
+        var objects = new HashMap<Path, Object>();
+        var paths = new ArrayList<>(digests.keySet());
+        paths.addAll(stages);
+        for (Path name : paths) {
+            objects.put(name, Files.readAttributes(name, java.nio.file.attribute.BasicFileAttributes.class,
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS).fileKey());
+        }
+        return new ManifestPlacementSnapshot(digests, objects);
+    }
+
+    private static void moveManifestTestData(org.apache.bookkeeper.common.util.nativeio.NativeIO nativeIo,
+            Path source, Path target) throws IOException {
+        assertEquals(0, nativeIo.renameNoReplace(source.toString(), target.toString()));
+        IsolatedSegmentFiles.syncDirectory(source.getParent());
+        IsolatedSegmentFiles.syncDirectory(target.getParent());
     }
 
     private static void assertManifestReadyNative(Fixture fixture, String parent, String holder, byte[] active,

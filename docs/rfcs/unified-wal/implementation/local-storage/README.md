@@ -1002,6 +1002,16 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 真实三 Arena 用例封印四个候选文件。READY 已提交但实际回调跨过截止时间时，独立读回确认 SEALED 和 READY 的同事务出生，七把原锁及两类额度继续保留。旧版本接管请求返回 `BADVERSION`，普通 claim 也拒绝 SEALED。同 operation 的精确重验不产生新 mutation，同字节新 inode 不能通过。实际 survivor 在 READY 发往 ZooKeeper 前撤回时，事务返回 `NONODE`，UWMP 保持原准备态。最终 20 项定向测试、Spotless 和 Checkstyle 均通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-ready-parent-bc39305c`。
 
+### 固定 manifest 的 READY 切换前缀观察
+
+以 `9a6972baee` 为基线。新只读入口在原根上重新取得共同 Bookie 锁和各 Arena 的 DATA、CONTROL 锁，再读取原 UWMA、SEALED UWMP 和 UWMR。按原 manifest 顺序和文件索引逐项核对 active、`image-N` 与 `retained-old-N` 的实际身份、单链接、长度、header 和完整 SHA。只接受全局 `I* R? O*`。I 表示新对象已在 active、旧对象仍保留，R 表示 active 明确不存在、旧对象已保留、新对象仍在暂存，O 表示原 active 和新暂存对象均在原位。所有暂存目录和完整旧向量都必须存在。
+
+完整前缀通过后，只读回放为每个文件选择其原对象所在路径。共同 Bookie 和逐 Arena 的原 cut、epoch、控制代和历史摘要，以及完整本地账本与路由均须匹配 UWMA。结果交付前复核 native READY、控制向量、所有文件位置和字节、根及实际锁。DATA 读取上限覆盖两轮原对象与候选的完整哈希和六次每文件身份页读取。日志回放、记录行及工作缓冲使用原图额度。
+
+结果只证明本次持锁时看到的历史 READY 和实际布局。目录持久屏障、跨进程续接授权、DATA 改名、控制结算和后继 OPEN 仍需独立验收。
+
+真实三 Arena 四文件夹具在测试侧用 no-replace 改名和双目录同步构造全 O、跨 Arena 的 I/R/O 和完整保留旧对象的全 I。新的 owner 能识别真实 active 缺失，跨 Arena 乱序与末文件同字节新 inode 均被拒绝。检查前后的原生 READY、路径对象和文件字节一致；普通 startup 仍拒绝有 grant 的旧 OPEN。主例和相关回归共 6 项通过，Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-switch-prefix-parent-9a6972ba`。
+
 ### 单 DATA 文件的 CLOSED 重建准入
 
 基线 `e96bd97d6d`。原受控 publisher 的 PID、进程出生与注册 session 在其运行期间取得，等待进程实际退出。原三把锁下完整重放控制历史。仅支持一个已安装、fenced 且 normal-inactive 的 ledger，一个 DATA 文件和当前单 fragment `3/3/3` CLOSED。旧 target 仍是原成员，保留在原删除目标历史。原 Bookie 的唯一已应用 recovery grant 须与当前 native SELF intent、commit birth、完整 close scope 和本地 terminal 应用精确对应。旧准入要求 grant 列表为空的断言在真实非空 close 上失败，重放实际返回一条已关闭的 `[0,1]` SELF grant。其他已应用 grant、额外本地 context、MOVE、FREE、复用和删除状态拒绝。

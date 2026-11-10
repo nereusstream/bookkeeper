@@ -22,6 +22,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.file.Files;
@@ -141,6 +142,9 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     /** Completed local observations. This value carries no publication authority after the guards drain. */
     record ManifestImageObservation(ProfileManifestPreparation.Receipt attempt, List<PreparedArenaImages> arenas) { }
 
+    record SwitchPrefixObservation(ProfileManifestClosedReady.Receipt ready,
+            List<List<SegmentManifestSwitchPrefix.Phase>> arenas) { }
+
     static final class LockedManifestImages {
         final SegmentClosedReconstruction.PreparedManifestAdmission admission;
         final ProfileManifestPreparation.Receipt attempt;
@@ -170,6 +174,11 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     @FunctionalInterface
     private interface CheckedRecoveryResult<T, R> {
         R finish(T observation) throws Exception;
+    }
+
+    @FunctionalInterface
+    private interface LockedRecoveryObservation<T> {
+        T observe(List<FileIdentity> paths) throws Exception;
     }
 
     static long closedDataCapacity(SegmentArenaManifest manifest, int maximumRows, int maximumEntries)
@@ -509,26 +518,8 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             long additionalControlBytes, RecoveryDependencyObserver<T> observer,
             CheckedRecoveryResult<T, R> complete) throws Exception {
         Objects.requireNonNull(observer, "observer");
-        if (deadline - System.nanoTime() > TimeUnit.MINUTES.toNanos(1)
-                || additionalDataBytes < 0 || additionalControlBytes < 0) {
-            throw new IllegalArgumentException("Manifest recovery observation requires bounded time and capacity");
-        }
         var rows = new SegmentStorageInspector.RecoveryRows(maximumRows);
-        synchronized (lifecycle) {
-            claimStartup();
-            observingRecoveryDependencies = true;
-        }
-        Throwable failed = null;
-        R result;
-        try {
-            requireRecoveryObservationLive(deadline);
-            reserveCapacity(capacity(manifest, control, settings, limits)
-                    .withRecoveryDependencies(members.size(), maximumRows)
-                    .withAdditionalData(additionalDataBytes)
-                    .withAdditionalControl(additionalControlBytes));
-            requireRoots(true);
-            acquireGuards(true);
-            var paths = recoveryPathIdentities();
+        return withRecoveryGuardsUntil(maximumRows, deadline, additionalDataBytes, additionalControlBytes, paths -> {
             var before = readRecoveryDependencies(rows, deadline);
             requireRecoveryPaths(paths, deadline);
             T observed = observer.observe(before);
@@ -538,7 +529,31 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 throw new IOException("Manifest recovery control dependencies changed during observation");
             }
             requireRecoveryPaths(paths, deadline);
-            result = complete.finish(observed);
+            return complete.finish(observed);
+        });
+    }
+
+    private <T> T withRecoveryGuardsUntil(int maximumRows, long deadline, long additionalDataBytes,
+            long additionalControlBytes, LockedRecoveryObservation<T> observer) throws Exception {
+        if (deadline - System.nanoTime() > TimeUnit.MINUTES.toNanos(1)
+                || additionalDataBytes < 0 || additionalControlBytes < 0) {
+            throw new IllegalArgumentException("Manifest recovery observation requires bounded time and capacity");
+        }
+        synchronized (lifecycle) {
+            claimStartup();
+            observingRecoveryDependencies = true;
+        }
+        Throwable failed = null;
+        T result;
+        try {
+            requireRecoveryObservationLive(deadline);
+            reserveCapacity(capacity(manifest, control, settings, limits)
+                    .withRecoveryDependencies(members.size(), maximumRows)
+                    .withAdditionalData(additionalDataBytes)
+                    .withAdditionalControl(additionalControlBytes));
+            requireRoots(true);
+            acquireGuards(true);
+            result = observer.observe(recoveryPathIdentities());
         } catch (Exception | Error failure) {
             failed = failure;
             throw failure;
@@ -709,6 +724,162 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     static long manifestReadyControlBytes(SegmentArenaManifest manifest) throws IOException {
         return SegmentControlCapacity.sum(SegmentControlCapacity.times(2, manifestImageControlBytes(manifest)),
                 4L * ProfileManifestClosedReady.MAX_BYTES);
+    }
+
+    /** A historical placement observation under the original graph, including a missing active DATA name. */
+    SwitchPrefixObservation observeClosedManifestSwitchPrefix(ProfileManifestClosedAdmission.Scope scope,
+            UUID operation, int maximumRows, long maximumDataReadBytes, Duration timeout,
+            ZKProfileReservationStore reservations) throws Exception {
+        requireSwitchScope(scope);
+        Objects.requireNonNull(operation, "operation");
+        var rows = new SegmentStorageInspector.RecoveryRows(maximumRows);
+        if (maximumDataReadBytes < manifestSwitchDataReadBytes(manifest)) {
+            throw new IOException("Manifest READY switch exceeds its full DATA read bound");
+        }
+        long deadline = reservations.manifestReadyReadDeadline(
+                SegmentClosedReconstruction.manifestClosedDeadline(timeout));
+        return withRecoveryGuardsUntil(maximumRows, deadline, manifestImageDataBytes(),
+                manifestSwitchControlBytes(manifest), paths -> {
+                    var ready = reservations.readManifestClosedReady(scope, deadline);
+                    if (ready == null || !ready.ready().operation().equals(operation)) {
+                        throw new IOException("Manifest switch inspection requires its original native READY");
+                    }
+                    var stages = members.stream().map(member -> member.config.directory()
+                            .resolve(".closed-manifest-image-" + operation)).toList();
+                    var nativeIo = new NativeIOImpl();
+                    var buffer = ByteBuffer.allocate(SegmentClosedReconstruction.COPY_BYTES);
+                    var protectedObjects = new HashSet<>(paths);
+                    SegmentDataRecovery.AuditCheckpoint checkpoint = () -> requireSwitchAuditLive(deadline);
+                    var placement = observeSwitchPlacements(ready, stages, protectedObjects, nativeIo,
+                            buffer, checkpoint);
+                    requireRecoveryPaths(paths, deadline);
+                    var original = readRecoveryDependencies(rows, deadline, stages, placement);
+                    requireOriginalSwitchCut(ready.admitted().admission(), paths, original);
+                    var after = readRecoveryDependencies(new SegmentStorageInspector.RecoveryRows(maximumRows),
+                            deadline, stages, placement);
+                    if (!original.equals(after)) {
+                        throw new IOException("Manifest switch original controls changed during observation");
+                    }
+                    if (!ready.equals(reservations.readManifestClosedReady(scope, deadline))) {
+                        throw new IOException("Manifest switch lost its original native READY during observation");
+                    }
+                    if (!placement.equals(observeSwitchPlacements(ready, stages, protectedObjects, nativeIo,
+                            buffer, checkpoint))) {
+                        throw new IOException("Manifest READY switch placement changed during observation");
+                    }
+                    requireRecoveryPaths(paths, deadline);
+                    return new SwitchPrefixObservation(ready, placement);
+                });
+    }
+
+    static long manifestSwitchDataReadBytes(SegmentArenaManifest manifest) throws IOException {
+        // Both full objects are hashed twice. Their identity pages are read during each hash verification and
+        // the original identity page is read again in each read-only control replay.
+        long bytes = 0;
+        try {
+            for (var arena : manifest.arenas()) {
+                long fileReads = Math.addExact(Math.multiplyExact(4, arena.bytesPerFile()), 6L * 4096);
+                bytes = Math.addExact(bytes, Math.multiplyExact(arena.dataFiles(), fileReads));
+            }
+        } catch (ArithmeticException unbounded) {
+            throw new IOException("Manifest READY switch DATA read bound overflowed", unbounded);
+        }
+        return bytes;
+    }
+
+    static long manifestSwitchControlBytes(SegmentArenaManifest manifest) throws IOException {
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        int largest = manifest.arenas().stream().mapToInt(SegmentArenaManifest.Arena::dataFiles).max().orElseThrow();
+        long files = manifest.arenas().stream().mapToLong(SegmentArenaManifest.Arena::dataFiles).sum();
+        // Exact alternate paths and the stage listing are materialized for at most one Arena at a time.
+        long onePath = SegmentControlCapacity.sum(4 * layout.string(4096 + 128), layout.hashEntry(),
+                layout.captured(8));
+        return SegmentControlCapacity.sum(manifestReadyControlBytes(manifest),
+                4L * ProfileManifestClosedAdmission.MAX_BYTES, layout.object(SwitchPrefixObservation.class),
+                SegmentControlCapacity.times(3L * largest, onePath), layout.refs(4 * files),
+                SegmentControlCapacity.times(manifest.arenas().size() + 1L, onePath + 4 * layout.list()));
+    }
+
+    private void requireSwitchScope(ProfileManifestClosedAdmission.Scope scope) throws IOException {
+        if (!scope.bookie().equals(bookieIdentity.bookieId().toString())
+                || !scope.incarnation().equals(bookieIdentity.incarnation())
+                || !scope.manifest().equals(manifest.identity()) || scope.arenas().size() != members.size()) {
+            throw new IOException("Manifest READY scope differs from the commissioned graph");
+        }
+        for (int i = 0; i < members.size(); i++) {
+            if (!scope.arenas().get(i).id().equals(members.get(i).identity.arenaId())) {
+                throw new IOException("Manifest READY scope differs from the commissioned Arena order");
+            }
+        }
+    }
+
+    private List<List<SegmentManifestSwitchPrefix.Phase>> observeSwitchPlacements(
+            ProfileManifestClosedReady.Receipt ready, List<Path> stages, Set<FileIdentity> protectedObjects,
+            NativeIOImpl nativeIo, ByteBuffer buffer, SegmentDataRecovery.AuditCheckpoint checkpoint)
+            throws Exception {
+        var placements = new ArrayList<List<SegmentManifestSwitchPrefix.Phase>>(members.size());
+        for (int i = 0; i < members.size(); i++) {
+            var member = members.get(i);
+            var admitted = ready.admitted().admission().arenas().get(i);
+            var candidates = ready.ready().arenas().get(i);
+            Path stage = stages.get(i);
+            var root = admitted.control().root();
+            requireOriginalSwitchStage(member, nativeIo, stage, root, candidates.stage(), checkpoint);
+            placements.add(SegmentManifestSwitchPrefix.inspectArena(member.config, member.identity, member.owned,
+                    nativeIo, stage, admitted, candidates, protectedObjects, buffer, checkpoint));
+            requireOriginalSwitchStage(member, nativeIo, stage, root, candidates.stage(), checkpoint);
+        }
+        SegmentManifestSwitchPrefix.requireGlobalOrder(placements);
+        return List.copyOf(placements);
+    }
+
+    private static void requireOriginalSwitchStage(Member member, NativeIOImpl nativeIo, Path stage,
+            FileIdentity root, FileIdentity expected, SegmentDataRecovery.AuditCheckpoint checkpoint)
+            throws IOException {
+        if (!expected.equals(observeImageStage(member, nativeIo, stage, root, checkpoint))) {
+            throw new IOException("Manifest READY switch lost its original staging object");
+        }
+    }
+
+    private void requireOriginalSwitchCut(ProfileManifestClosedAdmission admitted, List<FileIdentity> paths,
+            RecoveryDependencies actual) throws IOException {
+        var bookie = actual.bookie();
+        var point = new ProfileManifestClosedAdmission.ControlPoint(paths.get(0), bookie.observedSequence(),
+                bookie.physicalGeneration(), bookie.checkpointGeneration(), bookie.historyDigest());
+        if (!point.equals(admitted.bookie()) || bookie.ledgers().size() != admitted.ledgers().size()) {
+            throw new IOException("Manifest READY switch lost its original Bookie control cut");
+        }
+        for (int i = 0; i < members.size(); i++) {
+            var original = admitted.arenas().get(i);
+            var current = actual.arenas().get(i).control();
+            var cut = current.cut();
+            var arenaPoint = new ProfileManifestClosedAdmission.ControlPoint(paths.get(i + 1), cut.appliedSequence(),
+                    cut.physicalGeneration(), cut.checkpointGeneration(), current.historyDigest());
+            if (!arenaPoint.equals(original.control()) || cut.sessionOpen() != original.sessionOpen()
+                    || cut.sessionEpoch() != admitted.scope().arenas().get(i).epoch()
+                    || current.mode() != original.mode()) {
+                throw new IOException("Manifest READY switch lost its original Arena control cut");
+            }
+        }
+        for (int i = 0; i < admitted.ledgers().size(); i++) {
+            var member = admitted.ledgers().get(i);
+            var context = bookie.ledgers().get(i).context();
+            if (!context.equals(member.member().context())
+                    || !new LedgerRoute(member.shard(), member.arena()).equals(actual.ledgerRoutes().get(context))) {
+                throw new IOException("Manifest READY switch lost its original local ledger route");
+            }
+        }
+    }
+
+    private void requireSwitchAuditLive(long deadline) throws IOException {
+        try {
+            requireRecoveryObservationLive(deadline);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            var failure = new InterruptedIOException("Manifest READY switch observation interrupted");
+            failure.initCause(interrupted);
+            throw failure;
+        }
     }
 
     static long manifestImageDataBytes() throws IOException {
@@ -1031,16 +1202,25 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     private RecoveryDependencies readRecoveryDependencies(SegmentStorageInspector.RecoveryRows rows, long deadline)
             throws IOException, InterruptedException {
+        return readRecoveryDependencies(rows, deadline, List.of(), List.of());
+    }
+
+    private RecoveryDependencies readRecoveryDependencies(SegmentStorageInspector.RecoveryRows rows, long deadline,
+            List<Path> stages, List<List<SegmentManifestSwitchPrefix.Phase>> placement)
+            throws IOException, InterruptedException {
         requireRecoveryObservationLive(deadline);
         var shared = SegmentBookieControlLog.inspectRecoveryDependencies(control, bookieIdentity,
                 limits.controlLogBytes(), key, validator, rows, bookieGuard, bookieFiles, List.of());
         var arenas = new ArrayList<ArenaRecoveryDependencies>(members.size());
-        for (Member member : members) {
+        for (int i = 0; i < members.size(); i++) {
             requireRecoveryObservationLive(deadline);
+            var member = members.get(i);
             member.dataGuard.requireHeld(member.config.directory().resolve("isolated.lock"));
             member.identity.requireStoredManifest(member.config, -4, member.owned);
+            var originalPaths = placement.isEmpty() ? List.<Path>of() : SegmentManifestSwitchPrefix.originalPaths(
+                    member.config.directory(), stages.get(i), placement.get(i));
             var dependency = SegmentArenaControlLog.inspectRecoveryDependencies(member.config, member.identity,
-                    limits.controlLogBytes(), rows, member.controlGuard, member.owned, List.of());
+                    limits.controlLogBytes(), rows, member.controlGuard, member.owned, originalPaths);
             arenas.add(new ArenaRecoveryDependencies(member.identity, dependency));
         }
         var ledgerRoutes = new HashMap<ProfileLedgerContext, LedgerRoute>();
