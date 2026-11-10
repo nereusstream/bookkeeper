@@ -71,6 +71,7 @@ import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileManifestClosedAdmission;
+import org.apache.bookkeeper.discover.profile.ProfileManifestClosedReady;
 import org.apache.bookkeeper.discover.profile.ProfileManifestPreparation;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
@@ -139,6 +140,19 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     /** Completed local observations. This value carries no publication authority after the guards drain. */
     record ManifestImageObservation(ProfileManifestPreparation.Receipt attempt, List<PreparedArenaImages> arenas) { }
+
+    static final class LockedManifestImages {
+        final SegmentClosedReconstruction.PreparedManifestAdmission admission;
+        final ProfileManifestPreparation.Receipt attempt;
+        final List<PreparedArenaImages> images;
+
+        private LockedManifestImages(SegmentClosedReconstruction.PreparedManifestAdmission admission,
+                ProfileManifestPreparation.Receipt attempt, List<PreparedArenaImages> images) {
+            this.admission = admission;
+            this.attempt = attempt;
+            this.images = images;
+        }
+    }
 
     static final class AuditedClosedGraph {
         final ManifestSegmentStorage owner;
@@ -591,6 +605,27 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             Duration timeout, ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations,
             SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher,
             UUID operation, SegmentFileIo imageIo) throws Exception {
+        return prepareClosedManifestImages(maximumRows, maximumDataBytes, maximumEntries, timeout, metadata,
+                reservations, sources, publisher, operation, imageIo,
+                candidates -> new ManifestImageObservation(candidates.attempt, candidates.images), null);
+    }
+
+    ProfileManifestClosedReady.Receipt sealClosedManifestImages(int maximumRows, long maximumDataBytes,
+            int maximumEntries, Duration timeout, ProfileLedgerMetadataStore metadata,
+            ZKProfileReservationStore reservations, SegmentClosedReconstruction.Sources sources,
+            SegmentClosedReconstruction.OldPublisher publisher, UUID operation, SegmentFileIo imageIo)
+            throws Exception {
+        return prepareClosedManifestImages(maximumRows, maximumDataBytes, maximumEntries, timeout, metadata,
+                reservations, sources, publisher, operation, imageIo,
+                candidates -> reservations.sealManifestPreparation(
+                        metadata, SegmentClosedReconstruction.prepareManifestReady(candidates)), receipt -> receipt);
+    }
+
+    private <R> R prepareClosedManifestImages(int maximumRows, long maximumDataBytes, int maximumEntries,
+            Duration timeout, ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations,
+            SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher,
+            UUID operation, SegmentFileIo imageIo, CheckedRecoveryResult<LockedManifestImages, R> finish,
+            CheckedRecoveryResult<ProfileManifestClosedReady.Receipt, R> reuse) throws Exception {
         Objects.requireNonNull(sources, "sources");
         Objects.requireNonNull(publisher, "publisher");
         Objects.requireNonNull(operation, "operation");
@@ -600,7 +635,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 bookieIdentity.incarnation(), SegmentClosedReconstruction.manifestClosedDeadline(timeout));
         long deadline = reader.deadline();
         long controlBytes = SegmentControlCapacity.sum(ZKProfileReservationStore.manifestAdmissionControlBytes(),
-                manifestImageControlBytes(manifest));
+                manifestImageControlBytes(manifest), reuse == null ? 0 : manifestReadyControlBytes(manifest));
         return inspectClosedGraph(maximumRows, maximumDataBytes, maximumEntries, deadline, metadata, reservations,
                 sources, publisher, reader, manifestImageDataBytes(), controlBytes, audited -> {
                     var nativeIo = new NativeIOImpl();
@@ -613,31 +648,67 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                     var stages = new ArrayList<Path>(members.size());
                     for (var member : members) {
                         requireRecoveryObservationLive(deadline);
-                        Path stage = member.config.directory().resolve(".closed-manifest-image-" + operation);
-                        requireAbsentImageStage(stage);
-                        stages.add(stage);
-                    }
-                    requireRecoveryPaths(paths, deadline);
-                    var attempt = reservations.claimManifestPreparation(metadata, prepared, admitted);
-                    requireRecoveryPaths(paths, deadline);
-                    for (Path stage : stages) {
-                        requireRecoveryObservationLive(deadline);
-                        requireAbsentImageStage(stage);
+                        stages.add(member.config.directory().resolve(".closed-manifest-image-" + operation));
                     }
                     SegmentDataRecovery.AuditCheckpoint checkpoint = () -> requireClosedAuditLive(reader);
                     var buffer = ByteBuffer.allocate(SegmentClosedReconstruction.COPY_BYTES);
-                    var candidates = copyManifestImages(original, stages, paths, nativeIo, buffer, imageIo, checkpoint);
-                    if (!original.closed().dependencies().equals(readRecoveryDependencies(
-                            new SegmentStorageInspector.RecoveryRows(maximumRows), deadline))) {
-                        throw new IOException("Original manifest controls changed during image preparation");
+                    if (reuse != null) {
+                        var existing = reservations.readManifestClosedReady(prepared);
+                        if (existing != null) {
+                            if (!existing.admitted().equals(admitted)) {
+                                throw new IOException("Manifest READY lost its original admission birth");
+                            }
+                            var candidates = manifestReadyImages(existing.ready(), stages);
+                            verifyManifestImageCut(original, paths, maximumRows, deadline);
+                            verifyManifestImages(original, candidates, nativeIo, buffer, checkpoint);
+                            reservations.requireCurrentManifestReady(prepared, existing);
+                            verifyManifestImagePaths(original, candidates, nativeIo, checkpoint);
+                            requireRecoveryPaths(paths, deadline);
+                            return reuse.finish(existing);
+                        }
                     }
+                    requireAbsentImageStages(stages, deadline);
                     requireRecoveryPaths(paths, deadline);
+                    var attempt = reservations.claimManifestPreparation(metadata, prepared, admitted);
+                    requireRecoveryPaths(paths, deadline);
+                    requireAbsentImageStages(stages, deadline);
+                    var candidates = copyManifestImages(original, stages, paths, nativeIo, buffer, imageIo, checkpoint);
+                    verifyManifestImageCut(original, paths, maximumRows, deadline);
                     verifyManifestImages(original, candidates, nativeIo, buffer, checkpoint);
                     reservations.requireCurrentManifestPreparation(prepared, attempt);
                     verifyManifestImagePaths(original, candidates, nativeIo, checkpoint);
                     requireRecoveryPaths(paths, deadline);
-                    return new ManifestImageObservation(attempt, candidates);
+                    R result = finish.finish(new LockedManifestImages(prepared, attempt, candidates));
+                    if (reuse != null) {
+                        verifyManifestImagePaths(original, candidates, nativeIo, checkpoint);
+                        requireRecoveryPaths(paths, deadline);
+                    }
+                    return result;
                 });
+    }
+
+    private void verifyManifestImageCut(ClosedDataObservation original, List<FileIdentity> paths, int maximumRows,
+            long deadline) throws IOException, InterruptedException {
+        if (!original.closed().dependencies().equals(readRecoveryDependencies(
+                new SegmentStorageInspector.RecoveryRows(maximumRows), deadline))) {
+            throw new IOException("Original manifest controls changed during image preparation");
+        }
+        requireRecoveryPaths(paths, deadline);
+    }
+
+    private List<PreparedArenaImages> manifestReadyImages(ProfileManifestClosedReady ready, List<Path> stages) {
+        var candidates = new ArrayList<PreparedArenaImages>(members.size());
+        for (int i = 0; i < members.size(); i++) {
+            var arena = ready.arenas().get(i);
+            candidates.add(new PreparedArenaImages(members.get(i).identity.arenaId(), stages.get(i),
+                    arena.stage(), arena.files()));
+        }
+        return List.copyOf(candidates);
+    }
+
+    static long manifestReadyControlBytes(SegmentArenaManifest manifest) throws IOException {
+        return SegmentControlCapacity.sum(SegmentControlCapacity.times(2, manifestImageControlBytes(manifest)),
+                4L * ProfileManifestClosedReady.MAX_BYTES);
     }
 
     static long manifestImageDataBytes() throws IOException {
@@ -667,6 +738,13 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             return;
         }
         throw new IOException("Manifest image staging already exists: " + stage);
+    }
+
+    private void requireAbsentImageStages(List<Path> stages, long deadline) throws IOException, InterruptedException {
+        for (Path stage : stages) {
+            requireRecoveryObservationLive(deadline);
+            requireAbsentImageStage(stage);
+        }
     }
 
     private List<PreparedArenaImages> copyManifestImages(ClosedDataObservation original, List<Path> stages,
@@ -839,11 +917,12 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 }, complete);
     }
 
-    void beginManifestAdmission(ZKProfileReservationStore.ManifestAdmissionMutation mutation, long deadline)
+    void beginManifestAdmission(ZKProfileReservationStore.ManifestAdmissionMutation mutation,
+            ZKProfileReservationStore.ManifestAdmissionMutation expected, long deadline)
             throws IOException, InterruptedException {
         synchronized (gate) {
             requireRecoveryObservationTime(deadline);
-            if (stopping || manifestAdmissionMutation != null) {
+            if (stopping || manifestAdmissionMutation != expected || expected != null && !expected.drained()) {
                 throw new IOException("Manifest CLOSED mutation owner retired or already submitted");
             }
             manifestAdmissionMutation = mutation;

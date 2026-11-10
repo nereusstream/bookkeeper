@@ -38,6 +38,7 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -55,6 +56,8 @@ import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstructionSources;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileManifestClosedAdmission;
+import org.apache.bookkeeper.discover.profile.ProfileManifestClosedReady;
+import org.apache.bookkeeper.discover.profile.ProfileManifestPreparation;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
@@ -290,6 +293,7 @@ public final class SegmentClosedReconstruction {
         private final OldPublisher publisher;
         private final ZKProfileRegistrationStore registry;
         private final Map<ProfileClosedReconstructionSources, String> registrations;
+        private ZKProfileReservationStore.ManifestAdmissionMutation preparationMutation;
 
         private PreparedManifestAdmission(ProfileManifestClosedAdmission request,
                 ZKProfileReservationStore.ClosedReconstructionReader reader, ManifestSegmentStorage owner,
@@ -323,11 +327,61 @@ public final class SegmentClosedReconstruction {
 
         public void beginMutation(ZKProfileReservationStore.ManifestAdmissionMutation mutation)
                 throws IOException, InterruptedException {
-            owner.beginManifestAdmission(mutation, reader.deadline());
+            owner.beginManifestAdmission(mutation, null, reader.deadline());
+        }
+
+        public void beginPreparationMutation(ZKProfileReservationStore.ManifestAdmissionMutation mutation)
+                throws IOException, InterruptedException {
+            beginMutation(mutation);
+            preparationMutation = mutation;
         }
 
         public void requireOwnerLive() throws IOException, InterruptedException {
             owner.requireManifestAdmissionLive(reader.deadline());
+        }
+    }
+
+    static PreparedManifestReady prepareManifestReady(ManifestSegmentStorage.LockedManifestImages candidates) {
+        var preparation = candidates.attempt;
+        var attempt = preparation.attempt();
+        var ready = new ProfileManifestClosedReady(attempt.admissionBirth(), attempt.admissionDigest(),
+                attempt.operation(), preparation.birth(), preparation.version(),
+                attempt.firstNonce(), attempt.nonce(), candidates.images.stream().map(arena ->
+                        new ProfileManifestClosedReady.Arena(arena.stageObject(), arena.files())).toList());
+        return new PreparedManifestReady(candidates.admission, preparation, ready);
+    }
+
+    /** Private proof from this owner's actual copy, first close, synchronization and final verification. */
+    public static final class PreparedManifestReady {
+        private final PreparedManifestAdmission admission;
+        private final ProfileManifestPreparation.Receipt preparation;
+        private final ProfileManifestClosedReady ready;
+        private final ZKProfileReservationStore.ManifestAdmissionMutation claim;
+
+        private PreparedManifestReady(PreparedManifestAdmission admission,
+                ProfileManifestPreparation.Receipt preparation,
+                ProfileManifestClosedReady ready) {
+            this.admission = admission;
+            this.preparation = preparation;
+            this.ready = ready;
+            claim = Objects.requireNonNull(admission.preparationMutation, "original preparation mutation");
+        }
+
+        public PreparedManifestAdmission admission() {
+            return admission;
+        }
+
+        public ProfileManifestPreparation.Receipt preparation() {
+            return preparation;
+        }
+
+        public ProfileManifestClosedReady ready() {
+            return ready;
+        }
+
+        public void beginMutation(ZKProfileReservationStore.ManifestAdmissionMutation mutation)
+                throws IOException, InterruptedException {
+            admission.owner.beginManifestAdmission(mutation, claim, admission.reader.deadline());
         }
     }
 

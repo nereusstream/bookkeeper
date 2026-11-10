@@ -988,9 +988,19 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 每个 Arena 在原 filesystem 的 `.closed-manifest-image-<operation>` 写入全量 fresh 文件，包括未承载账本或为空白的必需 DATA 文件。使用同一个有界复制缓冲，逐文件校验原描述符、长度和 SHA，force、在新描述符上完整读回并完成实际首次 close，再同步暂存目录与原父目录。交付前复核原控制、物理对象、完整 native cohort、原 source/target 和当前 attempt。实际 I/O 或事务回调仍在途时保留整图锁和额度；首次 close 返回失败时保留未确认释放的成员及额度。
 
-每个原操作最多写一份完整候选图。任一原有暂存对象均在 claim 和首次本地写入前拒绝。失败前缀保持原样，清理与续接需要独立契约。结果是本次进程的候选观察，后续 READY 需要在原作用域内消费私有证明。原 DATA 替换、action 7、首次重开和生产持续隔离仍待验收。
+每个原操作最多写一份完整候选图。任一原有暂存对象均在 claim 和首次本地写入前拒绝。失败前缀保持原样，清理与续接需要独立契约。仅准备入口交付的是候选观察，封印入口在原作用域内消费私有证明。
 
 真实三 Arena 用例覆盖四个 fresh DATA 文件。原生 holder 已创建但回调跨过截止时间时，七把原锁和两类额度保持占用，所有暂存路径仍不存在。实际回调终结后，新一轮原图审计确认新 nonce 并完成复制；旧版本请求真实返回 `BADVERSION`。末文件 force 失败后保留未确认的候选前缀，同操作重试在 claim 前拒绝。最终 18 项定向测试和 Spotless、Checkstyle 均通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-preparation-parent-90c2c485`。
+
+### 固定 manifest 的候选 READY 封印
+
+以 `bc39305cb5` 为基线。封印入口在同一次原图持锁准备中取得逐文件首次 close、完整读回、目录同步和原作用域后验的私有证明。独立 `UWMR` schema 1 绑定原 ADMITTED 出生和摘要、原 operation、UWMP 的出生和提交前版本、两个 nonce，以及按原 manifest 顺序排列的全部暂存目录和 DATA 候选对象。完整形状、长度和摘要必须匹配原 ADMITTED。最大向量编码为 234,669 字节，记录上限 256 KiB，事务仍按实际 chroot 路径计入原 512 KiB 上限。
+
+一笔原生事务核对完整 CLOSED 账本、实际 survivor 注册、原 ADMITTED 及 UWMP 出生标记，再以原版本将 UWMP 从 96 字节 schema 1 CAS 到同长度的 schema 2 SEALED，同时创建不可变 READY 和同事务出生标记。读回核对 holder 的原出生、版本推进、两个 nonce 与 READY 的同事务出生。封印是同一 owner 的第二笔 mutation，登记时核对原 claim 的实际回调已经终结。任一实际回调仍在途时保留原图锁和两类额度。
+
+独立历史读取验证原生封印。当调用结果未知时，同 operation 可重新持原图锁，核对原控制、当前账本与来源、原 stage 和全部候选的精确对象及字节，再返回原 READY。该重验无需重新 claim、复制或 force。暂存前缀缺少已确认 READY 时仍拒绝。已封印候选损坏或被替换也会拒绝当前重验。READY 只封印受控候选事实。原 DATA 切换、action 7、首次重开、当前 requirements/G1 和生产持续隔离仍待独立验收。
+
+真实三 Arena 用例封印四个候选文件。READY 已提交但实际回调跨过截止时间时，独立读回确认 SEALED 和 READY 的同事务出生，七把原锁及两类额度继续保留。旧版本接管请求返回 `BADVERSION`，普通 claim 也拒绝 SEALED。同 operation 的精确重验不产生新 mutation，同字节新 inode 不能通过。实际 survivor 在 READY 发往 ZooKeeper 前撤回时，事务返回 `NONODE`，UWMP 保持原准备态。最终 20 项定向测试、Spotless 和 Checkstyle 均通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-ready-parent-bc39305c`。
 
 ### 单 DATA 文件的 CLOSED 重建准入
 

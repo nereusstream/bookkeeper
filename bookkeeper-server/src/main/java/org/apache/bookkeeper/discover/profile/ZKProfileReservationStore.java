@@ -1407,6 +1407,10 @@ public final class ZKProfileReservationStore {
         public boolean stopAndDrained() {
             return pending.stop() == 0;
         }
+
+        public boolean drained() {
+            return pending.idle();
+        }
     }
 
     public static long manifestAdmissionControlBytes() {
@@ -1459,9 +1463,7 @@ public final class ZKProfileReservationStore {
             var receipt = readManifestClosedAdmission(request.scope(), deadline);
             if (receipt == null) {
                 var checks = manifestAdmissionChecks(metadata, prepared, deadline);
-                if (protectedChildAcls.stream().noneMatch(acl -> (acl.getPerms() & ZooDefs.Perms.CREATE) != 0)) {
-                    throw new IOException("Manifest CLOSED admission ACL must allow its protected birth creation");
-                }
+                requireManifestProtectedBirthAcl();
                 String path = manifestAdmissionPath(request.scope());
                 checks.add(Op.create(path, request.encode(), protectedChildAcls, CreateMode.PERSISTENT));
                 checks.add(Op.create(marker(path, request.operation()), new byte[0], immutableAcls,
@@ -1545,7 +1547,10 @@ public final class ZKProfileReservationStore {
                 checks.add(Op.check(marker(holder, first), 0));
                 checks.add(Op.setData(holder, attempt.encode(), prior.version()));
             }
-            Code code = submitManifestMutation(checks, prepared, deadline, holder);
+            validateManifestAdmissionMulti(checks, holder, false);
+            var mutation = new ManifestAdmissionMutation();
+            prepared.beginPreparationMutation(mutation);
+            Code code = submitManifestMutation(checks, mutation, deadline);
             if (!manifestReadbackAllowed(code)) {
                 throw new IOException("Manifest preparation multi refused: " + code);
             }
@@ -1566,6 +1571,122 @@ public final class ZKProfileReservationStore {
             throw new IOException("Manifest preparation was not confirmed within its original deadline", failure);
         } catch (IllegalArgumentException | IllegalStateException failure) {
             throw new IOException("Manifest preparation was refused", failure);
+        }
+    }
+
+    /** Read the historical native seal. Current candidate bytes and source registrations are separate observations. */
+    public ProfileManifestClosedReady.Receipt readManifestClosedReady(ProfileManifestClosedAdmission.Scope scope)
+            throws IOException, InterruptedException {
+        long deadline = System.nanoTime() + timeoutNanos;
+        try {
+            var admitted = readManifestClosedAdmission(scope, deadline);
+            return admitted == null ? null : readManifestClosedReady(admitted, deadline);
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException failure) {
+            throw new IOException("Unable to confirm the historical manifest READY receipt", failure);
+        }
+    }
+
+    public ProfileManifestClosedReady.Receipt readManifestClosedReady(
+            SegmentClosedReconstruction.PreparedManifestAdmission prepared) throws IOException, InterruptedException {
+        long deadline = prepared.reader().deadline();
+        try {
+            var admitted = requireManifestAdmission(prepared.request(), deadline);
+            return readManifestClosedReady(admitted, deadline);
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException failure) {
+            throw new IOException("Unable to confirm the original manifest READY receipt", failure);
+        }
+    }
+
+    private ProfileManifestClosedReady.Receipt readManifestClosedReady(ProfileManifestClosedAdmission.Receipt admitted,
+            long deadline) throws IOException, InterruptedException, TimeoutException {
+        String parent = manifestAdmissionPath(admitted.admission().scope());
+        String holder = parent + "/preparation";
+        String path = parent + "/ready";
+        var node = reads.get(path, deadline);
+        var holderNode = reads.get(holder, deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            if (holderNode.code() != Code.NONODE.intValue()) {
+                // An observation across the sealing transaction can see a sealed holder here. It cannot prove absence.
+                manifestPreparationSnapshot(holder, admitted, holderNode, deadline, false);
+            }
+            return null;
+        }
+        requireFound(node);
+        requirePersistent(node, true);
+        var ready = ProfileManifestClosedReady.decode(node.bytes());
+        ready.requireAdmission(admitted);
+        long birth = node.stat().getCzxid();
+        requireMarker(marker(path, ready.operation()), birth, deadline);
+        var terminal = manifestPreparationSnapshot(holder, admitted, holderNode, deadline, true);
+        if (node.stat().getMzxid() != birth || terminal.birth() != ready.holderBirth() || birth != terminal.modified()
+                || terminal.version() != ready.holderVersion() + 1
+                || !terminal.attempt().firstNonce().equals(ready.firstNonce())
+                || !terminal.attempt().nonce().equals(ready.nonce())
+                || !Arrays.equals(node.bytes(), ready.encode())) {
+            throw new IOException("Manifest READY and the original sealed attempt were not confirmed together");
+        }
+        return new ProfileManifestClosedReady.Receipt(admitted, ready, birth,
+                ProfileClosedReconstruction.digest(node.bytes()));
+    }
+
+    public void requireCurrentManifestReady(SegmentClosedReconstruction.PreparedManifestAdmission prepared,
+            ProfileManifestClosedReady.Receipt expected) throws IOException, InterruptedException {
+        try {
+            revalidateManifestAdmission(prepared);
+            if (!expected.equals(readManifestClosedReady(prepared))) {
+                throw new IOException("Manifest READY receipt changed during current candidate verification");
+            }
+            prepared.requireOwnerLive();
+        } catch (TimeoutException failure) {
+            throw new IOException("Current manifest READY could not be verified within its original deadline",
+                    failure);
+        }
+    }
+
+    /** Seal only the candidate proof created by the same locked owner after its actual first closes. */
+    public ProfileManifestClosedReady.Receipt sealManifestPreparation(ProfileLedgerMetadataStore metadata,
+            SegmentClosedReconstruction.PreparedManifestReady prepared) throws IOException, InterruptedException {
+        requireRecoveryClient(metadata);
+        var admission = prepared.admission();
+        var preparation = prepared.preparation();
+        var request = prepared.ready();
+        long deadline = admission.reader().deadline();
+        try {
+            requireManifestSourceClients(admission);
+            var admitted = requireManifestAdmission(admission.request(), deadline);
+            request.requireAdmission(admitted);
+            String parent = manifestAdmissionPath(admission.request().scope());
+            String holder = parent + "/preparation";
+            if (!preparation.equals(readManifestPreparation(holder, admitted, deadline))) {
+                throw new IOException("Manifest READY requires the exact current preparation attempt");
+            }
+            var checks = manifestAdmissionChecks(metadata, admission, deadline);
+            requireManifestProtectedBirthAcl();
+            String path = parent + "/ready";
+            checks.add(Op.check(parent, 0));
+            checks.add(Op.check(marker(parent, request.operation()), 0));
+            checks.add(Op.check(marker(holder, request.firstNonce()), 0));
+            checks.add(Op.setData(holder, preparation.attempt().encodeSealed(), request.holderVersion()));
+            checks.add(Op.create(path, request.encode(), protectedChildAcls, CreateMode.PERSISTENT));
+            checks.add(Op.create(marker(path, request.operation()), new byte[0], immutableAcls, CreateMode.PERSISTENT));
+            validateManifestAdmissionMulti(checks, holder, true);
+            var mutation = new ManifestAdmissionMutation();
+            prepared.beginMutation(mutation);
+            Code code = submitManifestMutation(checks, mutation, deadline);
+            if (!manifestReadbackAllowed(code)) {
+                throw new IOException("Manifest READY multi refused: " + code);
+            }
+            revalidateManifestAdmission(admission);
+            var confirmed = readManifestClosedReady(admission);
+            if (confirmed == null || !admitted.equals(confirmed.admitted()) || !request.equals(confirmed.ready())) {
+                throw new IOException("The exact manifest READY receipt was not confirmed");
+            }
+            admission.requireOwnerLive();
+            return confirmed;
+        } catch (TimeoutException failure) {
+            throw new IOException("Manifest READY was not confirmed within its original deadline", failure);
+        } catch (IllegalArgumentException | IllegalStateException failure) {
+            throw new IOException("Manifest READY was refused", failure);
         }
     }
 
@@ -1594,9 +1715,21 @@ public final class ZKProfileReservationStore {
         if (node.code() == Code.NONODE.intValue()) {
             return null;
         }
+        return manifestPreparationSnapshot(holder, admitted, node, deadline, false);
+    }
+
+    private ProfileManifestPreparation.Receipt manifestPreparationSnapshot(String holder,
+            ProfileManifestClosedAdmission.Receipt admitted, ProfileZKReadClient.Node node, long deadline,
+            boolean sealed) throws IOException, InterruptedException, TimeoutException {
         requireFound(node);
         requirePersistent(node, false);
-        var attempt = ProfileManifestPreparation.decode(node.bytes());
+        ProfileManifestPreparation attempt;
+        try {
+            attempt = sealed ? ProfileManifestPreparation.decodeSealed(node.bytes())
+                    : ProfileManifestPreparation.decode(node.bytes());
+        } catch (IOException failure) {
+            throw new IOException("The expected manifest preparation state was not confirmed", failure);
+        }
         var stat = node.stat();
         long birth = stat.getCzxid();
         long modified = stat.getMzxid();
@@ -1604,8 +1737,9 @@ public final class ZKProfileReservationStore {
         if (birth <= admitted.birth() || attempt.admissionBirth() != admitted.birth()
                 || !attempt.admissionDigest().equals(admitted.digest())
                 || !attempt.operation().equals(admitted.admission().operation())
-                || (version == 0 ? birth != modified || !attempt.firstNonce().equals(attempt.nonce())
-                        : modified <= birth || attempt.firstNonce().equals(attempt.nonce()))) {
+                || (sealed ? version < 1 || modified <= birth
+                        : version == 0 ? birth != modified || !attempt.firstNonce().equals(attempt.nonce())
+                                : modified <= birth || attempt.firstNonce().equals(attempt.nonce()))) {
             throw new IOException("Manifest preparation holder differs from its original admission or birth");
         }
         requireMarker(marker(holder, attempt.firstNonce()), birth, deadline);
@@ -1616,6 +1750,12 @@ public final class ZKProfileReservationStore {
             throws IOException {
         for (var sources : prepared.sources()) {
             sources.requireManifestClosedClient(zk);
+        }
+    }
+
+    private void requireManifestProtectedBirthAcl() throws IOException {
+        if (protectedChildAcls.stream().noneMatch(acl -> (acl.getPerms() & ZooDefs.Perms.CREATE) != 0)) {
+            throw new IOException("Manifest CLOSED record ACL must allow its protected birth creation");
         }
     }
 
@@ -1651,15 +1791,15 @@ public final class ZKProfileReservationStore {
     Code submitManifestAdmission(List<Op> checks, SegmentClosedReconstruction.PreparedManifestAdmission prepared,
             long deadline)
             throws IOException, InterruptedException, TimeoutException {
-        return submitManifestMutation(checks, prepared, deadline, null);
-    }
-
-    private Code submitManifestMutation(List<Op> checks, SegmentClosedReconstruction.PreparedManifestAdmission prepared,
-            long deadline, String preparationPath) throws IOException, InterruptedException, TimeoutException {
-        validateManifestAdmissionMulti(checks, preparationPath);
+        validateManifestAdmissionMulti(checks);
         Objects.requireNonNull(prepared, "prepared");
         var mutation = new ManifestAdmissionMutation();
         prepared.beginMutation(mutation);
+        return submitManifestMutation(checks, mutation, deadline);
+    }
+
+    private Code submitManifestMutation(List<Op> checks, ManifestAdmissionMutation mutation, long deadline)
+            throws IOException, InterruptedException, TimeoutException {
         CompletableFuture<Integer> reply;
         try {
             reply = new ProfileZKReadClient(zk, mutation.pending).submitMulti(checks);
@@ -1689,10 +1829,11 @@ public final class ZKProfileReservationStore {
     }
 
     int validateManifestAdmissionMulti(List<Op> checks) throws IOException {
-        return validateManifestAdmissionMulti(checks, null);
+        return validateManifestAdmissionMulti(checks, null, false);
     }
 
-    private int validateManifestAdmissionMulti(List<Op> checks, String preparationPath) throws IOException {
+    private int validateManifestAdmissionMulti(List<Op> checks, String preparationPath, boolean sealed)
+            throws IOException {
         if (checks.isEmpty() || checks.size() > MAX_MANIFEST_ADMISSION_OPS) {
             throw new IOException("Manifest CLOSED admission exceeds its native operation limit");
         }
@@ -1710,7 +1851,11 @@ public final class ZKProfileReservationStore {
             }
             if (record instanceof SetDataRequest write && op.getPath().equals(preparationPath)
                     && write.getVersion() >= 0) {
-                ProfileManifestPreparation.decode(write.getData());
+                if (sealed) {
+                    ProfileManifestPreparation.decodeSealed(write.getData());
+                } else {
+                    ProfileManifestPreparation.decode(write.getData());
+                }
                 continue;
             }
             if (!(record instanceof CreateRequest create) || create.getFlags() != CreateMode.PERSISTENT.toFlag()
