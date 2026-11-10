@@ -39,9 +39,12 @@ public class ProfileManifestPreparationTest {
         assertEquals(attempt, ProfileManifestPreparation.decode(nativeRecord));
         assertArrayEquals(nativeRecord, attempt.encode());
 
-        byte[] unknownVersion = nativeRecord.clone();
-        ByteBuffer.wrap(unknownVersion).putInt(4, 2);
-        assertThrows(IOException.class, () -> ProfileManifestPreparation.decode(unknownVersion));
+        byte[] sealed = nativeRecord.clone();
+        ByteBuffer.wrap(sealed).putInt(4, 2);
+        assertThrows(IOException.class, () -> ProfileManifestPreparation.decode(sealed));
+        assertThrows(IOException.class, () -> ProfileManifestPreparation.decodeSealed(nativeRecord));
+        assertEquals(attempt, ProfileManifestPreparation.decodeSealed(sealed));
+        assertArrayEquals(sealed, attempt.encodeSealed());
         assertThrows(IOException.class, () -> ProfileManifestPreparation.decode(Arrays.copyOf(nativeRecord, 97)));
         byte[] zeroNonce = nativeRecord.clone();
         Arrays.fill(zeroNonce, 80, 96, (byte) 0);

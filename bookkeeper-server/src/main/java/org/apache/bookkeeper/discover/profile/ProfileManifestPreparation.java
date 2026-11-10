@@ -28,12 +28,18 @@ public record ProfileManifestPreparation(long admissionBirth, String admissionDi
         UUID firstNonce, UUID nonce) {
     private static final int MAGIC = 0x55574d50; // UWMP
     private static final int VERSION = 1;
+    private static final int SEALED_VERSION = 2;
     private static final int DIGEST_BYTES = 32;
     static final int ENCODED_BYTES = 96;
     private static final HexFormat HEX = HexFormat.of();
     private static final UUID ZERO = new UUID(0, 0);
 
     public ProfileManifestPreparation {
+        requireBinding(admissionBirth, admissionDigest, operation, firstNonce, nonce);
+    }
+
+    static void requireBinding(long admissionBirth, String admissionDigest, UUID operation, UUID firstNonce,
+            UUID nonce) {
         requireId(operation);
         requireId(firstNonce);
         requireId(nonce);
@@ -47,8 +53,16 @@ public record ProfileManifestPreparation(long admissionBirth, String admissionDi
                           long birth, long modified, int version) { }
 
     byte[] encode() {
+        return encode(VERSION);
+    }
+
+    byte[] encodeSealed() {
+        return encode(SEALED_VERSION);
+    }
+
+    private byte[] encode(int version) {
         var out = ByteBuffer.allocate(ENCODED_BYTES);
-        out.putInt(MAGIC).putInt(VERSION).putLong(admissionBirth).put(HEX.parseHex(admissionDigest));
+        out.putInt(MAGIC).putInt(version).putLong(admissionBirth).put(HEX.parseHex(admissionDigest));
         putId(out, operation);
         putId(out, firstNonce);
         putId(out, nonce);
@@ -56,12 +70,20 @@ public record ProfileManifestPreparation(long admissionBirth, String admissionDi
     }
 
     static ProfileManifestPreparation decode(byte[] bytes) throws IOException {
+        return decode(bytes, VERSION);
+    }
+
+    static ProfileManifestPreparation decodeSealed(byte[] bytes) throws IOException {
+        return decode(bytes, SEALED_VERSION);
+    }
+
+    private static ProfileManifestPreparation decode(byte[] bytes, int version) throws IOException {
         if (bytes.length != ENCODED_BYTES) {
             throw new IOException("Invalid manifest preparation record extent");
         }
         try {
             var in = ByteBuffer.wrap(bytes);
-            if (in.getInt() != MAGIC || in.getInt() != VERSION) {
+            if (in.getInt() != MAGIC || in.getInt() != version) {
                 throw new IOException("Unknown manifest preparation format");
             }
             long birth = in.getLong();
