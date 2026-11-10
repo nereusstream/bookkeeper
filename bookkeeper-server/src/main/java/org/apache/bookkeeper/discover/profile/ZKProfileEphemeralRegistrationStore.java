@@ -41,6 +41,7 @@ import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.discover.profile.ProfileEphemeralCodec.Envelope;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore.Node;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore.Snapshot;
+import org.apache.bookkeeper.zookeeper.ZooKeeperClient;
 import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException.Code;
@@ -63,6 +64,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     private final long sessionId;
     private final UUID nonce = UUID.randomUUID();
     private final long timeoutNanos;
+    private final Object firstOpenGate = new Object();
     private volatile boolean retired;
     private boolean operationStarted;
     private volatile Admission admission;
@@ -217,7 +219,17 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     }
 
     public boolean manifestSessionEnded(SegmentManifestColdPublication binding) {
-        return binding == manifestStartup && zk.getState() == ZooKeeper.States.CLOSED;
+        if (binding == null || binding != manifestStartup) {
+            return false;
+        }
+        // ZooKeeperClient installs a different handle only after Expired and closing the original handle.
+        return zk.getState() == ZooKeeper.States.CLOSED || zk instanceof ZooKeeperClient
+                && zk.getState() == ZooKeeper.States.CONNECTED && zk.getSessionId() != sessionId;
+    }
+
+    public boolean awaitManifestMutations(SegmentManifestColdPublication binding, long deadline)
+            throws InterruptedException {
+        return binding == null || binding != manifestStartup || manifestMutations.awaitIdle(deadline);
     }
 
     private long manifestDeadline() {
@@ -274,10 +286,15 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     }
 
     private void retire() {
-        retired = true;
-        Admission bound = admission;
+        Admission bound;
+        synchronized (firstOpenGate) {
+            retired = true;
+            bound = admission;
+            if (bound != null) {
+                bound.state.set(2);
+            }
+        }
         if (bound != null) {
-            bound.state.set(2);
             bound.watcherManager.removeChildWatcher(bound);
         }
     }
@@ -302,6 +319,10 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
             return state.get() == 2 && retired;
         }
 
+        public boolean isPending() {
+            return state.get() == 0 && !retired;
+        }
+
         public long openedAssignmentGeneration() {
             return openedAssignmentGeneration;
         }
@@ -318,6 +339,10 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
 
         /** The consumer belongs to this exact commissioned source and original storage/session attempt. */
         public boolean allowsDeleteFollower(ZKProfileReservationStore source, StorageIncarnation incarnation) {
+            var manifest = manifestStartup;
+            if (manifest != null) {
+                return manifest.reservations() == source && allows(bookieId, incarnation);
+            }
             return deleteDelivery == source && incarnation.equals(deleteIncarnation) && getAsBoolean();
         }
 
@@ -385,6 +410,29 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
                     return false;
                 }
                 throw unavailable;
+            }
+        }
+
+        /** Only the original owned listener episode can consume its fresh cold publication. */
+        public boolean openOwnedManifest(SegmentManifestColdPublication binding)
+                throws InterruptedException, TimeoutException {
+            requireManifestBinding(binding);
+            binding.requireOwnedAdmission(this);
+            var confirmed = reconcileManifestStartup(binding);
+            binding.requireOwnedAdmission(this);
+            synchronized (firstOpenGate) {
+                if (!isPending()) {
+                    return false;
+                }
+                requirePublishingSession();
+                ZKProfileRegistrationStore.requireTime(manifestDeadline());
+                openedAssignmentGeneration = 1;
+                openedRegistration = confirmed;
+                if (state.compareAndSet(0, 1) && getAsBoolean()) {
+                    firstOpenedRegistration = confirmed;
+                    return true;
+                }
+                return false;
             }
         }
 
@@ -681,11 +729,19 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
 
     @Override
     public void demote(String bookieId) {
+        demote(bookieId, System.nanoTime() + timeoutNanos);
+    }
+
+    public void demoteManifestUntil(SegmentManifestColdPublication binding, long deadline) {
+        requireManifestBinding(binding);
+        demote(bookieId, Math.min(deadline, System.nanoTime() + timeoutNanos));
+    }
+
+    private void demote(String bookieId, long deadline) {
         beginOperation();
         requireScope(bookieId);
         // A demoted nonce is never reused, including after a lost deletion reply.
         retire();
-        long deadline = System.nanoTime() + timeoutNanos;
         try {
             requireSession();
             String path = backend.path(bookieId);

@@ -406,22 +406,36 @@ public final class ZKProfileStartupRequirementsStore {
     /** Recheck only the original immutable source. Retained replay separately verifies the native G1 head. */
     public boolean revalidateManifestSource(Observation expected, ZKProfileReservationStore reservations,
             long deadline) {
+        return checkManifestSource(expected, reservations, deadline) == Status.FOUND;
+    }
+
+    /** Distinguish replacement/missing native authority from a transient cold read failure. */
+    public Status checkManifestSource(Observation expected, ZKProfileReservationStore reservations, long deadline) {
         synchronized (this) {
             if (expected == null || expected.owner() != this || !expected.isManifestSource()
                     || deleteAssignments == null || deleteAssignments != reservations) {
-                return false;
+                return Status.CORRUPT;
             }
         }
         try {
             var current = snapshot(expected.commissionedCompatibility().bookieId(), deadline, reads,
                     false, ProfileStartupRequirementsCodec.FIXED_MANIFEST);
-            return current != null && current.sourceIdentity().equals(expected.sourceIdentity())
-                    && current.envelope.equals(expected.envelope) && System.nanoTime() < deadline;
+            if (System.nanoTime() >= deadline) {
+                return Status.UNAVAILABLE;
+            }
+            if (current == null) {
+                return Status.NOT_FOUND;
+            }
+            return current.sourceIdentity().equals(expected.sourceIdentity())
+                    && current.envelope.equals(expected.envelope)
+                    ? Status.FOUND : Status.CORRUPT;
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            return false;
-        } catch (TimeoutException | IllegalArgumentException | IllegalStateException unavailable) {
-            return false;
+            return Status.UNAVAILABLE;
+        } catch (TimeoutException | IllegalStateException unavailable) {
+            return Status.UNAVAILABLE;
+        } catch (IllegalArgumentException invalid) {
+            return Status.CORRUPT;
         }
     }
 

@@ -138,6 +138,8 @@ replacement candidate 的机器锁见 [`candidate.json`](candidate.json)，记�
 
 上述 READY 属于 ledger 初始化。`SegmentProfileService.withOwnedResources` 仍在构造时拒绝两个必需 Arena，未创建存储目录。Bookie owned startup readiness、ephemeral writable 注册、注册池及其 SDK 公共工厂、自动维护和生产 Gate 各有独立验收。
 
+[受控固定 manifest 服务](../startup-readiness/README.md#受控固定-manifest-服务) 使用同一 mTLS handler 和实际回环地址。pending listener 完成 HELLO 后拒绝业务请求，原 session 注册确认后才首次开门。这里的实际写读沿 preconnected SDK 链，公开 create/open 工厂与公共 owned 配置入口仍有独立验收。
+
 ## 真实隔离普通 Add 接线
 
 本节保留 `66644a6021` 的 normal 切片与当时回执；后续 FENCE 接线及当前边界见下一节。

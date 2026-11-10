@@ -111,6 +111,10 @@ final class SegmentProfileListener {
         return bound.copy();
     }
 
+    boolean isListening() {
+        return !closing.get() && listener.isActive();
+    }
+
     /** Network/cold/response credit drain. Original storage I/O/owner drain remains the caller's next step. */
     CompletableFuture<Void> closeAsync() {
         if (closing.compareAndSet(false, true)) {

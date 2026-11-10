@@ -41,6 +41,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.BooleanSupplier;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
@@ -66,6 +67,7 @@ import org.apache.bookkeeper.proto.profile.ProfileInboundPipeline;
 import org.apache.bookkeeper.proto.profile.ProfileReceiveBudget;
 import org.apache.bookkeeper.tls.SecurityException;
 import org.apache.bookkeeper.tls.TLSContextFactory;
+import org.apache.bookkeeper.util.DiskChecker;
 
 /** Local Profile-only graph. The manifest fixes routing independently of execution placement. */
 final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHandler.DataOperations {
@@ -131,12 +133,30 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         final CheckedStartup checked;
         final PreflightEpisode episode;
         final Path directory;
+        final OwnedListener pending;
 
-        private ColdPublicationOwner(ManifestSegmentStorage storage, CheckedStartup checked) {
+        private ColdPublicationOwner(ManifestSegmentStorage storage, CheckedStartup checked, OwnedListener pending) {
             this.storage = storage;
             this.checked = checked;
             episode = storage.startupPreflight;
             directory = storage.control.directory();
+            this.pending = pending;
+        }
+    }
+
+    static final class OwnedListener {
+        final SegmentManifestOwnedService service;
+        final CheckedStartup checked;
+        final ZKProfileEphemeralRegistrationStore.Admission admission;
+        final SegmentProfileListener listener;
+
+        private OwnedListener(SegmentManifestOwnedService service, CheckedStartup checked,
+                ZKProfileEphemeralRegistrationStore.Admission admission,
+                SegmentProfileListener listener) {
+            this.service = service;
+            this.checked = checked;
+            this.admission = admission;
+            this.listener = listener;
         }
     }
 
@@ -196,6 +216,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     private boolean cleanupAttempted;
     private IOException cleanupFailure;
     private boolean listenerBorrowed;
+    private OwnedListener ownedListener;
     private PreflightEpisode startupPreflight;
     private SegmentManifestColdPublication coldPublication;
     private SegmentManifestAccessObservation.Probe accessProbe;
@@ -309,6 +330,24 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         }
         var retained = preflight.requireCurrent(manifest, control, observed, metadata, deadline);
         start(true, observed, new PreflightEpisode(preflight, metadata, retained, deadline));
+    }
+
+    void requireOwnedTransport(SegmentProfileService.Transport transport, DiskChecker diskChecker) throws IOException {
+        requireLoopbackTransport(transport);
+        for (var root : SegmentManifestAccessObservation.expectedRoots(manifest, control)) {
+            try {
+                diskChecker.checkExistingDir(Path.of(root.get("path")).toFile());
+            } catch (DiskChecker.DiskWarnThresholdException warning) {
+                // The original DiskChecker reports the advisory; its hard threshold still rejects startup.
+            }
+        }
+    }
+
+    void requireLoopbackTransport(SegmentProfileService.Transport transport) {
+        if (transport.budget() != budget || !transport.address().getAddress().isLoopbackAddress()
+                || transport.control() == null || transport.read() == null) {
+            throw new IllegalArgumentException("Manifest service needs its original budget and loopback transport");
+        }
     }
 
     /** A one-use offline observer. A timed-out result may leave the caller responsible for an explicit drain. */
@@ -544,6 +583,12 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             writes.addAll(lockPaths);
             writes.add(control.directory().resolve("bookie-control"));
             writes.add(bookieInspection.activeJournal());
+            for (String name : List.of("local-readiness", "local-readiness.lock")) {
+                Path file = control.directory().resolve(name);
+                if (Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
+                    writes.add(file);
+                }
+            }
         }
         for (Member member : members) {
             member.dataGuard.requireHeld(member.config.directory().resolve("isolated.lock"));
@@ -739,11 +784,26 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     /** Local-only recheck. Native authority and publication, if later implemented, need their own fences. */
     ProfileControlRequest.DeleteBinding requireOriginalGraph(CheckedStartup checked, long deadline) throws IOException {
+        return requireOriginalGraph(checked, deadline, null);
+    }
+
+    ProfileControlRequest.DeleteBinding requireOriginalGraph(CheckedStartup checked, long deadline,
+            OwnedListener pending) throws IOException {
         synchronized (gate) {
             if (checked.owner != this || System.nanoTime() >= deadline) {
                 throw new IOException("Checked startup does not belong to this live original graph or deadline");
             }
-            var actual = recoveredCuts();
+            LocalCuts actual;
+            if (pending == null) {
+                actual = recoveredCuts();
+            } else {
+                if (ownedListener != pending || pending.checked != checked || !listenerBorrowed
+                        || !pending.listener.isListening()
+                        || !pending.admission.isPending() || !recovered || freeing || !isLive()) {
+                    throw new IOException("Original owned pending listener is no longer available");
+                }
+                actual = inspectRecoveredCuts();
+            }
             var expected = checked.facts();
             if (actual.bookie() != expected.bookieControlThrough() || !actual.arenas().equals(expected.arenas())
                     || !actual.rollback().equals(expected.rollback())
@@ -758,14 +818,36 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     SegmentManifestColdPublication bindColdPublication(CheckedStartup checked, ZKProfileRegistrationStore persistent,
             ZKProfileEphemeralRegistrationStore publisher, ZKProfileEphemeralRegistrationStore.Admission admission,
             Generation readiness, Generation capabilities, String endpoint, List<Integer> hints) throws IOException {
+        return bindPublication(checked, persistent, publisher, admission, readiness, capabilities,
+                endpoint, hints, null);
+    }
+
+    SegmentManifestColdPublication bindOwnedPublication(OwnedListener pending, ZKProfileRegistrationStore persistent,
+            ZKProfileEphemeralRegistrationStore publisher, Generation readiness, Generation capabilities,
+            List<Integer> hints) throws IOException {
+        var bound = pending.listener.bound().getNow(null);
+        if (bound == null || !bound.getAddress().isLoopbackAddress() || bound.getPort() <= 0) {
+            throw new IOException("Original owned manifest listener has no actual bound loopback address");
+        }
+        String host = bound.getAddress().getHostAddress();
+        String endpoint = "tls://" + (host.contains(":") ? "[" + host + "]" : host) + ":" + bound.getPort();
+        return bindPublication(pending.checked, persistent, publisher, pending.admission, readiness, capabilities,
+                endpoint, hints, pending);
+    }
+
+    private SegmentManifestColdPublication bindPublication(CheckedStartup checked,
+            ZKProfileRegistrationStore persistent,
+            ZKProfileEphemeralRegistrationStore publisher, ZKProfileEphemeralRegistrationStore.Admission admission,
+            Generation readiness, Generation capabilities, String endpoint, List<Integer> hints, OwnedListener pending)
+            throws IOException {
         synchronized (gate) {
             var episode = startupPreflight;
             if (episode == null || coldPublication != null && !coldPublication.drained()) {
                 throw new IOException("Original manifest graph has no available cold publication attempt");
             }
-            requireOriginalGraph(checked, episode.deadline());
-            coldPublication = new SegmentManifestColdPublication(new ColdPublicationOwner(this, checked), persistent,
-                    publisher, admission, readiness, capabilities, endpoint, hints);
+            requireOriginalGraph(checked, episode.deadline(), pending);
+            coldPublication = new SegmentManifestColdPublication(new ColdPublicationOwner(this, checked, pending),
+                    persistent, publisher, admission, readiness, capabilities, endpoint, hints);
             return coldPublication;
         }
     }
@@ -847,6 +929,10 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         if (!coldRecoveryAvailable()) {
             throw new IOException("Original cold recovered manifest graph is unavailable");
         }
+        return inspectRecoveredCuts();
+    }
+
+    private LocalCuts inspectRecoveredCuts() throws IOException {
         if (execution.onOwnerThread()) {
             throw new IllegalArgumentException("Manifest recovery observation requires an external cold caller");
         }
@@ -875,6 +961,23 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 controls.activation(), controls.fenceOrGrant(), controls.tombstone(),
                 arenas.stream().anyMatch(arena -> arena.controlThrough() >= 0), controls.durabilityUnknown());
         return new LocalCuts(cut, List.copyOf(arenas), rollback, applied);
+    }
+
+    IsolatedSegmentStorage.DeleteCatchUpAttempt followOwnedG1(OwnedListener original, PreflightEpisode episode,
+            String domain, int maxEvents, long deadline, BooleanSupplier live) {
+        IsolatedSegmentStorage.DeleteReplayTarget local;
+        synchronized (gate) {
+            if (ownedListener != original || startupPreflight != episode || !isLive()
+                    || !original.admission.allows(bookieIdentity.bookieId().toString(), manifest.incarnation())) {
+                return new IsolatedSegmentStorage.DeleteCatchUpAttempt(
+                        IsolatedSegmentStorage.DeleteCatchUpStatus.UNAVAILABLE, null,
+                        CompletableFuture.completedFuture(null));
+            }
+            local = deleteReplayTarget();
+        }
+        var nativeProbe = episode.retained().nextProbe(deadline);
+        return IsolatedSegmentStorage.replayProfileDeletesUntil(local, episode.preflight().reservations,
+                episode.metadata(), domain, maxEvents, deadline, live, nativeProbe);
     }
 
     /** Observe and apply the original retained G1 journal on the sole recovered Bookie control owner. */
@@ -930,12 +1033,35 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             if (!isLive() || listenerBorrowed || coldPublication != null && !coldPublication.drained()) {
                 throw new IllegalStateException("Manifest listener requires one complete live graph");
             }
-            int base = SegmentProfileAddHandler.connectionBaseBytes(settings.connectionBaseBytes(),
-                    this.control.maxPendingEntries());
-            listenerBorrowed = true;
-            return new SegmentProfileListener(tls, budget, settings, address, acceptor, worker,
-                    base, new Connection(settings, control, read, base));
+            return bindListener(tls, settings, address, acceptor, worker, control, read);
         }
+    }
+
+    OwnedListener listenOwned(SegmentManifestOwnedService service, CheckedStartup checked,
+            ZKProfileEphemeralRegistrationStore.Admission admission, SegmentProfileService.Transport transport,
+            long deadline) throws IOException {
+        requireLoopbackTransport(transport);
+        synchronized (gate) {
+            requireOriginalGraph(checked, deadline);
+            if (!service.owns(this) || coldPublication != null || !admission.isPending()
+                    || !admission.bookieId().equals(manifest.bookieId().toString())) {
+                throw new IOException("Original manifest graph needs its pending owned admission");
+            }
+            var listener = bindListener(transport.tls(), transport.settings(), transport.address(),
+                    transport.acceptor(), transport.worker(), transport.control(), transport.read());
+            ownedListener = new OwnedListener(service, checked, admission, listener);
+            return ownedListener;
+        }
+    }
+
+    private SegmentProfileListener bindListener(TLSContextFactory tls, SegmentProfileListener.Settings settings,
+            InetSocketAddress address, EventLoopGroup acceptor, EventLoopGroup worker,
+            SegmentProfileControlConfig control, SegmentProfileReadConfig read) {
+        int base = SegmentProfileAddHandler.connectionBaseBytes(settings.connectionBaseBytes(),
+                this.control.maxPendingEntries());
+        listenerBorrowed = true;
+        return new SegmentProfileListener(tls, budget, settings, address, acceptor, worker,
+                base, new Connection(settings, control, read, base));
     }
 
     private final class Connection implements SegmentProfileListener.ConnectionInstaller {
@@ -1006,14 +1132,18 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     @Override
     public boolean ownedStartupAllowsRequests() {
-        return controlAdmission();
+        synchronized (gate) {
+            return isLive() && (ownedListener == null
+                    || ownedListener.admission.hasCompletedFirstOpen(manifest.incarnation()));
+        }
     }
 
     @Override
     public SegmentBookieControlLog.NormalRejection submitProfileNormal(ProfileLedgerContext context, byte[] credential,
             long entryId, ByteBuf entry, SegmentDataPhysicalDriver.NormalRequest request) throws IOException {
         synchronized (gate) {
-            if (!isLive()) {
+            if (!isLive() || ownedListener != null && !ownedListener.admission.allows(
+                    manifest.bookieId().toString(), manifest.incarnation())) {
                 return SegmentBookieControlLog.NormalRejection.UNAVAILABLE;
             }
             var rejection = bookie.normalRejection(context, credential);

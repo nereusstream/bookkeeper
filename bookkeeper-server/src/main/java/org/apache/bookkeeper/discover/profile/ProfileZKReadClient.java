@@ -44,6 +44,9 @@ final class ProfileZKReadClient {
 
         synchronized void returned() {
             callbacks--;
+            if (callbacks == 0) {
+                notifyAll();
+            }
         }
 
         synchronized int stop() {
@@ -53,6 +56,17 @@ final class ProfileZKReadClient {
 
         synchronized boolean idle() {
             return callbacks == 0;
+        }
+
+        synchronized boolean awaitIdle(long deadline) throws InterruptedException {
+            while (callbacks != 0) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    return false;
+                }
+                TimeUnit.NANOSECONDS.timedWait(this, remaining);
+            }
+            return true;
         }
     }
 

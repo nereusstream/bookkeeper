@@ -62,7 +62,9 @@
 
 步骤 12 新增多根外部 policy 声明及 schema 2 启动兼容性预检。预检在 mutable open 前拒绝 scope 和能力矛盾，并将 UWNS2 和 native requirements/G1 绑定到原冷重开 owner 的完整事实。详见 [固定多根 policy 与启动兼容性预检](startup-readiness/README.md#固定多根-policy-与启动兼容性预检)。
 
-步骤 12 的固定 manifest 冷发布复用原 readiness 阶段、DLR 和 ZooKeeper 记录。原生 writable multi 检查原 source marker、G1 head 和持久 readiness，实际读回重验原 birth、会话、G1 和本地游标。当前为受控隔离 namespace，业务 admission 保持 pending 或 retired。独立生产 issuer、持续隔离、owned listener first-open 与运行期 G2 退休仍 OPEN。详见 [固定 manifest 冷发布与结算](startup-readiness/README.md#固定-manifest-冷发布与结算)。
+步骤 12 的固定 manifest 冷发布复用原 readiness 阶段、DLR 和 ZooKeeper 记录。原生 writable multi 检查原 source marker、G1 head 和持久 readiness，实际读回重验原 birth、会话、G1 和本地游标。单独冷发布的业务 admission 保持 pending 或 retired。详见 [固定 manifest 冷发布与结算](startup-readiness/README.md#固定-manifest-冷发布与结算)。
+
+步骤 12 接通受控的固定 manifest 服务。真实 loopback listener 在同 session 冷结算及原 follower 调度成功后首次开门，运行期按原 G1 native birth 与最新本地游标读取，确认 G2 或原生来源失效后退休并撤销发布。实际排空之前保留文件、guards 和 credits。独立生产 issuer、持续隔离、公共 owned/Main 接线及生产 Gate 仍 OPEN。详见 [受控固定 manifest 服务](startup-readiness/README.md#受控固定-manifest-服务)。
 
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 

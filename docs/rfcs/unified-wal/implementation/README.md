@@ -419,7 +419,9 @@ DATA durable → hot locator → local result
 
 [固定多根 policy 与启动兼容性预检](startup-readiness/README.md#固定多根-policy-与启动兼容性预检) 核对外部声明、完整根向量、UWNS2、固定 schema 2 能力及原生 G1，仅在原冷重开 owner 上产出 checked facts。
 
-[固定 manifest 冷发布与结算](startup-readiness/README.md#固定-manifest-冷发布与结算) 在受控 namespace 复用原 readiness 阶段及 schema 2 的实际 ZooKeeper 事务，结算再次核对原会话、原 source birth、G1 与本地游标。完整 owned listener 与首次开放请求仍 OPEN。
+[固定 manifest 冷发布与结算](startup-readiness/README.md#固定-manifest-冷发布与结算) 在受控 namespace 复用原 readiness 阶段及 schema 2 的实际 ZooKeeper 事务，结算再次核对原会话、原 source birth、G1 与本地游标。
+
+[受控固定 manifest 服务](startup-readiness/README.md#受控固定-manifest-服务) 将实际回环 listener、同 session 首次开流量、原生 G1 在线 follower 和实际 owner 排空接入健康 CLOSED 重开。公共 owned factory、生产 issuer、持续隔离及生产 Gate 仍 OPEN。
 
 依赖步骤14，首版删除要求fenced-close。将步骤9的本地能力接入集群流程：
 

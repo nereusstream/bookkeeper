@@ -19,9 +19,14 @@ package org.apache.bookkeeper.bookie.storage.segment;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
+import org.apache.bookkeeper.bookie.storage.segment.IsolatedSegmentStorage.DeleteCatchUpAttempt;
+import org.apache.bookkeeper.bookie.storage.segment.IsolatedSegmentStorage.DeleteCatchUpStatus;
 import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore.WritableRegistration;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
@@ -42,6 +47,8 @@ public final class SegmentManifestColdPublication {
 
     private final ManifestSegmentStorage owner;
     private final ManifestSegmentStorage.CheckedStartup checked;
+    private final ManifestSegmentStorage.OwnedListener pending;
+    private final ManifestSegmentStorage.PreflightEpisode episode;
     private final SegmentManifestStartupPolicy.PreOpen preflight;
     private final ZKProfileReservationStore.RetainedG1DeleteReplay retained;
     private final long deadline;
@@ -55,6 +62,7 @@ public final class SegmentManifestColdPublication {
     private volatile boolean bound;
     private volatile boolean retired;
     private volatile boolean demoted;
+    private SegmentLocalReadinessStore ownedLocal;
 
     SegmentManifestColdPublication(ManifestSegmentStorage.ColdPublicationOwner original,
             ZKProfileRegistrationStore persistent,
@@ -62,9 +70,11 @@ public final class SegmentManifestColdPublication {
             Generation readiness, Generation capabilities, String endpoint, List<Integer> hints) {
         owner = original.storage;
         checked = original.checked;
-        preflight = original.episode.preflight();
-        retained = original.episode.retained();
-        deadline = original.episode.deadline();
+        pending = original.pending;
+        episode = original.episode;
+        preflight = episode.preflight();
+        retained = episode.retained();
+        deadline = episode.deadline();
         directory = original.directory;
         this.persistent = Objects.requireNonNull(persistent, "persistent");
         this.publisher = Objects.requireNonNull(publisher, "publisher");
@@ -113,13 +123,21 @@ public final class SegmentManifestColdPublication {
         }
     }
 
+    public void requireOwnedAdmission(ZKProfileEphemeralRegistrationStore.Admission candidate) {
+        if (pending == null || candidate != pending.admission || retired || !pending.listener.isListening()) {
+            throw new IllegalArgumentException("Manifest publication has no matching owned pending listener");
+        }
+        pending.service.requirePrepared(this);
+    }
+
     /** Match and read the local cut under the original graph gate. */
     public ProfileDeleteDelivery.Progress localProgress(long operationDeadline) {
         if (retired || operationDeadline > deadline) {
             throw new IllegalStateException("Fixed manifest cold publication retired or expired");
         }
         try {
-            return ProfileDeleteDelivery.Progress.fromEvent(owner.requireOriginalGraph(checked, operationDeadline));
+            return ProfileDeleteDelivery.Progress.fromEvent(
+                    owner.requireOriginalGraph(checked, operationDeadline, pending));
         } catch (IOException unavailable) {
             throw new IllegalStateException("Fixed manifest original graph is no longer available", unavailable);
         }
@@ -142,17 +160,12 @@ public final class SegmentManifestColdPublication {
             bound = true;
             long operationDeadline = publisher.verifyManifestStartup(this);
             localProgress(operationDeadline);
-            var facts = checked.facts();
-            try (var local = new SegmentLocalReadinessStore(
-                    directory, facts.bookie().toString(), facts.incarnation())) {
-                var bounded = publisher.manifestPersistentStore(this);
-                var phases = new StartupReadinessHarness(local, bounded, publisher)
-                        .runManifest(input, StartupCrashPoint.NONE);
-                if (phases.outcome() != Outcome.PUBLICATION_RECONCILED) {
-                    demote();
-                    return new Result(phases, null);
-                }
-                return new Result(phases, publisher.reconcileManifestStartup(this));
+            if (pending != null) {
+                ownedLocal = openLocal();
+                return publish(ownedLocal);
+            }
+            try (var local = openLocal()) {
+                return publish(local);
             }
         } catch (IOException | RuntimeException failure) {
             demoteAfterFailure(failure);
@@ -169,6 +182,36 @@ public final class SegmentManifestColdPublication {
         } finally {
             running = false;
         }
+    }
+
+    private SegmentLocalReadinessStore openLocal() throws IOException {
+        var facts = checked.facts();
+        return new SegmentLocalReadinessStore(directory, facts.bookie().toString(), facts.incarnation());
+    }
+
+    private Result publish(SegmentLocalReadinessStore local) throws InterruptedException, TimeoutException {
+        var bounded = publisher.manifestPersistentStore(this);
+        var phases = new StartupReadinessHarness(local, bounded, publisher).runManifest(input, StartupCrashPoint.NONE);
+        if (phases.outcome() != Outcome.PUBLICATION_RECONCILED) {
+            demote();
+            return new Result(phases, null);
+        }
+        return new Result(phases, publisher.reconcileManifestStartup(this));
+    }
+
+    DeleteCatchUpAttempt followG1(String domain, int maxEvents, Duration timeout, BooleanSupplier live) {
+        long probeDeadline = System.nanoTime() + timeout.toNanos();
+        var sourceStatus = requirements().checkManifestSource(source(), reservations(), probeDeadline);
+        if (sourceStatus != ZKProfileStartupRequirementsStore.Status.FOUND) {
+            var status = sourceStatus == ZKProfileStartupRequirementsStore.Status.UNAVAILABLE
+                    ? DeleteCatchUpStatus.UNAVAILABLE : DeleteCatchUpStatus.QUARANTINED;
+            return new DeleteCatchUpAttempt(status, null, CompletableFuture.completedFuture(null));
+        }
+        if (!live.getAsBoolean() || System.nanoTime() >= probeDeadline) {
+            return new DeleteCatchUpAttempt(DeleteCatchUpStatus.UNAVAILABLE, null,
+                    CompletableFuture.completedFuture(null));
+        }
+        return owner.followOwnedG1(pending, episode, domain, maxEvents, probeDeadline, live);
     }
 
     private void demoteAfterFailure(Throwable failure) {
@@ -194,8 +237,30 @@ public final class SegmentManifestColdPublication {
         }
     }
 
+    void demoteUntil(long closeDeadline) {
+        retire();
+        if (bound && !demoted && !publisher.manifestSessionEnded(this)) {
+            publisher.demoteManifestUntil(this, closeDeadline);
+            demoted = true;
+        }
+    }
+
+    void closeLocal() throws IOException {
+        if (ownedLocal != null) {
+            ownedLocal.close();
+            ownedLocal = null;
+        }
+    }
+
     boolean drained() {
-        return retired && !running && (!bound || demoted || publisher.manifestSessionEnded(this))
-                && publisher.manifestMutationsDrained(this);
+        return publicationRetired() && publisher.manifestMutationsDrained(this);
+    }
+
+    boolean awaitDrained(long deadline) throws InterruptedException {
+        return publicationRetired() && publisher.awaitManifestMutations(this, deadline);
+    }
+
+    private boolean publicationRetired() {
+        return retired && !running && (!bound || demoted || publisher.manifestSessionEnded(this));
     }
 }

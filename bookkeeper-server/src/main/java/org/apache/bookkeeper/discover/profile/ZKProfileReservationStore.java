@@ -6154,6 +6154,17 @@ public final class ZKProfileReservationStore {
             this.deadline = deadline;
         }
 
+        /** Fresh bounded read budget for the original native G1, without observing a replacement scope. */
+        public RetainedG1DeleteReplay nextProbe(long probeDeadline) {
+            long remaining = probeDeadline - System.nanoTime();
+            if (remaining > Duration.ofMinutes(1).toNanos()) {
+                throw new IllegalArgumentException("Retained G1 probe requires a bounded remaining deadline");
+            }
+            var probe = new RetainedG1DeleteReplay(metadata, target, probeDeadline);
+            probe.initial = requireG1();
+            return probe;
+        }
+
         public DeleteHeadResult readHead() {
             try {
                 if (reads.sync(root, deadline) != Code.OK.intValue()) {
@@ -6161,11 +6172,14 @@ public final class ZKProfileReservationStore {
                 }
                 var current = deleteHead(target, deadline);
                 if (current == null) {
-                    return new DeleteHeadResult(ReadStatus.NOT_FOUND, null);
+                    return new DeleteHeadResult(initial == null ? ReadStatus.NOT_FOUND : ReadStatus.QUARANTINED, null);
                 }
                 if (initial == null) {
                     initial = current;
                 } else {
+                    if (initial.mode() != current.mode()) {
+                        return new DeleteHeadResult(ReadStatus.QUARANTINED, null);
+                    }
                     requireSameG1(initial, current.head(), current.node());
                 }
                 return new DeleteHeadResult(ReadStatus.FOUND, current.head());
