@@ -32,8 +32,10 @@ import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -43,8 +45,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import javax.crypto.SecretKey;
+import org.apache.bookkeeper.common.profile.ProfileDescriptorIdentity;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
+import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.Generation;
@@ -55,6 +59,8 @@ import org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
+import org.apache.bookkeeper.common.util.nativeio.NativeIO.FileIdentity;
+import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
@@ -71,7 +77,39 @@ import org.apache.bookkeeper.util.DiskChecker;
 
 /** Local Profile-only graph. The manifest fixes routing independently of execution placement. */
 final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHandler.DataOperations {
-    record Capacity(long dataBytes, long controlBytes) { }
+    record Capacity(long dataBytes, long controlBytes) {
+        Capacity withRecoveryDependencies(int arenas, int maximumRows) throws IOException {
+            var layout = SegmentControlCapacity.Layout.hotSpot();
+            // A recovery grant can project both its original and terminal scope. Allow for copied
+            // identifier arrays and strings, plus temporary and immutable row containers.
+            long scope = SegmentControlCapacity.sum(layout.object(ProfileControlScope.class),
+                    layout.object(ProfileDescriptorIdentity.class), layout.bytes(36),
+                    SegmentControlCapacity.times(8, layout.bytes(32)),
+                    layout.string(ProfileControlScope.MAX_TARGET_BOOKIE_BYTES));
+            long row = SegmentControlCapacity.sum(SegmentControlCapacity.times(2, scope), layout.string(64),
+                    SegmentControlCapacity.times(8, layout.captured(16)));
+            long projection = SegmentControlCapacity.sum(SegmentControlCapacity.times(maximumRows, row),
+                    SegmentControlCapacity.times(arenas + 1L, 16 * layout.captured(16)),
+                    4L * SegmentArenaManifest.MAX_BYTES);
+            // Each vector can retain references from its original replay while the other is assembled.
+            return new Capacity(dataBytes,
+                    SegmentControlCapacity.times(2, SegmentControlCapacity.sum(controlBytes, projection)));
+        }
+    }
+
+    record ArenaRecoveryDependencies(SegmentFileHeader identity,
+            SegmentArenaControlLog.RecoveryDependencies control) { }
+
+    record LedgerRoute(int shard, int arena) { }
+
+    record RecoveryDependencies(ManifestIdentity manifest, SegmentFileHeader bookieIdentity,
+            SegmentBookieControlLog.RecoveryDependencies bookie, List<ArenaRecoveryDependencies> arenas,
+            Map<ProfileLedgerContext, LedgerRoute> ledgerRoutes) { }
+
+    @FunctionalInterface
+    interface RecoveryDependencyObserver<T> {
+        T observe(RecoveryDependencies dependencies) throws Exception;
+    }
 
     enum RecoveryFactsStatus { COMPLETE, SOURCE_UNVERIFIED, GRAPH_UNAVAILABLE, DELETE_INCOMPLETE, DEADLINE_EXPIRED }
 
@@ -223,6 +261,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     private SegmentManifestColdPublication coldPublication;
     private SegmentManifestAccessObservation.Probe accessProbe;
     private boolean observingAccess;
+    private boolean observingRecoveryDependencies;
 
     ManifestSegmentStorage(SegmentArenaManifest manifest, ManifestIdentity expected, IsolatedSegmentConfig runtime,
             SecretKey key, ProfileDescriptorValidator validator, SegmentExecutionGroup.Settings settings,
@@ -352,6 +391,133 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         }
     }
 
+    /** The observer borrows an immutable control cut while this one-use owner holds the complete graph. */
+    <T> T withRecoveryDependencies(int maximumRows, Duration timeout, RecoveryDependencyObserver<T> observer)
+            throws Exception {
+        Objects.requireNonNull(observer, "observer");
+        long nanos = timeout.toNanos();
+        if (nanos <= 0 || nanos > TimeUnit.MINUTES.toNanos(1)) {
+            throw new IllegalArgumentException("Manifest recovery observation requires a bounded deadline");
+        }
+        var rows = new SegmentStorageInspector.RecoveryRows(maximumRows);
+        long deadline = System.nanoTime() + nanos;
+        synchronized (lifecycle) {
+            claimStartup();
+            observingRecoveryDependencies = true;
+        }
+        Throwable failed = null;
+        T result;
+        try {
+            requireRecoveryObservationLive(deadline);
+            reserveCapacity(capacity(manifest, control, settings, limits)
+                    .withRecoveryDependencies(members.size(), maximumRows));
+            requireRoots(true);
+            acquireGuards(true);
+            var paths = recoveryPathIdentities();
+            var before = readRecoveryDependencies(rows, deadline);
+            requireRecoveryPaths(paths, deadline);
+            result = observer.observe(before);
+            requireRecoveryPaths(paths, deadline);
+            if (!before.equals(readRecoveryDependencies(new SegmentStorageInspector.RecoveryRows(maximumRows),
+                    deadline))) {
+                throw new IOException("Manifest recovery control dependencies changed during observation");
+            }
+            requireRecoveryPaths(paths, deadline);
+        } catch (Exception | Error failure) {
+            failed = failure;
+            throw failure;
+        } finally {
+            finishOfflineObservation(failed);
+        }
+        requireRecoveryObservationTime(deadline);
+        return result;
+    }
+
+    private RecoveryDependencies readRecoveryDependencies(SegmentStorageInspector.RecoveryRows rows, long deadline)
+            throws IOException, InterruptedException {
+        requireRecoveryObservationLive(deadline);
+        var shared = SegmentBookieControlLog.inspectRecoveryDependencies(control, bookieIdentity,
+                limits.controlLogBytes(), key, validator, rows, bookieGuard, bookieFiles, List.of());
+        var arenas = new ArrayList<ArenaRecoveryDependencies>(members.size());
+        for (Member member : members) {
+            requireRecoveryObservationLive(deadline);
+            member.dataGuard.requireHeld(member.config.directory().resolve("isolated.lock"));
+            member.identity.requireStoredManifest(member.config, -4, member.owned);
+            var dependency = SegmentArenaControlLog.inspectRecoveryDependencies(member.config, member.identity,
+                    limits.controlLogBytes(), rows, member.controlGuard, member.owned, List.of());
+            arenas.add(new ArenaRecoveryDependencies(member.identity, dependency));
+        }
+        var ledgerRoutes = new HashMap<ProfileLedgerContext, LedgerRoute>();
+        for (var ledger : shared.ledgers()) {
+            int shard = shard(ledger.context());
+            ledgerRoutes.put(ledger.context(), new LedgerRoute(shard, manifest.arenaForShard(shard)));
+        }
+        return new RecoveryDependencies(manifest.identity(), bookieIdentity, shared, List.copyOf(arenas),
+                Map.copyOf(ledgerRoutes));
+    }
+
+    private void requireRecoveryPaths(List<FileIdentity> expected, long deadline)
+            throws IOException, InterruptedException {
+        requireRecoveryObservationLive(deadline);
+        if (!expected.equals(recoveryPathIdentities())) {
+            throw new IOException("Manifest recovery observation path identity changed");
+        }
+        requireRecoveryObservationLive(deadline);
+    }
+
+    private List<FileIdentity> recoveryPathIdentities() throws IOException {
+        var paths = new ArrayList<FileIdentity>();
+        for (Path root : roots) {
+            paths.add(recoveryPathIdentity(root, true));
+        }
+        paths.add(recoveryPathIdentity(manifest.path(), false));
+        var nativeIo = new NativeIOImpl();
+        paths.add(recoveryGuardIdentity(nativeIo, bookieGuard, lockPaths.get(0)));
+        for (int i = 0; i < members.size(); i++) {
+            paths.add(recoveryGuardIdentity(nativeIo, members.get(i).dataGuard, lockPaths.get(2 * i + 1)));
+            paths.add(recoveryGuardIdentity(nativeIo, members.get(i).controlGuard, lockPaths.get(2 * i + 2)));
+        }
+        return paths;
+    }
+
+    private static FileIdentity recoveryGuardIdentity(NativeIOImpl nativeIo, SegmentDataFileLock guard, Path path)
+            throws IOException {
+        guard.requireHeld(path);
+        FileIdentity actual = recoveryPathIdentity(path, false);
+        if (!actual.equals(nativeIo.fileIdentity(guard.channel()))) {
+            throw new IOException("Manifest recovery guard differs from its original path: " + path);
+        }
+        return actual;
+    }
+
+    private static FileIdentity recoveryPathIdentity(Path path, boolean directory) throws IOException {
+        var attributes = Files.readAttributes(path, "unix:dev,ino,isDirectory,isRegularFile",
+                LinkOption.NOFOLLOW_LINKS);
+        if (!(Boolean) attributes.get(directory ? "isDirectory" : "isRegularFile")
+                || !path.equals(path.toRealPath())) {
+            throw new IOException("Manifest recovery path is no longer its canonical type: " + path);
+        }
+        return new FileIdentity((Long) attributes.get("dev"), (Long) attributes.get("ino"));
+    }
+
+    private void requireRecoveryObservationLive(long deadline) throws IOException, InterruptedException {
+        requireRecoveryObservationTime(deadline);
+        synchronized (gate) {
+            if (stopping) {
+                throw new IOException("Manifest recovery observation retired");
+            }
+        }
+    }
+
+    private static void requireRecoveryObservationTime(long deadline) throws IOException, InterruptedException {
+        if (Thread.interrupted()) {
+            throw new InterruptedException("Manifest recovery observation interrupted");
+        }
+        if (deadline - System.nanoTime() <= 0) {
+            throw new IOException("Manifest recovery observation deadline elapsed");
+        }
+    }
+
     /** A one-use offline observer. A timed-out result may leave the caller responsible for an explicit drain. */
     SegmentManifestAccessObservation observeAccess(SegmentManifestAccessObservation.OldScope old, long newUid,
             Path probe, Duration timeout) throws IOException, InterruptedException {
@@ -392,18 +558,19 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             throw failure;
         } finally {
             if (claimed) {
-                finishAccessObservation(failed);
+                finishOfflineObservation(failed);
             }
         }
     }
 
-    private void finishAccessObservation(Throwable failed) throws IOException, InterruptedException {
+    private void finishOfflineObservation(Throwable failed) throws IOException, InterruptedException {
         boolean interrupted = failed instanceof InterruptedException;
         synchronized (lifecycle) {
             observingAccess = false;
+            observingRecoveryDependencies = false;
             try {
                 if (!close(Duration.ofSeconds(5)) && failed == null) {
-                    throw new IOException("Manifest access observation did not drain");
+                    throw new IOException("Manifest offline observation did not drain");
                 }
             } catch (IOException | InterruptedException cleanup) {
                 interrupted |= cleanup instanceof InterruptedException;
@@ -493,7 +660,10 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     }
 
     private void reserveCapacity() throws IOException {
-        Capacity capacity = capacity(manifest, control, settings, limits);
+        reserveCapacity(capacity(manifest, control, settings, limits));
+    }
+
+    private void reserveCapacity(Capacity capacity) throws IOException {
         try {
             dataCredit = budget.reserveDataWorkingSet(capacity.dataBytes());
             controlCredit = budget.reserveControlWorkingSet(capacity.controlBytes());
@@ -1366,7 +1536,8 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             }
         }
         synchronized (lifecycle) {
-            if (observingAccess || accessProbe != null && !accessProbe.closeWhenDrained()) {
+            if (observingAccess || observingRecoveryDependencies
+                    || accessProbe != null && !accessProbe.closeWhenDrained()) {
                 return false;
             }
             accessProbe = null;

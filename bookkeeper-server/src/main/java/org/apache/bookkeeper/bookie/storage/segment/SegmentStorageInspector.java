@@ -60,6 +60,24 @@ public final class SegmentStorageInspector {
         T observe(RecoveryDependencies dependencies) throws Exception;
     }
 
+    static final class RecoveryRows {
+        private int remaining;
+
+        RecoveryRows(int maximum) {
+            if (maximum < 1 || maximum > 65536) {
+                throw new IllegalArgumentException("Recovery dependency observation requires bounded rows");
+            }
+            remaining = maximum;
+        }
+
+        void charge(long rows, String owner) throws IOException {
+            if (rows > remaining) {
+                throw new IOException(owner + " recovery dependency observation exceeds its row limit");
+            }
+            remaining -= (int) rows;
+        }
+    }
+
     @FunctionalInterface
     interface LockedScope<T> {
         T run(Path scope, SegmentDataFileLock data, SegmentDataFileLock arena, SegmentDataFileLock bookie,
@@ -212,9 +230,10 @@ public final class SegmentStorageInspector {
             }
         }) {
             var arenaDependencies = SegmentArenaControlLog.inspectRecoveryDependencies(config, identity,
-                    maximumControlBytes, maximumRows, arena, files, readyDataPaths);
+                    maximumControlBytes, new RecoveryRows(maximumRows), arena, files, readyDataPaths);
             var bookieDependencies = SegmentBookieControlLog.inspectRecoveryDependencies(config, identity,
-                    maximumControlBytes, key, validator, maximumRows, bookie, files, readyDataPaths);
+                    maximumControlBytes, key, validator, new RecoveryRows(maximumRows), bookie, files,
+                    readyDataPaths);
             return new RecoveryDependencies(identity, arenaDependencies, bookieDependencies);
         }
     }

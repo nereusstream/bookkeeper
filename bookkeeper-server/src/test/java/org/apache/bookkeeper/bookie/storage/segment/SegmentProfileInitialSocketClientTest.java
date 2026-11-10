@@ -19525,8 +19525,9 @@ public class SegmentProfileInitialSocketClientTest {
                         fixture.cold), VALIDATOR, pool, 4);
                 var request = publicCreateRequest(fixture, 44);
                 var later = publicCreateRequest(fixture, 46);
+                var empty = publicCreateRequest(fixture, 47);
                 fixture.retainedReadContexts = Set.of(publicProfileCreateContext(request),
-                        publicProfileCreateContext(later));
+                        publicProfileCreateContext(later), publicProfileCreateContext(empty));
                 InetSocketAddress address;
                 try (var history = manifestResourceService(fixture, layout, requiredRoot, source, access,
                         new InetSocketAddress("127.0.0.1", 0), 1)) {
@@ -19579,6 +19580,12 @@ public class SegmentProfileInitialSocketClientTest {
                     byte[] payload = bytes(25, 9);
                     writeClosedPublicProfileLedger(sdk, later, payload);
                     assertOwnedManifestRoute(storage, layout, publicProfileCreateContext(later), 0);
+                    try (var writer = sdk.createProfileLedger(empty).get(10, TimeUnit.SECONDS)) {
+                        writer.closeAsync().get(30, TimeUnit.SECONDS);
+                        assertEquals(LedgerMetadata.State.CLOSED, writer.getLedgerMetadata().getState());
+                        assertEquals(-1, writer.getLedgerMetadata().getLastEntryId());
+                        assertEquals(0, writer.getLedgerMetadata().getLength());
+                    }
                     second.service.close();
                     third.service.close();
                     assertPublicProfilePayload(sdk, fixture, 46, payload);
@@ -19593,6 +19600,9 @@ public class SegmentProfileInitialSocketClientTest {
                 assertFalse(laterGranted.grantFree());
                 assertTrue(laterGranted.currentAllocations() > 0);
                 var beforeRefusal = manifestTreeDigests(layout);
+                assertManifestRecoveryDependencies(layout, earlier, laterGranted, publicProfileCreateContext(request),
+                        publicProfileCreateContext(later), publicProfileCreateContext(empty));
+                assertEquals(beforeRefusal, manifestTreeDigests(layout));
                 assertThrows(IOException.class, () -> manifestAccess(layout, access.old(), access.newUid(), script));
                 try (var refused = layout.owner(manifestWireBudget(layout.capacity()))) {
                     assertThrows(IOException.class, refused::restart);
@@ -19603,6 +19613,135 @@ public class SegmentProfileInitialSocketClientTest {
                 assertNull(registry.readPeer(bookie).peer());
             }
         }
+    }
+
+    private static void assertManifestRecoveryDependencies(ManifestWireLayout layout, ManifestCrashArena first,
+            ManifestCrashArena second, ProfileLedgerContext deleted, ProfileLedgerContext data,
+            ProfileLedgerContext empty) throws Exception {
+        var manifest = layout.manifest();
+        var timeout = Duration.ofSeconds(10);
+        int maximumRows = 64;
+        var capacity = layout.capacity().withRecoveryDependencies(2, maximumRows);
+        var budget = manifestWireBudget(capacity);
+        Path bookieLock = manifest.controlDirectory().resolve("bookie-control.lock");
+        long bookieCut;
+        try (var guard = SegmentDataFileLock.openExistingControl(bookieLock)) {
+            var identity = SegmentFileHeader.forBookie(manifest);
+            bookieCut = SegmentBookieControlLog.inspectManifestWhileLocked(manifest.bookieConfig(layout.runtime()),
+                    identity, layout.limits().controlLogBytes(), new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                    guard, new SegmentOwnedFiles(List.of(bookieLock))).cut();
+        }
+        int rows;
+        try (var owner = layout.owner(budget)) {
+            rows = owner.withRecoveryDependencies(maximumRows, timeout, graph -> {
+                assertEquals(manifest.identity(), graph.manifest());
+                assertEquals(SegmentFileHeader.forBookie(manifest), graph.bookieIdentity());
+                assertEquals(bookieCut, graph.bookie().observedSequence());
+                assertEquals(Set.of(deleted, data, empty), Set.copyOf(graph.bookie().ledgers().stream()
+                        .map(SegmentBookieControlLog.ObservedLedger::context).toList()));
+                assertEquals(Map.of(deleted.ledgerId(), deleted), graph.bookie().tombstones());
+                assertEquals(Map.of(deleted, new ManifestSegmentStorage.LedgerRoute(0, 1),
+                        data, new ManifestSegmentStorage.LedgerRoute(0, 1),
+                        empty, new ManifestSegmentStorage.LedgerRoute(1, 0)), graph.ledgerRoutes());
+                assertEquals(capacity.controlBytes(), budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                assertThrows(IOException.class, () -> SegmentDataFileLock.openExistingControl(bookieLock));
+                assertEquals(2, graph.arenas().size());
+                int bookieRows = graph.bookie().ledgers().size() + graph.bookie().tombstones().size();
+                for (var ledger : graph.bookie().ledgers()) {
+                    bookieRows += ledger.recoveryGrants().size() + ledger.terminalBoundaries().size();
+                }
+                int total = bookieRows;
+                var expected = List.of(first, second);
+                for (int i = 0; i < expected.size(); i++) {
+                    var member = graph.arenas().get(i);
+                    var crash = expected.get(i);
+                    var arena = member.control();
+                    assertEquals(SegmentFileHeader.forArena(manifest, i), member.identity());
+                    assertEquals(crash.epoch(), arena.cut().sessionEpoch());
+                    assertEquals(crash.cut(), arena.cut().appliedSequence());
+                    assertEquals(crash.physicalGeneration().value(), arena.cut().physicalGeneration());
+                    assertTrue(arena.cut().sessionOpen());
+                    assertEquals(crash.allocationHighWatermark(), arena.allocationHighWatermark());
+                    assertEquals(crash.currentAllocations(), arena.grants().size());
+                    int memberRows = arena.grants().size() + arena.streams().size() + arena.selections().size()
+                            + arena.committedCopyCount() + arena.retiredSlots().size() + arena.retiredRanges().size()
+                            + Math.toIntExact(arena.currentReused());
+                    total += memberRows;
+                    Path root = manifest.arenas().get(i).directory();
+                    assertThrows(IOException.class, () -> SegmentDataFileLock.open(root));
+                    assertThrows(IOException.class, () -> SegmentDataFileLock.openExistingControl(
+                            root.resolve("arena-control.lock")));
+                }
+                assertTrue(bookieRows > 1 && total - bookieRows > 1);
+                return total;
+            });
+            assertManifestObservationReleased(budget);
+        }
+
+        try (var owner = layout.owner(budget)) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.withRecoveryDependencies(rows - 1, timeout, graph -> {
+                        throw new AssertionError("Aggregate overflow exposed a partial graph");
+                    }));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("exceeds its row limit"));
+            assertManifestObservationReleased(budget);
+        }
+
+        Path lateLock = manifest.arenas().get(1).directory().resolve("arena-control.lock");
+        try (var guard = SegmentDataFileLock.openExistingControl(lateLock); var owner = layout.owner(budget)) {
+            var failure = assertThrows(IOException.class,
+                    () -> owner.withRecoveryDependencies(maximumRows, timeout, graph -> {
+                        throw new AssertionError("Busy last member exposed a partial graph");
+                    }));
+            assertTrue(failure.getMessage(), failure.getMessage().contains("already has a writer"));
+            assertTrue(guard.lock().isValid());
+            assertManifestObservationReleased(budget);
+        }
+
+        // Inject one valid replay transition into the early member while the observation is active.
+        Path journal = manifest.arenas().get(0).directory().resolve("arena-control");
+        try (var file = java.nio.channels.FileChannel.open(journal, StandardOpenOption.WRITE);
+                var owner = layout.owner(budget)) {
+            long size = file.size();
+            try {
+                var failure = assertThrows(IOException.class,
+                        () -> owner.withRecoveryDependencies(maximumRows, timeout, graph -> {
+                            var frame = SegmentControlFormat.encode(SegmentControlFormat.Type.DEVICE_STATE,
+                                    first.physicalGeneration(), first.cut() + 1, UUID.randomUUID(),
+                                    new Generation(first.epoch()), first.epoch(),
+                                    java.nio.ByteBuffer.allocate(16).putInt(1).putInt(4).putLong(first.epoch()).flip());
+                            new SegmentFileIo().writeFully(file, frame, size);
+                            return graph.manifest();
+                        }));
+                assertEquals("Manifest recovery control dependencies changed during observation", failure.getMessage());
+                assertManifestObservationReleased(budget);
+            } finally {
+                file.truncate(size);
+            }
+        }
+
+        try (var owner = layout.owner(budget)) {
+            var failure = assertThrows(IOException.class, () -> owner.withRecoveryDependencies(maximumRows,
+                    timeout, graph -> {
+                        assertFalse(owner.close(timeout));
+                        assertThrows(IOException.class, () -> SegmentDataFileLock.openExistingControl(lateLock));
+                        assertEquals(capacity.controlBytes(), budget.used(ProfileReceiveBudget.Lane.CONTROL));
+                        return graph.manifest();
+                    }));
+            assertEquals("Manifest recovery observation retired", failure.getMessage());
+            assertManifestObservationReleased(budget);
+        }
+
+        try (var owner = layout.owner(budget)) {
+            assertEquals(bookieCut, (long) owner.withRecoveryDependencies(rows, timeout,
+                    graph -> graph.bookie().observedSequence()));
+            assertManifestObservationReleased(budget);
+        }
+    }
+
+    private static void assertManifestObservationReleased(ProfileReceiveBudget budget) {
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.DATA));
+        assertEquals(0, budget.used(ProfileReceiveBudget.Lane.CONTROL));
     }
 
     private static void reclaimManifestCrashHistory(Fixture fixture, BookKeeper sdk,

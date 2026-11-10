@@ -812,7 +812,8 @@ final class SegmentBookieControlLog implements AutoCloseable {
                                 boolean deleteEffective) { }
 
     static RecoveryDependencies inspectRecoveryDependencies(IsolatedSegmentConfig config, SegmentFileHeader identity,
-            long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator, int maximumRows,
+            long maxLogBytes, SecretKey key, ProfileDescriptorValidator validator,
+            SegmentStorageInspector.RecoveryRows budget,
             SegmentDataFileLock guard, SegmentOwnedFiles files, List<Path> readyDataPaths) throws IOException {
         guard.requireHeld(config.directory().toRealPath().resolve("bookie-control.lock"));
         FileChannel original = SegmentOwnedFiles.openRegularReadOnly(files,
@@ -825,17 +826,13 @@ final class SegmentBookieControlLog implements AutoCloseable {
         for (LedgerState state : observed.ledgers.values()) {
             rows += state.recoveryGrants.size();
         }
-        if (rows > maximumRows) {
-            throw new IOException("Bookie recovery dependency observation exceeds its row limit");
-        }
+        budget.charge(rows, "Bookie");
         var terminals = new HashMap<ProfileLedgerContext, List<ObservedTerminalBoundary>>();
         for (var applied : observed.operations.values()) {
             var command = applied.command();
             if (applied.outcome() == Status.APPLIED_DURABLE
                     && command.type == SegmentControlFormat.Type.RECOVERY_TERMINAL_BOUNDARY) {
-                if (++rows > maximumRows) {
-                    throw new IOException("Bookie recovery dependency observation exceeds its row limit");
-                }
+                budget.charge(1, "Bookie");
                 terminals.computeIfAbsent(command.scope.context, ignored -> new ArrayList<>())
                         .add(new ObservedTerminalBoundary(command.scope.observation(), command.terminal,
                                 applied.sequence()));

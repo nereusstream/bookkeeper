@@ -865,7 +865,8 @@ final class SegmentArenaControlLog implements AutoCloseable {
 
     /** Only the caller's existing lock scope and owned readers participate in this observation. */
     static RecoveryDependencies inspectRecoveryDependencies(IsolatedSegmentConfig config, SegmentFileHeader identity,
-            long maxLogBytes, int maximumRows, SegmentDataFileLock guard, SegmentOwnedFiles files,
+            long maxLogBytes, SegmentStorageInspector.RecoveryRows rowBudget, SegmentDataFileLock guard,
+            SegmentOwnedFiles files,
             List<Path> readyDataPaths) throws IOException {
         guard.requireHeld(config.directory().toRealPath().resolve("arena-control.lock"));
         Path path = config.directory().resolve("arena-control");
@@ -877,10 +878,9 @@ final class SegmentArenaControlLog implements AutoCloseable {
         long copyRows = observed.committedCopies.values().stream().mapToLong(Map::size).sum();
         long tailRows = observed.currentAllocations.values().stream()
                 .filter(grant -> grant.command().expectedGeneration() > 0).count();
-        if ((long) observed.currentAllocations.size() + observed.streamStarts.size() + observed.selectedMoves.size()
-                + observed.retiredSlots.size() + observed.retiredRanges.size() + copyRows + tailRows > maximumRows) {
-            throw new IOException("Arena recovery dependency observation exceeds its row limit");
-        }
+        rowBudget.charge((long) observed.currentAllocations.size() + observed.streamStarts.size()
+                + observed.selectedMoves.size() + observed.retiredSlots.size() + observed.retiredRanges.size()
+                + copyRows + tailRows, "Arena");
         var copies = new HashMap<Long, Map<CopyKey, String>>();
         observed.committedCopies.forEach((allocation, rows) -> copies.put(allocation, Map.copyOf(rows)));
         var history = new SegmentControlCheckpoint.Snapshot(observed.appliedThrough, observed.appliedOffset,

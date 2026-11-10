@@ -934,6 +934,16 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 58 项定向回归通过，Spotless 与 Checkstyle 通过。观察结果用于后续重建准入。原已授权 OPEN 的正常启动仍拒绝。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/closed-open-recovery-evidence-0064ecfc`。
 
+### 固定 manifest 的全图只读控制依赖
+
+原 Profile-only manifest owner 按 Bookie CONTROL、各 Arena DATA 和各 Arena CONTROL 的既定顺序取得全图既有排他锁。包内一次性观察复用原只读重放，记录同一个 commissioned manifest、唯一 Bookie cut 与完整本地 ledger 集合，以及按 manifest 顺序排列的各 Arena epoch、cut、grant、stream、MOVE、退休和既有尾界。账本按运行时同一 shard 规则关联到 Arena，已安装但无 DATA 的账本也参与关联。
+
+整图每次重放共用一个行数上限，覆盖嵌套 grant、copy、terminal 和 tail。原逐日志字节限制继续生效，原预算同时覆盖前后两份重放与观察向量。借用回调结束后再次核对原锁描述符和路径对象并重放完整向量。任一成员不可读、界限超出、向量变化或观察被退休时拒绝返回结果。回调和正在进行的同步 I/O 保留原锁及容量，返回前按原 owner 顺序完成读者和锁排空。截止时间约束结果交付。
+
+该接口观察本地控制历史，包括保有 grant 的 OPEN。重用尾界仍来自原控制历史。后续全图 CLOSED 重建需要独立验证 DATA 字节、旧写者持续隔离和当前原生 CLOSED 权威。原 startup 对 granted OPEN 的拒绝仍生效。
+
+真实已注册子 JVM `halt(23)` 后，观察覆盖原 retained grant、通过公开 SDK 安装的空 ledger，以及仍有本地 context 的已删除 ledger。末成员锁占用、全图行数超限、回调期间推进原控制 cut 和观察退休均拒绝交付，随后可重取原锁。原文件摘要及启动拒绝保持一致。九项定向测试、Spotless 和 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-recovery-dependencies-parent-35eb709c`。
+
 ### 单 DATA 文件的 CLOSED 重建准入
 
 基线 `e96bd97d6d`。原受控 publisher 的 PID、进程出生与注册 session 在其运行期间取得，等待进程实际退出。原三把锁下完整重放控制历史。仅支持一个已安装、fenced 且 normal-inactive 的 ledger，一个 DATA 文件和当前单 fragment `3/3/3` CLOSED。旧 target 仍是原成员，保留在原删除目标历史。原 Bookie 的唯一已应用 recovery grant 须与当前 native SELF intent、commit birth、完整 close scope 和本地 terminal 应用精确对应。旧准入要求 grant 列表为空的断言在真实非空 close 上失败，重放实际返回一条已关闭的 `[0,1]` SELF grant。其他已应用 grant、额外本地 context、MOVE、FREE、复用和删除状态拒绝。
