@@ -160,6 +160,7 @@ public class ZKMetadataDriverBase implements AutoCloseable {
     // managers
     protected LayoutManager layoutManager;
     protected LedgerManagerFactory lmFactory;
+    private boolean existingLayoutFactory;
 
     public String getScheme() {
         return SCHEME;
@@ -276,14 +277,24 @@ public class ZKMetadataDriverBase implements AutoCloseable {
         return layoutManager;
     }
 
-    @SneakyThrows
     public synchronized LedgerManagerFactory getLedgerManagerFactory()
             throws MetadataException {
+        return getLedgerManagerFactory(false);
+    }
+
+    @SneakyThrows
+    protected synchronized LedgerManagerFactory getLedgerManagerFactory(boolean existingOnly)
+            throws MetadataException {
+        if (existingOnly && lmFactory != null && !existingLayoutFactory) {
+            throw new MetadataException(Code.METADATA_SERVICE_ERROR,
+                    "Cached ledger manager factory did not require an existing layout");
+        }
         if (null == lmFactory) {
             try {
-                lmFactory = AbstractZkLedgerManagerFactory.newLedgerManagerFactory(
-                    conf,
-                    layoutManager);
+                lmFactory = existingOnly
+                        ? AbstractZkLedgerManagerFactory.openExistingLedgerManagerFactory(conf, layoutManager)
+                        : AbstractZkLedgerManagerFactory.newLedgerManagerFactory(conf, layoutManager);
+                existingLayoutFactory = existingOnly;
             } catch (IOException e) {
                 throw new MetadataException(
                     Code.METADATA_SERVICE_ERROR, "Failed to initialized ledger manager factory", e);
@@ -360,6 +371,7 @@ public class ZKMetadataDriverBase implements AutoCloseable {
                 log.warn().exception(e).log("Failed to close zookeeper based ledger manager");
             }
             lmFactory = null;
+            existingLayoutFactory = false;
         }
         if (ownZKHandle && null != zk) {
             try {

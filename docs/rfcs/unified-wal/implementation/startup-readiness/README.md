@@ -453,6 +453,14 @@ ZooKeeper `Op.check` 校验路径与 data version。正常 provisioning 的新 U
 
 入口保持包内、loopback 和健康 CLOSED restart 范围。公共服务工厂、Main、生产 issuer、持续隔离、Linux D2、真实掉电、异常同身份重开和完整 16 步资格仍待验收。
 
+### 健康重开使用已存在的 ledger layout
+
+自有资源的 manifest restart 在同一个 ZooKeeper client 上打开既有 ledger manager。原 factory 实际读取 `LAYOUT` 的分支直接处理缺失，已有根下没有 `LAYOUT` 时启动失败。读取到已有布局时继续沿原 factory 类型、版本和兼容性检查。driver 只复用以该模式打开的缓存 factory，关闭仍沿同一 owner。普通 SDK 和 v1 的工厂继续使用既有初始化契约。布局检查覆盖该次原生读取。
+
+真实失败用例配置已存在的空 ledger root 和错误 schema 2 birth。父版本拒绝启动后留下原生 `LAYOUT`，最终版本保留其缺失。真实 ZooKeeper processor 暂存实际 GET 请求，删除原本可见的布局后交回原处理链，启动失败且布局保持缺失。同一读取窗口中先关闭有效输入的 owner，close 返回 pending 并保留实际依赖。释放 GET 后，原 manager 可以完成装配，已退休的 attempt 无法创建核心、打开本地文件或发布 readiness。后续 close 排空原资源。公开 SDK 正向使用显式已初始化的 layout，启动和同地址重开前后核对原始字节、出生 zxid 与版本。
+
+2026-11-11，父版本 `efed68da6d`。完整入口 RED 留下 67 字节原生 `LAYOUT` 和新出生 Stat。首次修复验证发现正向夹具只创建了内存中的 manager，由夹具的显式准备阶段补充原生 layout。最终 11 项全部通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。真实用例还核对已有不兼容 layout 的拒绝与原字节保留，以及默认 lazy-create 和两种缓存模式。父版 EmbeddedServer 四项基线、完整 RED 和最终回执分开保存在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-bootstrap-parent-efed68da`。
+
 ## 显式 Profile 服务启动与 owner 排空
 
 2026-10-12，`SegmentProfileService` 将原 graph、DLR receipt、session admission、listener 和 delete consumer 接成一个显式隔离服务 episode。构造 owner 不打开目录、创建 graph 或绑定端口；`start(existing)` 由外部 cold caller 执行，先读取原 immutable requirements、运行原 version/scope/new-scope 检查，再核对 fallback 的 ARENA/INDEX 根与将要打开的原生目录。已存在的祖先通过 real path 解析，未创建的后缀保持计划路径；错根、相对根及与任一 old root 的祖先/后代重叠拒绝。此检查只绑定路径，不生产 Unix access、old-service disposition 或永久隔离事实，物理 proof issuer 仍由调用方提供。

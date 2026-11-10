@@ -163,6 +163,8 @@ import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore.RestoreDependencyStatus;
 import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 import org.apache.bookkeeper.meta.AbstractZkLedgerManager;
+import org.apache.bookkeeper.meta.FlatLedgerManagerFactory;
+import org.apache.bookkeeper.meta.LedgerLayout;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.meta.LongHierarchicalLedgerManagerFactory;
 import org.apache.bookkeeper.meta.ZkLayoutManager;
@@ -177,6 +179,10 @@ import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.data.Stat;
+import org.apache.zookeeper.proto.GetDataRequest;
+import org.apache.zookeeper.server.Request;
+import org.apache.zookeeper.server.RequestProcessor;
+import org.apache.zookeeper.server.ZooKeeperServer;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -19360,6 +19366,7 @@ public class SegmentProfileInitialSocketClientTest {
             }
             var access = observeRetainedManifest(classic, layout);
             String requirementsRoot = "/manifest-resources-required";
+            commissionManifestLedgerLayout(fixture);
             var required = provisionManifestPreflightRequirements(fixture, layout.manifest(), requirementsRoot,
                     2, 2, List.of(1, 2), 2);
             var source = required.source().sourceIdentity();
@@ -19378,6 +19385,8 @@ public class SegmentProfileInitialSocketClientTest {
                 sdk.enableProfile(initializer, coordinator, VALIDATOR, pool, 4);
                 var request = publicCreateRequest(fixture, 44);
                 fixture.retainedReadContexts = Set.of(publicProfileCreateContext(request));
+                String ledgerLayout = "/socket-ledgers/LAYOUT";
+                var originalLayout = readPublicProfileMetadata(fixture, ledgerLayout);
                 byte[] payload = bytes(23, 42);
                 String bookie = layout.manifest().bookieId().toString();
                 InetSocketAddress address;
@@ -19422,6 +19431,7 @@ public class SegmentProfileInitialSocketClientTest {
                     assertEquals(0, tls.refCnt());
                     assertManifestResourcesTerminated(resources);
                 }
+                assertPublicProfileMetadataUnchanged(originalLayout, readPublicProfileMetadata(fixture, ledgerLayout));
             }
         }
     }
@@ -19439,6 +19449,7 @@ public class SegmentProfileInitialSocketClientTest {
             }
             var access = observeRetainedManifest(classic, layout);
             String requirementsRoot = "/manifest-resources-required";
+            commissionManifestLedgerLayout(fixture);
             var required = provisionManifestPreflightRequirements(fixture, layout.manifest(), requirementsRoot,
                     2, 2, List.of(1, 2), 2);
             fixture.zk.create(SOCKET_SERVICE_READINESS, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
@@ -19472,6 +19483,22 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(0, tls.refCnt());
                 assertManifestResourcesTerminated(resources);
             }
+            String ledgerRoot = "/existing-empty-ledger-root";
+            fixture.zk.create(ledgerRoot, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            String ledgerLayout = ledgerRoot + "/LAYOUT";
+            assertNull(fixture.zk.exists(ledgerLayout, false));
+            try (var rejected = manifestResourceService(fixture, layout, requirementsRoot, wrong, access,
+                    address, 1, manifestLedgerConfiguration(fixture, ledgerRoot))) {
+                assertThrows(java.io.IOException.class, rejected::start);
+                assertNull(manifestField(rejected, "service", SegmentManifestOwnedService.class));
+                assertTrue(rejected.close(Duration.ofSeconds(5)));
+            }
+            var layoutStat = fixture.zk.exists(ledgerLayout, false);
+            assertNull("Rejected manifest restart created LAYOUT bytes "
+                    + (layoutStat == null ? ""
+                        : java.util.HexFormat.of().formatHex(fixture.zk.getData(ledgerLayout, false, null))),
+                    layoutStat);
+            assertManifestNativeLayoutWindows(fixture, layout, requirementsRoot, source, access, ledgerRoot);
             assertNull(fixture.zk.exists(manifestRegistration(SOCKET_SERVICE_READINESS, layout), false));
             assertEquals(before, manifestTreeDigests(layout));
             assertEquals(source, required.store().readManifest(layout.manifest().bookieId().toString())
@@ -19479,14 +19506,168 @@ public class SegmentProfileInitialSocketClientTest {
         }
     }
 
+    private static void assertManifestNativeLayoutWindows(Fixture fixture, ManifestWireLayout layout,
+            String requirementsRoot, ZKProfileStartupRequirementsStore.SourceIdentity source,
+            RetainedManifestAccess access, String ledgerRoot) throws Exception {
+        String path = ledgerRoot + "/LAYOUT";
+        var address = new InetSocketAddress("127.0.0.1", 0);
+        byte[] wrongFactory = new LedgerLayout(FlatLedgerManagerFactory.class.getName(),
+                FlatLedgerManagerFactory.CUR_VERSION).serialize();
+        fixture.zk.create(path, wrongFactory, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var incompatible = readPublicProfileMetadata(fixture, path);
+        try (var rejected = manifestResourceService(fixture, layout, requirementsRoot, source, access,
+                address, 1, manifestLedgerConfiguration(fixture, ledgerRoot))) {
+            var failure = assertThrows(java.io.IOException.class, rejected::start);
+            assertTrue(failure.getCause().getCause().getMessage().contains("does not match existing layout"));
+            assertNull(manifestField(rejected, "service", SegmentManifestOwnedService.class));
+            assertTrue(rejected.close(Duration.ofSeconds(5)));
+        }
+        assertPublicProfileMetadataUnchanged(incompatible, readPublicProfileMetadata(fixture, path));
+        byte[] layoutBytes = fixture.zk.getData("/socket-ledgers/LAYOUT", false, null);
+        var visible = fixture.zk.setData(path, layoutBytes, incompatible.version());
+        try (var owner = manifestResourceService(fixture, layout, requirementsRoot, source, access,
+                    address, 1, manifestLedgerConfiguration(fixture, ledgerRoot));
+                var held = new HeldNativeLayoutRead(fixture.cluster, path)) {
+            var starting = fixture.cold.submit(owner::start);
+            assertLayoutReadOwned(owner, held);
+            assertEquals(visible, fixture.zk.exists(path, false));
+            fixture.zk.delete(path, visible.getVersion());
+            held.release();
+            var failure = assertThrows(ExecutionException.class, () -> starting.get(5, TimeUnit.SECONDS));
+            assertTrue(failure.getCause() instanceof java.io.IOException);
+            assertNull(fixture.zk.exists(path, false));
+            assertNull(manifestField(owner, "service", SegmentManifestOwnedService.class));
+            assertTrue(owner.close(Duration.ofSeconds(5)));
+        }
+
+        fixture.zk.create(path, layoutBytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var existing = readPublicProfileMetadata(fixture, path);
+        try (var owner = manifestResourceService(fixture, layout, requirementsRoot, source, access,
+                    address, 1, manifestLedgerConfiguration(fixture, ledgerRoot));
+                var held = new HeldNativeLayoutRead(fixture.cluster, path)) {
+            var starting = fixture.cold.submit(owner::start);
+            var resources = assertLayoutReadOwned(owner, held);
+            var zk = manifestField(resources, "zk", ZooKeeper.class);
+            var tls = nativeTlsContext(tlsContext(manifestField(resources, "tls", TLSContextFactory.class)));
+            assertFalse(owner.close(Duration.ofMillis(200)));
+            assertFalse(starting.isDone());
+            assertTrue(zk.getState().isConnected());
+            assertFalse(manifestField(resources, "worker", EventLoopGroup.class).isShuttingDown());
+            assertTrue(tls.refCnt() > 0);
+            held.release();
+            var failure = assertThrows(ExecutionException.class, () -> starting.get(5, TimeUnit.SECONDS));
+            assertEquals("Owned manifest resource episode is retired", failure.getCause().getMessage());
+            assertNotNull(manifestField(resources, "manager", AbstractZkLedgerManager.class));
+            assertNull(manifestField(owner, "service", SegmentManifestOwnedService.class));
+            assertTrue(owner.close(Duration.ofSeconds(5)));
+            assertEquals(0, tls.refCnt());
+            assertManifestResourcesTerminated(resources);
+        }
+        assertPublicProfileMetadataUnchanged(existing, readPublicProfileMetadata(fixture, path));
+    }
+
+    private static SegmentProfileOwnedResources assertLayoutReadOwned(SegmentManifestResourceService owner,
+            HeldNativeLayoutRead held) throws Exception {
+        var request = held.request.get(5, TimeUnit.SECONDS);
+        var resources = manifestField(owner, "resources", SegmentProfileOwnedResources.class);
+        var zk = manifestField(resources, "zk", ZooKeeper.class);
+        assertTrue(zk.getState().isConnected());
+        assertEquals(zk.getSessionId(), request.sessionId);
+        return resources;
+    }
+
+    /** Hold the actual request before the native ZooKeeper processor can read its layout. */
+    private static final class HeldNativeLayoutRead implements AutoCloseable, RequestProcessor {
+        private final ZooKeeperServer server;
+        private final java.lang.reflect.Field processor;
+        private final RequestProcessor delegate;
+        private final String path;
+        private final CompletableFuture<Request> request = new CompletableFuture<>();
+        private boolean released;
+
+        HeldNativeLayoutRead(ZooKeeperUtil cluster, String path) throws Exception {
+            var serverField = ZooKeeperUtil.class.getDeclaredField("zks");
+            serverField.setAccessible(true);
+            server = (ZooKeeperServer) serverField.get(cluster);
+            processor = ZooKeeperServer.class.getDeclaredField("firstProcessor");
+            processor.setAccessible(true);
+            delegate = (RequestProcessor) processor.get(server);
+            this.path = path;
+            processor.set(server, this);
+        }
+
+        @Override
+        public void processRequest(Request incoming) throws RequestProcessorException {
+            if (incoming.type == ZooDefs.OpCode.getData) {
+                var read = incoming.readRequestRecordNoException(GetDataRequest::new);
+                synchronized (this) {
+                    if (!released && read != null && path.equals(read.getPath()) && request.complete(incoming)) {
+                        return;
+                    }
+                }
+            }
+            delegate.processRequest(incoming);
+        }
+
+        void release() throws RequestProcessorException {
+            Request pending;
+            synchronized (this) {
+                if (released) {
+                    return;
+                }
+                released = true;
+                pending = request.getNow(null);
+            }
+            if (pending != null) {
+                delegate.processRequest(pending);
+            }
+        }
+
+        @Override
+        public void shutdown() {
+            delegate.shutdown();
+        }
+
+        @Override
+        public void close() throws Exception {
+            try {
+                release();
+            } finally {
+                processor.set(server, delegate);
+            }
+        }
+    }
+
+    private static void commissionManifestLedgerLayout(Fixture fixture) throws Exception {
+        var factory = new LongHierarchicalLedgerManagerFactory();
+        new ZkLayoutManager(fixture.zk, "/socket-ledgers", ZooDefs.Ids.OPEN_ACL_UNSAFE)
+                .storeLedgerLayout(new LedgerLayout(factory.getClass().getName(), factory.getCurrentVersion()));
+    }
+
+    private static ServerConfiguration manifestLedgerConfiguration(Fixture fixture, String ledgerRoot)
+            throws Exception {
+        var configuration = new ServerConfiguration();
+        configureOwnedProfileService(configuration, fixture.cluster.getZooKeeperConnectString());
+        configuration.setMetadataServiceUri(fixture.cluster.getMetadataServiceUri(ledgerRoot, "longhierarchical"));
+        return configuration;
+    }
+
     private static SegmentManifestResourceService manifestResourceService(Fixture fixture, ManifestWireLayout layout,
             String requirementsRoot, ZKProfileStartupRequirementsStore.SourceIdentity source,
             RetainedManifestAccess access, InetSocketAddress address, long generation) throws Exception {
+        var configuration = new ServerConfiguration();
+        configureOwnedProfileService(configuration, fixture.cluster.getZooKeeperConnectString());
+        return manifestResourceService(fixture, layout, requirementsRoot, source, access, address, generation,
+                configuration);
+    }
+
+    private static SegmentManifestResourceService manifestResourceService(Fixture fixture, ManifestWireLayout layout,
+            String requirementsRoot, ZKProfileStartupRequirementsStore.SourceIdentity source,
+            RetainedManifestAccess access, InetSocketAddress address, long generation,
+            ServerConfiguration configuration) throws Exception {
         var policy = new SegmentManifestStartupPolicy(source, layout.manifest(),
                 SegmentManifestAccessObservation.expectedRoots(layout.manifest(), layout.runtime()), access.old(),
                 access.newUid(), access.disposition());
-        var configuration = new ServerConfiguration();
-        configureOwnedProfileService(configuration, fixture.cluster.getZooKeeperConnectString());
         var disk = new org.apache.bookkeeper.util.DiskChecker(configuration.getDiskUsageThreshold(),
                 configuration.getDiskUsageWarnThreshold());
         var options = new SegmentProfileOwnedResources.ResourceSettings(requirementsRoot, SOCKET_SERVICE_READINESS,

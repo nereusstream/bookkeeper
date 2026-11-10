@@ -25,6 +25,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import org.apache.bookkeeper.conf.ClientConfiguration;
 import org.apache.bookkeeper.discover.RegistrationClient;
 import org.apache.bookkeeper.discover.ZKRegistrationClient;
+import org.apache.bookkeeper.meta.LedgerManagerFactory;
 import org.apache.bookkeeper.meta.MetadataClientDriver;
 import org.apache.bookkeeper.meta.MetadataDrivers;
 import org.apache.bookkeeper.meta.exceptions.MetadataException;
@@ -72,6 +73,11 @@ public class ZKMetadataClientDriver
         this.scheduler = scheduler;
         this.bookieAddressTracking = conf.getEnableBookieAddressTracking();
         return this;
+    }
+
+    /** Obtain the factory from an existing layout, or reuse a factory opened in the same mode. */
+    public LedgerManagerFactory getExistingLedgerManagerFactory() throws MetadataException {
+        return getLedgerManagerFactory(true);
     }
 
     @Override

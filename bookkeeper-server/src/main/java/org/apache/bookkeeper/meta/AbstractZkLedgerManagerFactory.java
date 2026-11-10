@@ -139,6 +139,22 @@ public abstract class AbstractZkLedgerManagerFactory implements LedgerManagerFac
     public static LedgerManagerFactory newLedgerManagerFactory(
         final AbstractConfiguration<?> conf, LayoutManager layoutManager)
             throws IOException, InterruptedException {
+        return newLedgerManagerFactory(conf, layoutManager, false);
+    }
+
+    /** Open the configured factory using an existing layout, without provisioning one. */
+    public static LedgerManagerFactory openExistingLedgerManagerFactory(
+            final AbstractConfiguration<?> conf, LayoutManager layoutManager)
+            throws IOException, InterruptedException {
+        if (layoutManager == null) {
+            throw new IOException("An existing ledger layout requires a layout manager");
+        }
+        return newLedgerManagerFactory(conf, layoutManager, true);
+    }
+
+    private static LedgerManagerFactory newLedgerManagerFactory(
+            final AbstractConfiguration<?> conf, LayoutManager layoutManager, boolean existingOnly)
+            throws IOException, InterruptedException {
         String metadataServiceUriStr;
         try {
             metadataServiceUriStr = conf.getMetadataServiceUri();
@@ -185,6 +201,9 @@ public abstract class AbstractZkLedgerManagerFactory implements LedgerManagerFac
         LedgerLayout layout = layoutManager.readLedgerLayout();
 
         if (layout == null) { // no existing layout
+            if (existingOnly) {
+                throw new IOException("Existing ledger layout is required");
+            }
             lmFactory = createNewLMFactory(conf, layoutManager, factoryClass);
             return lmFactory
                     .initialize(conf, layoutManager, lmFactory.getCurrentVersion());

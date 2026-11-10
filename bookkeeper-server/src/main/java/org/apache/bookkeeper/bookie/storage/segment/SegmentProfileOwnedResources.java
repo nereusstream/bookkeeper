@@ -230,7 +230,7 @@ public final class SegmentProfileOwnedResources {
     Environment open() throws IOException, InterruptedException {
         var policy = settings.policy();
         var compatibility = policy.compatibility();
-        var connected = connect(compatibility.bookieId());
+        var connected = connect(compatibility.bookieId(), false);
         var startup = new SegmentProfileService.Startup(connected.requirements(), policy, connected.persistent(),
                 connected.publisher(), connected.source(), connected.metadata(), connected.watcher(),
                 resources.domain(), scheduler, cold, resources.maxEvents(), resources.timeout(),
@@ -247,7 +247,7 @@ public final class SegmentProfileOwnedResources {
         }
         var manifest = policy.manifest();
         String bookie = manifest.bookieId().toString();
-        var connected = connect(bookie);
+        var connected = connect(bookie, true);
         connected.requirements().bindDeleteAssignments(connected.source());
         var source = connected.requirements().readManifest(bookie).observation()
                 .orElseThrow(() -> new IOException("Owned manifest startup requirements unavailable"));
@@ -259,7 +259,7 @@ public final class SegmentProfileOwnedResources {
     }
 
     @SuppressWarnings("deprecation")
-    private Connected connect(String bookie) throws IOException, InterruptedException {
+    private Connected connect(String bookie, boolean existingLayoutOnly) throws IOException, InterruptedException {
         try {
             var uri = URI.create(configuration.getMetadataServiceUri());
             String connect = ZKMetadataDriverBase.getZKServersFromServiceUri(uri);
@@ -287,7 +287,8 @@ public final class SegmentProfileOwnedResources {
             client.setZkLedgersRootPath(uri.getPath());
             driver = new ZKMetadataClientDriver();
             driver.initialize(client, scheduler, NullStatsLogger.INSTANCE, Optional.of(zk));
-            factory = driver.getLedgerManagerFactory();
+            factory = existingLayoutOnly ? driver.getExistingLedgerManagerFactory()
+                    : driver.getLedgerManagerFactory();
             var created = factory.newLedgerManager();
             if (!(created instanceof AbstractZkLedgerManager)) {
                 created.close();

@@ -21,19 +21,29 @@
 
 package org.apache.bookkeeper.meta;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.util.Optional;
+import java.util.concurrent.Executors;
 import org.apache.bookkeeper.conf.ClientConfiguration;
+import org.apache.bookkeeper.meta.exceptions.MetadataException;
+import org.apache.bookkeeper.meta.zk.ZKMetadataClientDriver;
 import org.apache.bookkeeper.meta.zk.ZKMetadataDriverBase;
+import org.apache.bookkeeper.stats.NullStatsLogger;
 import org.apache.bookkeeper.test.BookKeeperClusterTestCase;
 import org.apache.bookkeeper.util.BookKeeperConstants;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.ZooDefs.Ids;
+import org.apache.zookeeper.data.Stat;
 import org.junit.Test;
 
 /**
@@ -48,6 +58,36 @@ public class ZkLedgerLayoutTest extends BookKeeperClusterTestCase {
     protected ClientConfiguration newClientConfiguration() {
         return new ClientConfiguration()
             .setMetadataServiceUri(metadataServiceUri);
+    }
+
+    @Test
+    public void testExistingLayoutFactoryNeverUsesPermissiveCache() throws Exception {
+        String root = "/existing-layout-factory";
+        String path = root + "/" + BookKeeperConstants.LAYOUT_ZNODE;
+        zkc.create(root, new byte[0], Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var conf = new ClientConfiguration()
+                .setMetadataServiceUri(zkUtil.getMetadataServiceUri(root, "longhierarchical"));
+        conf.setZkLedgersRootPath(root);
+        var scheduler = Executors.newSingleThreadScheduledExecutor();
+        try (var permissive = new ZKMetadataClientDriver(); var existing = new ZKMetadataClientDriver()) {
+            permissive.initialize(conf, scheduler, NullStatsLogger.INSTANCE, Optional.of(zkc));
+            assertThrows(MetadataException.class, permissive::getExistingLedgerManagerFactory);
+            assertNull(zkc.exists(path, false));
+            assertNotNull(permissive.getLedgerManagerFactory());
+            var original = new Stat();
+            byte[] bytes = zkc.getData(path, false, original);
+            assertThrows(MetadataException.class, permissive::getExistingLedgerManagerFactory);
+
+            existing.initialize(conf, scheduler, NullStatsLogger.INSTANCE, Optional.of(zkc));
+            var factory = existing.getExistingLedgerManagerFactory();
+            assertSame(factory, existing.getExistingLedgerManagerFactory());
+            assertSame(factory, existing.getLedgerManagerFactory());
+            var after = new Stat();
+            assertArrayEquals(bytes, zkc.getData(path, false, after));
+            assertEquals(original, after);
+        } finally {
+            scheduler.shutdown();
+        }
     }
 
     @Test
