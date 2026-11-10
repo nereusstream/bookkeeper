@@ -57,6 +57,8 @@ import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
+import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 import org.apache.bookkeeper.net.BookieId;
@@ -120,15 +122,29 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     record StartupPreflightAttempt(RecoveryFactsAttempt recovery, CheckedStartup checked) { }
 
-    private record PreflightEpisode(SegmentManifestStartupPolicy.PreOpen preflight,
+    record PreflightEpisode(SegmentManifestStartupPolicy.PreOpen preflight,
             ProfileLedgerMetadataStore metadata, ZKProfileReservationStore.RetainedG1DeleteReplay retained,
             long deadline) { }
+
+    static final class ColdPublicationOwner {
+        final ManifestSegmentStorage storage;
+        final CheckedStartup checked;
+        final PreflightEpisode episode;
+        final Path directory;
+
+        private ColdPublicationOwner(ManifestSegmentStorage storage, CheckedStartup checked) {
+            this.storage = storage;
+            this.checked = checked;
+            episode = storage.startupPreflight;
+            directory = storage.control.directory();
+        }
+    }
 
     private record LocalCuts(long bookie, List<ArenaCut> arenas, RollbackSafetyFacts rollback,
             ProfileControlRequest.DeleteBinding applied) { }
 
     private static final Generation INITIAL_GENERATION = new Generation(1);
-    static final NativeFormats NATIVE_FORMATS = new NativeFormats(2, 1, List.of(1, 2), 2);
+    private static final NativeFormats NATIVE_FORMATS = new NativeFormats(2, 1, List.of(1, 2), 2);
 
     private static final class Member {
         final IsolatedSegmentConfig config;
@@ -181,6 +197,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     private IOException cleanupFailure;
     private boolean listenerBorrowed;
     private PreflightEpisode startupPreflight;
+    private SegmentManifestColdPublication coldPublication;
     private SegmentManifestAccessObservation.Probe accessProbe;
     private boolean observingAccess;
 
@@ -721,7 +738,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     }
 
     /** Local-only recheck. Native authority and publication, if later implemented, need their own fences. */
-    void requireOriginalGraph(CheckedStartup checked, long deadline) throws IOException {
+    ProfileControlRequest.DeleteBinding requireOriginalGraph(CheckedStartup checked, long deadline) throws IOException {
         synchronized (gate) {
             if (checked.owner != this || System.nanoTime() >= deadline) {
                 throw new IOException("Checked startup does not belong to this live original graph or deadline");
@@ -733,6 +750,23 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                     || !Objects.equals(actual.applied(), expected.appliedDelete()) || System.nanoTime() >= deadline) {
                 throw new IOException("Checked startup no longer matches the original recovered cuts");
             }
+            return actual.applied();
+        }
+    }
+
+    /** Bind one isolated cold publication to this graph. The caller owns its actual session and demotion. */
+    SegmentManifestColdPublication bindColdPublication(CheckedStartup checked, ZKProfileRegistrationStore persistent,
+            ZKProfileEphemeralRegistrationStore publisher, ZKProfileEphemeralRegistrationStore.Admission admission,
+            Generation readiness, Generation capabilities, String endpoint, List<Integer> hints) throws IOException {
+        synchronized (gate) {
+            var episode = startupPreflight;
+            if (episode == null || coldPublication != null && !coldPublication.drained()) {
+                throw new IOException("Original manifest graph has no available cold publication attempt");
+            }
+            requireOriginalGraph(checked, episode.deadline());
+            coldPublication = new SegmentManifestColdPublication(new ColdPublicationOwner(this, checked), persistent,
+                    publisher, admission, readiness, capabilities, endpoint, hints);
+            return coldPublication;
         }
     }
 
@@ -893,7 +927,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             throw new IllegalArgumentException("Manifest Profile listener requires a resolved loopback address");
         }
         synchronized (gate) {
-            if (!isLive() || listenerBorrowed) {
+            if (!isLive() || listenerBorrowed || coldPublication != null && !coldPublication.drained()) {
                 throw new IllegalStateException("Manifest listener requires one complete live graph");
             }
             int base = SegmentProfileAddHandler.connectionBaseBytes(settings.connectionBaseBytes(),
@@ -1148,12 +1182,20 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         if (group != null && group.onOwnerThread()) {
             throw new IllegalStateException("Manifest drain requires an external thread");
         }
+        SegmentManifestColdPublication publication;
         synchronized (gate) {
             accepting = false;
             stopping = true;
+            publication = coldPublication;
             var active = execution;
             if (active != null) {
                 active.stopAdmission();
+            }
+        }
+        if (publication != null) {
+            publication.retire();
+            if (!publication.drained()) {
+                return false;
             }
         }
         synchronized (lifecycle) {

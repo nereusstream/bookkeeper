@@ -31,7 +31,8 @@ public record StartupReadinessResult(
     public enum Outcome {
         WRITABLE,
         NON_WRITABLE,
-        RETRY_REQUIRED
+        RETRY_REQUIRED,
+        PUBLICATION_RECONCILED
     }
 
     public enum Reason {

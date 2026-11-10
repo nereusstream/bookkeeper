@@ -61,12 +61,29 @@ public final class StartupReadinessHarness {
     public StartupReadinessResult run(StartupReadinessInput input, StartupCrashPoint crashPoint) {
         StartupFactSupport.requireNonNull(input);
         StartupFactSupport.requireNonNull(crashPoint);
+        return runPhases(new PhaseInput(input.compatibility(), input.requiredDevices(), input.recoveryFacts(),
+                input.targetReadinessGeneration(), input.capabilityGeneration(), input.supportedMandatoryFeatures(),
+                input.profileEndpoint(), input.capabilityHints()), validateCompatibility(input), Outcome.WRITABLE,
+                crashPoint);
+    }
+
+    /** Runs fixed-manifest cold publication without reporting business admission. */
+    public StartupReadinessResult runManifest(ManifestStartupReadinessInput input, StartupCrashPoint crashPoint) {
+        StartupFactSupport.requireNonNull(input);
+        StartupFactSupport.requireNonNull(crashPoint);
+        return runPhases(new PhaseInput(input.compatibility(), input.requiredDevices(), input.recoveryFacts(),
+                input.targetReadinessGeneration(), input.capabilityGeneration(),
+                ManifestStartupReadinessInput.SUPPORTED_FEATURES, input.profileEndpoint(), input.capabilityHints()),
+                input.compatibilityFailure(), Outcome.PUBLICATION_RECONCILED, crashPoint);
+    }
+
+    private StartupReadinessResult runPhases(PhaseInput input, Reason compatibilityFailure, Outcome completedOutcome,
+            StartupCrashPoint crashPoint) {
         StartupReadinessMetrics metrics = new StartupReadinessMetrics();
         List<StartupPhase> completed = new ArrayList<>();
         BookieCompatibilityFact compatibility = input.compatibility();
 
         metrics.increment(ColdOperation.COMPATIBILITY_FACT_READ);
-        Reason compatibilityFailure = validateCompatibility(input);
         if (compatibilityFailure != null) {
             return fail(compatibility.bookieId(), compatibilityFailure, Outcome.NON_WRITABLE, completed, metrics);
         }
@@ -219,7 +236,7 @@ public final class StartupReadinessHarness {
                     completed,
                     metrics);
         }
-        return new StartupReadinessResult(Outcome.WRITABLE, Reason.COMPLETE, completed, metrics.snapshot());
+        return new StartupReadinessResult(completedOutcome, Reason.COMPLETE, completed, metrics.snapshot());
     }
 
     private Reason validateCompatibility(StartupReadinessInput input) {
@@ -247,7 +264,7 @@ public final class StartupReadinessHarness {
         return null;
     }
 
-    private Reason validateDevices(StartupReadinessInput input) {
+    private Reason validateDevices(PhaseInput input) {
         BookieCompatibilityFact compatibility = input.compatibility();
         RequiredDeviceManifest manifest = input.requiredDevices();
         if (!manifest.identity().equals(compatibility.deviceManifestIdentity())
@@ -265,14 +282,14 @@ public final class StartupReadinessHarness {
         return null;
     }
 
-    private boolean validateRecoveryIdentity(StartupReadinessInput input) {
+    private boolean validateRecoveryIdentity(PhaseInput input) {
         LocalRecoveryFacts recovery = input.recoveryFacts();
         BookieCompatibilityFact compatibility = input.compatibility();
         return recovery.storageIncarnation().equals(compatibility.storageIncarnation())
                 && recovery.localFormatGeneration().equals(compatibility.localFormatGeneration());
     }
 
-    private DurableLocalReadiness localReadiness(StartupReadinessInput input) {
+    private DurableLocalReadiness localReadiness(PhaseInput input) {
         BookieCompatibilityFact compatibility = input.compatibility();
         return new DurableLocalReadiness(
                 compatibility.bookieId(),
@@ -286,7 +303,7 @@ public final class StartupReadinessHarness {
                 true);
     }
 
-    private ProfileReadinessRecord persistentReadiness(StartupReadinessInput input) {
+    private ProfileReadinessRecord persistentReadiness(PhaseInput input) {
         BookieCompatibilityFact compatibility = input.compatibility();
         return new ProfileReadinessRecord(
                 compatibility.bookieId(),
@@ -362,7 +379,7 @@ public final class StartupReadinessHarness {
     }
 
     private ProfileServiceInfoProjection serviceInfo(
-            StartupReadinessInput input, VersionedRecord persistent) {
+            PhaseInput input, VersionedRecord persistent) {
         BookieCompatibilityFact compatibility = input.compatibility();
         return new ProfileServiceInfoProjection(
                 compatibility.bookieId(),
@@ -449,4 +466,8 @@ public final class StartupReadinessHarness {
     }
 
     private record PersistentStep(VersionedRecord versionedRecord, Reason reason) {}
+
+    private record PhaseInput(BookieCompatibilityFact compatibility, RequiredDeviceManifest requiredDevices,
+            LocalRecoveryFacts recoveryFacts, Generation targetReadinessGeneration, Generation capabilityGeneration,
+            List<Integer> supportedMandatoryFeatures, String profileEndpoint, List<Integer> capabilityHints) { }
 }

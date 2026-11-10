@@ -27,10 +27,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import org.apache.bookkeeper.common.profile.EngineProfile;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
-import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact.MigrationState;
-import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest.DeviceStatus;
+import org.apache.bookkeeper.common.profile.startup.ManifestStartupReadinessInput;
+import org.apache.bookkeeper.common.profile.startup.StartupReadinessResult.Reason;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
@@ -40,11 +39,6 @@ import org.apache.bookkeeper.discover.profile.ZKProfileStartupRequirementsStore;
 record SegmentManifestStartupPolicy(ZKProfileStartupRequirementsStore.SourceIdentity source,
         SegmentArenaManifest manifest, List<Map<String, String>> roots,
         SegmentManifestAccessObservation.OldScope oldScope, long newUid, OldDisposition oldDisposition) {
-    private static final int READER_VERSION = 2;
-    private static final int WRITER_VERSION = 2;
-    private static final int FIXED_MANIFEST_FEATURE = 2;
-    private static final List<Integer> FEATURES =
-            List.of(IsolatedSegmentStorage.STARTUP_BASE_FORMAT_FEATURE, FIXED_MANIFEST_FEATURE);
     private static final Set<String> OLD_ROOT_KINDS = Set.of("JOURNAL", "LEDGER", "INDEX", "ARENA");
 
     enum OldDisposition { DRAINED, READ_ONLY, DECOMMISSIONED, WRITABLE, UNKNOWN }
@@ -99,24 +93,12 @@ record SegmentManifestStartupPolicy(ZKProfileStartupRequirementsStore.SourceIden
                 || oldDisposition == OldDisposition.WRITABLE || oldDisposition == OldDisposition.UNKNOWN) {
             throw new IOException("Declared policy does not bind a distinct complete manifest startup scope");
         }
-        var compatibility = observed.commissionedCompatibility();
-        if (compatibility.migrationState() != MigrationState.FORMAT_READY
-                || compatibility.activeEngine() != EngineProfile.SEGMENT_WAL_ENGINE
-                || compatibility.profileWireMajor() != 1 || compatibility.profileWireMinor() != 0
-                || compatibility.descriptorHashSuite() != 1
-                || compatibility.minimumReaderVersion() > READER_VERSION
-                || compatibility.minimumWriterVersion() > WRITER_VERSION
-                || !compatibility.mandatoryLocalFeatures().equals(FEATURES)) {
-            throw new IOException("Manifest startup compatibility is unsupported");
-        }
-        var formats = ManifestSegmentStorage.NATIVE_FORMATS;
-        for (var device : observed.requiredDevices().devices()) {
-            if (device.status() != DeviceStatus.READY || device.arenaFormatVersion() != formats.identityPage()
-                    || device.controlFormatVersion() != formats.controlFrame()
-                    || device.checkpointFormatVersion() != formats.checkpointWriter()
-                    || device.superblockGeneration().value() != 1 || !device.mandatoryFeatures().equals(FEATURES)) {
-                throw new IOException("Manifest startup required device format is unsupported");
-            }
+        var unsupported = ManifestStartupReadinessInput.fixedFormatFailure(
+                observed.commissionedCompatibility(), observed.requiredDevices());
+        if (unsupported != null) {
+            throw new IOException(unsupported == Reason.DEVICE_NOT_READY
+                    ? "Manifest startup required device format is unsupported"
+                    : "Manifest startup compatibility is unsupported");
         }
         return new PreOpen(this, Objects.requireNonNull(requirements), observed, Objects.requireNonNull(reservations));
     }

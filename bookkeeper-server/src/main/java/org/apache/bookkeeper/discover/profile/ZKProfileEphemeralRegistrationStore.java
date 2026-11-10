@@ -29,10 +29,12 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
+import org.apache.bookkeeper.bookie.storage.segment.SegmentManifestColdPublication;
 import org.apache.bookkeeper.bookie.storage.segment.SegmentProfileDeleteAdoption;
 import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore;
 import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
+import org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore;
 import org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection;
 import org.apache.bookkeeper.common.profile.startup.StartupReadinessInput;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
@@ -69,6 +71,10 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     private Supplier<ProfileDeleteDelivery.Progress> deleteProgress;
     private ZKProfileStartupRequirementsStore startupRequirements;
     private ZKProfileStartupRequirementsStore.Observation startupObservation;
+    private long manifestOperationDeadline;
+    private ZKProfileRegistrationStore manifestPersistent;
+    private ProfileZKReadClient.Pending manifestMutations;
+    private volatile SegmentManifestColdPublication manifestStartup;
 
     public ZKProfileEphemeralRegistrationStore(ZooKeeper zk, String root, String bookieId,
                                               List<ACL> acls, Duration timeout) {
@@ -84,7 +90,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     /** Bind the original local durable cursor before startup; a missing assignment never defaults to ready. */
     public synchronized void bindDeleteDelivery(ZKProfileReservationStore reservations, StorageIncarnation incarnation,
             Supplier<ProfileControlRequest.DeleteBinding> progress) {
-        if (operationStarted || retired || deleteDelivery != null) {
+        if (operationStarted || retired || deleteDelivery != null || manifestStartup != null) {
             throw new IllegalStateException("Delete delivery must be bound once before startup publication");
         }
         Objects.requireNonNull(reservations, "reservations").requireDeletePublisherClient(zk);
@@ -99,7 +105,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     public synchronized void bindDeleteAssignment(ZKProfileReservationStore reservations,
             StorageIncarnation incarnation,
             Supplier<ProfileDeleteDelivery.Progress> progress) {
-        if (operationStarted || retired || deleteDelivery != null) {
+        if (operationStarted || retired || deleteDelivery != null || manifestStartup != null) {
             throw new IllegalStateException("Delete assignment must be bound once before startup publication");
         }
         Objects.requireNonNull(reservations, "reservations").requireDeletePublisherClient(zk);
@@ -111,7 +117,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     /** Freeze the pre-open declared requirements on this exact source/client and publisher attempt. */
     public synchronized void bindStartupRequirements(ZKProfileStartupRequirementsStore source,
             ZKProfileStartupRequirementsStore.Observation observation) {
-        if (operationStarted || retired || startupRequirements != null) {
+        if (operationStarted || retired || startupRequirements != null || manifestStartup != null) {
             throw new IllegalStateException("Startup requirements must be bound once before publication");
         }
         Objects.requireNonNull(source, "source").requirePublisherClient(zk, observation, bookieId);
@@ -119,8 +125,116 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
         startupObservation = observation;
     }
 
+    /** Bind the fixed manifest cold publisher without arming the legacy first-open path. */
+    public synchronized void bindManifestStartup(SegmentManifestColdPublication binding, Admission expected,
+            ZKProfileRegistrationStore persistent) {
+        if (operationStarted || retired || startupRequirements != null || deleteDelivery != null
+                || manifestStartup != null || expected == null || admission != expected
+                || !backend.samePublisherContext(persistent)) {
+            throw new IllegalStateException("Fixed manifest publication needs the original unbound pending stores");
+        }
+        requirePublishingSession();
+        binding.requirePublisher(this, expected, persistent);
+        var source = binding.source();
+        binding.requirements().requireManifestPublisherClient(zk, source, bookieId, binding.reservations());
+        var target = new ProfileDeleteRecord.Target(bookieId, source.compatibility().storageIncarnation().value());
+        binding.retained().requirePublisherScope(zk, binding.reservations(), target);
+        manifestOperationDeadline = Math.min(binding.deadline(), System.nanoTime() + timeoutNanos);
+        manifestPersistent = persistent;
+        manifestMutations = new ProfileZKReadClient.Pending();
+        manifestStartup = binding;
+    }
+
+    /** The original persistent store under the same absolute deadline as the fixed manifest publisher. */
+    public ProfileRegistrationStore manifestPersistentStore(SegmentManifestColdPublication binding) {
+        requireManifestBinding(binding);
+        var persistent = manifestPersistent;
+        var deadline = manifestDeadline();
+        return new ProfileRegistrationStore() {
+            @Override
+            public ReadResult read(String bookie) {
+                requireScope(bookie);
+                return persistent.read(bookie, deadline);
+            }
+
+            @Override
+            public CasResult compareAndSet(String bookie, long version, long generation,
+                    ProfileReadinessRecord record) {
+                requireScope(bookie);
+                requirePublishingSession();
+                return persistent.compareAndSet(bookie, version, generation, record, deadline, manifestMutations);
+            }
+        };
+    }
+
+    public long verifyManifestStartup(SegmentManifestColdPublication binding)
+            throws InterruptedException, TimeoutException {
+        requireManifestBinding(binding);
+        var deadline = manifestDeadline();
+        requirePublishingSession();
+        var local = binding.localProgress(deadline);
+        if (!binding.requirements().revalidateManifestSource(binding.source(), binding.reservations(), deadline)) {
+            throw new IllegalStateException("Original fixed manifest startup requirements changed");
+        }
+        binding.retained().publicationChecks(local, deadline);
+        requirePublishingSession();
+        ZKProfileRegistrationStore.requireTime(deadline);
+        return deadline;
+    }
+
+    /** Strict cold settlement only. The matching business admission stays pending. */
+    public WritableRegistration reconcileManifestStartup(SegmentManifestColdPublication binding)
+            throws InterruptedException, TimeoutException {
+        requireManifestBinding(binding);
+        beginOperation();
+        long deadline = manifestDeadline();
+        var observed = readOwned(bookieId, true, deadline).orElseThrow(
+                () -> new IllegalStateException("Original manifest writable publication is absent"));
+        var authority = observed.authority();
+        var projection = observed.envelope().projection();
+        var input = binding.input();
+        var record = authority.envelope().record();
+        if (!record.localReadinessGeneration().equals(input.targetReadinessGeneration())
+                || !record.capabilityGeneration().equals(input.capabilityGeneration())
+                || !projection.endpoint().equals(input.profileEndpoint())
+                || !projection.capabilityHints().equals(input.capabilityHints())) {
+            throw new IllegalStateException("Original fixed manifest readiness or projection changed");
+        }
+        var current = backend.snapshot(bookieId, deadline);
+        if (current == null || current.stat().getCzxid() != authority.stat().getCzxid()
+                || current.stat().getMzxid() != authority.stat().getMzxid()
+                || !current.envelope().equals(authority.envelope())) {
+            throw new IllegalStateException("Fixed manifest persistent readiness changed during reconciliation");
+        }
+        binding.localProgress(deadline);
+        requirePublishingSession();
+        ZKProfileRegistrationStore.requireTime(deadline);
+        return writable(projection);
+    }
+
+    public boolean manifestMutationsDrained(SegmentManifestColdPublication binding) {
+        return binding == null || binding != manifestStartup || manifestMutations.idle();
+    }
+
+    public boolean manifestSessionEnded(SegmentManifestColdPublication binding) {
+        return binding == manifestStartup && zk.getState() == ZooKeeper.States.CLOSED;
+    }
+
+    private long manifestDeadline() {
+        return manifestOperationDeadline;
+    }
+
+    private void requireManifestBinding(SegmentManifestColdPublication binding) {
+        if (binding == null || binding != manifestStartup) {
+            throw new IllegalArgumentException("Fixed manifest operation belongs to another publisher");
+        }
+    }
+
     /** A bound source cannot be replaced by a caller's compatibility/device requirements. */
     public void requireStartupPolicy(StartupReadinessInput policy) {
+        if (manifestStartup != null) {
+            throw new IllegalArgumentException("Fixed manifest binding cannot use the legacy startup policy");
+        }
         if (startupObservation != null && (!startupObservation.compatibility().equals(policy.compatibility())
                 || !startupObservation.requiredDevices().equals(policy.requiredDevices()))) {
             throw new IllegalArgumentException("Startup policy does not consume its frozen requirement source");
@@ -227,7 +341,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
         /** Cold-path final reconciliation after local startup checks; read failures retire and propagate. */
         public synchronized boolean openAfterReconciliation(WritableRegistration expected) {
             Objects.requireNonNull(expected, "expected");
-            if (state.get() == 2) {
+            if (state.get() == 2 || manifestStartup != null) {
                 return false;
             }
             if (state.get() == 1) {
@@ -315,7 +429,13 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
 
     private Optional<Envelope> read(String bookieId, boolean writable) {
         beginOperation();
-        long deadline = System.nanoTime() + timeoutNanos;
+        long deadline = manifestStartup == null ? System.nanoTime() + timeoutNanos : manifestDeadline();
+        return readOwned(bookieId, writable, deadline).map(OwnedRead::envelope);
+    }
+
+    private record OwnedRead(Snapshot authority, Envelope envelope) { }
+
+    private Optional<OwnedRead> readOwned(String bookieId, boolean writable, long deadline) {
         try {
             requireScope(bookieId);
             requireSession();
@@ -336,6 +456,9 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
                 if (startupRequirements != null) {
                     startupRequirements.publicationChecks(startupObservation, authority.envelope().record(), deadline);
                 }
+                if (manifestStartup != null) {
+                    manifestChecks(authority.envelope().record(), deadline);
+                }
                 Envelope service = owned(node(authority.path() + "/service-info", deadline), bookieId);
                 if (!service.equals(envelope) || !matches(authority, envelope.projection())) {
                     throw new IllegalStateException("Writable projection is stale or mismatched");
@@ -345,7 +468,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
             if (writable && retired) {
                 throw new IllegalStateException("Publisher was demoted during read");
             }
-            return Optional.of(envelope);
+            return Optional.of(new OwnedRead(authority, envelope));
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted registration read", interrupted);
@@ -369,7 +492,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
     private PublicationResult publish(String bookieId, ProfileServiceInfoProjection requested,
                                       WritableRegistration registration) {
         beginOperation();
-        long deadline = System.nanoTime() + timeoutNanos;
+        long deadline = manifestStartup == null ? System.nanoTime() + timeoutNanos : manifestDeadline();
         boolean submitted = false;
         try {
             requireScope(bookieId);
@@ -416,6 +539,9 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
                     operations.addAll(startupRequirements.publicationChecks(
                             startupObservation, authority.envelope().record(), deadline));
                 }
+                if (manifestStartup != null) {
+                    operations.addAll(manifestChecks(authority.envelope().record(), deadline));
+                }
                 if (writableNode.code() != Code.NONODE.intValue()) {
                     Envelope existing = owned(writableNode, bookieId);
                     requirePublishingSession();
@@ -437,7 +563,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
             requirePublishingSession();
             ZKProfileRegistrationStore.requireTime(deadline);
             submitted = true;
-            int code = backend.multi(operations, deadline);
+            int code = backend.multi(operations, deadline, manifestMutations);
             if (code == Code.OK.intValue()) {
                 // A caller-supplied ZooKeeperClient may have recreated its session while retrying the RPC.
                 requirePublishingSession();
@@ -453,11 +579,23 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
         }
     }
 
+    private List<Op> manifestChecks(ProfileReadinessRecord record, long deadline)
+            throws InterruptedException, TimeoutException {
+        var binding = manifestStartup;
+        var checks = binding.requirements().manifestPublicationChecks(binding.source(), record, deadline);
+        checks.addAll(binding.retained().publicationChecks(binding.localProgress(deadline), deadline));
+        return checks;
+    }
+
     /** Retire this graph's old gate, then switch assignment and remove its owned publication atomically. */
     public ZKProfileReservationStore.DeleteHandoffEffectiveResult makeDeleteHandoffEffective(
             SegmentProfileDeleteAdoption local) {
         Objects.requireNonNull(local, "local");
         beginOperation();
+        if (manifestStartup != null) {
+            return ZKProfileReservationStore.effectiveFailure(
+                    ZKProfileReservationStore.DeleteHandoffEffectiveStatus.UNAVAILABLE);
+        }
         var plan = local.plan();
         var target = plan.predecessor().target();
         long deadline = System.nanoTime() + timeoutNanos;
@@ -574,7 +712,7 @@ public final class ZKProfileEphemeralRegistrationStore implements EphemeralProfi
             }
             operations.add(Op.delete(markerPath(path), 0));
             requireSession();
-            if (backend.multi(operations, deadline) != Code.OK.intValue()) {
+            if (backend.multi(operations, deadline, manifestMutations) != Code.OK.intValue()) {
                 throw new IllegalStateException("Demotion unconfirmed; retain local non-writable state");
             }
         } catch (InterruptedException interrupted) {

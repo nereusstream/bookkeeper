@@ -439,8 +439,33 @@ public final class ZKProfileStartupRequirementsStore {
     List<Op> publicationChecks(Observation expected, ProfileReadinessRecord readiness, long deadline)
             throws InterruptedException, TimeoutException {
         var current = snapshot(expected.compatibility().bookieId(), deadline);
-        if (current == null || expected.owner() != this || current.birthZxid != expected.birthZxid
-                || current.modifiedZxid != expected.modifiedZxid || !current.envelope.equals(expected.envelope)
+        var checks = sourcePublicationChecks(expected, current, readiness);
+        if (deleteAssignments != null) {
+            checks.addAll(deleteAssignments.requiredDeleteAssignmentChecks(expected.compatibility(), deadline));
+        }
+        return List.copyOf(checks);
+    }
+
+    void requireManifestPublisherClient(ZooKeeper client, Observation observed, String bookieId,
+            ZKProfileReservationStore reservations) {
+        if (zk != client || observed == null || observed.owner() != this || !observed.isManifestSource()
+                || !observed.compatibility().bookieId().equals(bookieId) || deleteAssignments != reservations
+                || observed.compatibility().effectiveDeleteAssignmentGeneration().value() != 1) {
+            throw new IllegalArgumentException("Fixed manifest startup source/client/scope mismatch");
+        }
+    }
+
+    List<Op> manifestPublicationChecks(Observation expected, ProfileReadinessRecord readiness, long deadline)
+            throws InterruptedException, TimeoutException {
+        var current = snapshot(expected.compatibility().bookieId(), deadline, reads, false,
+                ProfileStartupRequirementsCodec.FIXED_MANIFEST);
+        return sourcePublicationChecks(expected, current, readiness);
+    }
+
+    private List<Op> sourcePublicationChecks(Observation expected, Observation current,
+            ProfileReadinessRecord readiness) {
+        if (current == null || expected.owner() != this || !current.sourceIdentity().equals(expected.sourceIdentity())
+                || !current.envelope.equals(expected.envelope)
                 || !current.compatibility().equals(expected.compatibility())) {
             throw new IllegalStateException("Required startup source changed or disappeared");
         }
@@ -462,10 +487,7 @@ public final class ZKProfileStartupRequirementsStore {
         var checks = new java.util.ArrayList<Op>();
         checks.add(Op.check(marker(expected.envelope), 0));
         checks.add(Op.check(path(c.bookieId()), 0));
-        if (deleteAssignments != null) {
-            checks.addAll(deleteAssignments.requiredDeleteAssignmentChecks(c, deadline));
-        }
-        return List.copyOf(checks);
+        return checks;
     }
 
     private Observation snapshot(String bookieId, long deadline) throws InterruptedException, TimeoutException {

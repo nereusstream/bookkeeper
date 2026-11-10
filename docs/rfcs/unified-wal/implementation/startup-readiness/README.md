@@ -409,9 +409,21 @@ operation 确认旧 worker 实际返回同 nonce 的结果，并清理原身份�
 
 pre-open 先核对兼容性和声明，重开前核对 UWNS2 原请求、原生 requirements birth 及 G1，继续用同一个 retained G1 reader 和外层 deadline 恢复与复验。只有当前冷重开图的 `RecoveryFactsAttempt.COMPLETE` 可生成内部 checked facts。原 owner 短 gate 复核唯一 Bookie cut、各 Arena cut、原锁与健康状态；关闭、借出 listener 或改用另一 owner 后，历史 checked facts 不能代表该图当前状态。拒绝仍保留已合法应用的删除及实际完成句柄。此入口只产出 policy 一致性、兼容性和本地事实。部署级独立 issuer、信任根和持续隔离仍待验证。
 
-后继 owned 接线顺序为全图 replay 并取得 facts，绑定 pending admission，绑定 listener 并取得实际地址，在同 session 重验原 source、G1 cut 和外部 policy 并纳入原 writable multi，读回本 session 注册后首次开放请求。借出 listener 后禁止重新取冷事实。显式 borrowed listener 保持原行为。未来 G1-only follower 一旦实际观察到 G2、原 stream 或 birth 换代，即使没有新事件，也须退休 admission 并走原 session-owned demote/drain。共用 Harness phases、schema 2 publisher 和 owned service 接线仍 OPEN。
+后继 owned 接线顺序为全图 replay 并取得 facts，绑定 pending admission，绑定 listener 并取得实际地址，在同 session 重验原 source、G1 cut 和外部 policy 并纳入原 writable multi，读回本 session 注册后首次开放请求。借出 listener 后禁止重新取冷事实。显式 borrowed listener 保持原行为。未来 G1-only follower 一旦实际观察到 G2、原 stream 或 birth 换代，即使没有新事件，也须退休 admission 并走原 session-owned demote/drain。
 
 2026-11-10，父版本 `deb99c52b8`。在 macOS 的 owner-enabled APFS 上，原 Classic JVM 经 SDK 写读并实际排空，两条 3/3/3 ledger 在两个 Arena 中持久化后经原 UWNS2 与兼容 schema 2 冷重开，checked facts 绑定原图，两条 ledger 经 mTLS 读回。拒绝覆盖缺根、错 index UUID、旧 episode/UID、不可接受的 disposition、不兼容的版本、feature 与设备格式，以及同字节 requirements 重建和 closed/异 owner。只移除 reader 上限的变体在 reader 99 断言上得到预期失败。最终 28 项定向测试全过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-owned-startup-evidence-deb99c52`。Linux D2、真实掉电及生产资格仍待验收。
+
+## 固定 manifest 冷发布与结算
+
+`ManifestStartupReadinessInput` 承载完整 schema 2 事实、原生 source identity 和外部多根声明。Harness 的显式 manifest 入口与 v1 共用原 DLR、persistent READY、service-info、writable 和最终读回阶段。manifest 的成功结果为 `PUBLICATION_RECONCILED`。冷桥从原 `CheckedStartup` 和活图取实际 control 根、全图 cuts 与本地 DELETE 游标，使用同一原 requirements、reservations、metadata 和 publisher client。在原图或原生条件失效时拒绝进入 DLR；已提交的合法 DLR 与 DELETE 继续保留。
+
+publisher 显式绑定 schema 2。在同一绝对 deadline 内，原 writable multi 同时检查持久 readiness 版本、owned session/nonce、原 requirements marker/version、原 G1 assignment 与 stream birth marker、head version 及据实际本地游标确定的 required-through。原有 writable 的精确重试和结算读回再次检查当前 G1 及原图实际游标。G2、游标落后、原生换 birth、失效图、foreign nonce 与 retired session 均拒绝冷结算。v1 入口及原 schema 1 事务语义保留。
+
+ZooKeeper `Op.check` 校验路径与 data version。正常 provisioning 的新 UUID 会使原 marker 条件失败，合法 head increment 或 G1→G2 会使原 head version 条件失败。若持有父节点 DELETE 等权限的主体以原字节和 UUID 重建 requirements 与 marker，版本可重新为 0。该受控 OPEN_ACL 情况允许实际事务短暂创建 ephemeral writable，原会话的精确 birth 读回拒绝结算，随后撤销本会话发布。此处依赖部署侧对 commissioning 源和父节点的权限隔离。
+
+冷发布仅运行于受控实验 namespace，endpoint 来自显式 typed 投影。admission 始终 pending 或 retired，旧 first-open 入口拒绝 manifest publisher。活跃冷发布期间不能借出裸 listener。原图保留本地 guard 和额度，直到冷调用、已接纳的 ZooKeeper mutation 回调及同会话 demotion 排空。独立生产 issuer、持续隔离、实际 owned listener 地址、首次开流量与在线 G2 退休仍待接线。
+
+2026-11-10，父版本 `628c92dcf1`。macOS owner-enabled APFS 上，真实 Classic 有序排空与 UWNS2 进入两 Arena 健康冷重开。原 DLR、persistent READY、session-owned service-info/writable 完成冷结算，真实丢回复可精确读回。G1 推进后旧游标拒绝精确重试，实际追赶后新 nonce 结算。真实 DELETE head 推进和原 legacy handoff 生成的空 G2 均使在途 writable multi 返回 BADVERSION。空 G2 测试在受控环境使用两个隔离本地图竞争同一原生 target。新 UUID 替换由事务拒绝，OPEN_ACL 的同 UUID、同字节重建由读回拒绝并撤销实际 transient writable。退役中的迟到回调排空前保留原图，DATA bytes 保留。只移除已有 writable 的 G1 复核会让落后游标返回 ALREADY_APPLIED，精确反例失败。最终 62 项定向回归全部通过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-publisher-parent-628c92dc`。父版本的 9 项基线和 v1 OPEN_ACL 探针独立保存。
 
 2026-10-12 [显式Profile listener与actual network drain](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)已复用original graph/pipeline并管理native parent/child、worker handoff与receive ledger终态；cold/frame/backing保留至实际归还，caller future不能伪造drain，borrowed graph/cold/loops由caller续接。actual mTLS/held cold/bind failure/queued accepted socket验证完成，46项Java/13配置模型得到预期结果、style通过，RAT443历史问题无新增。它是full startup owner的必要接线，尚未把required/physical proof、端口和registration组成default服务入口，生产Gate继续OPEN。
 

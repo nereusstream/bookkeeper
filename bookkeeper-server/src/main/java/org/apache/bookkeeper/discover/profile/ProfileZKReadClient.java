@@ -50,6 +50,10 @@ final class ProfileZKReadClient {
             stopped = true;
             return callbacks;
         }
+
+        synchronized boolean idle() {
+            return callbacks == 0;
+        }
     }
 
     private final ZooKeeper zk;

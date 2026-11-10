@@ -296,9 +296,30 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
     }
 
     int multi(List<Op> operations, long deadline) throws InterruptedException, TimeoutException {
+        return multi(operations, deadline, null);
+    }
+
+    int multi(List<Op> operations, long deadline, ProfileZKReadClient.Pending pending)
+            throws InterruptedException, TimeoutException {
         requireTime(deadline);
+        return submitMulti(operations, deadline, pending);
+    }
+
+    private int submitMulti(List<Op> operations, long deadline, ProfileZKReadClient.Pending pending)
+            throws InterruptedException, TimeoutException {
         CompletableFuture<Integer> reply = new CompletableFuture<>();
-        zk.multi(operations, (code, ignored, context, results) -> reply.complete(code), null);
+        if (pending != null) {
+            pending.submitted();
+        }
+        zk.multi(operations, (code, ignored, context, results) -> {
+            try {
+                reply.complete(code);
+            } finally {
+                if (pending != null) {
+                    pending.returned();
+                }
+            }
+        }, null);
         return await(reply, deadline);
     }
 
@@ -327,7 +348,10 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
 
     @Override
     public ReadResult read(String bookieId) {
-        long deadline = System.nanoTime() + timeoutNanos;
+        return read(bookieId, System.nanoTime() + timeoutNanos);
+    }
+
+    ReadResult read(String bookieId, long deadline) {
         try {
             if (sync(deadline) != Code.OK.intValue()) {
                 return ReadResult.unavailable();
@@ -361,12 +385,17 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
     @Override
     public CasResult compareAndSet(String bookieId, long expectedStoreVersion,
                                    long expectedReadinessGeneration, ProfileReadinessRecord newRecord) {
+        return compareAndSet(bookieId, expectedStoreVersion, expectedReadinessGeneration, newRecord,
+                System.nanoTime() + timeoutNanos, null);
+    }
+
+    CasResult compareAndSet(String bookieId, long expectedStoreVersion, long expectedReadinessGeneration,
+            ProfileReadinessRecord newRecord, long deadline, ProfileZKReadClient.Pending pending) {
         Objects.requireNonNull(newRecord, "newRecord");
         if (!newRecord.bookieId().equals(bookieId) || expectedStoreVersion < NO_STORE_VERSION
                 || expectedReadinessGeneration < 0) {
             return new CasResult(CasStatus.CONFLICT);
         }
-        long deadline = System.nanoTime() + timeoutNanos;
         boolean submitted = false;
         try {
             if (sync(deadline) != Code.OK.intValue()) {
@@ -407,10 +436,8 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
                 return new CasResult(CasStatus.UNAVAILABLE);
             }
             requireTime(deadline);
-            CompletableFuture<Integer> reply = new CompletableFuture<>();
             submitted = true;
-            zk.multi(operations, (code, ignored, context, results) -> reply.complete(code), null);
-            int result = await(reply, deadline);
+            int result = submitMulti(operations, deadline, pending);
             if (result == Code.OK.intValue()) {
                 return new CasResult(CasStatus.APPLIED);
             }

@@ -6187,6 +6187,29 @@ public final class ZKProfileReservationStore {
             return readDeleteAuthority(metadata, target, null, key, deadline, requireG1());
         }
 
+        void requirePublisherScope(ZooKeeper client, ZKProfileReservationStore original,
+                ProfileDeleteRecord.Target expected) {
+            if (client != zk || original != ZKProfileReservationStore.this || !target.equals(expected)) {
+                throw new IllegalArgumentException("Retained G1 publication belongs to a different store or target");
+            }
+            requireG1();
+        }
+
+        List<Op> publicationChecks(ProfileDeleteDelivery.Progress local, long operationDeadline)
+                throws InterruptedException, TimeoutException {
+            if (operationDeadline > deadline || reads.sync(root, operationDeadline) != Code.OK.intValue()) {
+                throw new IllegalStateException("Retained G1 publication source unavailable");
+            }
+            var original = requireG1();
+            var current = deleteHead(target, operationDeadline);
+            if (current == null || current.mode() != original.mode()) {
+                throw new IllegalStateException("Original G1 delete assignment unavailable");
+            }
+            requireSameG1(original, current.head(), current.node());
+            requireDeleteRegistrationProgress(current.head(), local);
+            return deleteHeadChecks(current);
+        }
+
         private DeleteHeadSnapshot requireG1() {
             if (initial == null || initial.head().assignmentGeneration() != 1) {
                 throw new IllegalStateException("Retained delete replay requires an observed G1 head");
@@ -6228,10 +6251,7 @@ public final class ZKProfileReservationStore {
                 || head.head().assignmentGeneration() != required.effectiveDeleteAssignmentGeneration().value()) {
             throw new IllegalStateException("Required effective assignment changed before startup publication");
         }
-        String name = deliveryPath(target);
-        return List.of(Op.check(name + "-assignment", 0),
-                Op.check(name + "/birth-" + HexFormat.of().formatHex(head.head().streamId()), 0),
-                Op.check(name, head.node().stat().getVersion()));
+        return deleteHeadChecks(head);
     }
 
     /** Checks join the caller's existing writable-publication multi, ordering it against every head increment. */
@@ -6247,15 +6267,24 @@ public final class ZKProfileReservationStore {
                 || record.effectiveAssignmentGeneration().value() != current.head().assignmentGeneration()) {
             throw new IllegalStateException("Missing or different effective delete assignment");
         }
-        var head = current.head();
+        requireDeleteRegistrationProgress(current.head(), local);
+        return deleteHeadChecks(current);
+    }
+
+    private static void requireDeleteRegistrationProgress(ProfileDeleteDelivery.Head head,
+            ProfileDeleteDelivery.Progress local) {
         if (local == null ? head.committedThrough() != 0 || head.assignmentGeneration() != 1
                 : !local.matches(head)) {
             throw new IllegalStateException("Local delete-applied cursor has not reached required-through");
         }
-        String name = deliveryPath(target);
+    }
+
+    private List<Op> deleteHeadChecks(DeleteHeadSnapshot snapshot) {
+        var head = snapshot.head();
+        String name = deliveryPath(head.target());
         return List.of(Op.check(name + "-assignment", 0),
                 Op.check(name + "/birth-" + HexFormat.of().formatHex(head.streamId()), 0),
-                Op.check(name, current.node().stat().getVersion()));
+                Op.check(name, snapshot.node().stat().getVersion()));
     }
 
     private ProfileDeleteSnapshot.Effect snapshotEffect(ProfileDeleteRecord.Target target, long sequence,

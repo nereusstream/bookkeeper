@@ -417,7 +417,9 @@ DATA durable → hot locator → local result
 
 [绑定原 requirements 的完整多 Arena 恢复事实](startup-readiness/README.md#绑定原-requirements-的完整多-arena-恢复事实) 将 UWSQ schema 2 的完整声明与冷重开图的唯一 Bookie cut、全部 Arena cut 和已实际追赶的 G1 游标绑定。失败保留已持久化的原删除前缀，完整事实仅作为后续 owned startup 的输入。
 
-[固定多根 policy 与启动兼容性预检](startup-readiness/README.md#固定多根-policy-与启动兼容性预检) 核对外部声明、完整根向量、UWNS2、固定 schema 2 能力及原生 G1，仅在原冷重开 owner 上产出 checked facts。独立生产 issuer、owned readiness 和注册发布仍 OPEN。
+[固定多根 policy 与启动兼容性预检](startup-readiness/README.md#固定多根-policy-与启动兼容性预检) 核对外部声明、完整根向量、UWNS2、固定 schema 2 能力及原生 G1，仅在原冷重开 owner 上产出 checked facts。
+
+[固定 manifest 冷发布与结算](startup-readiness/README.md#固定-manifest-冷发布与结算) 在受控 namespace 复用原 readiness 阶段及 schema 2 的实际 ZooKeeper 事务，结算再次核对原会话、原 source birth、G1 与本地游标。完整 owned listener 与首次开放请求仍 OPEN。
 
 依赖步骤14，首版删除要求fenced-close。将步骤9的本地能力接入集群流程：
 

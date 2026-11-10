@@ -107,10 +107,12 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.control.ProfilePrincipal;
 import org.apache.bookkeeper.common.profile.control.ProtectedProfileCredential;
 import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
+import org.apache.bookkeeper.common.profile.startup.EphemeralProfileRegistrationStore;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.LocalRecoveryFacts;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
 import org.apache.bookkeeper.common.profile.startup.NewScopeFallbackManifest;
+import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
 import org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore;
 import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest;
 import org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts;
@@ -292,6 +294,7 @@ public class SegmentProfileInitialSocketClientTest {
                     || retainedReadContexts.contains(context);
         }
         ZooKeeper zk;
+        final ZooKeeperWatcherBase zkWatcher = new ZooKeeperWatcherBase(10000, false);
         LedgerManager manager;
         ZKProfileReservationStore reservations;
         ProfileReservation reservation;
@@ -331,14 +334,21 @@ public class SegmentProfileInitialSocketClientTest {
 
         Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count, int ackQuorum,
                 boolean enableRead, boolean enableLac, int ioThreads, int indexedEntries) throws Exception {
+            this(blockInstall, blockActivate, enableControl, count, ackQuorum, enableRead, enableLac, ioThreads,
+                    indexedEntries, false);
+        }
+
+        Fixture(boolean blockInstall, boolean blockActivate, boolean enableControl, int count, int ackQuorum,
+                boolean enableRead, boolean enableLac, int ioThreads, int indexedEntries, boolean cutPublication)
+                throws Exception {
             descriptor = new ProfileDescriptor(EngineProfile.SEGMENT_WAL_ENGINE,
                     PayloadFormat.OPAQUE_LEDGER, DurabilityMode.SYNC_ON_ACK, 3, 3, ackQuorum, 0, 7, 11, List.of());
             descriptorBytes = ProfileDescriptorCodec.encode(descriptor, VALIDATOR);
             try {
                 cluster.startCluster();
-                ZooKeeperWatcherBase watcher = new ZooKeeperWatcherBase(10000, false);
-                zk = new ZooKeeper(cluster.getZooKeeperConnectString(), 10000, watcher);
-                watcher.waitForConnection();
+                zk = cutPublication ? new DeleteRegistrationCutClient(cluster.getZooKeeperConnectString(), zkWatcher)
+                        : new ZooKeeper(cluster.getZooKeeperConnectString(), 10000, zkWatcher);
+                zkWatcher.waitForConnection();
                 zk.create("/socket-initial", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
                 zk.create("/socket-ledgers", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
                 ClientConfiguration conf = new ClientConfiguration();
@@ -2693,6 +2703,8 @@ public class SegmentProfileInitialSocketClientTest {
         volatile Runnable beforeWritable;
         volatile boolean loseWritable;
         volatile boolean dropped;
+        volatile int lastWritableCode;
+        final AtomicReference<CompletableFuture<Runnable>> holdWritableReply = new AtomicReference<>();
 
         DeleteRegistrationCutClient(String connect, ZooKeeperWatcherBase watcher) throws Exception {
             super(connect, 10000, watcher);
@@ -2711,8 +2723,15 @@ public class SegmentProfileInitialSocketClientTest {
                 beforeWritable = null;
                 before.run();
             }
+            var held = writable ? holdWritableReply.getAndSet(null) : null;
             super.multi(copied, (code, path, ignored, results) -> {
-                if (writable && loseWritable && code == org.apache.zookeeper.KeeperException.Code.OK.intValue()) {
+                if (writable) {
+                    lastWritableCode = code;
+                }
+                if (held != null) {
+                    held.complete(() -> callback.processResult(code, path, context, results));
+                } else if (writable && loseWritable
+                        && code == org.apache.zookeeper.KeeperException.Code.OK.intValue()) {
                     loseWritable = false;
                     dropped = true;
                     callback.processResult(org.apache.zookeeper.KeeperException.Code.CONNECTIONLOSS.intValue(),
@@ -2845,7 +2864,7 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void manifestListenerRoutesTwoLedgersAndReadsAfterHealthyIndexRebuild() throws Exception {
-        verifyManifestRetainedReads(false);
+        verifyManifestRetainedReads(false, false);
     }
 
     @Test
@@ -2853,11 +2872,109 @@ public class SegmentProfileInitialSocketClientTest {
         SegmentNewScopeAccessTest.requireCredentials();
         assumeTrue("Unix permission-bit experiment requires a non-root target credential",
                 ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
-        verifyManifestRetainedReads(true);
+        verifyManifestRetainedReads(true, false);
     }
 
-    private void verifyManifestRetainedReads(boolean observe) throws Exception {
-        try (var fixture = new Fixture(false, false, true, 3, 3, true, true); BookKeeper sdk = sdk(fixture)) {
+    @Test
+    public void manifestColdPublicationUsesOriginalReadinessAndG1CutWithoutOpeningAdmission() throws Exception {
+        SegmentNewScopeAccessTest.requireCredentials();
+        assumeTrue("Unix permission-bit experiment requires a non-root target credential",
+                ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
+        verifyManifestRetainedReads(true, true);
+    }
+
+    @Test
+    public void manifestColdPublicationCannotCrossAnEffectiveEmptyG2Handoff() throws Exception {
+        SegmentNewScopeAccessTest.requireCredentials();
+        assumeTrue("Unix permission-bit experiment requires a non-root target credential",
+                ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
+        try (var fixture = new Fixture(false, false, true, 3, 3, true, true, 2, 16, true);
+                BookKeeper sdk = sdk(fixture);
+                var episode = new SegmentClassicScopeEpisodeTest.Episode(fixture.cluster.getZooKeeperConnectString(),
+                        "/old-classic-manifest-empty-g2")) {
+            var legacyConfig = files(fixture.nodes.get(0)).config();
+            var layout = replaceWithManifest(fixture, 0);
+            var manifest = layout.manifest();
+            var bookie = manifest.bookieId().toString();
+            var required = provisionManifestPreflightRequirements(fixture, manifest, "/manifest-empty-g2-required",
+                    2, 2, List.of(1, 2), 2);
+            try (var created = layout.owner(manifestWireBudget(layout.capacity()))) {
+                created.startNew();
+            }
+            var access = observeRetainedManifest(episode, layout);
+            var metadata = new ProfileLedgerMetadataStore(fixture.zk, (AbstractZkLedgerManager) fixture.manager,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            var watcher = new ZooKeeperWatcherBase(10000, false);
+            try (var legacyClient = new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher);
+                    var owner = layout.owner(manifestWireBudget(layout.capacity()));
+                    var local = new SegmentLocalReadinessStore(legacyConfig.directory(), bookie,
+                            manifest.incarnation())) {
+                watcher.waitForConnection();
+                var checked = reopenManifestForColdPublication(fixture, layout, owner, metadata, access, required);
+                var legacy = new IsolatedSegmentStorage(legacyConfig, fixture.identities.get(0),
+                        new SecretKeySpec(bytes(32, 7), "AES"), VALIDATOR,
+                        new SegmentExecutionGroup.Settings(1, 2, 6, 2, 4096, 4096,
+                                2 * (4096L + 4095) + 4096, Duration.ofSeconds(5)),
+                        new IsolatedSegmentStorage.Limits(1024 * 1024, 8, 16, 1, 1,
+                                new SegmentDataPhysicalDriver.BatchLimits(4096, 1, Duration.ofSeconds(30))));
+                fixture.nodes.set(0, legacy);
+                for (String root : List.of("/handoff-readiness", "/handoff-requirements", MANIFEST_COLD_READINESS)) {
+                    fixture.zk.create(root, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+                }
+                var legacySource = new ZKProfileReservationStore(legacyClient, "/socket-initial",
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var legacyMetadata = new ProfileLedgerMetadataStore(legacyClient,
+                        (AbstractZkLedgerManager) fixture.manager, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var legacyRequirements = new ZKProfileStartupRequirementsStore(legacyClient, "/handoff-requirements",
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                legacyRequirements.bindDeleteAssignments(legacySource);
+                var legacyPersistent = new ZKProfileRegistrationStore(legacyClient, "/handoff-readiness",
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var legacyPublisher = readyHandoffPublisher(fixture, sdk, 0, legacyConfig, legacyClient, legacySource,
+                        legacyMetadata, legacyRequirements, legacyPersistent, watcher, local, 1);
+                var target = checked.facts().requiredDelete().target();
+                assertEquals(0, checked.facts().requiredDelete().committedThrough());
+                var coordinator = new ProfileDeleteCoordinator(legacySource, legacyMetadata, fixture.cold);
+                var prepare = coordinator.beginPrepareHandoff(target, bytes(16, 115), sdk.getClientCtx(), 64,
+                        Duration.ofSeconds(10));
+                assertEquals(ZKProfileReservationStore.DeleteHandoffStatus.PREPARED,
+                        prepare.result().get(10, TimeUnit.SECONDS).status());
+                prepare.completion().get(5, TimeUnit.SECONDS);
+                var adopted = awaitHandoffAdoption(legacy, legacySource, legacyMetadata);
+                assertEquals(IsolatedSegmentStorage.DeleteAdoptionStatus.ADOPTED_DURABLE, adopted.status());
+                var acknowledge = coordinator.beginAcknowledgeHandoff(adopted.adoption(), sdk.getClientCtx(),
+                        Duration.ofSeconds(10));
+                assertEquals(ZKProfileReservationStore.DeleteHandoffAckStatus.ACKNOWLEDGED,
+                        acknowledge.result().get(10, TimeUnit.SECONDS).status());
+                acknowledge.completion().get(5, TimeUnit.SECONDS);
+
+                var persistent = new ZKProfileRegistrationStore(fixture.zk, MANIFEST_COLD_READINESS,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                var client = (DeleteRegistrationCutClient) fixture.zk;
+                try (var attempt = manifestColdPublisher(fixture, owner, checked, persistent)) {
+                    client.beforeWritable = () -> assertEquals(ZKProfileReservationStore.DeleteHandoffEffectiveStatus
+                            .EFFECTIVE, legacyPublisher.makeDeleteHandoffEffective(adopted.adoption()).status());
+                    assertNull(attempt.publication().run().reconciled());
+                    assertEquals(org.apache.zookeeper.KeeperException.Code.BADVERSION.intValue(),
+                            client.lastWritableCode);
+                    assertFalse(attempt.admission().hasCompletedFirstOpen(manifest.incarnation()));
+                }
+                var head = fixture.reservations.readDeleteHead(target).head();
+                assertEquals(2, head.assignmentGeneration());
+                assertEquals(0, head.committedThrough());
+                assertNull(owner.profileDeleteProgress());
+                assertNull(owner.checkRecoveredStartup("ledger-profile", 1).checked());
+                try (var refused = manifestColdPublisher(fixture, owner, checked, persistent)) {
+                    assertThrows(IllegalArgumentException.class, refused.publication()::run);
+                    assertFalse(refused.admission().getAsBoolean());
+                }
+            }
+        }
+    }
+
+    private void verifyManifestRetainedReads(boolean observe, boolean publish) throws Exception {
+        try (var fixture = new Fixture(false, false, true, 3, 3, true, true, 2, 16, publish);
+                BookKeeper sdk = sdk(fixture)) {
             var layout = replaceWithManifest(fixture, 0);
             var identity = fixture.identities.get(0);
             var manifest = layout.manifest();
@@ -2960,6 +3077,7 @@ public class SegmentProfileInitialSocketClientTest {
             }
             var storage = layout.owner(manifestWireBudget(capacity));
             ManifestSegmentStorage.CheckedStartup checked = null;
+            RetainedManifestAccess retainedAccess = null;
             try (storage; var episode = observe ? new SegmentClassicScopeEpisodeTest.Episode(
                     fixture.cluster.getZooKeeperConnectString(), "/old-classic-manifest-access") : null) {
                 if (episode == null) {
@@ -2975,21 +3093,32 @@ public class SegmentProfileInitialSocketClientTest {
                             List.of(manifest.arenas().get(0).id(), new UUID(0, 99)));
                     assertThrows(IOException.class, () -> ManifestSegmentStorage.requireRecoverySourceScope(
                             manifest, wrongMember.source()));
-                    var access = observeRetainedManifest(episode, layout);
-                    checked = checkManifestStartupPreflight(fixture, layout, storage, metadata, access);
+                    retainedAccess = observeRetainedManifest(episode, layout);
+                    checked = checkManifestStartupPreflight(fixture, layout, storage, metadata, retainedAccess);
                     var attempt = requirements.facts(storage, fixture, metadata, 1, Duration.ofSeconds(5));
                     assertRecoveredManifestFacts(storage, layout, requirements, attempt, 0);
                     assertEquals(99, attempt.facts().commissioned().minimumReaderVersion());
                     assertNull(attempt.facts().appliedDelete());
                     assertFalse(Files.exists(manifest.controlDirectory().resolve("local-readiness")));
                     assertNull(fixture.zk.exists("/socket-ledgers/available/socket0:3181", false));
+                    if (publish) {
+                        verifyManifestColdPublication(fixture, sdk, layout, storage, checked, metadata);
+                    }
                 }
                 var listener = listenManifest(fixture, storage, 0);
                 try (var peer = dataClient(fixture, 0, 8, Duration.ofSeconds(5))) {
-                    assertReadPayload(peer, first, a);
+                    if (publish) {
+                        assertManifestDeletedRead(peer, first);
+                    } else {
+                        assertReadPayload(peer, first, a);
+                    }
                     assertReadPayload(peer, second, b);
                 } finally {
                     listener.closeAsync().get(10, TimeUnit.SECONDS);
+                }
+                if (publish) {
+                    storage.close();
+                    verifyManifestColdSourceAndCloseRaces(fixture, layout, metadata, retainedAccess);
                 }
             }
             if (checked != null) {
@@ -3008,6 +3137,252 @@ public class SegmentProfileInitialSocketClientTest {
     private record RetainedManifestAccess(SegmentManifestAccessObservation observed,
             SegmentManifestAccessObservation.OldScope old, long newUid,
             SegmentManifestStartupPolicy.OldDisposition disposition) { }
+
+    private static final String MANIFEST_COLD_READINESS = "/manifest-cold-readiness";
+
+    private record ManifestColdPublisher(ZKProfileEphemeralRegistrationStore publisher,
+            ZKProfileEphemeralRegistrationStore.Admission admission, SegmentManifestColdPublication publication)
+            implements AutoCloseable {
+        @Override
+        public void close() {
+            publication.demote();
+        }
+    }
+
+    private static ManifestColdPublisher manifestColdPublisher(Fixture fixture, ManifestSegmentStorage storage,
+            ManifestSegmentStorage.CheckedStartup checked, ZKProfileRegistrationStore persistent) throws IOException {
+        return manifestColdPublisher(fixture, storage, checked, persistent, Duration.ofSeconds(10));
+    }
+
+    private static ManifestColdPublisher manifestColdPublisher(Fixture fixture, ManifestSegmentStorage storage,
+            ManifestSegmentStorage.CheckedStartup checked, ZKProfileRegistrationStore persistent, Duration timeout)
+            throws IOException {
+        var bookie = checked.facts().bookie().toString();
+        var publisher = new ZKProfileEphemeralRegistrationStore(fixture.zk, MANIFEST_COLD_READINESS, bookie,
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+        var admission = publisher.watchAdmission(fixture.zkWatcher);
+        try {
+            var binding = storage.bindColdPublication(checked, persistent, publisher, admission, new Generation(1),
+                    new Generation(1), "tls://localhost:3181", List.of(1));
+            return new ManifestColdPublisher(publisher, admission, binding);
+        } catch (IOException | RuntimeException failure) {
+            admission.close();
+            throw failure;
+        }
+    }
+
+    private static void verifyManifestColdSourceAndCloseRaces(Fixture fixture, ManifestWireLayout layout,
+            ProfileLedgerMetadataStore metadata, RetainedManifestAccess access) throws Exception {
+        var client = (DeleteRegistrationCutClient) fixture.zk;
+        var manifest = layout.manifest();
+        var bookie = manifest.bookieId().toString();
+        String path = MANIFEST_COLD_READINESS + "/" + java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(bookie.getBytes(StandardCharsets.UTF_8));
+        var persistent = new ZKProfileRegistrationStore(client, MANIFEST_COLD_READINESS,
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        var watcher = new ZooKeeperWatcherBase(10000, false);
+        try (var competing = new ZooKeeper(fixture.cluster.getZooKeeperConnectString(), 10000, watcher)) {
+            watcher.waitForConnection();
+            for (boolean sameBirthMarker : new boolean[] {false, true}) {
+                String root = "/manifest-source-race-" + sameBirthMarker;
+                var required = provisionManifestPreflightRequirements(fixture, manifest, root, 2, 2,
+                        List.of(1, 2), 2);
+                var original = required.source().sourceIdentity();
+                byte[] bytes = client.getData(original.nodePath(), false, null);
+                try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
+                    var checked = reopenManifestForColdPublication(
+                            fixture, layout, storage, metadata, access, required);
+                    if (!sameBirthMarker) {
+                        var foreignPersistent = new ZKProfileRegistrationStore(competing, MANIFEST_COLD_READINESS,
+                                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                        var foreign = new ZKProfileEphemeralRegistrationStore(competing, MANIFEST_COLD_READINESS,
+                                bookie, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                        try (var admission = foreign.watchAdmission(watcher)) {
+                            var wrong = storage.bindColdPublication(checked, foreignPersistent, foreign, admission,
+                                    new Generation(1), new Generation(1), "tls://localhost:3181", List.of(1));
+                            assertThrows(IllegalArgumentException.class, wrong::run);
+                            assertFalse(admission.hasCompletedFirstOpen(manifest.incarnation()));
+                            assertNull(client.exists(path + "/service-info", false));
+                        }
+                    }
+                    try (var attempt = manifestColdPublisher(fixture, storage, checked, persistent)) {
+                        client.beforeWritable = () -> {
+                            try {
+                                if (sameBirthMarker) {
+                                    recreateManifestRequirements(competing, original, bytes);
+                                } else {
+                                    competing.multi(List.of(
+                                            org.apache.zookeeper.Op.delete(original.nodePath()
+                                                    + "/birth-" + original.birthId(), 0),
+                                            org.apache.zookeeper.Op.delete(original.nodePath(), 0)));
+                                    var replacement = new ZKProfileStartupRequirementsStore(competing, root,
+                                            ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+                                    assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
+                                            replacement.provisionManifest(required.source().commissionedCompatibility(),
+                                                    required.source().requiredDevices()));
+                                }
+                            } catch (Exception failure) {
+                                throw new AssertionError(failure);
+                            }
+                        };
+                        if (sameBirthMarker) {
+                            assertThrows(IllegalStateException.class, attempt.publication()::run);
+                            assertEquals(org.apache.zookeeper.KeeperException.Code.OK.intValue(),
+                                    client.lastWritableCode);
+                        } else {
+                            assertNull(attempt.publication().run().reconciled());
+                            assertEquals(org.apache.zookeeper.KeeperException.Code.NONODE.intValue(),
+                                    client.lastWritableCode);
+                        }
+                        var current = required.store().readManifest(bookie).observation().orElseThrow()
+                                .sourceIdentity();
+                        assertNotEquals(original.birthZxid(), current.birthZxid());
+                        if (sameBirthMarker) {
+                            assertEquals(original.birthId(), current.birthId());
+                            assertArrayEquals(original.sha256(), current.sha256());
+                        } else {
+                            assertNotEquals(original.birthId(), current.birthId());
+                        }
+                        assertTrue(attempt.admission().isRetired());
+                        assertFalse(attempt.admission().hasCompletedFirstOpen(manifest.incarnation()));
+                        assertNull(client.exists(path + "/writable", false));
+                        assertNull(client.exists(path + "/service-info", false));
+                    }
+                }
+            }
+        }
+        var required = provisionManifestPreflightRequirements(fixture, manifest, "/manifest-source-held", 2, 2,
+                List.of(1, 2), 2);
+        try (var storage = layout.owner(manifestWireBudget(layout.capacity()))) {
+            var checked = reopenManifestForColdPublication(fixture, layout, storage, metadata, access, required);
+            try (var attempt = manifestColdPublisher(fixture, storage, checked, persistent, Duration.ofSeconds(3))) {
+                var held = new CompletableFuture<Runnable>();
+                client.holdWritableReply.set(held);
+                var run = fixture.cold.submit(attempt.publication()::run);
+                Runnable actual = held.get(10, TimeUnit.SECONDS);
+                try {
+                    assertNotNull(client.exists(path + "/writable", false));
+                    assertFalse(storage.close(Duration.ofMillis(25)));
+                    assertThrows(ExecutionException.class, () -> run.get(10, TimeUnit.SECONDS));
+                    assertNull(client.exists(path + "/writable", false));
+                    assertFalse(storage.close(Duration.ofMillis(25)));
+                    assertFalse(attempt.publisher().manifestMutationsDrained(attempt.publication()));
+                    assertTrue(attempt.admission().isRetired());
+                } finally {
+                    actual.run();
+                }
+                assertTrue(attempt.publisher().manifestMutationsDrained(attempt.publication()));
+                assertFalse(attempt.admission().hasCompletedFirstOpen(manifest.incarnation()));
+                assertTrue(storage.close(Duration.ofSeconds(5)));
+            }
+        }
+    }
+
+    private static ManifestSegmentStorage.CheckedStartup reopenManifestForColdPublication(Fixture fixture,
+            ManifestWireLayout layout, ManifestSegmentStorage storage, ProfileLedgerMetadataStore metadata,
+            RetainedManifestAccess access, ManifestRequirements requirements) throws Exception {
+        var manifest = layout.manifest();
+        var policy = new SegmentManifestStartupPolicy(requirements.source().sourceIdentity(), manifest,
+                SegmentManifestAccessObservation.expectedRoots(manifest, layout.runtime()), access.old(),
+                access.newUid(), access.disposition());
+        var preflight = policy.preflight(layout.runtime(), requirements.store(), requirements.source(),
+                fixture.reservations);
+        var script = Path.of("../scripts/unified-wal/probe-new-scope-access.py").toRealPath();
+        var observed = manifestAccess(layout, access.old(), access.newUid(), script);
+        storage.restartForStartupPreflight(preflight, observed, metadata,
+                System.nanoTime() + TimeUnit.SECONDS.toNanos(45));
+        var result = storage.checkRecoveredStartup("ledger-profile", 8);
+        assertEquals(ManifestSegmentStorage.RecoveryFactsStatus.COMPLETE, result.recovery().status());
+        return result.checked();
+    }
+
+    private static void verifyManifestColdPublication(Fixture fixture, BookKeeper sdk, ManifestWireLayout layout,
+            ManifestSegmentStorage storage, ManifestSegmentStorage.CheckedStartup checked,
+            ProfileLedgerMetadataStore metadata) throws Exception {
+        var client = (DeleteRegistrationCutClient) fixture.zk;
+        var manifest = layout.manifest();
+        var bookie = manifest.bookieId().toString();
+        client.create(MANIFEST_COLD_READINESS, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var persistent = new ZKProfileRegistrationStore(client, MANIFEST_COLD_READINESS,
+                ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+        String path = MANIFEST_COLD_READINESS + "/" + java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(bookie.getBytes(StandardCharsets.UTF_8));
+        var firstData = IsolatedSegmentFiles.dataPath(manifest.arenaConfig(layout.runtime(), 0), 0);
+        var secondData = IsolatedSegmentFiles.dataPath(manifest.arenaConfig(layout.runtime(), 1), 0);
+        var firstBytes = Files.readAllBytes(firstData);
+        var secondBytes = Files.readAllBytes(secondData);
+        var deletes = new ProfileDeleteCoordinator(fixture.reservations, metadata, fixture.cold);
+        try (var original = manifestColdPublisher(fixture, storage, checked, persistent)) {
+            client.loseWritable = true;
+            var published = original.publication().run();
+            assertEquals(StartupReadinessResult.Outcome.PUBLICATION_RECONCILED, published.phases().outcome());
+            assertTrue(client.dropped);
+            var writable = published.reconciled();
+            assertNotNull(writable);
+            assertFalse(original.admission().getAsBoolean());
+            assertFalse(original.admission().openAfterReconciliation(writable));
+            assertFalse(original.admission().hasCompletedFirstOpen(manifest.incarnation()));
+            assertThrows(IllegalStateException.class, () -> listenManifest(fixture, storage, 0));
+            assertEquals(EphemeralProfileRegistrationStore.PublicationStatus.ALREADY_APPLIED,
+                    original.publisher().registerWritable(writable).status());
+            assertEquals(writable, original.publisher().readWritable(bookie).orElseThrow());
+            assertEquals(client.getSessionId(), client.exists(path + "/writable", false).getEphemeralOwner());
+            var ready = persistent.read(bookie).versionedRecord().orElseThrow().record();
+            assertEquals(ProfileReadinessRecord.State.READY, ready.state());
+            assertEquals(manifest.identity(), ready.deviceManifestIdentity());
+            try (var local = new SegmentLocalReadinessStore(manifest.controlDirectory(), bookie,
+                    manifest.incarnation())) {
+                assertEquals(manifest.identity(), local.read(bookie).orElseThrow().deviceManifestIdentity());
+            }
+            var foreign = new ZKProfileEphemeralRegistrationStore(client, MANIFEST_COLD_READINESS, bookie,
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
+            assertThrows(IllegalStateException.class, () -> foreign.readWritable(bookie));
+            assertThrows(IllegalStateException.class, () -> foreign.demote(bookie));
+            assertNotNull(client.exists(path + "/writable", false));
+
+            commitManifestColdDelete(deletes, sdk, 44);
+            assertNull(storage.profileDeleteProgress());
+            assertEquals(EphemeralProfileRegistrationStore.PublicationStatus.UNAVAILABLE,
+                    original.publisher().registerWritable(writable).status());
+            assertThrows(IllegalStateException.class,
+                    () -> original.publisher().reconcileManifestStartup(original.publication()));
+            assertFalse(original.admission().getAsBoolean());
+        }
+        assertNull(client.exists(path + "/writable", false));
+        assertNull(client.exists(path + "/service-info", false));
+
+        var caughtUp = storage.checkRecoveredStartup("ledger-profile", 1);
+        assertEquals(ManifestSegmentStorage.RecoveryFactsStatus.COMPLETE, caughtUp.recovery().status());
+        assertEquals(1, storage.profileDeleteProgress().sequence());
+        try (var retry = manifestColdPublisher(fixture, storage, caughtUp.checked(), persistent)) {
+            assertNotNull(retry.publication().run().reconciled());
+            assertFalse(retry.admission().getAsBoolean());
+        }
+        try (var racing = manifestColdPublisher(fixture, storage, caughtUp.checked(), persistent)) {
+            client.beforeWritable = () -> {
+                try {
+                    commitManifestColdDelete(deletes, sdk, 45);
+                } catch (Exception failure) {
+                    throw new AssertionError(failure);
+                }
+            };
+            var refused = racing.publication().run();
+            assertNull(refused.reconciled());
+            assertEquals(org.apache.zookeeper.KeeperException.Code.BADVERSION.intValue(), client.lastWritableCode);
+            assertFalse(racing.admission().getAsBoolean());
+        }
+        assertEquals(1, storage.profileDeleteProgress().sequence());
+        assertNull(client.exists(path + "/writable", false));
+        assertArrayEquals(firstBytes, Files.readAllBytes(firstData));
+        assertArrayEquals(secondBytes, Files.readAllBytes(secondData));
+    }
+
+    private static void commitManifestColdDelete(ProfileDeleteCoordinator deletes, BookKeeper sdk, long ledger)
+            throws Exception {
+        var result = deletes.deleteLedgerAsync(ledger, bytes(16, (int) ledger), sdk.getClientCtx(),
+                Duration.ofSeconds(10)).get(10, TimeUnit.SECONDS);
+        assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED, result.status());
+    }
 
     private static ManifestSegmentStorage.CheckedStartup checkManifestStartupPreflight(Fixture fixture,
             ManifestWireLayout layout, ManifestSegmentStorage storage, ProfileLedgerMetadataStore metadata,
@@ -3076,7 +3451,7 @@ public class SegmentProfileInitialSocketClientTest {
         var stale = new SegmentManifestStartupPolicy(pinned, manifest, roots, old, access.newUid(),
                 access.disposition()).preflight(layout.runtime(), recreated.store(), recreated.source(),
                         fixture.reservations);
-        recreateManifestRequirements(fixture, pinned, fixture.zk.getData(pinned.nodePath(), false, null));
+        recreateManifestRequirements(fixture.zk, pinned, fixture.zk.getData(pinned.nodePath(), false, null));
         var replacement = recreated.store().readManifest(manifest.bookieId().toString()).observation().orElseThrow();
         assertArrayEquals(pinned.sha256(), replacement.sourceIdentity().sha256());
         assertNotEquals(pinned.birthZxid(), replacement.sourceIdentity().birthZxid());
@@ -3086,7 +3461,7 @@ public class SegmentProfileInitialSocketClientTest {
         assertEquals(before, manifestTreeDigests(layout));
 
         var preflight = policy.preflight(layout.runtime(), requirements.store(), source, fixture.reservations);
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(45);
         storage.restartForStartupPreflight(preflight, access.observed(), metadata, deadline);
         var result = storage.checkRecoveredStartup("ledger-profile", 1);
         assertRecoveredManifestFacts(storage, layout, requirements, result.recovery(), 0);
@@ -3341,11 +3716,11 @@ public class SegmentProfileInitialSocketClientTest {
                 .observation().orElseThrow());
     }
 
-    private static void recreateManifestRequirements(Fixture fixture,
+    private static void recreateManifestRequirements(ZooKeeper client,
             ZKProfileStartupRequirementsStore.SourceIdentity source, byte[] bytes) throws Exception {
         String path = source.nodePath();
         String marker = path + "/birth-" + source.birthId();
-        fixture.zk.multi(List.of(org.apache.zookeeper.Op.delete(marker, 0),
+        client.multi(List.of(org.apache.zookeeper.Op.delete(marker, 0),
                 org.apache.zookeeper.Op.delete(path, 0),
                 org.apache.zookeeper.Op.create(path, bytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
                 org.apache.zookeeper.Op.create(marker, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
@@ -3538,7 +3913,7 @@ public class SegmentProfileInitialSocketClientTest {
                         () -> requirements.facts(storage, fixture, metadata, 1, Duration.ofSeconds(10)), fixture.cold);
                 try {
                     assertTrue(entered.await(5, TimeUnit.SECONDS));
-                    recreateManifestRequirements(fixture, source, original);
+                    recreateManifestRequirements(fixture.zk, source, original);
                 } finally {
                     release.countDown();
                 }
