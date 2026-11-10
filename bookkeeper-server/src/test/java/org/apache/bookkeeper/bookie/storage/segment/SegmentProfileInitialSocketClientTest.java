@@ -3971,12 +3971,14 @@ public class SegmentProfileInitialSocketClientTest {
         var receipt = new ObjectMapper().readTree(observed.receipt());
         assertEquals("UWNS2", receipt.path("schema").asText());
         assertEquals("ACCESS_SNAPSHOT_ONLY", receipt.path("authority").asText());
-        assertEquals(5, receipt.path("newRoots").size());
+        assertEquals(1 + 2 * manifest.arenas().size(), receipt.path("newRoots").size());
         var writes = new java.util.HashSet<String>();
         receipt.path("requiredWrites").forEach(row -> writes.add(row.textValue()));
         for (int i = 0; i < manifest.arenas().size(); i++) {
             var member = manifest.arenaConfig(layout.runtime(), i);
-            assertTrue(writes.contains(IsolatedSegmentFiles.dataPath(member, 0).toString()));
+            for (int file = 0; file < member.dataFiles(); file++) {
+                assertTrue(writes.contains(IsolatedSegmentFiles.dataPath(member, file).toString()));
+            }
             assertTrue(writes.contains(SegmentDerivedIndex.directory(member).resolve("LOCK").toString()));
         }
         boolean immutableObserved = false;
@@ -4509,15 +4511,25 @@ public class SegmentProfileInitialSocketClientTest {
 
     private ManifestWireLayout replaceWithManifest(Fixture fixture, int target, int secondFiles, long secondFileBytes)
             throws Exception {
+        return replaceWithManifest(fixture, target, secondFiles, secondFileBytes, false);
+    }
+
+    private ManifestWireLayout replaceWithManifest(Fixture fixture, int target, int secondFiles, long secondFileBytes,
+            boolean unusedArena) throws Exception {
         fixture.listeners.get(target).close().sync();
         fixture.nodes.get(target).close();
         var identity = fixture.identities.get(target);
         Path root = temporary.newFolder().toPath().toRealPath();
         long fileBytes = 4L * 1024 * 1024;
-        var manifest = new SegmentArenaManifest(identity.incarnation(), identity.bookieId(), List.of(
+        var arenas = new ArrayList<>(List.of(
                 new SegmentArenaManifest.Arena(new UUID(0, 19), root.resolve("arena-a"), 1, fileBytes),
                 new SegmentArenaManifest.Arena(new UUID(0, 20), root.resolve("arena-b"), secondFiles,
-                        secondFileBytes)),
+                        secondFileBytes)));
+        if (unusedArena) {
+            arenas.add(new SegmentArenaManifest.Arena(new UUID(0, 21), root.resolve("arena-unused"), 1,
+                    5L * 1024 * 1024));
+        }
+        var manifest = new SegmentArenaManifest(identity.incarnation(), identity.bookieId(), arenas,
                 root.resolve("bookie"), List.of(1, 0));
         var runtime = new IsolatedSegmentConfig(manifest.controlDirectory(), 1, 2, 1, fileBytes, 4096, 1024, 16,
                 "FILE_CHANNEL", "OFF", "SYSTEM", "PARK");
@@ -19618,21 +19630,27 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void manifestBindsTheCompleteNativeClosedCohortUnderOneDeadline() throws Exception {
-        observeManifestNativeClosedCohort(true);
+        observeManifestNativeClosedCohort(true, false);
     }
 
     @Test
     public void manifestNativeClosedCohortRejectsTheLastInstalledOpenLedger() throws Exception {
-        observeManifestNativeClosedCohort(false);
+        observeManifestNativeClosedCohort(false, false);
     }
 
-    private void observeManifestNativeClosedCohort(boolean closeEmpty) throws Exception {
+    @Test
+    public void manifestAuditsEveryOriginalDataFileAgainstNativeClosedCohort() throws Exception {
+        observeManifestNativeClosedCohort(true, true);
+    }
+
+    private void observeManifestNativeClosedCohort(boolean closeEmpty, boolean physicalAudit) throws Exception {
         assumeTrue("Unix permission-bit experiment requires a non-root target credential",
                 ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
         try (var fixture = new Fixture(false, false, true, 3, 3, true, true);
                 var classic = new SegmentClassicScopeEpisodeTest.Episode(fixture.cluster.getZooKeeperConnectString(),
                         "/old-classic-manifest-native-closed")) {
-            var layout = replaceWithManifest(fixture, 0);
+            var layout = physicalAudit ? replaceWithManifest(fixture, 0, 2, 3L * 1024 * 1024, true)
+                    : replaceWithManifest(fixture, 0);
             var manifest = layout.manifest();
             String bookie = manifest.bookieId().toString();
             try (var created = layout.owner(manifestWireBudget(layout.capacity()))) {
@@ -19704,23 +19722,30 @@ public class SegmentProfileInitialSocketClientTest {
                     nativeBefore.add(readPublicProfileMetadata(fixture, path));
                 }
                 int rows = 64;
-                var capacity = layout.capacity().withRecoveryDependencies(2, rows)
+                var capacity = layout.capacity().withRecoveryDependencies(manifest.arenas().size(), rows)
                         .withAdditionalControl(SegmentClosedReconstruction.manifestClosedControlBytes());
                 var budget = manifestWireBudget(capacity);
                 var timeout = Duration.ofSeconds(15);
-                try (var owner = layout.owner(budget)) {
-                    if (closeEmpty) {
-                        var observation = SegmentClosedReconstruction.observeManifestClosedCohort(owner, rows,
-                                timeout, metadata, fixture.reservations);
-                        assertManifestNativeClosedCohort(fixture, layout, metadata, contexts, observation);
-                    } else {
-                        var failure = assertThrows(IOException.class,
-                                () -> SegmentClosedReconstruction.observeManifestClosedCohort(owner, rows,
-                                        timeout, metadata, fixture.reservations));
-                        assertTrue(failure.getMessage(), failure.getMessage().contains("member 46"));
-                        assertTrue(failure.getMessage(), failure.getMessage().contains("NOT_CLOSED"));
+                if (physicalAudit) {
+                    var auditBudget = manifestWireBudget(capacity.withAdditionalData(
+                            ManifestSegmentStorage.closedDataCapacity(manifest, rows, 2)));
+                    assertManifestClosedDataAudit(fixture, layout, manager, metadata, contexts, auditBudget,
+                            rows, timeout, paths, before);
+                } else {
+                    try (var owner = layout.owner(budget)) {
+                        if (closeEmpty) {
+                            var observation = SegmentClosedReconstruction.observeManifestClosedCohort(owner, rows,
+                                    timeout, metadata, fixture.reservations);
+                            assertManifestNativeClosedCohort(fixture, layout, metadata, contexts, observation);
+                        } else {
+                            var failure = assertThrows(IOException.class,
+                                    () -> SegmentClosedReconstruction.observeManifestClosedCohort(owner, rows,
+                                            timeout, metadata, fixture.reservations));
+                            assertTrue(failure.getMessage(), failure.getMessage().contains("member 46"));
+                            assertTrue(failure.getMessage(), failure.getMessage().contains("NOT_CLOSED"));
+                        }
+                        assertManifestObservationReleased(budget);
                     }
-                    assertManifestObservationReleased(budget);
                 }
                 try (var refused = layout.owner(manifestWireBudget(layout.capacity()))) {
                     assertThrows(IOException.class, refused::restart);
@@ -19731,7 +19756,7 @@ public class SegmentProfileInitialSocketClientTest {
                     assertPublicProfileMetadataUnchanged(nativeBefore.get(i),
                             readPublicProfileMetadata(fixture, paths.get(i)));
                 }
-                if (closeEmpty) {
+                if (closeEmpty && !physicalAudit) {
                     assertManifestNativeClosedReadFailures(fixture, layout, manager, budget, rows, timeout, paths);
                     assertEquals(before, manifestTreeDigests(layout));
                     assertNull(registry.readPeer(bookie).peer());
@@ -19762,9 +19787,10 @@ public class SegmentProfileInitialSocketClientTest {
                         ProfileClosedReconstruction.Kind.EMPTY_TERMINAL),
                 observation.members().stream().map(SegmentClosedReconstruction.ManifestClosedMember::kind).toList());
         assertEquals(2, graph.bookie().appliedRecoveryGrants());
-        for (var arena : graph.arenas()) {
+        for (int i = 0; i < graph.arenas().size(); i++) {
+            var arena = graph.arenas().get(i);
             assertTrue(arena.control().cut().sessionOpen());
-            assertFalse(arena.control().grants().isEmpty());
+            assertEquals(i >= 2, arena.control().grants().isEmpty());
         }
         for (var member : observation.members()) {
             var nativeSnapshot = fixture.reservations.readClosedForOpen(metadata, member.ledger().ledgerId())
@@ -19778,6 +19804,134 @@ public class SegmentProfileInitialSocketClientTest {
         var wrong = fixture.reservations.closedReconstructionReader(metadata, manifest.bookieId(),
                 new StorageIncarnation(bytes(16, 109)), System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
         assertThrows(IOException.class, () -> wrong.read(contexts.get(0)));
+    }
+
+    private static void assertManifestClosedDataAudit(Fixture fixture, ManifestWireLayout layout,
+            AbstractZkLedgerManager manager, ProfileLedgerMetadataStore metadata, List<ProfileLedgerContext> contexts,
+            ProfileReceiveBudget budget, int rows, Duration timeout, List<String> metadataPaths,
+            Map<Path, String> before) throws Exception {
+        var manifest = layout.manifest();
+        long totalBytes = manifest.arenas().stream().mapToLong(arena -> arena.dataFiles() * arena.bytesPerFile()).sum();
+        try (var owner = layout.owner(budget)) {
+            var observed = owner.observeClosedData(rows, totalBytes, 2, timeout, metadata, fixture.reservations);
+            assertManifestNativeClosedCohort(fixture, layout, metadata, contexts, observed.closed());
+            assertEquals(3, observed.arenas().size());
+            for (int i = 0; i < observed.arenas().size(); i++) {
+                var arena = observed.arenas().get(i);
+                var original = manifest.arenas().get(i);
+                assertEquals(SegmentFileHeader.forArena(manifest, i), arena.identity());
+                assertEquals(original.dataFiles(), arena.files().size());
+                for (int file = 0; file < original.dataFiles(); file++) {
+                    var image = arena.files().get(file);
+                    assertEquals(file, image.index());
+                    assertEquals(original.bytesPerFile(), image.image().length());
+                    assertEquals(before.get(original.directory().resolve("data-" + file)), image.image().sha256());
+                }
+            }
+            var first = observed.arenas().get(0).entries();
+            var second = observed.arenas().get(1).entries();
+            assertEquals(Set.of(contexts.get(1)), first.keySet());
+            assertEquals(Set.of(contexts.get(0), contexts.get(2)), second.keySet());
+            assertManifestClosedEntry(first.get(contexts.get(1)), bytes(23, 10));
+            assertManifestClosedEntry(second.get(contexts.get(0)), bytes(17, 9));
+            assertTrue(second.get(contexts.get(2)).isEmpty());
+            assertTrue(observed.arenas().get(2).entries().isEmpty());
+            assertManifestObservationReleased(budget);
+        }
+        assertEquals(before, manifestTreeDigests(layout));
+        try (var owner = layout.owner(budget)) {
+            var byteLimit = assertThrows(IOException.class, () -> owner.observeClosedData(rows, totalBytes - 1, 2,
+                    timeout, metadata, fixture.reservations));
+            assertTrue(byteLimit.getMessage().contains("total DATA byte limit"));
+            assertManifestObservationReleased(budget);
+        }
+        try (var owner = layout.owner(budget)) {
+            var entryLimit = assertThrows(IOException.class, () -> owner.observeClosedData(rows, totalBytes, 1,
+                    timeout, metadata, fixture.reservations));
+            assertTrue(entryLimit.getMessage().contains("total entry limit"));
+            assertManifestObservationReleased(budget);
+        }
+
+        Path late = manifest.arenas().get(2).directory().resolve("data-0");
+        try (var file = java.nio.channels.FileChannel.open(late, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            long offset = file.size() - 4096;
+            var original = java.nio.ByteBuffer.allocate(4096);
+            SegmentFileIo.readFully(file, original, offset);
+            var badPage = java.nio.ByteBuffer.allocate(4096).put(0, (byte) 90);
+            var io = new SegmentFileIo();
+            try {
+                io.writeFully(file, badPage, offset);
+                var corrupted = manifestTreeDigests(layout);
+                assertNotEquals(before.get(late), corrupted.get(late));
+                try (var owner = layout.owner(budget)) {
+                    assertEquals(3, SegmentClosedReconstruction.observeManifestClosedCohort(owner, rows,
+                            timeout, metadata, fixture.reservations).members().size());
+                }
+                try (var owner = layout.owner(budget)) {
+                    var malformed = assertThrows(IOException.class, () -> owner.observeClosedData(rows, totalBytes, 2,
+                            timeout, metadata, fixture.reservations));
+                    assertEquals("Invalid DATA batch address", malformed.getMessage());
+                    assertManifestObservationReleased(budget);
+                }
+                assertEquals(corrupted, manifestTreeDigests(layout));
+            } finally {
+                io.writeFully(file, original, offset);
+            }
+        }
+        assertEquals(before, manifestTreeDigests(layout));
+        assertManifestClosedAuditRejectsReplacedFile(fixture, layout, manager, budget, rows, timeout, metadataPaths,
+                totalBytes, late);
+        assertEquals(before, manifestTreeDigests(layout));
+    }
+
+    private static void assertManifestClosedEntry(List<SegmentDataRecovery.ClosedImageEntry> entries, byte[] payload)
+            throws Exception {
+        assertEquals(1, entries.size());
+        var entry = entries.get(0);
+        assertEquals(payload.length, entry.cumulativeLength());
+        assertEquals(payload.length, entry.payloadLength());
+        assertEquals(java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(payload)),
+                entry.payloadSha256());
+    }
+
+    private static void assertManifestClosedAuditRejectsReplacedFile(Fixture fixture, ManifestWireLayout layout,
+            AbstractZkLedgerManager manager, ProfileReceiveBudget budget, int rows, Duration timeout,
+            List<String> metadataPaths, long totalBytes, Path late) throws Exception {
+        try (var zk = new RestoreAdmissionZk(fixture.cluster.getZooKeeperConnectString(),
+                new ZooKeeperWatcherBase(10000, false)); var owner = layout.owner(budget)) {
+            var metadata = new ProfileLedgerMetadataStore(zk, manager, ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+            var reservations = new ZKProfileReservationStore(zk, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    timeout);
+            var held = new CompletableFuture<Runnable>();
+            zk.holdRead.set(Map.entry(metadataPaths.get(2), held));
+            var result = fixture.cold.submit(() -> owner.observeClosedData(rows, totalBytes, 2, timeout, metadata,
+                    reservations));
+            var releaseLast = held.get(5, TimeUnit.SECONDS);
+            var firstRecheck = new CompletableFuture<Runnable>();
+            zk.holdRead.set(Map.entry(metadataPaths.get(0), firstRecheck));
+            releaseLast.run();
+            var releaseRecheck = firstRecheck.get(5, TimeUnit.SECONDS);
+            Path saved = late.resolveSibling("saved-test-data");
+            try {
+                try {
+                    Files.move(late, saved);
+                    Files.copy(saved, late);
+                    assertFalse(Files.isSameFile(saved, late));
+                } finally {
+                    releaseRecheck.run();
+                }
+                var failure = assertThrows(ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+                assertTrue(failure.getCause().toString(), failure.getCause() instanceof IOException);
+                assertTrue(failure.getCause().toString(),
+                        failure.getCause().getMessage().contains("path object changed"));
+                assertManifestObservationReleased(budget);
+            } finally {
+                if (Files.exists(saved)) {
+                    Files.deleteIfExists(late);
+                    Files.move(saved, late);
+                }
+            }
+        }
     }
 
     private static void assertManifestNativeClosedReadFailures(Fixture fixture, ManifestWireLayout layout,

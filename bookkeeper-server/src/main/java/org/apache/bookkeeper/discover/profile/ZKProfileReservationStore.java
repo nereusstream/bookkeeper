@@ -17,6 +17,7 @@
 package org.apache.bookkeeper.discover.profile;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -1128,9 +1129,7 @@ public final class ZKProfileReservationStore {
 
         public ClosedReconstructionObservation read(ProfileLedgerContext context) throws IOException,
                 InterruptedException {
-            if (deadline - System.nanoTime() <= 0) {
-                throw new IOException("CLOSED reconstruction cohort read deadline elapsed");
-            }
+            requireTime();
             var read = readClosedForOpen(metadata, context.ledgerId(), deadline);
             if (read.snapshot() == null || !context.equals(read.snapshot().context().ledger())) {
                 throw new IOException("CLOSED reconstruction member " + context.ledgerId()
@@ -1139,10 +1138,17 @@ public final class ZKProfileReservationStore {
             var snapshot = read.snapshot();
             var proof = checkedClosedReconstructionProof(metadata, snapshot, targetBookie, targetIncarnation,
                     deadline);
-            if (deadline - System.nanoTime() <= 0) {
-                throw new IOException("CLOSED reconstruction cohort read deadline elapsed");
-            }
+            requireTime();
             return new ClosedReconstructionObservation(snapshot, proof);
+        }
+
+        public void requireTime() throws IOException {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedIOException("CLOSED reconstruction observation interrupted");
+            }
+            if (deadline - System.nanoTime() <= 0) {
+                throw new IOException("CLOSED reconstruction cohort deadline elapsed");
+            }
         }
     }
 

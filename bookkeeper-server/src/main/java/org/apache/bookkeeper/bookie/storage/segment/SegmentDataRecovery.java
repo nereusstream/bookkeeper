@@ -661,6 +661,11 @@ final class SegmentDataRecovery {
 
     record ClosedImage(long bytes, String sha256, Map<ProfileLedgerContext, List<ClosedImageEntry>> entries) { }
 
+    @FunctionalInterface
+    interface AuditCheckpoint {
+        void check() throws IOException;
+    }
+
     static ClosedImage auditClosedImage(FileChannel data, IsolatedSegmentConfig config, SegmentFileHeader identity,
             SegmentArenaControlLog.RecoveryDependencies arena, List<ClosedImageMember> members,
             long maximumDataBytes, int maximumEntries) throws IOException {
@@ -694,7 +699,8 @@ final class SegmentDataRecovery {
             this.arena = arena;
             this.members = List.copyOf(members);
             if (Math.multiplyExact(config.bytesPerFile(), config.dataFiles()) > maximumDataBytes
-                    || members.isEmpty() || maximumEntries < 1 || maximumEntries > 65536) {
+                    || members.isEmpty() && identity.manifest() == null
+                    || maximumEntries < 1 || maximumEntries > 65536) {
                 throw new IOException("CLOSED reconstruction image exceeds its scope or bounds");
             }
             long total = 0;
@@ -774,6 +780,11 @@ final class SegmentDataRecovery {
         }
 
         String scan(FileChannel data, int fileIndex) throws IOException {
+            return scan(data, fileIndex, () -> { });
+        }
+
+        String scan(FileChannel data, int fileIndex, AuditCheckpoint checkpoint) throws IOException {
+            checkpoint.check();
             long bytes = config.bytesPerFile();
             if (fileIndex != nextFile || fileIndex >= config.dataFiles() || data.size() != bytes) {
                 throw new IOException("CLOSED reconstruction requires every original DATA file in order");
@@ -786,10 +797,12 @@ final class SegmentDataRecovery {
             var reusedFile = reusedExtents.get(fileIndex);
             boolean moved = arena.history().committedMoves();
             for (long offset = config.alignment(); offset < bytes;) {
+                checkpoint.check();
                 Long retiredEnd = retired == null ? null : retired.get(offset);
                 if (retiredEnd != null) {
                     // Preserve all bytes even where the original FREE ended record authority.
                     do {
+                        checkpoint.check();
                         SegmentFileIo.readFully(data, page.clear(), offset);
                         imageDigest.update(page);
                         offset += config.alignment();
@@ -869,6 +882,7 @@ final class SegmentDataRecovery {
                 }
                 offset += batchLength;
             }
+            checkpoint.check();
             if (data.size() != bytes) {
                 throw new IOException("CLOSED reconstruction DATA no longer matches the complete file length");
             }

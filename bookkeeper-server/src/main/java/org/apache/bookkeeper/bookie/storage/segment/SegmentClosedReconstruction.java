@@ -73,6 +73,18 @@ public final class SegmentClosedReconstruction {
     record ManifestClosedObservation(ManifestSegmentStorage.RecoveryDependencies dependencies,
             List<ManifestClosedMember> members) { }
 
+    record ManifestClosedCohort(ZKProfileReservationStore.ClosedReconstructionReader reader,
+            List<ManifestClosedMember> members) {
+        void revalidate(ManifestSegmentStorage.RecoveryDependencies graph) throws IOException, InterruptedException {
+            var ledgers = graph.bookie().ledgers();
+            for (int i = 0; i < ledgers.size(); i++) {
+                if (!members.get(i).equals(readManifestClosedMember(graph, reader, ledgers.get(i)))) {
+                    throw new IOException("Native CLOSED evidence changed during manifest cohort observation");
+                }
+            }
+        }
+    }
+
     static long manifestClosedControlBytes() throws IOException {
         var layout = SegmentControlCapacity.Layout.hotSpot();
         long member = SegmentControlCapacity.sum(layout.object(ManifestClosedMember.class), layout.string(64));
@@ -86,35 +98,42 @@ public final class SegmentClosedReconstruction {
     static ManifestClosedObservation observeManifestClosedCohort(ManifestSegmentStorage owner, int controlRows,
             Duration timeout, ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations)
             throws Exception {
+        long deadline = manifestClosedDeadline(timeout);
+        return owner.withRecoveryDependenciesUntil(controlRows, deadline, manifestClosedControlBytes(), graph -> {
+            var cohort = readManifestClosedCohort(graph, metadata, reservations, deadline);
+            cohort.revalidate(graph);
+            return new ManifestClosedObservation(graph, cohort.members());
+        });
+    }
+
+    static long manifestClosedDeadline(Duration timeout) {
         long nanos = timeout.toNanos();
         if (nanos <= 0 || nanos > TimeUnit.MINUTES.toNanos(1)) {
             throw new IllegalArgumentException("Manifest CLOSED observation requires a bounded deadline");
         }
-        long deadline = System.nanoTime() + nanos;
-        return owner.withRecoveryDependenciesUntil(controlRows, deadline, manifestClosedControlBytes(), graph -> {
-            var bookie = graph.bookie();
-            SegmentStorageInspector.requireClosedBookieHistory(bookie);
-            var ledgers = bookie.ledgers();
-            if (ledgers.isEmpty() || ledgers.size() > ProfileClosedReconstruction.MAX_MEMBERS) {
-                throw new IOException("Manifest CLOSED observation requires a complete bounded Bookie cohort");
-            }
-            var target = graph.bookieIdentity();
-            var reader = reservations.closedReconstructionReader(metadata, target.bookieId(),
-                    target.incarnation(), deadline);
-            var members = new ArrayList<ManifestClosedMember>(ledgers.size());
-            for (var ledger : ledgers) {
-                members.add(readManifestClosedMember(graph, reader, ledger));
-            }
-            long nonempty = members.stream()
-                    .filter(member -> member.kind() == ProfileClosedReconstruction.Kind.NONEMPTY_SELF).count();
-            SegmentStorageInspector.requireClosedBookieCohort(bookie, members.size(), nonempty);
-            for (int i = 0; i < ledgers.size(); i++) {
-                if (!members.get(i).equals(readManifestClosedMember(graph, reader, ledgers.get(i)))) {
-                    throw new IOException("Native CLOSED evidence changed during manifest cohort observation");
-                }
-            }
-            return new ManifestClosedObservation(graph, List.copyOf(members));
-        });
+        return System.nanoTime() + nanos;
+    }
+
+    static ManifestClosedCohort readManifestClosedCohort(ManifestSegmentStorage.RecoveryDependencies graph,
+            ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations, long deadline)
+            throws IOException, InterruptedException {
+        var bookie = graph.bookie();
+        SegmentStorageInspector.requireClosedBookieHistory(bookie);
+        var ledgers = bookie.ledgers();
+        if (ledgers.isEmpty() || ledgers.size() > ProfileClosedReconstruction.MAX_MEMBERS) {
+            throw new IOException("Manifest CLOSED observation requires a complete bounded Bookie cohort");
+        }
+        var target = graph.bookieIdentity();
+        var reader = reservations.closedReconstructionReader(metadata, target.bookieId(),
+                target.incarnation(), deadline);
+        var members = new ArrayList<ManifestClosedMember>(ledgers.size());
+        for (var ledger : ledgers) {
+            members.add(readManifestClosedMember(graph, reader, ledger));
+        }
+        long nonempty = members.stream()
+                .filter(member -> member.kind() == ProfileClosedReconstruction.Kind.NONEMPTY_SELF).count();
+        SegmentStorageInspector.requireClosedBookieCohort(bookie, members.size(), nonempty);
+        return new ManifestClosedCohort(reader, List.copyOf(members));
     }
 
     private static ManifestClosedMember readManifestClosedMember(ManifestSegmentStorage.RecoveryDependencies graph,
@@ -441,31 +460,46 @@ public final class SegmentClosedReconstruction {
     private static List<ProfileClosedReconstruction.FileImage> auditOriginals(IsolatedSegmentConfig config,
             Path root, NativeIO.FileIdentity rootObject, SegmentOwnedFiles files, NativeIO nativeIo,
             SegmentDataRecovery.ClosedImageAudit audit) throws Exception {
-        var objects = new HashSet<NativeIO.FileIdentity>();
-        objects.add(rootObject);
+        return auditOriginals(config, root, rootObject, files, nativeIo, audit, new HashSet<>(), () -> { });
+    }
+
+    static List<ProfileClosedReconstruction.FileImage> auditOriginals(IsolatedSegmentConfig config,
+            Path root, NativeIO.FileIdentity rootObject, SegmentOwnedFiles files, NativeIO nativeIo,
+            SegmentDataRecovery.ClosedImageAudit audit, Set<NativeIO.FileIdentity> dataObjects,
+            SegmentDataRecovery.AuditCheckpoint checkpoint) throws IOException {
+        var objects = new ArrayList<NativeIO.FileIdentity>(config.dataFiles());
+        for (int index = 0; index < config.dataFiles(); index++) {
+            checkpoint.check();
+            var object = requireOriginalFile(root.resolve("data-" + index), config.bytesPerFile());
+            if (object.device() != rootObject.device() || object.equals(rootObject) || !dataObjects.add(object)) {
+                throw new IOException("Original DATA aliases a required object or crosses the original filesystem");
+            }
+            objects.add(object);
+        }
         try (var names = files.openDirectory(root)) {
             for (Path path : names) {
+                checkpoint.check();
                 String name = path.getFileName().toString();
                 if (name.equals("isolated.lock") || name.startsWith("arena-control")
                         || name.startsWith("bookie-control") || name.startsWith("superblock-")) {
                     var identity = SegmentClassicHandoffPaths.loadingIdentity(path);
-                    objects.add(new NativeIO.FileIdentity(identity.device(), identity.inode()));
+                    if (objects.contains(new NativeIO.FileIdentity(identity.device(), identity.inode()))) {
+                        throw new IOException("Original DATA aliases a required control object");
+                    }
                 }
             }
         }
         var originals = new ArrayList<ProfileClosedReconstruction.FileImage>(config.dataFiles());
         for (int index = 0; index < config.dataFiles(); index++) {
+            checkpoint.check();
             Path path = root.resolve("data-" + index);
-            var object = requireOriginalFile(path, config.bytesPerFile());
-            if (object.device() != rootObject.device() || !objects.add(object)) {
-                throw new IOException("Original DATA aliases a required object or crosses the original filesystem");
-            }
+            var object = objects.get(index);
             String digest;
             try (var file = SegmentOwnedFiles.openRegularReadOnly(files, path)) {
                 if (!files.fileIdentity(file, nativeIo).equals(object)) {
                     throw new IOException("Opened original DATA differs from its path object");
                 }
-                digest = audit.scan(file, index);
+                digest = audit.scan(file, index, checkpoint);
                 if (!files.fileIdentity(file, nativeIo).equals(object)) {
                     throw new IOException("Original DATA descriptor changed during its complete audit");
                 }
@@ -477,7 +511,7 @@ public final class SegmentClosedReconstruction {
         return List.copyOf(originals);
     }
 
-    private static void verifyOriginalPaths(Path root, List<ProfileClosedReconstruction.FileImage> originals)
+    static void verifyOriginalPaths(Path root, List<ProfileClosedReconstruction.FileImage> originals)
             throws IOException {
         for (var file : originals) {
             var image = file.image();
@@ -899,7 +933,7 @@ public final class SegmentClosedReconstruction {
         }
     }
 
-    private static NativeIO.FileIdentity observeDirectory(SegmentOwnedFiles files, NativeIO nativeIo, Path path)
+    static NativeIO.FileIdentity observeDirectory(SegmentOwnedFiles files, NativeIO nativeIo, Path path)
             throws IOException {
         if (!Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) || !path.toRealPath().equals(path)) {
             throw new IOException("Reconstruction requires an original directory without aliases");

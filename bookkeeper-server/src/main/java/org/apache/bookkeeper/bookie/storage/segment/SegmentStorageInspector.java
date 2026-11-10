@@ -133,8 +133,12 @@ public final class SegmentStorageInspector {
     static void requireReconstructionMode(RecoveryDependencies dependencies,
             ProfileClosedReconstruction.HistoryMode mode)
             throws IOException {
-        var arena = dependencies.arena();
-        arena.history().requireMode(mode, dependencies.bookie().observedSequence(),
+        requireReconstructionMode(dependencies.arena(), dependencies.bookie().observedSequence(), mode);
+    }
+
+    static void requireReconstructionMode(SegmentArenaControlLog.RecoveryDependencies arena, long bookieCut,
+            ProfileClosedReconstruction.HistoryMode mode) throws IOException {
+        arena.history().requireMode(mode, bookieCut,
                 !arena.selections().isEmpty(), arena.retiredSlots().size(), arena.currentReused(), arena.tails());
     }
 

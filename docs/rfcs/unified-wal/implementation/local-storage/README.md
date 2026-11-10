@@ -952,6 +952,16 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 真实双 Arena 注册子 JVM 退出后，原全图能绑定分布在两个 Arena 的 SELF 账本及一个 EMPTY 账本。末成员仍 OPEN、原 incarnation 错误或共享截止时间耗尽均拒绝。扣住第二轮首次读响应后，以相同字节重建末成员 metadata 节点，产生不同出生。省略末成员第二轮复验时，真实调用错误交付整组结果。完整复验会拒绝。六项相关回归和样式检查通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-native-closed-parent-715af26b`。
 
+### 固定 manifest 的全图 DATA 审计
+
+一次原 owner 持锁完成 native CLOSED 初读、全图 DATA 扫描、同一 reader 的完整复验和原控制及路径后验。按原 shard 映射为每个 Arena 传入实际 CLOSED 成员。无账本的 Arena 和没有记录的 DATA 文件同样纳入审计。分配扫描结构前核对全图声明字节和累计 entry 上限，新增扫描结构及保留摘要使用原 DATA 预算。
+
+各 Arena 使用原控制历史规则、grant、stream、MOVE、FREE 和复用证据。逐文件核对原 header、原设备和 inode、单链接、长度与完整字节 SHA，退休区也纳入摘要。普通扫描和退休区扫描均检查 native reader 的有效截止时间、中断和退休。末轮 native 复验后重新核对各 Arena 根及 DATA 路径对象，实际排空后才交付文件和 entry 观察。
+
+该观察记录本地 DATA 与当前原生 CLOSED 的对应关系。旧 publisher 持续隔离、两个当前独立来源的字节核对、全图准入及持久发布各需独立验证。
+
+真实注册子 JVM 退出后，三 Arena 的四个异构 DATA 文件逐一比对独立 SHA。夹具覆盖两个非空 SELF、一个 EMPTY、一个无账本 Arena 和空白后部文件。全图超字节或 entry 限额拒绝。末 Arena 的坏页可通过原控制和 native CLOSED 检查，完整 DATA 扫描仍拒绝。末轮 native 读挂起期间将最后一个文件换成同字节的新 inode，完整路径复验拒绝。省略末 Arena 路径复验的反证实际交付了错误结果。原文件恢复后，正常 startup 仍拒绝 granted OPEN。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-physical-audit-parent-98b73707`。
+
 ### 单 DATA 文件的 CLOSED 重建准入
 
 基线 `e96bd97d6d`。原受控 publisher 的 PID、进程出生与注册 session 在其运行期间取得，等待进程实际退出。原三把锁下完整重放控制历史。仅支持一个已安装、fenced 且 normal-inactive 的 ledger，一个 DATA 文件和当前单 fragment `3/3/3` CLOSED。旧 target 仍是原成员，保留在原删除目标历史。原 Bookie 的唯一已应用 recovery grant 须与当前 native SELF intent、commit birth、完整 close scope 和本地 terminal 应用精确对应。旧准入要求 grant 列表为空的断言在真实非空 close 上失败，重放实际返回一条已关闭的 `[0,1]` SELF grant。其他已应用 grant、额外本地 context、MOVE、FREE、复用和删除状态拒绝。

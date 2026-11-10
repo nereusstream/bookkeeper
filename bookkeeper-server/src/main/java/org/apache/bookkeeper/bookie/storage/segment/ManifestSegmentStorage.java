@@ -61,6 +61,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.common.util.nativeio.NativeIO.FileIdentity;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
+import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
@@ -78,6 +79,10 @@ import org.apache.bookkeeper.util.DiskChecker;
 /** Local Profile-only graph. The manifest fixes routing independently of execution placement. */
 final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHandler.DataOperations {
     record Capacity(long dataBytes, long controlBytes) {
+        Capacity withAdditionalData(long bytes) {
+            return new Capacity(SegmentControlCapacity.sum(dataBytes, bytes), controlBytes);
+        }
+
         Capacity withAdditionalControl(long bytes) {
             return new Capacity(dataBytes, SegmentControlCapacity.sum(controlBytes, bytes));
         }
@@ -109,6 +114,37 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     record RecoveryDependencies(ManifestIdentity manifest, SegmentFileHeader bookieIdentity,
             SegmentBookieControlLog.RecoveryDependencies bookie, List<ArenaRecoveryDependencies> arenas,
             Map<ProfileLedgerContext, LedgerRoute> ledgerRoutes) { }
+
+    record ClosedArenaData(SegmentFileHeader identity, FileIdentity rootObject,
+            List<ProfileClosedReconstruction.FileImage> files,
+            Map<ProfileLedgerContext, List<SegmentDataRecovery.ClosedImageEntry>> entries) { }
+
+    record ClosedDataObservation(SegmentClosedReconstruction.ManifestClosedObservation closed,
+            List<ClosedArenaData> arenas) { }
+
+    static long closedDataCapacity(SegmentArenaManifest manifest, int maximumRows, int maximumEntries)
+            throws IOException {
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        long files = manifest.arenas().stream().mapToLong(SegmentArenaManifest.Arena::dataFiles).sum();
+        long entry = SegmentControlCapacity.sum(layout.object(SegmentDataRecovery.ClosedImageEntry.class),
+                SegmentControlCapacity.times(2, layout.string(64)), 4 * 8);
+        long file = SegmentControlCapacity.sum(layout.object(ProfileClosedReconstruction.FileImage.class),
+                layout.object(ProfileClosedReconstruction.Image.class), layout.object(FileIdentity.class),
+                layout.string(64), layout.hashEntry(), 8 * 8);
+        // The base manifest reservation includes page and batch parser workspaces. One CLOSED scan at a time
+        // adds grant/selector maps, boxed positions, stream state and retired/reused extent trees.
+        long scanRow = SegmentControlCapacity.sum(6 * layout.hashEntry(), 4 * layout.treeEntry(),
+                8 * layout.captured(16));
+        long arena = SegmentControlCapacity.sum(layout.object(ClosedArenaData.class), layout.object(FileIdentity.class),
+                8 * layout.hashMap(), 4 * layout.list());
+        return SegmentControlCapacity.sum(layout.object(ClosedDataObservation.class),
+                layout.object(SegmentClosedReconstruction.ManifestClosedObservation.class),
+                layout.object(SegmentDataRecovery.ClosedImageAudit.class),
+                SegmentControlCapacity.times(manifest.arenas().size(), arena),
+                SegmentControlCapacity.times(ProfileClosedReconstruction.MAX_MEMBERS, 12 * layout.captured(16)),
+                SegmentControlCapacity.times(files, file), SegmentControlCapacity.times(maximumRows, scanRow),
+                SegmentControlCapacity.times((long) maximumEntries + SegmentBatchFormat.MAX_RECORDS, entry));
+    }
 
     @FunctionalInterface
     interface RecoveryDependencyObserver<T> {
@@ -408,8 +444,14 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     <T> T withRecoveryDependenciesUntil(int maximumRows, long deadline, long additionalControlBytes,
             RecoveryDependencyObserver<T> observer) throws Exception {
+        return withRecoveryDependenciesUntil(maximumRows, deadline, 0, additionalControlBytes, observer);
+    }
+
+    private <T> T withRecoveryDependenciesUntil(int maximumRows, long deadline, long additionalDataBytes,
+            long additionalControlBytes, RecoveryDependencyObserver<T> observer) throws Exception {
         Objects.requireNonNull(observer, "observer");
-        if (deadline - System.nanoTime() > TimeUnit.MINUTES.toNanos(1) || additionalControlBytes < 0) {
+        if (deadline - System.nanoTime() > TimeUnit.MINUTES.toNanos(1)
+                || additionalDataBytes < 0 || additionalControlBytes < 0) {
             throw new IllegalArgumentException("Manifest recovery observation requires bounded time and capacity");
         }
         var rows = new SegmentStorageInspector.RecoveryRows(maximumRows);
@@ -423,6 +465,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             requireRecoveryObservationLive(deadline);
             reserveCapacity(capacity(manifest, control, settings, limits)
                     .withRecoveryDependencies(members.size(), maximumRows)
+                    .withAdditionalData(additionalDataBytes)
                     .withAdditionalControl(additionalControlBytes));
             requireRoots(true);
             acquireGuards(true);
@@ -444,6 +487,105 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         }
         requireRecoveryObservationTime(deadline);
         return result;
+    }
+
+    /** Local full-byte evidence bound to the current native CLOSED cohort under the original guards. */
+    ClosedDataObservation observeClosedData(int maximumRows, long maximumDataBytes, int maximumEntries,
+            Duration timeout, ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations)
+            throws Exception {
+        long deadline = SegmentClosedReconstruction.manifestClosedDeadline(timeout);
+        if (maximumDataBytes < 1 || maximumEntries < 1 || maximumEntries > 65536) {
+            throw new IllegalArgumentException("Manifest CLOSED audit requires bounded DATA geometry");
+        }
+        long totalBytes = 0;
+        for (Member member : members) {
+            totalBytes = Math.addExact(totalBytes, dataBytes(member.config));
+        }
+        if (totalBytes > maximumDataBytes) {
+            throw new IOException("Manifest CLOSED audit exceeds its total DATA byte limit");
+        }
+        return withRecoveryDependenciesUntil(maximumRows, deadline,
+                closedDataCapacity(manifest, maximumRows, maximumEntries),
+                SegmentClosedReconstruction.manifestClosedControlBytes(), graph -> {
+                    var cohort = SegmentClosedReconstruction.readManifestClosedCohort(graph, metadata,
+                            reservations, deadline);
+                    var nativeIo = new NativeIOImpl();
+                    var images = auditClosedData(graph, cohort, maximumEntries, nativeIo);
+                    cohort.revalidate(graph);
+                    for (int i = 0; i < images.size(); i++) {
+                        requireClosedAuditLive(cohort);
+                        var member = members.get(i);
+                        var image = images.get(i);
+                        Path root = member.config.directory();
+                        if (!image.rootObject().equals(SegmentClosedReconstruction.observeDirectory(
+                                member.owned, nativeIo, root))) {
+                            throw new IOException("Original Arena root changed during the manifest CLOSED audit");
+                        }
+                        SegmentClosedReconstruction.verifyOriginalPaths(root, image.files());
+                    }
+                    requireClosedAuditLive(cohort);
+                    return new ClosedDataObservation(new SegmentClosedReconstruction.ManifestClosedObservation(
+                            graph, cohort.members()), images);
+                });
+    }
+
+    private List<ClosedArenaData> auditClosedData(RecoveryDependencies graph,
+            SegmentClosedReconstruction.ManifestClosedCohort cohort, int maximumEntries, NativeIOImpl nativeIo)
+            throws IOException {
+        var ledgers = new ArrayList<List<SegmentDataRecovery.ClosedImageMember>>(members.size());
+        for (int i = 0; i < members.size(); i++) {
+            ledgers.add(new ArrayList<>());
+        }
+        long totalEntries = 0;
+        int[] entryCounts = new int[members.size()];
+        for (var ledger : cohort.members()) {
+            if (ledger.lastEntry() < -1 || ledger.lastEntry() >= maximumEntries) {
+                throw new IOException("Manifest CLOSED audit exceeds its total entry limit");
+            }
+            int count = Math.toIntExact(ledger.lastEntry() + 1);
+            totalEntries = Math.addExact(totalEntries, count);
+            if (totalEntries > maximumEntries) {
+                throw new IOException("Manifest CLOSED audit exceeds its total entry limit");
+            }
+            int arena = ledger.route().arena();
+            entryCounts[arena] += count;
+            ledgers.get(arena).add(new SegmentDataRecovery.ClosedImageMember(ledger.ledger(),
+                    ledger.lastEntry(), ledger.length()));
+        }
+
+        SegmentDataRecovery.AuditCheckpoint checkpoint = () -> requireClosedAuditLive(cohort);
+        var objects = new HashSet<FileIdentity>();
+        var images = new ArrayList<ClosedArenaData>(members.size());
+        for (int i = 0; i < members.size(); i++) {
+            checkpoint.check();
+            var member = members.get(i);
+            var arena = graph.arenas().get(i).control();
+            if (!arena.cut().recordedQuarantineFiles().isEmpty()) {
+                throw new IOException("Manifest CLOSED audit encountered a quarantined Arena");
+            }
+            SegmentStorageInspector.requireReconstructionMode(arena, graph.bookie().observedSequence(), arena.mode());
+            Path root = member.config.directory();
+            var rootObject = SegmentClosedReconstruction.observeDirectory(member.owned, nativeIo, root);
+            var audit = new SegmentDataRecovery.ClosedImageAudit(member.config, member.identity, arena, ledgers.get(i),
+                    dataBytes(member.config), Math.max(1, entryCounts[i]));
+            var files = SegmentClosedReconstruction.auditOriginals(member.config, root, rootObject, member.owned,
+                    nativeIo, audit, objects, checkpoint);
+            images.add(new ClosedArenaData(member.identity, rootObject, files, audit.finish()));
+        }
+        return List.copyOf(images);
+    }
+
+    private static long dataBytes(IsolatedSegmentConfig config) {
+        return Math.multiplyExact(config.bytesPerFile(), config.dataFiles());
+    }
+
+    private void requireClosedAuditLive(SegmentClosedReconstruction.ManifestClosedCohort cohort) throws IOException {
+        cohort.reader().requireTime();
+        synchronized (gate) {
+            if (stopping) {
+                throw new IOException("Manifest CLOSED audit retired");
+            }
+        }
     }
 
     private RecoveryDependencies readRecoveryDependencies(SegmentStorageInspector.RecoveryRows rows, long deadline)
