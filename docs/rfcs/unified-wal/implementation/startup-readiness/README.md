@@ -401,6 +401,18 @@ operation 确认旧 worker 实际返回同 nonce 的结果，并清理原身份�
 
 2026-11-09，基线 `40f21ad61caa60aab80349dccc3e8d78d9c3b94a`。两条真实 3/3/3 ledger 分别写入两个 Arena，经过 UWNS2 观测、实际排空及健康冷重开后均可读回。完整事实包含两项真实成员 cut。两条删除事件覆盖 LIMIT 后原前缀、实际 force 超时与 completion 副本取消、排空后游标 2 和精确重读无重复 force。真实 ZooKeeper 在另一实际 force 中以相同字节和 UUID 重建 requirements，原本地删除照常完成，旧出生观察无法生成完整事实。只跳过第二个 Arena 索引校验的变体在同一真实图上错误返回 COMPLETE。最终定向 50 项全部通过，零失败、错误或跳过。父 codec 对同一个有效的一成员 schema 2 向量拒绝，原 schema 1 的 226-byte 固定向量保持。Spotless 和 Checkstyle 通过，根 RAT 的 431 个路径与父报告一致。证据在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-recovered-facts-evidence-40f21ad6`。本轮未执行 Linux D2、掉电和生产资格验证。
 
+## 固定多根 policy 与启动兼容性预检
+
+`SegmentManifestStartupPolicy` 是外部声明。它绑定 UWSQ schema 2 的原生 SourceIdentity、新 Bookie/incarnation 和完整 manifest、CONTROL 及每个 Arena UUID 的 ARENA/INDEX、旧 Bookie 与四个根、旧 Unix account/UID、新 UID 和旧服务 disposition。旧 Classic UUID 只标识外部实验 episode。预检拒绝重复身份、相同凭据、重叠或不完整的根，以及 WRITABLE/UNKNOWN 声明。UWNS2 与原请求的旧 scope、完整新根向量和实际 UID 逐项匹配。旧 episode UUID 只在本次内存请求绑定，UWNS2 报文仍为 ACCESS_SNAPSHOT_ONLY，旧服务 disposition 仍为 NOT_VERIFIED。正向实验的 DRAINED 来自原 Classic episode 的实际有序关闭、进程退出和注册消失。
+
+固定 manifest 启动能力为 reader 2 / writer 2。schema 2 需要 FORMAT_READY、SEGMENT_WAL_ENGINE、wire 1.0、hash suite 1、完整原设备向量、G1 及初始 manifest/local generation 1。全局和各设备 feature 向量均为 `[1, 2]`，其中 1 是原基线，2 是固定完整拓扑。身份页原生 bitmask 3 与 feature ID 分属两种编码。每个设备声明 READY、arena format 2、control format 1、checkpoint format 2 和初始逻辑 superblock generation 1。checkpoint format 对应读 1/2、写 2 的合同，未投影本次选择的 image。旧单 Arena 启动能力仍为 1/1。此前 schema 2 局部恢复观察继续记录原声明值，符合启动预检需要新 commissioning 的完整兼容声明。
+
+pre-open 先核对兼容性和声明，重开前核对 UWNS2 原请求、原生 requirements birth 及 G1，继续用同一个 retained G1 reader 和外层 deadline 恢复与复验。只有当前冷重开图的 `RecoveryFactsAttempt.COMPLETE` 可生成内部 checked facts。原 owner 短 gate 复核唯一 Bookie cut、各 Arena cut、原锁与健康状态；关闭、借出 listener 或改用另一 owner 后，历史 checked facts 不能代表该图当前状态。拒绝仍保留已合法应用的删除及实际完成句柄。此入口只产出 policy 一致性、兼容性和本地事实。部署级独立 issuer、信任根和持续隔离仍待验证。
+
+后继 owned 接线顺序为全图 replay 并取得 facts，绑定 pending admission，绑定 listener 并取得实际地址，在同 session 重验原 source、G1 cut 和外部 policy 并纳入原 writable multi，读回本 session 注册后首次开放请求。借出 listener 后禁止重新取冷事实。显式 borrowed listener 保持原行为。未来 G1-only follower 一旦实际观察到 G2、原 stream 或 birth 换代，即使没有新事件，也须退休 admission 并走原 session-owned demote/drain。共用 Harness phases、schema 2 publisher 和 owned service 接线仍 OPEN。
+
+2026-11-10，父版本 `deb99c52b8`。在 macOS 的 owner-enabled APFS 上，原 Classic JVM 经 SDK 写读并实际排空，两条 3/3/3 ledger 在两个 Arena 中持久化后经原 UWNS2 与兼容 schema 2 冷重开，checked facts 绑定原图，两条 ledger 经 mTLS 读回。拒绝覆盖缺根、错 index UUID、旧 episode/UID、不可接受的 disposition、不兼容的版本、feature 与设备格式，以及同字节 requirements 重建和 closed/异 owner。只移除 reader 上限的变体在 reader 99 断言上得到预期失败。最终 28 项定向测试全过，零失败、错误或跳过，Spotless 与 Checkstyle 通过。证据在 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-owned-startup-evidence-deb99c52`。Linux D2、真实掉电及生产资格仍待验收。
+
 2026-10-12 [显式Profile listener与actual network drain](../profile-wire/README.md#显式-profile-listener-与实际网络-credit-排空)已复用original graph/pipeline并管理native parent/child、worker handoff与receive ledger终态；cold/frame/backing保留至实际归还，caller future不能伪造drain，borrowed graph/cold/loops由caller续接。actual mTLS/held cold/bind failure/queued accepted socket验证完成，46项Java/13配置模型得到预期结果、style通过，RAT443历史问题无新增。它是full startup owner的必要接线，尚未把required/physical proof、端口和registration组成default服务入口，生产Gate继续OPEN。
 
 ## 显式 Profile 服务启动与 owner 排空

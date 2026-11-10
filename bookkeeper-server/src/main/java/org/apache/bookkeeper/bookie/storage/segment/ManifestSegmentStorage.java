@@ -49,6 +49,7 @@ import org.apache.bookkeeper.common.profile.startup.BookieCompatibilityFact;
 import org.apache.bookkeeper.common.profile.startup.Generation;
 import org.apache.bookkeeper.common.profile.startup.LocalRecoveryFacts;
 import org.apache.bookkeeper.common.profile.startup.ManifestIdentity;
+import org.apache.bookkeeper.common.profile.startup.RequiredDeviceManifest;
 import org.apache.bookkeeper.common.profile.startup.RollbackSafetyFacts;
 import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
@@ -89,11 +90,45 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         }
     }
 
+    /** The original graph and its current cold facts, with only a checked external declaration. */
+    static final class CheckedStartup {
+        private final ManifestSegmentStorage owner;
+        private final SegmentManifestStartupPolicy policy;
+        private final RequiredDeviceManifest requiredDevices;
+        private final RecoveredFacts facts;
+
+        private CheckedStartup(ManifestSegmentStorage owner, SegmentManifestStartupPolicy policy,
+                RequiredDeviceManifest requiredDevices, RecoveredFacts facts) {
+            this.owner = owner;
+            this.policy = policy;
+            this.requiredDevices = requiredDevices;
+            this.facts = facts;
+        }
+
+        SegmentManifestStartupPolicy policy() {
+            return policy;
+        }
+
+        RequiredDeviceManifest requiredDevices() {
+            return requiredDevices;
+        }
+
+        RecoveredFacts facts() {
+            return facts;
+        }
+    }
+
+    record StartupPreflightAttempt(RecoveryFactsAttempt recovery, CheckedStartup checked) { }
+
+    private record PreflightEpisode(SegmentManifestStartupPolicy.PreOpen preflight,
+            ProfileLedgerMetadataStore metadata, ZKProfileReservationStore.RetainedG1DeleteReplay retained,
+            long deadline) { }
+
     private record LocalCuts(long bookie, List<ArenaCut> arenas, RollbackSafetyFacts rollback,
             ProfileControlRequest.DeleteBinding applied) { }
 
     private static final Generation INITIAL_GENERATION = new Generation(1);
-    private static final NativeFormats NATIVE_FORMATS = new NativeFormats(2, 1, List.of(1, 2), 2);
+    static final NativeFormats NATIVE_FORMATS = new NativeFormats(2, 1, List.of(1, 2), 2);
 
     private static final class Member {
         final IsolatedSegmentConfig config;
@@ -145,6 +180,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     private boolean cleanupAttempted;
     private IOException cleanupFailure;
     private boolean listenerBorrowed;
+    private PreflightEpisode startupPreflight;
     private SegmentManifestAccessObservation.Probe accessProbe;
     private boolean observingAccess;
 
@@ -235,15 +271,27 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     }
 
     void startNew() throws IOException, InterruptedException {
-        start(false, null);
+        start(false, null, null);
     }
 
     void restart() throws IOException, InterruptedException {
-        start(true, null);
+        start(true, null, null);
     }
 
     void restart(SegmentManifestAccessObservation observed) throws IOException, InterruptedException {
-        start(true, Objects.requireNonNull(observed));
+        start(true, Objects.requireNonNull(observed), null);
+    }
+
+    /** Recheck the native source and declared access scope before opening this retained graph. */
+    void restartForStartupPreflight(SegmentManifestStartupPolicy.PreOpen preflight,
+            SegmentManifestAccessObservation observed, ProfileLedgerMetadataStore metadata, long deadline)
+            throws IOException, InterruptedException {
+        long remaining = deadline - System.nanoTime();
+        if (remaining <= 0 || remaining > TimeUnit.MINUTES.toNanos(1)) {
+            throw new IOException("Manifest startup requires a bounded remaining deadline");
+        }
+        var retained = preflight.requireCurrent(manifest, control, observed, metadata, deadline);
+        start(true, observed, new PreflightEpisode(preflight, metadata, retained, deadline));
     }
 
     /** A one-use offline observer. A timed-out result may leave the caller responsible for an explicit drain. */
@@ -324,7 +372,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         }
     }
 
-    private void start(boolean existing, SegmentManifestAccessObservation observed)
+    private void start(boolean existing, SegmentManifestAccessObservation observed, PreflightEpisode preflight)
             throws IOException, InterruptedException {
         synchronized (lifecycle) {
             claimStartup();
@@ -338,6 +386,9 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                     bookieCut = preflightRestart(writes);
                     if (observed != null) {
                         observed.requireCurrent(manifest, control, writes);
+                    }
+                    if (preflight != null && System.nanoTime() >= preflight.deadline()) {
+                        throw new IOException("Manifest startup preflight deadline elapsed before mutable recovery");
                     }
                 } else {
                     SegmentBookieControlLog.formatManifestControl(control, bookieIdentity, bookieGuard, bookieFiles,
@@ -364,6 +415,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                         throw new IOException("Manifest startup lost the complete local graph");
                     }
                     recovered = existing;
+                    startupPreflight = preflight;
                     accepting = true;
                 }
             } catch (IOException | InterruptedException | RuntimeException | Error failure) {
@@ -628,11 +680,68 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     RecoveryFactsAttempt recoveredStartupFacts(ZKProfileStartupRequirementsStore requirements,
             ZKProfileStartupRequirementsStore.Observation source, ZKProfileReservationStore reservations,
             ProfileLedgerMetadataStore metadata, String domain, int maxEvents, Duration timeout) {
-        Objects.requireNonNull(requirements, "requirements");
-        Objects.requireNonNull(source, "source");
         IsolatedSegmentStorage.requireDeleteReplayArguments(reservations, metadata, domain, maxEvents, timeout,
                 this::coldRecoveryAvailable);
-        long deadline = System.nanoTime() + timeout.toNanos();
+        return recoveredStartupFactsUntil(requirements, source, reservations, metadata, domain, maxEvents,
+                System.nanoTime() + timeout.toNanos(), null);
+    }
+
+    /** Consume only the original graph opened by the preflight. Keep any real DELETE completion on rejection. */
+    StartupPreflightAttempt checkRecoveredStartup(String domain, int maxEvents) {
+        PreflightEpisode episode;
+        synchronized (gate) {
+            episode = startupPreflight;
+            if (episode == null || !coldRecoveryAvailable()) {
+                return new StartupPreflightAttempt(
+                        new RecoveryFactsAttempt(RecoveryFactsStatus.GRAPH_UNAVAILABLE, null, null), null);
+            }
+        }
+        long remaining = episode.deadline() - System.nanoTime();
+        if (remaining <= 0) {
+            return new StartupPreflightAttempt(
+                    new RecoveryFactsAttempt(RecoveryFactsStatus.DEADLINE_EXPIRED, null, null), null);
+        }
+        var preflight = episode.preflight();
+        IsolatedSegmentStorage.requireDeleteReplayArguments(preflight.reservations, episode.metadata(), domain,
+                maxEvents, Duration.ofNanos(remaining), this::coldRecoveryAvailable);
+        var result = recoveredStartupFactsUntil(preflight.requirements, preflight.source, preflight.reservations,
+                episode.metadata(), domain, maxEvents, episode.deadline(), episode.retained());
+        if (result.status() != RecoveryFactsStatus.COMPLETE) {
+            return new StartupPreflightAttempt(result, null);
+        }
+        var checked = new CheckedStartup(this, preflight.policy, preflight.source.requiredDevices(), result.facts());
+        try {
+            requireOriginalGraph(checked, episode.deadline());
+            return new StartupPreflightAttempt(result, checked);
+        } catch (IOException stale) {
+            var status = System.nanoTime() >= episode.deadline()
+                    ? RecoveryFactsStatus.DEADLINE_EXPIRED : RecoveryFactsStatus.GRAPH_UNAVAILABLE;
+            return new StartupPreflightAttempt(new RecoveryFactsAttempt(status, null, result.delete()), null);
+        }
+    }
+
+    /** Local-only recheck. Native authority and publication, if later implemented, need their own fences. */
+    void requireOriginalGraph(CheckedStartup checked, long deadline) throws IOException {
+        synchronized (gate) {
+            if (checked.owner != this || System.nanoTime() >= deadline) {
+                throw new IOException("Checked startup does not belong to this live original graph or deadline");
+            }
+            var actual = recoveredCuts();
+            var expected = checked.facts();
+            if (actual.bookie() != expected.bookieControlThrough() || !actual.arenas().equals(expected.arenas())
+                    || !actual.rollback().equals(expected.rollback())
+                    || !Objects.equals(actual.applied(), expected.appliedDelete()) || System.nanoTime() >= deadline) {
+                throw new IOException("Checked startup no longer matches the original recovered cuts");
+            }
+        }
+    }
+
+    private RecoveryFactsAttempt recoveredStartupFactsUntil(ZKProfileStartupRequirementsStore requirements,
+            ZKProfileStartupRequirementsStore.Observation source, ZKProfileReservationStore reservations,
+            ProfileLedgerMetadataStore metadata, String domain, int maxEvents, long deadline,
+            ZKProfileReservationStore.RetainedG1DeleteReplay original) {
+        Objects.requireNonNull(requirements, "requirements");
+        Objects.requireNonNull(source, "source");
         try {
             requireRecoverySourceScope(manifest, source);
         } catch (IOException mismatch) {
@@ -653,7 +762,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             return new RecoveryFactsAttempt(RecoveryFactsStatus.SOURCE_UNVERIFIED, null, null);
         }
         var target = new ProfileDeleteRecord.Target(manifest.bookieId().toString(), manifest.incarnation().value());
-        var retained = reservations.retainedG1DeleteReplay(metadata, target, deadline);
+        var retained = original == null ? reservations.retainedG1DeleteReplay(metadata, target, deadline) : original;
         var deletion = IsolatedSegmentStorage.replayProfileDeletesUntil(replay, reservations, metadata, domain,
                 maxEvents, deadline, this::coldRecoveryAvailable, retained);
         if (deletion.status() != IsolatedSegmentStorage.DeleteCatchUpStatus.CAUGHT_UP) {

@@ -2958,9 +2958,10 @@ public class SegmentProfileInitialSocketClientTest {
                     org.apache.commons.io.FileUtils.deleteDirectory(SegmentDerivedIndex.directory(config).toFile());
                 }
             }
-            try (var episode = observe ? new SegmentClassicScopeEpisodeTest.Episode(
-                            fixture.cluster.getZooKeeperConnectString(), "/old-classic-manifest-access") : null;
-                    var storage = layout.owner(manifestWireBudget(capacity))) {
+            var storage = layout.owner(manifestWireBudget(capacity));
+            ManifestSegmentStorage.CheckedStartup checked = null;
+            try (storage; var episode = observe ? new SegmentClassicScopeEpisodeTest.Episode(
+                    fixture.cluster.getZooKeeperConnectString(), "/old-classic-manifest-access") : null) {
                 if (episode == null) {
                     storage.restart();
                 } else {
@@ -2974,9 +2975,11 @@ public class SegmentProfileInitialSocketClientTest {
                             List.of(manifest.arenas().get(0).id(), new UUID(0, 99)));
                     assertThrows(IOException.class, () -> ManifestSegmentStorage.requireRecoverySourceScope(
                             manifest, wrongMember.source()));
-                    storage.restart(observeRetainedManifest(episode, layout));
+                    var access = observeRetainedManifest(episode, layout);
+                    checked = checkManifestStartupPreflight(fixture, layout, storage, metadata, access);
                     var attempt = requirements.facts(storage, fixture, metadata, 1, Duration.ofSeconds(5));
                     assertRecoveredManifestFacts(storage, layout, requirements, attempt, 0);
+                    assertEquals(99, attempt.facts().commissioned().minimumReaderVersion());
                     assertNull(attempt.facts().appliedDelete());
                     assertFalse(Files.exists(manifest.controlDirectory().resolve("local-readiness")));
                     assertNull(fixture.zk.exists("/socket-ledgers/available/socket0:3181", false));
@@ -2989,10 +2992,116 @@ public class SegmentProfileInitialSocketClientTest {
                     listener.closeAsync().get(10, TimeUnit.SECONDS);
                 }
             }
+            if (checked != null) {
+                var original = checked;
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                assertThrows(IOException.class, () -> storage.requireOriginalGraph(original, deadline));
+                try (var another = layout.owner(manifestWireBudget(capacity))) {
+                    another.restart();
+                    assertThrows(IOException.class, () -> another.requireOriginalGraph(original, deadline));
+                    assertNull(another.checkRecoveredStartup("ledger-profile", 1).checked());
+                }
+            }
         }
     }
 
-    private SegmentManifestAccessObservation observeRetainedManifest(SegmentClassicScopeEpisodeTest.Episode episode,
+    private record RetainedManifestAccess(SegmentManifestAccessObservation observed,
+            SegmentManifestAccessObservation.OldScope old, long newUid,
+            SegmentManifestStartupPolicy.OldDisposition disposition) { }
+
+    private static ManifestSegmentStorage.CheckedStartup checkManifestStartupPreflight(Fixture fixture,
+            ManifestWireLayout layout, ManifestSegmentStorage storage, ProfileLedgerMetadataStore metadata,
+            RetainedManifestAccess access) throws Exception {
+        var manifest = layout.manifest();
+        var roots = SegmentManifestAccessObservation.expectedRoots(manifest, layout.runtime());
+        var requirements = provisionManifestPreflightRequirements(fixture, manifest, "/manifest-preflight", 2, 2,
+                List.of(1, 2), 2);
+        var source = requirements.source();
+        var policy = new SegmentManifestStartupPolicy(source.sourceIdentity(), manifest, roots, access.old(),
+                access.newUid(), access.disposition());
+        var before = manifestTreeDigests(layout);
+        for (String kind : List.of("CONTROL", "ARENA", "INDEX")) {
+            var incomplete = new ArrayList<>(roots);
+            incomplete.remove(incomplete.stream().filter(root -> root.get("kind").equals(kind)).findFirst()
+                    .orElseThrow());
+            assertThrows(IllegalArgumentException.class, () -> new SegmentManifestStartupPolicy(
+                    source.sourceIdentity(), manifest, incomplete, access.old(), access.newUid(),
+                    access.disposition()));
+        }
+        var wrongRoots = roots.stream().map(root -> root.get("kind").equals("INDEX")
+                ? Map.of("kind", "INDEX", "arena", manifest.arenas().get(0).id().toString(), "path", root.get("path"))
+                : root).toList();
+        var wrongVector = new SegmentManifestStartupPolicy(source.sourceIdentity(), manifest, wrongRoots, access.old(),
+                access.newUid(), access.disposition());
+        assertThrows(IOException.class, () -> wrongVector.preflight(layout.runtime(), requirements.store(), source,
+                fixture.reservations));
+
+        var old = access.old();
+        var wrongEpisode = new SegmentManifestAccessObservation.OldScope(
+                old.bookieId(), old.user(), old.uid(), old.roots(), UUID.randomUUID());
+        var wrongUid = new SegmentManifestAccessObservation.OldScope(
+                old.bookieId(), old.user(), old.uid() == 1 ? 2 : 1, old.roots(), old.episode());
+        for (var wrongOld : List.of(wrongEpisode, wrongUid)) {
+            var mismatched = new SegmentManifestStartupPolicy(source.sourceIdentity(), manifest, roots, wrongOld,
+                    access.newUid(), access.disposition());
+            var preflight = mismatched.preflight(layout.runtime(), requirements.store(), source, fixture.reservations);
+            var failure = assertThrows(IOException.class, () -> storage.restartForStartupPreflight(
+                    preflight, access.observed(), metadata, System.nanoTime() + TimeUnit.SECONDS.toNanos(10)));
+            assertEquals("Access observation differs from the declared complete policy scope", failure.getMessage());
+        }
+        for (var refused : List.of(SegmentManifestStartupPolicy.OldDisposition.WRITABLE,
+                SegmentManifestStartupPolicy.OldDisposition.UNKNOWN)) {
+            var unsafe = new SegmentManifestStartupPolicy(source.sourceIdentity(), manifest, roots, old,
+                    access.newUid(), refused);
+            assertThrows(IOException.class, () -> unsafe.preflight(layout.runtime(), requirements.store(), source,
+                    fixture.reservations));
+        }
+        var badRuntime = provisionManifestPreflightRequirements(fixture, manifest, "/manifest-bad-runtime", 99, 2,
+                List.of(1, 2), 2);
+        var badFeature = provisionManifestPreflightRequirements(fixture, manifest, "/manifest-bad-feature", 2, 2,
+                List.of(1, 3), 2);
+        var badDevice = provisionManifestPreflightRequirements(fixture, manifest, "/manifest-bad-device", 2, 2,
+                List.of(1, 2), 1);
+        for (var incompatible : List.of(badRuntime, badFeature, badDevice)) {
+            var observed = incompatible.source();
+            var declared = new SegmentManifestStartupPolicy(observed.sourceIdentity(), manifest, roots, old,
+                    access.newUid(), access.disposition());
+            assertThrows(IOException.class, () -> declared.preflight(layout.runtime(), incompatible.store(),
+                    observed, fixture.reservations));
+        }
+
+        var recreated = provisionManifestPreflightRequirements(fixture, manifest, "/manifest-preflight-recreated",
+                2, 2, List.of(1, 2), 2);
+        var pinned = recreated.source().sourceIdentity();
+        var stale = new SegmentManifestStartupPolicy(pinned, manifest, roots, old, access.newUid(),
+                access.disposition()).preflight(layout.runtime(), recreated.store(), recreated.source(),
+                        fixture.reservations);
+        recreateManifestRequirements(fixture, pinned, fixture.zk.getData(pinned.nodePath(), false, null));
+        var replacement = recreated.store().readManifest(manifest.bookieId().toString()).observation().orElseThrow();
+        assertArrayEquals(pinned.sha256(), replacement.sourceIdentity().sha256());
+        assertNotEquals(pinned.birthZxid(), replacement.sourceIdentity().birthZxid());
+        var failure = assertThrows(IOException.class, () -> storage.restartForStartupPreflight(stale, access.observed(),
+                metadata, System.nanoTime() + TimeUnit.SECONDS.toNanos(10)));
+        assertEquals("Original manifest requirements are no longer current", failure.getMessage());
+        assertEquals(before, manifestTreeDigests(layout));
+
+        var preflight = policy.preflight(layout.runtime(), requirements.store(), source, fixture.reservations);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        storage.restartForStartupPreflight(preflight, access.observed(), metadata, deadline);
+        var result = storage.checkRecoveredStartup("ledger-profile", 1);
+        assertRecoveredManifestFacts(storage, layout, requirements, result.recovery(), 0);
+        var checked = result.checked();
+        assertNotNull(checked);
+        assertEquals(policy, checked.policy());
+        assertEquals(source.requiredDevices(), checked.requiredDevices());
+        assertEquals(source.sourceIdentity(), checked.facts().source());
+        assertEquals(2, checked.facts().commissioned().minimumReaderVersion());
+        assertSame(result.recovery().facts(), checked.facts());
+        storage.requireOriginalGraph(checked, deadline);
+        return checked;
+    }
+
+    private RetainedManifestAccess observeRetainedManifest(SegmentClassicScopeEpisodeTest.Episode episode,
             ManifestWireLayout layout) throws Exception {
         var manifest = layout.manifest();
         Path script = Path.of("../scripts/unified-wal/probe-new-scope-access.py").toRealPath();
@@ -3008,14 +3117,16 @@ public class SegmentProfileInitialSocketClientTest {
         episode.requestCloseAndHoldProcess();
         assertThrows(IllegalStateException.class, episode::drained);
         episode.exit();
-        episode.drained();
+        var drained = episode.drained();
+        assertEquals(0, drained.path("exitCode").asInt(-1));
         var ready = episode.ready();
         var oldRoots = new ArrayList<Map<String, String>>();
         for (var root : ready.path("roots")) {
             oldRoots.add(Map.of("kind", root.path("kind").asText(), "path", root.path("path").asText()));
         }
         var old = new SegmentManifestAccessObservation.OldScope(
-                ready.path("bookieId").asText(), "nobody", ready.path("uid").asLong(), oldRoots);
+                ready.path("bookieId").asText(), "nobody", ready.path("uid").asLong(),
+                oldRoots, episode.scopeEpisode());
         var ownerOnlyRead = PosixFilePermissions.fromString("r--------");
         Files.setPosixFilePermissions(manifest.path(), ownerOnlyRead);
         var dataPermissions = Files.getPosixFilePermissions(data);
@@ -3120,7 +3231,7 @@ public class SegmentProfileInitialSocketClientTest {
             Files.move(saved, index);
         }
         assertEquals(before, manifestTreeDigests(layout));
-        return observed;
+        return new RetainedManifestAccess(observed, old, uid, SegmentManifestStartupPolicy.OldDisposition.DRAINED);
     }
 
     private static void assertMissingManifestRootRefused(ManifestWireLayout layout,
@@ -3190,13 +3301,6 @@ public class SegmentProfileInitialSocketClientTest {
 
     private static ManifestRequirements provisionManifestRequirements(Fixture fixture, SegmentArenaManifest manifest,
             String path, List<UUID> arenas) throws Exception {
-        fixture.zk.create(path, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-        var store = new ZKProfileStartupRequirementsStore(fixture.zk, path, ZooDefs.Ids.OPEN_ACL_UNSAFE,
-                Duration.ofSeconds(5));
-        store.bindDeleteAssignments(fixture.reservations);
-        var target = new ProfileDeleteRecord.Target(manifest.bookieId().toString(), manifest.incarnation().value());
-        assertEquals(ProfileControlStore.ReadStatus.FOUND,
-                fixture.reservations.createInitialDeleteAssignment(target).status());
         var one = new Generation(1);
         // The commissioned values deliberately differ from the local native format observations.
         var compatibility = new BookieCompatibilityFact(manifest.bookieId().toString(), manifest.incarnation(),
@@ -3205,10 +3309,47 @@ public class SegmentProfileInitialSocketClientTest {
         var devices = new RequiredDeviceManifest(manifest.identity(), one, arenas.stream()
                 .map(id -> new RequiredDeviceManifest.RequiredDeviceFact(id.toString(), manifest.incarnation(), one,
                         RequiredDeviceManifest.DeviceStatus.READY, 9, 8, 7, one, List.of(73))).toList());
+        return provisionManifestRequirements(fixture, manifest, path, compatibility, devices);
+    }
+
+    private static ManifestRequirements provisionManifestPreflightRequirements(Fixture fixture,
+            SegmentArenaManifest manifest, String path, int reader, int writer, List<Integer> features,
+            int checkpointFormat) throws Exception {
+        var one = new Generation(1);
+        var compatibility = new BookieCompatibilityFact(manifest.bookieId().toString(), manifest.incarnation(),
+                EngineProfile.SEGMENT_WAL_ENGINE, 1, 0, 1, features, manifest.identity(), one, one, one,
+                reader, writer, BookieCompatibilityFact.MigrationState.FORMAT_READY, one);
+        var devices = new RequiredDeviceManifest(manifest.identity(), one, manifest.arenas().stream()
+                .map(arena -> new RequiredDeviceManifest.RequiredDeviceFact(arena.id().toString(),
+                        manifest.incarnation(), one, RequiredDeviceManifest.DeviceStatus.READY, 2, 1,
+                        checkpointFormat, one, features)).toList());
+        return provisionManifestRequirements(fixture, manifest, path, compatibility, devices);
+    }
+
+    private static ManifestRequirements provisionManifestRequirements(Fixture fixture, SegmentArenaManifest manifest,
+            String path, BookieCompatibilityFact compatibility, RequiredDeviceManifest devices) throws Exception {
+        fixture.zk.create(path, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var store = new ZKProfileStartupRequirementsStore(fixture.zk, path, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                Duration.ofSeconds(5));
+        store.bindDeleteAssignments(fixture.reservations);
+        var target = new ProfileDeleteRecord.Target(manifest.bookieId().toString(), manifest.incarnation().value());
+        assertEquals(ProfileControlStore.ReadStatus.FOUND,
+                fixture.reservations.createInitialDeleteAssignment(target).status());
         assertEquals(ZKProfileStartupRequirementsStore.ProvisionStatus.APPLIED,
                 store.provisionManifest(compatibility, devices));
         return new ManifestRequirements(store, store.readManifest(manifest.bookieId().toString())
                 .observation().orElseThrow());
+    }
+
+    private static void recreateManifestRequirements(Fixture fixture,
+            ZKProfileStartupRequirementsStore.SourceIdentity source, byte[] bytes) throws Exception {
+        String path = source.nodePath();
+        String marker = path + "/birth-" + source.birthId();
+        fixture.zk.multi(List.of(org.apache.zookeeper.Op.delete(marker, 0),
+                org.apache.zookeeper.Op.delete(path, 0),
+                org.apache.zookeeper.Op.create(path, bytes, ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT),
+                org.apache.zookeeper.Op.create(marker, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                        CreateMode.PERSISTENT)));
     }
 
     private static void assertRecoveredManifestFacts(ManifestSegmentStorage storage, ManifestWireLayout layout,
@@ -3220,7 +3361,6 @@ public class SegmentProfileInitialSocketClientTest {
         assertTrue(attempt.completion().isDone());
         assertEquals(requirements.source().sourceIdentity(), facts.source());
         assertEquals(requirements.source().commissionedCompatibility(), facts.commissioned());
-        assertEquals(99, facts.commissioned().minimumReaderVersion());
         assertEquals(layout.manifest().identity(), facts.manifest());
         assertEquals(layout.manifest().incarnation(), facts.incarnation());
         assertEquals(layout.manifest().bookieId(), facts.bookie());
@@ -3398,12 +3538,7 @@ public class SegmentProfileInitialSocketClientTest {
                         () -> requirements.facts(storage, fixture, metadata, 1, Duration.ofSeconds(10)), fixture.cold);
                 try {
                     assertTrue(entered.await(5, TimeUnit.SECONDS));
-                    fixture.zk.multi(List.of(org.apache.zookeeper.Op.delete(marker, 0),
-                            org.apache.zookeeper.Op.delete(path, 0),
-                            org.apache.zookeeper.Op.create(path, original, ZooDefs.Ids.OPEN_ACL_UNSAFE,
-                                    CreateMode.PERSISTENT),
-                            org.apache.zookeeper.Op.create(marker, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE,
-                                    CreateMode.PERSISTENT)));
+                    recreateManifestRequirements(fixture, source, original);
                 } finally {
                     release.countDown();
                 }

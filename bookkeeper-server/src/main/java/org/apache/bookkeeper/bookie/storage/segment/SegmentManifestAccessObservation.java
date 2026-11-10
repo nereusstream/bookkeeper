@@ -61,7 +61,11 @@ final class SegmentManifestAccessObservation {
     private static final ObjectMapper JSON = new ObjectMapper().enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
-    record OldScope(String bookieId, String user, long uid, List<Map<String, String>> roots) {
+    record OldScope(String bookieId, String user, long uid, List<Map<String, String>> roots, UUID episode) {
+        OldScope(String bookieId, String user, long uid, List<Map<String, String>> roots) {
+            this(bookieId, user, uid, roots, null);
+        }
+
         OldScope {
             roots = roots.stream().map(Map::copyOf).sorted(Comparator.comparing(root -> root.get("path"), PATH_ORDER))
                     .toList();
@@ -105,16 +109,20 @@ final class SegmentManifestAccessObservation {
             List<String> writable) { }
 
     private final ManifestIdentity manifestIdentity;
+    private final OldScope oldScope;
+    private final long newUid;
     private final List<Map<String, String>> expectedRoots;
     private final Map<Path, Identity> roots;
     private final Map<Path, Identity> files;
     private final Set<Path> requiredWrites;
     private final byte[] receipt;
 
-    private SegmentManifestAccessObservation(ManifestIdentity manifestIdentity,
+    private SegmentManifestAccessObservation(ManifestIdentity manifestIdentity, OldScope oldScope, long newUid,
             List<Map<String, String>> expectedRoots, Map<Path, Identity> roots, Map<Path, Identity> files,
             Set<Path> requiredWrites, byte[] receipt) {
         this.manifestIdentity = manifestIdentity;
+        this.oldScope = oldScope;
+        this.newUid = newUid;
         this.expectedRoots = expectedRoots;
         this.roots = Map.copyOf(roots);
         this.files = Map.copyOf(files);
@@ -188,8 +196,8 @@ final class SegmentManifestAccessObservation {
         if (!succeeded) {
             throw new IOException("Actual manifest access probe refused the scope");
         }
-        var result = new SegmentManifestAccessObservation(manifest.identity(), expected, roots, files,
-                requiredWrites, JSON.writeValueAsBytes(reply));
+        var result = new SegmentManifestAccessObservation(manifest.identity(), old, request.newUid(), expected,
+                roots, files, requiredWrites, JSON.writeValueAsBytes(reply));
         result.requireCurrent(manifest, request.runtime(), requiredWrites);
         return result;
     }
@@ -358,7 +366,7 @@ final class SegmentManifestAccessObservation {
         }
     }
 
-    private static List<Map<String, String>> expectedRoots(SegmentArenaManifest manifest,
+    static List<Map<String, String>> expectedRoots(SegmentArenaManifest manifest,
             IsolatedSegmentConfig runtime) {
         var roots = new ArrayList<Map<String, String>>();
         roots.add(Map.of("kind", "CONTROL", "arena", "", "path", manifest.controlDirectory().toString()));
@@ -498,5 +506,13 @@ final class SegmentManifestAccessObservation {
 
     byte[] receipt() {
         return receipt.clone();
+    }
+
+    /** Compare the original request scope and observed actors. The old episode is caller-declared. */
+    void requirePolicyScope(SegmentManifestStartupPolicy policy) throws IOException {
+        if (!manifestIdentity.equals(policy.manifest().identity()) || !expectedRoots.equals(policy.roots())
+                || !oldScope.equals(policy.oldScope()) || newUid != policy.newUid()) {
+            throw new IOException("Access observation differs from the declared complete policy scope");
+        }
     }
 }
