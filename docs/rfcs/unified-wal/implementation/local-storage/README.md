@@ -978,9 +978,19 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 同一原生事务核对全部账本的 membership、lifecycle 和 CLOSED 证据，以及实际读取过的原 survivor 注册版本与出生标记，再创建不可变 ADMITTED 和同一出生事务的保护子节点。注册、标准 ledger metadata 与 reservation 使用同一受控原生 ZooKeeper 会话。该会话在构造时从实际连接串绑定 chroot。提交前按 ZooKeeper 实际路径计算每条路径的 4096 字节上限，并以原生序列化核对 384 个操作及加上 chroot 后的 512 KiB 事务体上限。原受控进程退出和目标注册缺失在事务前后复核，ZooKeeper 的事务栅栏约束已存在的正向证据。生产持续隔离仍需外部证明。
 
-准入、确认及回调排空共用一个截止时间。实际回调未终结时，原 Bookie/Arena 的锁与 DATA、CONTROL 额度保持占用。未知结果保留原槽位，通过重新执行原审计并读取精确记录和出生标记确认。ADMITTED 仅记录原图证据。镜像、READY、action 7 和生产启动仍待各自验收。
+准入、确认及回调排空共用一个截止时间。实际回调未终结时，原 Bookie/Arena 的锁与 DATA、CONTROL 额度保持占用。未知结果保留原槽位，通过重新执行原审计并读取精确记录和出生标记确认。ADMITTED 仅记录原图证据。
 
 最大规范向量为 64 个 Arena、4096 个 DATA 文件、64 个可路由 shard 和 16 个账本，实际记录 242,523 字节，上限为 256 KiB。非 ASCII chroot 夹具比对实际原生事务体，并验证加前缀后超限时在 owner gate 前拒绝。真实三 Arena 审计覆盖晚 EMPTY 删除、原 survivor 撤回、已提交回调超时后的七把锁与两类额度，以及同操作精确重试。移除原生 survivor 栅栏后，撤回的反例实际提交了事务。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-admitted-parent-29534187`。
+
+### 固定 manifest 的准备栅栏与候选镜像
+
+以 `90c2c485e9` 为基线。在完整原图、当前 native CLOSED、原 survivor 和原受控退出的同一次持锁复验内，先读回原 ADMITTED，再证明每个 Arena 的固定 operation 暂存路径明确不存在。一个原生事务检查原 ADMITTED 出生、完整账本和原 survivor 注册。首轮创建 96 字节的 `UWMP` 准备记录和同事务出生标记，后继以原版本 CAS 换新 nonce。只有精确回执确认并且实际回调已终结，才允许创建暂存目录。
+
+每个 Arena 在原 filesystem 的 `.closed-manifest-image-<operation>` 写入全量 fresh 文件，包括未承载账本或为空白的必需 DATA 文件。使用同一个有界复制缓冲，逐文件校验原描述符、长度和 SHA，force、在新描述符上完整读回并完成实际首次 close，再同步暂存目录与原父目录。交付前复核原控制、物理对象、完整 native cohort、原 source/target 和当前 attempt。实际 I/O 或事务回调仍在途时保留整图锁和额度；首次 close 返回失败时保留未确认释放的成员及额度。
+
+每个原操作最多写一份完整候选图。任一原有暂存对象均在 claim 和首次本地写入前拒绝。失败前缀保持原样，清理与续接需要独立契约。结果是本次进程的候选观察，后续 READY 需要在原作用域内消费私有证明。原 DATA 替换、action 7、首次重开和生产持续隔离仍待验收。
+
+真实三 Arena 用例覆盖四个 fresh DATA 文件。原生 holder 已创建但回调跨过截止时间时，七把原锁和两类额度保持占用，所有暂存路径仍不存在。实际回调终结后，新一轮原图审计确认新 nonce 并完成复制；旧版本请求真实返回 `BADVERSION`。末文件 force 失败后保留未确认的候选前缀，同操作重试在 claim 前拒绝。最终 18 项定向测试和 Spotless、Checkstyle 均通过。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-preparation-parent-90c2c485`。
 
 ### 单 DATA 文件的 CLOSED 重建准入
 

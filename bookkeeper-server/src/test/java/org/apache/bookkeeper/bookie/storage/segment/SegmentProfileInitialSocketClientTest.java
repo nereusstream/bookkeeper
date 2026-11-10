@@ -19669,14 +19669,28 @@ public class SegmentProfileInitialSocketClientTest {
         observeManifestNativeClosedCohort(ManifestClosedAudit.ADMISSION_SOURCE);
     }
 
-    private enum ManifestClosedAudit { OPEN, NATIVE, DATA, SOURCES, ADMISSION, ADMISSION_DELETE, ADMISSION_SOURCE }
+    @Test
+    public void manifestPreparationRetainsTheGraphUntilTheActualClaimReplyThenCopiesEveryFile() throws Exception {
+        observeManifestNativeClosedCohort(ManifestClosedAudit.PREPARATION);
+    }
+
+    @Test
+    public void manifestPreparationRetainsAnUnconfirmedLateImageAndRefusesTheExistingStage() throws Exception {
+        observeManifestNativeClosedCohort(ManifestClosedAudit.PREPARATION_FORCE);
+    }
+
+    private enum ManifestClosedAudit {
+        OPEN, NATIVE, DATA, SOURCES, ADMISSION, ADMISSION_DELETE, ADMISSION_SOURCE, PREPARATION, PREPARATION_FORCE
+    }
 
     private void observeManifestNativeClosedCohort(ManifestClosedAudit audit) throws Exception {
         assumeTrue("Unix permission-bit experiment requires a non-root target credential",
                 ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
         boolean closeEmpty = audit != ManifestClosedAudit.OPEN;
+        boolean preparation = audit == ManifestClosedAudit.PREPARATION
+                || audit == ManifestClosedAudit.PREPARATION_FORCE;
         boolean admission = audit == ManifestClosedAudit.ADMISSION || audit == ManifestClosedAudit.ADMISSION_DELETE
-                || audit == ManifestClosedAudit.ADMISSION_SOURCE;
+                || audit == ManifestClosedAudit.ADMISSION_SOURCE || preparation;
         boolean sourceAudit = audit == ManifestClosedAudit.SOURCES || admission;
         boolean physicalAudit = audit == ManifestClosedAudit.DATA || sourceAudit;
         try (var fixture = new Fixture(false, false, true, 3, 3, true, true);
@@ -19700,7 +19714,7 @@ public class SegmentProfileInitialSocketClientTest {
                     var sdk = sdk(fixture);
                     var mutationClient = admission ? new ManifestAdmissionZk(
                             fixture.cluster.getZooKeeperConnectString(), new ZooKeeperWatcherBase(10000, false),
-                            audit == ManifestClosedAudit.ADMISSION) : null) {
+                            audit == ManifestClosedAudit.ADMISSION, preparation) : null) {
                 second.replaceNode(fixture, 1, false);
                 third.replaceNode(fixture, 2, false);
                 var registry = admission ? new ZKProfileRegistrationStore(mutationClient, SOCKET_SERVICE_READINESS,
@@ -19773,19 +19787,27 @@ public class SegmentProfileInitialSocketClientTest {
                 var budget = manifestWireBudget(capacity);
                 var timeout = Duration.ofSeconds(15);
                 if (sourceAudit) {
-                    var sourceBudget = manifestWireBudget(capacity.withAdditionalData(
+                    var sourceCapacity = capacity.withAdditionalData(
                             ManifestSegmentStorage.closedDataCapacity(manifest, rows, 2))
                             .withAdditionalControl(SegmentClosedReconstruction.manifestSourceControlBytes())
                             .withAdditionalControl(admission ? ZKProfileReservationStore.manifestAdmissionControlBytes()
-                                    : 0));
+                                    : 0);
                     var transports = new SegmentClosedReconstruction.Sources(sdk.getClientCtx(), fixture.clientGroup,
                             fixture.peerTls, fixture.cold, registry);
-                    if (admission) {
-                        assertManifestClosedAdmission(fixture, layout, metadata, manager, third, contexts, sourceBudget,
-                                rows, timeout, transports, publisher, mutationClient, audit, before);
+                    if (preparation) {
+                        var imageBudget = manifestWireBudget(sourceCapacity
+                                .withAdditionalData(ManifestSegmentStorage.manifestImageDataBytes())
+                                .withAdditionalControl(ManifestSegmentStorage.manifestImageControlBytes(manifest)));
+                        assertManifestImagePreparation(fixture, layout, manager, imageBudget, rows, timeout,
+                                transports, publisher, mutationClient, audit, before);
+                    } else if (admission) {
+                        assertManifestClosedAdmission(fixture, layout, metadata, manager, third, contexts,
+                                manifestWireBudget(sourceCapacity), rows, timeout, transports, publisher,
+                                mutationClient, audit, before);
                     } else {
-                        assertManifestClosedSources(fixture, layout, metadata, manager, third, contexts, sourceBudget,
-                                rows, timeout, transports, publisher, paths, before);
+                        assertManifestClosedSources(fixture, layout, metadata, manager, third, contexts,
+                                manifestWireBudget(sourceCapacity), rows, timeout, transports, publisher, paths,
+                                before);
                     }
                 } else if (physicalAudit) {
                     var auditBudget = manifestWireBudget(capacity.withAdditionalData(
@@ -19811,7 +19833,9 @@ public class SegmentProfileInitialSocketClientTest {
                 try (var refused = layout.owner(manifestWireBudget(layout.capacity()))) {
                     assertThrows(IOException.class, refused::restart);
                 }
-                assertEquals(before, manifestTreeDigests(layout));
+                if (!preparation) {
+                    assertEquals(before, manifestTreeDigests(layout));
+                }
                 assertNull(registry.readPeer(bookie).peer());
                 for (int i = 0; i < paths.size(); i++) {
                     if (audit == ManifestClosedAudit.ADMISSION_DELETE && i == paths.size() - 1) {
@@ -19825,6 +19849,181 @@ public class SegmentProfileInitialSocketClientTest {
                     assertEquals(before, manifestTreeDigests(layout));
                     assertNull(registry.readPeer(bookie).peer());
                 }
+            }
+        }
+    }
+
+    private static void assertManifestImagePreparation(Fixture fixture, ManifestWireLayout layout,
+            AbstractZkLedgerManager manager, ProfileReceiveBudget budget, int rows, Duration timeout,
+            SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher,
+            ManifestAdmissionZk zk, ManifestClosedAudit audit, Map<Path, String> before) throws Exception {
+        var manifest = layout.manifest();
+        var metadata = new ProfileLedgerMetadataStore(zk, manager, ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+        var reservations = new ZKProfileReservationStore(zk, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+        long totalBytes = manifest.arenas().stream().mapToLong(arena -> arena.dataFiles() * arena.bytesPerFile()).sum();
+        var operation = UUID.randomUUID();
+        var stages = manifest.arenas().stream()
+                .map(arena -> arena.directory().resolve(".closed-manifest-image-" + operation)).toList();
+        ProfileManifestClosedAdmission.Receipt admitted;
+        try (var owner = layout.owner(budget)) {
+            admitted = owner.admitClosedManifest(rows, totalBytes, 2, timeout, metadata, reservations, sources,
+                    publisher, operation);
+            assertManifestObservationReleased(budget);
+        }
+        String holder = zk.directAdmissionPath + "/preparation";
+        var sentinel = stages.get(stages.size() - 1);
+        Files.writeString(sentinel, "test-owned original sentinel", StandardOpenOption.CREATE_NEW);
+        try (var owner = layout.owner(budget)) {
+            var refused = assertThrows(IOException.class, () -> owner.prepareClosedManifestImages(rows, totalBytes, 2,
+                    timeout, metadata, reservations, sources, publisher, operation, new SegmentFileIo()));
+            assertTrue(refused.toString(), refused.getMessage().contains("staging already exists"));
+            assertEquals("test-owned original sentinel", Files.readString(sentinel));
+            assertFalse(Files.exists(stages.get(0)));
+            assertFalse(Files.exists(stages.get(1)));
+            assertNull(fixture.zk.exists(holder, false));
+            assertEquals(0, zk.preparationSubmissions.get());
+            assertManifestObservationReleased(budget);
+        } finally {
+            Files.delete(sentinel);
+        }
+
+        if (audit == ManifestClosedAudit.PREPARATION) {
+            var initialStat = new Stat();
+            byte[] initial;
+            var held = new CompletableFuture<Runnable>();
+            zk.holdPreparationReply.set(held);
+            try (var owner = layout.owner(budget)) {
+                var attempt = new FutureTask<>(() -> owner.prepareClosedManifestImages(rows, totalBytes, 2,
+                        timeout, metadata, reservations, sources, publisher, operation, new SegmentFileIo()));
+                var caller = new Thread(attempt, "manifest-image-preparation");
+                caller.start();
+                try {
+                    var deliver = held.get(10, TimeUnit.SECONDS);
+                    initial = fixture.zk.getData(holder, false, initialStat);
+                    assertEquals(96, initial.length);
+                    assertEquals(0, initialStat.getVersion());
+                    assertEquals(initialStat.getCzxid(), initialStat.getMzxid());
+                    for (Path stage : stages) {
+                        assertFalse(Files.exists(stage));
+                    }
+                    var unknown = assertThrows(ExecutionException.class, () -> attempt.get(17, TimeUnit.SECONDS));
+                    assertTrue(unknown.getCause().toString(),
+                            unknown.getCause().getMessage().contains("not confirmed within its original deadline"));
+                    assertFalse(owner.close(Duration.ofMillis(100)));
+                    assertManifestAdmissionHeld(layout, budget);
+                    for (Path stage : stages) {
+                        assertFalse(Files.exists(stage));
+                    }
+                    deliver.run();
+                    assertTrue(owner.close(Duration.ofSeconds(5)));
+                    assertManifestObservationReleased(budget);
+                } finally {
+                    var release = held.getNow(null);
+                    if (release != null) {
+                        release.run();
+                    }
+                    caller.join(16000);
+                    assertFalse(caller.isAlive());
+                }
+            }
+            ManifestSegmentStorage.ManifestImageObservation images;
+            try (var owner = layout.owner(budget)) {
+                images = owner.prepareClosedManifestImages(rows, totalBytes, 2, timeout, metadata, reservations,
+                        sources, publisher, operation, new SegmentFileIo());
+                assertManifestObservationReleased(budget);
+            }
+            assertEquals(admitted, images.attempt().admitted());
+            assertEquals(1, images.attempt().version());
+            assertEquals(initialStat.getCzxid(), images.attempt().birth());
+            assertTrue(images.attempt().modified() > initialStat.getMzxid());
+            assertNotEquals(images.attempt().attempt().firstNonce(), images.attempt().attempt().nonce());
+            var old = java.nio.ByteBuffer.wrap(initial);
+            assertEquals(0x55574d50, old.getInt());
+            assertEquals(1, old.getInt());
+            assertEquals(admitted.birth(), old.getLong());
+            old.position(64);
+            assertEquals(images.attempt().attempt().firstNonce(), new UUID(old.getLong(), old.getLong()));
+            assertEquals(List.of("birth-" + images.attempt().attempt().firstNonce()),
+                    fixture.zk.getChildren(holder, false));
+            var markerStat = fixture.zk.exists(holder + "/birth-" + images.attempt().attempt().firstNonce(), false);
+            assertEquals(initialStat.getCzxid(), markerStat.getCzxid());
+            assertEquals(0, markerStat.getVersion());
+            var reply = new CompletableFuture<Integer>();
+            fixture.zk.multi(zk.lastPreparationOperations, (code, path, context, results) -> reply.complete(code),
+                    null);
+            assertEquals(org.apache.zookeeper.KeeperException.Code.BADVERSION.intValue(),
+                    reply.get(5, TimeUnit.SECONDS).intValue());
+            assertEquals(2, zk.preparationSubmissions.get());
+            assertManifestFreshImages(layout, stages, before, images);
+        } else {
+            var imageIo = new SegmentFileIo(Integer.MAX_VALUE, -1, 4, false);
+            try (var owner = layout.owner(budget)) {
+                var failed = assertThrows(IOException.class, () -> owner.prepareClosedManifestImages(rows, totalBytes,
+                        2, timeout, metadata, reservations, sources, publisher, operation, imageIo));
+                assertTrue(failed.toString(), failed.getMessage().contains("Injected force failure"));
+                assertEquals(4, imageIo.forces);
+                assertManifestObservationReleased(budget);
+            }
+            var retained = manifestTreeDigests(layout);
+            assertTrue(Files.isRegularFile(stages.get(0).resolve("image-0")));
+            assertTrue(Files.isRegularFile(stages.get(2).resolve("image-0")));
+            assertManifestImageRetryRefused(layout, budget, rows, totalBytes, timeout, metadata, reservations,
+                    sources, publisher, operation);
+            assertEquals(retained, manifestTreeDigests(layout));
+            assertEquals(1, zk.preparationSubmissions.get());
+            assertEquals(0, fixture.zk.exists(holder, false).getVersion());
+        }
+        assertEquals(admitted, fixture.reservations.readManifestClosedAdmission(admitted.admission().scope()));
+        assertEquals(Set.of("birth-" + operation, "preparation"),
+                Set.copyOf(fixture.zk.getChildren(zk.directAdmissionPath, false)));
+        var active = manifestTreeDigests(layout);
+        active.keySet().removeIf(path -> stages.stream().anyMatch(path::startsWith));
+        assertEquals(before, active);
+        for (int i = 0; i < manifest.arenas().size(); i++) {
+            Path root = manifest.arenas().get(i).directory();
+            for (var file : admitted.admission().arenas().get(i).files()) {
+                assertEquals(file.image().object(), SegmentClosedReconstruction.requireOriginalFile(
+                        root.resolve("data-" + file.index()), file.image().length()));
+            }
+        }
+    }
+
+    private static void assertManifestImageRetryRefused(ManifestWireLayout layout, ProfileReceiveBudget budget,
+            int rows, long bytes, Duration timeout, ProfileLedgerMetadataStore metadata,
+            ZKProfileReservationStore reservations, SegmentClosedReconstruction.Sources sources,
+            SegmentClosedReconstruction.OldPublisher publisher, UUID operation) throws Exception {
+        try (var owner = layout.owner(budget)) {
+            var refused = assertThrows(IOException.class, () -> owner.prepareClosedManifestImages(rows, bytes, 2,
+                    timeout, metadata, reservations, sources, publisher, operation, new SegmentFileIo()));
+            assertTrue(refused.toString(), refused.getMessage().contains("staging already exists"));
+            assertManifestObservationReleased(budget);
+        }
+    }
+
+    private static void assertManifestFreshImages(ManifestWireLayout layout, List<Path> stages,
+            Map<Path, String> before,
+            ManifestSegmentStorage.ManifestImageObservation images) throws Exception {
+        assertEquals(3, images.arenas().size());
+        assertEquals(4, images.arenas().stream().mapToInt(arena -> arena.files().size()).sum());
+        var actualBytes = manifestTreeDigests(layout);
+        var identities = new java.util.HashSet<>();
+        images.attempt().admitted().admission().arenas().forEach(arena ->
+                arena.files().forEach(file -> identities.add(file.image().object())));
+        for (int i = 0; i < images.arenas().size(); i++) {
+            var arena = layout.manifest().arenas().get(i);
+            var observed = images.arenas().get(i);
+            assertEquals(arena.id(), observed.arena());
+            assertEquals(stages.get(i), observed.stage());
+            assertEquals(PosixFilePermissions.fromString("rwx------"), Files.getPosixFilePermissions(observed.stage()));
+            assertEquals(arena.dataFiles(), observed.files().size());
+            for (var file : observed.files()) {
+                Path path = observed.stage().resolve("image-" + file.index());
+                assertEquals(arena.bytesPerFile(), file.image().length());
+                assertEquals(file.image().sha256(), before.get(arena.directory().resolve("data-" + file.index())));
+                assertEquals(file.image().sha256(), actualBytes.get(path));
+                assertEquals(file.image().object(),
+                        SegmentClosedReconstruction.requireOriginalFile(path, file.image().length()));
+                assertTrue(identities.add(file.image().object()));
             }
         }
     }
@@ -19998,12 +20197,19 @@ public class SegmentProfileInitialSocketClientTest {
         private final CompletableFuture<Integer> serverReply = new CompletableFuture<>();
         private final CompletableFuture<Runnable> callback = new CompletableFuture<>();
         private final AtomicInteger submissions = new AtomicInteger();
+        private final AtomicInteger preparationSubmissions = new AtomicInteger();
+        private final AtomicReference<CompletableFuture<Runnable>> holdPreparationReply = new AtomicReference<>();
         private final boolean holdReply;
+        private final boolean directAdmission;
+        private volatile String directAdmissionPath;
+        private volatile List<org.apache.zookeeper.Op> lastPreparationOperations;
 
-        ManifestAdmissionZk(String connect, ZooKeeperWatcherBase watcher, boolean holdReply) throws Exception {
+        ManifestAdmissionZk(String connect, ZooKeeperWatcherBase watcher, boolean holdReply, boolean directAdmission)
+                throws Exception {
             super(connect, 10000, watcher);
             watcher.waitForConnection();
             this.holdReply = holdReply;
+            this.directAdmission = directAdmission;
         }
 
         @Override
@@ -20011,6 +20217,32 @@ public class SegmentProfileInitialSocketClientTest {
                 org.apache.zookeeper.AsyncCallback.MultiCallback completion, Object context) {
             var ops = new ArrayList<org.apache.zookeeper.Op>();
             operations.forEach(ops::add);
+            if (directAdmission) {
+                var preparation = ops.stream().filter(op -> op.getPath().endsWith("/preparation")
+                        && (op.getType() == ZooDefs.OpCode.create || op.getType() == ZooDefs.OpCode.setData))
+                        .findFirst();
+                if (preparation.isPresent()) {
+                    preparationSubmissions.incrementAndGet();
+                    lastPreparationOperations = List.copyOf(ops);
+                    var held = holdPreparationReply.getAndSet(null);
+                    super.multi(ops, (code, path, ignored, results) -> {
+                        if (held != null && code == org.apache.zookeeper.KeeperException.Code.OK.intValue()) {
+                            var delivered = new AtomicBoolean();
+                            held.complete(() -> {
+                                if (delivered.compareAndSet(false, true)) {
+                                    completion.processResult(code, path, context, results);
+                                }
+                            });
+                        } else {
+                            if (held != null) {
+                                held.completeExceptionally(new AssertionError("Unexpected native claim code " + code));
+                            }
+                            completion.processResult(code, path, context, results);
+                        }
+                    }, context);
+                    return;
+                }
+            }
             var create = ops.stream().filter(op -> op.getType() == ZooDefs.OpCode.create
                     && op.getPath().startsWith("/socket-initial/closed-manifest-reconstruction-")
                     && !op.getPath().contains("/birth-")).findFirst();
@@ -20019,6 +20251,11 @@ public class SegmentProfileInitialSocketClientTest {
                 return;
             }
             var node = create.orElseThrow();
+            if (directAdmission) {
+                directAdmissionPath = node.getPath();
+                super.multi(ops, completion, context);
+                return;
+            }
             int submission = submissions.incrementAndGet();
             assertEquals(1, submission);
             try {

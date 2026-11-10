@@ -70,6 +70,7 @@ import org.apache.zookeeper.data.Id;
 import org.apache.zookeeper.data.Stat;
 import org.apache.zookeeper.proto.CheckVersionRequest;
 import org.apache.zookeeper.proto.CreateRequest;
+import org.apache.zookeeper.proto.SetDataRequest;
 
 /**
  * Experimental initial lifecycle: immutable reservation, bounded target page, READY and DELETE_INTENT CAS.
@@ -1454,21 +1455,10 @@ public final class ZKProfileReservationStore {
         var request = prepared.request();
         long deadline = prepared.reader().deadline();
         try {
-            for (var sources : prepared.sources()) {
-                sources.requireManifestClosedClient(zk);
-            }
+            requireManifestSourceClients(prepared);
             var receipt = readManifestClosedAdmission(request.scope(), deadline);
             if (receipt == null) {
-                var checks = new ArrayList<Op>();
-                for (var ledger : request.ledgers()) {
-                    var observed = manifestAdmissionMember(prepared.reader(), ledger);
-                    checks.addAll(reconstructionMemberChecks(metadata, observed.snapshot(), observed.proof(),
-                            deadline));
-                }
-                for (var sources : prepared.sources()) {
-                    sources.addManifestClosedChecks(checks);
-                }
-                prepared.revalidateRegistrations();
+                var checks = manifestAdmissionChecks(metadata, prepared, deadline);
                 if (protectedChildAcls.stream().noneMatch(acl -> (acl.getPerms() & ZooDefs.Perms.CREATE) != 0)) {
                     throw new IOException("Manifest CLOSED admission ACL must allow its protected birth creation");
                 }
@@ -1477,8 +1467,7 @@ public final class ZKProfileReservationStore {
                 checks.add(Op.create(marker(path, request.operation()), new byte[0], immutableAcls,
                         CreateMode.PERSISTENT));
                 Code code = submitManifestAdmission(checks, prepared, deadline);
-                if (code != Code.OK && code != Code.NODEEXISTS && code != Code.CONNECTIONLOSS
-                        && code != Code.OPERATIONTIMEOUT && code != Code.SESSIONMOVED && code != Code.SESSIONEXPIRED) {
+                if (!manifestReadbackAllowed(code)) {
                     throw new IOException("Manifest CLOSED admission multi refused: " + code);
                 }
                 receipt = readManifestClosedAdmission(request.scope(), deadline);
@@ -1489,11 +1478,7 @@ public final class ZKProfileReservationStore {
             if (!request.equals(receipt.admission())) {
                 throw new IOException("Manifest CLOSED admission conflicts with the original fixed slot");
             }
-            for (var ledger : request.ledgers()) {
-                manifestAdmissionMember(prepared.reader(), ledger);
-            }
-            prepared.revalidateRegistrations();
-            prepared.requireOwnerLive();
+            revalidateManifestAdmission(prepared);
             return receipt;
         } catch (TimeoutException failure) {
             throw new IOException("Manifest CLOSED admission was not confirmed within its original deadline", failure);
@@ -1502,10 +1487,176 @@ public final class ZKProfileReservationStore {
         }
     }
 
+    public ProfileManifestClosedAdmission.Receipt requireManifestAdmission(
+            SegmentClosedReconstruction.PreparedManifestAdmission prepared) throws IOException, InterruptedException {
+        try {
+            return requireManifestAdmission(prepared.request(), prepared.reader().deadline());
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException failure) {
+            throw new IOException("The original manifest CLOSED admission could not be confirmed", failure);
+        }
+    }
+
+    private ProfileManifestClosedAdmission.Receipt requireManifestAdmission(ProfileManifestClosedAdmission request,
+            long deadline) throws IOException, InterruptedException, TimeoutException {
+        var admitted = readManifestClosedAdmission(request.scope(), deadline);
+        if (admitted == null || !request.equals(admitted.admission())) {
+            throw new IOException("Manifest preparation requires its exact original ADMITTED record");
+        }
+        return admitted;
+    }
+
+    /** Confirm one new native attempt before the original locked owner can touch any candidate files. */
+    public ProfileManifestPreparation.Receipt claimManifestPreparation(ProfileLedgerMetadataStore metadata,
+            SegmentClosedReconstruction.PreparedManifestAdmission prepared,
+            ProfileManifestClosedAdmission.Receipt expected) throws IOException, InterruptedException {
+        requireRecoveryClient(metadata);
+        var request = prepared.request();
+        long deadline = prepared.reader().deadline();
+        try {
+            requireManifestSourceClients(prepared);
+            var admitted = requireManifestAdmission(request, deadline);
+            if (!admitted.equals(expected)) {
+                throw new IOException("Manifest preparation lost its original admission birth");
+            }
+            String path = manifestAdmissionPath(request.scope());
+            String holder = path + "/preparation";
+            var prior = readManifestPreparation(holder, admitted, deadline);
+            UUID nonce = UUID.randomUUID();
+            if (prior != null && (prior.version() >= Integer.MAX_VALUE - 1
+                    || nonce.equals(prior.attempt().firstNonce()) || nonce.equals(prior.attempt().nonce()))) {
+                throw new IOException("Manifest preparation holder is exhausted or did not get a fresh nonce");
+            }
+            UUID first = prior == null ? nonce : prior.attempt().firstNonce();
+            var attempt = new ProfileManifestPreparation(admitted.birth(), admitted.digest(), request.operation(),
+                    first, nonce);
+            var checks = manifestAdmissionChecks(metadata, prepared, deadline);
+            checks.add(Op.check(path, 0));
+            checks.add(Op.check(marker(path, request.operation()), 0));
+            if (prior == null) {
+                int permissions = restoreDependencyAcls.stream().mapToInt(ACL::getPerms)
+                        .reduce(0, (left, right) -> left | right);
+                int required = ZooDefs.Perms.CREATE | ZooDefs.Perms.WRITE;
+                if ((permissions & required) != required) {
+                    throw new IOException("Manifest preparation holder ACL lacks CREATE or WRITE");
+                }
+                checks.add(Op.create(holder, attempt.encode(), restoreDependencyAcls, CreateMode.PERSISTENT));
+                checks.add(Op.create(marker(holder, first), new byte[0], immutableAcls, CreateMode.PERSISTENT));
+            } else {
+                checks.add(Op.check(marker(holder, first), 0));
+                checks.add(Op.setData(holder, attempt.encode(), prior.version()));
+            }
+            Code code = submitManifestMutation(checks, prepared, deadline, holder);
+            if (!manifestReadbackAllowed(code)) {
+                throw new IOException("Manifest preparation multi refused: " + code);
+            }
+            revalidateManifestAdmission(prepared);
+            if (!admitted.equals(requireManifestAdmission(request, deadline))) {
+                throw new IOException("Manifest preparation lost its original admission after submission");
+            }
+            var current = readManifestPreparation(holder, admitted, deadline);
+            if (current == null || !attempt.equals(current.attempt())
+                    || (prior == null ? current.version() != 0
+                            : current.version() != prior.version() + 1 || current.birth() != prior.birth()
+                                    || current.modified() <= prior.modified())) {
+                throw new IOException("The exact manifest preparation attempt was not confirmed");
+            }
+            prepared.requireOwnerLive();
+            return current;
+        } catch (TimeoutException failure) {
+            throw new IOException("Manifest preparation was not confirmed within its original deadline", failure);
+        } catch (IllegalArgumentException | IllegalStateException failure) {
+            throw new IOException("Manifest preparation was refused", failure);
+        }
+    }
+
+    /** The original attempt must still be current before the locked owner can complete its image audit. */
+    public void requireCurrentManifestPreparation(SegmentClosedReconstruction.PreparedManifestAdmission prepared,
+            ProfileManifestPreparation.Receipt expected) throws IOException, InterruptedException {
+        var request = prepared.request();
+        long deadline = prepared.reader().deadline();
+        try {
+            revalidateManifestAdmission(prepared);
+            var admitted = requireManifestAdmission(request, deadline);
+            if (!admitted.equals(expected.admitted()) || !expected.equals(readManifestPreparation(
+                    manifestAdmissionPath(request.scope()) + "/preparation", admitted, deadline))) {
+                throw new IOException("Manifest preparation lost its exact current attempt");
+            }
+            prepared.requireOwnerLive();
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException failure) {
+            throw new IOException("Unable to verify the current manifest preparation", failure);
+        }
+    }
+
+    private ProfileManifestPreparation.Receipt readManifestPreparation(String holder,
+            ProfileManifestClosedAdmission.Receipt admitted, long deadline)
+            throws IOException, InterruptedException, TimeoutException {
+        var node = reads.get(holder, deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            return null;
+        }
+        requireFound(node);
+        requirePersistent(node, false);
+        var attempt = ProfileManifestPreparation.decode(node.bytes());
+        var stat = node.stat();
+        long birth = stat.getCzxid();
+        long modified = stat.getMzxid();
+        int version = stat.getVersion();
+        if (birth <= admitted.birth() || attempt.admissionBirth() != admitted.birth()
+                || !attempt.admissionDigest().equals(admitted.digest())
+                || !attempt.operation().equals(admitted.admission().operation())
+                || (version == 0 ? birth != modified || !attempt.firstNonce().equals(attempt.nonce())
+                        : modified <= birth || attempt.firstNonce().equals(attempt.nonce()))) {
+            throw new IOException("Manifest preparation holder differs from its original admission or birth");
+        }
+        requireMarker(marker(holder, attempt.firstNonce()), birth, deadline);
+        return new ProfileManifestPreparation.Receipt(admitted, attempt, birth, modified, version);
+    }
+
+    private void requireManifestSourceClients(SegmentClosedReconstruction.PreparedManifestAdmission prepared)
+            throws IOException {
+        for (var sources : prepared.sources()) {
+            sources.requireManifestClosedClient(zk);
+        }
+    }
+
+    private List<Op> manifestAdmissionChecks(ProfileLedgerMetadataStore metadata,
+            SegmentClosedReconstruction.PreparedManifestAdmission prepared, long deadline)
+            throws IOException, InterruptedException, TimeoutException {
+        var checks = new ArrayList<Op>();
+        for (var ledger : prepared.request().ledgers()) {
+            var observed = manifestAdmissionMember(prepared.reader(), ledger);
+            checks.addAll(reconstructionMemberChecks(metadata, observed.snapshot(), observed.proof(), deadline));
+        }
+        for (var sources : prepared.sources()) {
+            sources.addManifestClosedChecks(checks);
+        }
+        prepared.revalidateRegistrations();
+        return checks;
+    }
+
+    private void revalidateManifestAdmission(SegmentClosedReconstruction.PreparedManifestAdmission prepared)
+            throws IOException, InterruptedException, TimeoutException {
+        for (var ledger : prepared.request().ledgers()) {
+            manifestAdmissionMember(prepared.reader(), ledger);
+        }
+        prepared.revalidateRegistrations();
+        prepared.requireOwnerLive();
+    }
+
+    private static boolean manifestReadbackAllowed(Code code) {
+        return code == Code.OK || code == Code.NODEEXISTS || code == Code.CONNECTIONLOSS
+                || code == Code.OPERATIONTIMEOUT || code == Code.SESSIONMOVED || code == Code.SESSIONEXPIRED;
+    }
+
     Code submitManifestAdmission(List<Op> checks, SegmentClosedReconstruction.PreparedManifestAdmission prepared,
             long deadline)
             throws IOException, InterruptedException, TimeoutException {
-        validateManifestAdmissionMulti(checks);
+        return submitManifestMutation(checks, prepared, deadline, null);
+    }
+
+    private Code submitManifestMutation(List<Op> checks, SegmentClosedReconstruction.PreparedManifestAdmission prepared,
+            long deadline, String preparationPath) throws IOException, InterruptedException, TimeoutException {
+        validateManifestAdmissionMulti(checks, preparationPath);
         Objects.requireNonNull(prepared, "prepared");
         var mutation = new ManifestAdmissionMutation();
         prepared.beginMutation(mutation);
@@ -1514,11 +1665,11 @@ public final class ZKProfileReservationStore {
             reply = new ProfileZKReadClient(zk, mutation.pending).submitMulti(checks);
         } catch (RuntimeException uncertain) {
             // Pending has registered the actual callback; an ambiguous throw is not a drain signal.
-            throw new IOException("Manifest CLOSED admission submission was not confirmed", uncertain);
+            throw new IOException("Manifest CLOSED mutation submission was not confirmed", uncertain);
         }
         int code = ProfileZKReadClient.await(reply, deadline);
         if (!mutation.pending.awaitIdle(deadline)) {
-            throw new TimeoutException("Manifest CLOSED admission callback has not drained");
+            throw new TimeoutException("Manifest CLOSED mutation callback has not drained");
         }
         return Code.get(code);
     }
@@ -1538,6 +1689,10 @@ public final class ZKProfileReservationStore {
     }
 
     int validateManifestAdmissionMulti(List<Op> checks) throws IOException {
+        return validateManifestAdmissionMulti(checks, null);
+    }
+
+    private int validateManifestAdmissionMulti(List<Op> checks, String preparationPath) throws IOException {
         if (checks.isEmpty() || checks.size() > MAX_MANIFEST_ADMISSION_OPS) {
             throw new IOException("Manifest CLOSED admission exceeds its native operation limit");
         }
@@ -1551,6 +1706,11 @@ public final class ZKProfileReservationStore {
             }
             var record = op.toRequestRecord();
             if (record instanceof CheckVersionRequest check && check.getVersion() >= 0) {
+                continue;
+            }
+            if (record instanceof SetDataRequest write && op.getPath().equals(preparationPath)
+                    && write.getVersion() >= 0) {
+                ProfileManifestPreparation.decode(write.getData());
                 continue;
             }
             if (!(record instanceof CreateRequest create) || create.getFlags() != CreateMode.PERSISTENT.toFlag()

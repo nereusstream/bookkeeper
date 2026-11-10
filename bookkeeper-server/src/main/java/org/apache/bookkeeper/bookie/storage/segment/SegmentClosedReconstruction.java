@@ -61,7 +61,7 @@ import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
 
 /** Controlled offline recovery of the complete original CLOSED DATA file set. */
 public final class SegmentClosedReconstruction {
-    private static final int COPY_BYTES = 64 * 1024;
+    static final int COPY_BYTES = 64 * 1024;
     private static final String CANDIDATE = "image";
     private static final String INTERRUPTED = "interrupted-image";
     private static final String RETAINED = "retained-old";
@@ -239,11 +239,10 @@ public final class SegmentClosedReconstruction {
                 layout.hashMap(), layout.list());
     }
 
-    static ProfileManifestClosedAdmission.Receipt admitManifestClosed(ManifestSegmentStorage.AuditedClosedGraph audit,
-            ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations,
+    static PreparedManifestAdmission prepareManifestAdmission(ManifestSegmentStorage.AuditedClosedGraph audit,
             ZKProfileReservationStore.ClosedReconstructionReader reader, ZKProfileRegistrationStore registry,
             OldPublisher publisher, NativeIO.FileIdentity bookieRoot, UUID operation)
-            throws IOException, InterruptedException {
+            throws IOException {
         var observation = audit.observation;
         var graph = observation.data().closed().dependencies();
         if (graph.arenas().stream().noneMatch(arena ->
@@ -278,8 +277,8 @@ public final class SegmentClosedReconstruction {
         var exited = observation.publisher();
         var request = new ProfileManifestClosedAdmission(scope, operation, exited.pid(), exited.startMillis(),
                 exited.session(), point, arenas, ledgers);
-        return reservations.admitManifestClosed(metadata, new PreparedManifestAdmission(request, reader,
-                audit.owner, target, publisher, registry, audit.registrations));
+        return new PreparedManifestAdmission(request, reader, audit.owner, target, publisher, registry,
+                audit.registrations);
     }
 
     /** Only the locked manifest audit can prepare the original graph and its registered source observations. */
@@ -772,6 +771,13 @@ public final class SegmentClosedReconstruction {
     private static ProfileClosedReconstruction.Image copyFreshImage(SegmentOwnedFiles files, NativeIO nativeIo,
             Path originalPath, Path candidate, ProfileClosedReconstruction.Image original, ByteBuffer buffer,
             SegmentFileIo io) throws Exception {
+        return copyFreshImage(files, nativeIo, originalPath, candidate, original, buffer, io, () -> { });
+    }
+
+    static ProfileClosedReconstruction.Image copyFreshImage(SegmentOwnedFiles files, NativeIO nativeIo,
+            Path originalPath, Path candidate, ProfileClosedReconstruction.Image original, ByteBuffer buffer,
+            SegmentFileIo io, SegmentDataRecovery.AuditCheckpoint checkpoint) throws Exception {
+        checkpoint.check();
         var permissions = Files.getPosixFilePermissions(originalPath, LinkOption.NOFOLLOW_LINKS);
         NativeIO.FileIdentity fresh;
         try (var input = SegmentOwnedFiles.openRegularReadOnly(files, originalPath);
@@ -785,9 +791,11 @@ public final class SegmentClosedReconstruction {
             }
             var digest = MessageDigest.getInstance("SHA-256");
             for (long offset = 0; offset < original.length();) {
+                checkpoint.check();
                 int count = (int) Math.min(buffer.capacity(), original.length() - offset);
                 buffer.clear().limit(count);
                 SegmentFileIo.readFully(input, buffer, offset);
+                checkpoint.check();
                 io.writeFully(output, buffer, offset);
                 digest.update(buffer);
                 offset += count;
@@ -795,12 +803,15 @@ public final class SegmentClosedReconstruction {
             if (!original.sha256().equals(HexFormat.of().formatHex(digest.digest()))) {
                 throw new IOException("Original DATA changed while generating the complete fresh image");
             }
+            checkpoint.check();
             io.force(output, true);
-            if (!original.sha256().equals(hash(output, original.length(), buffer))) {
+            checkpoint.check();
+            if (!original.sha256().equals(hash(output, original.length(), buffer, checkpoint))) {
                 throw new IOException("Fresh DATA readback differs from the complete original image");
             }
         }
         files.requireHealthy();
+        checkpoint.check();
         return new ProfileClosedReconstruction.Image(fresh, original.length(), original.sha256());
     }
 
@@ -819,12 +830,14 @@ public final class SegmentClosedReconstruction {
         }
     }
 
-    private static String hash(java.nio.channels.FileChannel file, long length, ByteBuffer buffer) throws Exception {
+    private static String hash(java.nio.channels.FileChannel file, long length, ByteBuffer buffer,
+            SegmentDataRecovery.AuditCheckpoint checkpoint) throws Exception {
         if (file.size() != length) {
             throw new IOException("Reconstruction file length differs from its native binding");
         }
         var digest = MessageDigest.getInstance("SHA-256");
         for (long offset = 0; offset < length;) {
+            checkpoint.check();
             int count = (int) Math.min(buffer.capacity(), length - offset);
             buffer.clear().limit(count);
             SegmentFileIo.readFully(file, buffer, offset);
@@ -1071,13 +1084,20 @@ public final class SegmentClosedReconstruction {
     private static void verifyImage(SegmentOwnedFiles files, NativeIO nativeIo, IsolatedSegmentConfig config,
             SegmentFileHeader identity, Path path, ProfileClosedReconstruction.FileImage row, ByteBuffer buffer)
             throws Exception {
+        verifyImage(files, nativeIo, config, identity, path, row, buffer, () -> { });
+    }
+
+    static void verifyImage(SegmentOwnedFiles files, NativeIO nativeIo, IsolatedSegmentConfig config,
+            SegmentFileHeader identity, Path path, ProfileClosedReconstruction.FileImage row, ByteBuffer buffer,
+            SegmentDataRecovery.AuditCheckpoint checkpoint) throws Exception {
+        checkpoint.check();
         var image = row.image();
         if (!requireOriginalFile(path, image.length()).equals(image.object())) {
             throw new IOException("Reconstruction path does not name the exact READY object");
         }
         try (var file = SegmentOwnedFiles.openRegularReadOnly(files, path)) {
             if (!files.fileIdentity(file, nativeIo).equals(image.object())
-                    || !image.sha256().equals(hash(file, image.length(), buffer))) {
+                    || !image.sha256().equals(hash(file, image.length(), buffer, checkpoint))) {
                 throw new IOException("Reconstruction object does not match the exact READY image");
             }
             ByteBuffer header = ByteBuffer.allocate(config.alignment());
@@ -1087,6 +1107,7 @@ public final class SegmentClosedReconstruction {
         if (!requireOriginalFile(path, image.length()).equals(image.object())) {
             throw new IOException("Reconstruction image path changed after its original close");
         }
+        checkpoint.check();
     }
 
     private static void rename(NativeIO nativeIo, Path source, Path target) throws IOException {
@@ -1110,7 +1131,7 @@ public final class SegmentClosedReconstruction {
         return object;
     }
 
-    private static NativeIO.FileIdentity requireOriginalFile(Path path, long length) throws IOException {
+    static NativeIO.FileIdentity requireOriginalFile(Path path, long length) throws IOException {
         if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
             throw new IOException("Reconstruction requires the original regular DATA object");
         }

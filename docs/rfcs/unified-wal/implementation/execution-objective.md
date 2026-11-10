@@ -86,7 +86,9 @@
 
 步骤 7→14 增加 [受控退出与两份当前来源核验](local-storage/README.md#固定-manifest-的受控退出与两份来源核验)。原进程退出与注册缺失、原图物理审计和两个 survivor 的逐条 mTLS 核对绑定同一次持锁观察。
 
-步骤 7→14 增加 [固定 manifest 的原生 CLOSED 准入](local-storage/README.md#固定-manifest-的原生-closed-准入)。同一次原图持锁审计在全部账本和已核对 survivor 的原生栅栏下创建历史 ADMITTED。未知结果保留原锁与额度直到实际回调终结，可经新一次原图审计确认同一记录。生产持续隔离、镜像发布、首次后继 OPEN 和启动仍待独立验证。
+步骤 7→14 增加 [固定 manifest 的原生 CLOSED 准入](local-storage/README.md#固定-manifest-的原生-closed-准入)。同一次原图持锁审计在全部账本和已核对 survivor 的原生栅栏下创建历史 ADMITTED。未知结果保留原锁与额度直到实际回调终结，可经新一次原图审计确认同一记录。
+
+步骤 7→14 增加 [固定 manifest 的准备栅栏与候选镜像](local-storage/README.md#固定-manifest-的准备栅栏与候选镜像)。确认原生准备 attempt 并等其实际回调终结后，在原图锁内准备全部 fresh 文件。原 operation 的已有暂存前缀导致整组拒绝，旧对象保持。生产持续隔离、READY、正式发布和首次后继 OPEN 仍待独立验证。
 
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 

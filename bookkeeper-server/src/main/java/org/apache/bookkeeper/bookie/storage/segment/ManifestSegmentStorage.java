@@ -23,11 +23,14 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -68,6 +71,7 @@ import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileManifestClosedAdmission;
+import org.apache.bookkeeper.discover.profile.ProfileManifestPreparation;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
@@ -81,6 +85,8 @@ import org.apache.bookkeeper.util.DiskChecker;
 
 /** Local Profile-only graph. The manifest fixes routing independently of execution placement. */
 final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHandler.DataOperations {
+    private static final Set<PosixFilePermission> IMAGE_STAGE_MODE = PosixFilePermissions.fromString("rwx------");
+
     record Capacity(long dataBytes, long controlBytes) {
         Capacity withAdditionalData(long bytes) {
             return new Capacity(SegmentControlCapacity.sum(dataBytes, bytes), controlBytes);
@@ -127,6 +133,12 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     record ClosedSourceObservation(ClosedDataObservation data, SegmentClosedReconstruction.PublisherExit publisher,
             List<ProfileClosedReconstruction.Member> sources) { }
+
+    record PreparedArenaImages(UUID arena, Path stage, FileIdentity stageObject,
+            List<ProfileClosedReconstruction.FileImage> files) { }
+
+    /** Completed local observations. This value carries no publication authority after the guards drain. */
+    record ManifestImageObservation(ProfileManifestPreparation.Receipt attempt, List<PreparedArenaImages> arenas) { }
 
     static final class AuditedClosedGraph {
         final ManifestSegmentStorage owner;
@@ -550,7 +562,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             throws Exception {
         long deadline = SegmentClosedReconstruction.manifestClosedDeadline(timeout);
         return inspectClosedGraph(maximumRows, maximumDataBytes, maximumEntries, deadline, metadata, reservations,
-                sources, publisher, null, 0, audited -> audited.observation);
+                sources, publisher, null, 0, 0, audited -> audited.observation);
     }
 
     ProfileManifestClosedAdmission.Receipt admitClosedManifest(int maximumRows, long maximumDataBytes,
@@ -564,20 +576,216 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         var reader = reservations.closedReconstructionReader(metadata, bookieIdentity.bookieId(),
                 bookieIdentity.incarnation(), SegmentClosedReconstruction.manifestClosedDeadline(timeout));
         return inspectClosedGraph(maximumRows, maximumDataBytes, maximumEntries, reader.deadline(),
-                metadata, reservations, sources, publisher, reader,
+                metadata, reservations, sources, publisher, reader, 0,
                 ZKProfileReservationStore.manifestAdmissionControlBytes(),
                 audited -> {
                     var root = SegmentClosedReconstruction.observeDirectory(bookieFiles, new NativeIOImpl(),
                             control.directory());
-                    return SegmentClosedReconstruction.admitManifestClosed(audited, metadata, reservations,
-                            reader, sources.registry(), publisher, root, operation);
+                    var prepared = SegmentClosedReconstruction.prepareManifestAdmission(
+                            audited, reader, sources.registry(), publisher, root, operation);
+                    return reservations.admitManifestClosed(metadata, prepared);
                 });
+    }
+
+    ManifestImageObservation prepareClosedManifestImages(int maximumRows, long maximumDataBytes, int maximumEntries,
+            Duration timeout, ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations,
+            SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher,
+            UUID operation, SegmentFileIo imageIo) throws Exception {
+        Objects.requireNonNull(sources, "sources");
+        Objects.requireNonNull(publisher, "publisher");
+        Objects.requireNonNull(operation, "operation");
+        Objects.requireNonNull(imageIo, "imageIo");
+        reservations.requireManifestAdmissionClient(sources.registry());
+        var reader = reservations.closedReconstructionReader(metadata, bookieIdentity.bookieId(),
+                bookieIdentity.incarnation(), SegmentClosedReconstruction.manifestClosedDeadline(timeout));
+        long deadline = reader.deadline();
+        long controlBytes = SegmentControlCapacity.sum(ZKProfileReservationStore.manifestAdmissionControlBytes(),
+                manifestImageControlBytes(manifest));
+        return inspectClosedGraph(maximumRows, maximumDataBytes, maximumEntries, deadline, metadata, reservations,
+                sources, publisher, reader, manifestImageDataBytes(), controlBytes, audited -> {
+                    var nativeIo = new NativeIOImpl();
+                    var paths = recoveryPathIdentities();
+                    var original = audited.observation.data();
+                    var root = SegmentClosedReconstruction.observeDirectory(bookieFiles, nativeIo, control.directory());
+                    var prepared = SegmentClosedReconstruction.prepareManifestAdmission(audited, reader,
+                            sources.registry(), publisher, root, operation);
+                    var admitted = reservations.requireManifestAdmission(prepared);
+                    var stages = new ArrayList<Path>(members.size());
+                    for (var member : members) {
+                        requireRecoveryObservationLive(deadline);
+                        Path stage = member.config.directory().resolve(".closed-manifest-image-" + operation);
+                        requireAbsentImageStage(stage);
+                        stages.add(stage);
+                    }
+                    requireRecoveryPaths(paths, deadline);
+                    var attempt = reservations.claimManifestPreparation(metadata, prepared, admitted);
+                    requireRecoveryPaths(paths, deadline);
+                    for (Path stage : stages) {
+                        requireRecoveryObservationLive(deadline);
+                        requireAbsentImageStage(stage);
+                    }
+                    SegmentDataRecovery.AuditCheckpoint checkpoint = () -> requireClosedAuditLive(reader);
+                    var buffer = ByteBuffer.allocate(SegmentClosedReconstruction.COPY_BYTES);
+                    var candidates = copyManifestImages(original, stages, paths, nativeIo, buffer, imageIo, checkpoint);
+                    if (!original.closed().dependencies().equals(readRecoveryDependencies(
+                            new SegmentStorageInspector.RecoveryRows(maximumRows), deadline))) {
+                        throw new IOException("Original manifest controls changed during image preparation");
+                    }
+                    requireRecoveryPaths(paths, deadline);
+                    verifyManifestImages(original, candidates, nativeIo, buffer, checkpoint);
+                    reservations.requireCurrentManifestPreparation(prepared, attempt);
+                    verifyManifestImagePaths(original, candidates, nativeIo, checkpoint);
+                    requireRecoveryPaths(paths, deadline);
+                    return new ManifestImageObservation(attempt, candidates);
+                });
+    }
+
+    static long manifestImageDataBytes() throws IOException {
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        return SegmentControlCapacity.sum(layout.bytes(SegmentClosedReconstruction.COPY_BYTES),
+                layout.bytes(4096), 6 * layout.buffer());
+    }
+
+    static long manifestImageControlBytes(SegmentArenaManifest manifest) throws IOException {
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        long files = manifest.arenas().stream().mapToLong(SegmentArenaManifest.Arena::dataFiles).sum();
+        long file = SegmentControlCapacity.sum(layout.object(ProfileClosedReconstruction.FileImage.class),
+                layout.object(ProfileClosedReconstruction.Image.class), layout.object(FileIdentity.class),
+                2 * layout.hashEntry(), layout.string(64), layout.refs(4));
+        // The retained paths are one stage per Arena. Source and destination file paths are transient.
+        long arena = SegmentControlCapacity.sum(layout.object(PreparedArenaImages.class),
+                4 * layout.string(4096 + 128), layout.list(), 5 * layout.captured(16));
+        return SegmentControlCapacity.sum(layout.object(ManifestImageObservation.class), layout.hashMap(),
+                SegmentControlCapacity.times(manifest.arenas().size() + 1L, arena),
+                SegmentControlCapacity.times(files, file), layout.refs(8L * manifest.arenas().size()));
+    }
+
+    private static void requireAbsentImageStage(Path stage) throws IOException {
+        try {
+            Files.readAttributes(stage, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+        } catch (NoSuchFileException absent) {
+            return;
+        }
+        throw new IOException("Manifest image staging already exists: " + stage);
+    }
+
+    private List<PreparedArenaImages> copyManifestImages(ClosedDataObservation original, List<Path> stages,
+            List<FileIdentity> paths, NativeIOImpl nativeIo, ByteBuffer buffer, SegmentFileIo imageIo,
+            SegmentDataRecovery.AuditCheckpoint checkpoint) throws Exception {
+        var objects = new HashSet<>(paths);
+        for (var arena : original.arenas()) {
+            arena.files().forEach(file -> objects.add(file.image().object()));
+        }
+        var result = new ArrayList<PreparedArenaImages>(members.size());
+        for (int i = 0; i < members.size(); i++) {
+            checkpoint.check();
+            var member = members.get(i);
+            var before = original.arenas().get(i);
+            Path root = member.config.directory();
+            Path stage = stages.get(i);
+            Files.createDirectory(stage, PosixFilePermissions.asFileAttribute(IMAGE_STAGE_MODE));
+            var stageObject = observeImageStage(member, nativeIo, stage, before.rootObject(), checkpoint);
+            if (!objects.add(stageObject)) {
+                throw new IOException("Manifest image stage aliases an original graph object");
+            }
+            var files = new ArrayList<ProfileClosedReconstruction.FileImage>(before.files().size());
+            for (var file : before.files()) {
+                int index = file.index();
+                var image = SegmentClosedReconstruction.copyFreshImage(member.owned, nativeIo,
+                        root.resolve("data-" + index), stage.resolve("image-" + index), file.image(),
+                        buffer, imageIo, checkpoint);
+                if (!objects.add(image.object())) {
+                    throw new IOException("Manifest candidate aliases another graph object");
+                }
+                files.add(new ProfileClosedReconstruction.FileImage(index, image));
+            }
+            syncImageDirectory(member.owned, nativeIo, stage, stageObject, checkpoint);
+            syncImageDirectory(member.owned, nativeIo, root, before.rootObject(), checkpoint);
+            result.add(new PreparedArenaImages(member.identity.arenaId(), stage, stageObject, List.copyOf(files)));
+        }
+        return List.copyOf(result);
+    }
+
+    private void verifyManifestImages(ClosedDataObservation original, List<PreparedArenaImages> candidates,
+            NativeIOImpl nativeIo, ByteBuffer buffer, SegmentDataRecovery.AuditCheckpoint checkpoint) throws Exception {
+        for (int i = 0; i < members.size(); i++) {
+            checkpoint.check();
+            var member = members.get(i);
+            var before = original.arenas().get(i);
+            var image = candidates.get(i);
+            if (!image.stageObject().equals(observeImageStage(member, nativeIo, image.stage(), before.rootObject(),
+                    checkpoint))) {
+                throw new IOException("Manifest image stage changed after synchronization");
+            }
+            SegmentClosedReconstruction.verifyOriginalPaths(member.config.directory(), before.files());
+            for (var file : image.files()) {
+                SegmentClosedReconstruction.verifyImage(member.owned, nativeIo, member.config, member.identity,
+                        image.stage().resolve("image-" + file.index()), file, buffer, checkpoint);
+            }
+            member.owned.requireHealthy();
+        }
+        bookieFiles.requireHealthy();
+    }
+
+    private void verifyManifestImagePaths(ClosedDataObservation original, List<PreparedArenaImages> candidates,
+            NativeIOImpl nativeIo, SegmentDataRecovery.AuditCheckpoint checkpoint) throws IOException {
+        for (int i = 0; i < members.size(); i++) {
+            var member = members.get(i);
+            var before = original.arenas().get(i);
+            var image = candidates.get(i);
+            if (!image.stageObject().equals(observeImageStage(member, nativeIo, image.stage(), before.rootObject(),
+                    checkpoint))) {
+                throw new IOException("Manifest image stage changed during final native verification");
+            }
+            SegmentClosedReconstruction.verifyOriginalPaths(member.config.directory(), before.files());
+            for (var file : image.files()) {
+                checkpoint.check();
+                if (!file.image().object().equals(SegmentClosedReconstruction.requireOriginalFile(
+                        image.stage().resolve("image-" + file.index()), file.image().length()))) {
+                    throw new IOException("Manifest candidate path changed during final native verification");
+                }
+            }
+        }
+    }
+
+    private static FileIdentity observeImageStage(Member member, NativeIOImpl nativeIo, Path stage,
+            FileIdentity expectedRoot, SegmentDataRecovery.AuditCheckpoint checkpoint) throws IOException {
+        checkpoint.check();
+        Path root = member.config.directory();
+        var object = SegmentClosedReconstruction.observeDirectory(member.owned, nativeIo, stage);
+        if (object.device() != expectedRoot.device()
+                || !Files.getPosixFilePermissions(stage, LinkOption.NOFOLLOW_LINKS).equals(IMAGE_STAGE_MODE)
+                || !Files.getOwner(stage, LinkOption.NOFOLLOW_LINKS)
+                        .equals(Files.getOwner(root, LinkOption.NOFOLLOW_LINKS))
+                || !expectedRoot.equals(SegmentClosedReconstruction.observeDirectory(member.owned, nativeIo, root))) {
+            throw new IOException("Manifest image stage does not belong to its original Arena");
+        }
+        checkpoint.check();
+        return object;
+    }
+
+    private static void syncImageDirectory(SegmentOwnedFiles files, NativeIOImpl nativeIo, Path directory,
+            FileIdentity expected, SegmentDataRecovery.AuditCheckpoint checkpoint) throws IOException {
+        checkpoint.check();
+        try (var channel = SegmentOwnedFiles.open(files, directory, StandardOpenOption.READ,
+                LinkOption.NOFOLLOW_LINKS)) {
+            if (!expected.equals(files.fileIdentity(channel, nativeIo))) {
+                throw new IOException("Manifest image directory changed before synchronization");
+            }
+            checkpoint.check();
+            channel.force(true);
+        }
+        if (!expected.equals(SegmentClosedReconstruction.observeDirectory(files, nativeIo, directory))) {
+            throw new IOException("Manifest image directory changed after synchronization");
+        }
+        checkpoint.check();
     }
 
     private <R> R inspectClosedGraph(int maximumRows, long maximumDataBytes, int maximumEntries, long deadline,
             ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations,
             SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher,
-            ZKProfileReservationStore.ClosedReconstructionReader admissionReader, long additionalControlBytes,
+            ZKProfileReservationStore.ClosedReconstructionReader admissionReader, long additionalDataBytes,
+            long additionalControlBytes,
             CheckedRecoveryResult<AuditedClosedGraph, R> complete) throws Exception {
         if (maximumDataBytes < 1 || maximumEntries < 1 || maximumEntries > 65536) {
             throw new IllegalArgumentException("Manifest CLOSED audit requires bounded DATA geometry");
@@ -593,7 +801,8 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                 sources == null ? 0 : SegmentClosedReconstruction.manifestSourceControlBytes(),
                 additionalControlBytes);
         return withRecoveryDependenciesUntil(maximumRows, deadline,
-                closedDataCapacity(manifest, maximumRows, maximumEntries), controlBytes, graph -> {
+                SegmentControlCapacity.sum(closedDataCapacity(manifest, maximumRows, maximumEntries),
+                        additionalDataBytes), controlBytes, graph -> {
                     var reader = admissionReader != null ? admissionReader
                             : reservations.closedReconstructionReader(metadata, bookieIdentity.bookieId(),
                                     bookieIdentity.incarnation(), deadline);
@@ -635,7 +844,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         synchronized (gate) {
             requireRecoveryObservationTime(deadline);
             if (stopping || manifestAdmissionMutation != null) {
-                throw new IOException("Manifest CLOSED admission owner retired or already submitted");
+                throw new IOException("Manifest CLOSED mutation owner retired or already submitted");
             }
             manifestAdmissionMutation = mutation;
         }
@@ -728,7 +937,12 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     }
 
     private void requireClosedAuditLive(SegmentClosedReconstruction.ManifestClosedCohort cohort) throws IOException {
-        cohort.reader().requireTime();
+        requireClosedAuditLive(cohort.reader());
+    }
+
+    private void requireClosedAuditLive(ZKProfileReservationStore.ClosedReconstructionReader reader)
+            throws IOException {
+        reader.requireTime();
         synchronized (gate) {
             if (stopping) {
                 throw new IOException("Manifest CLOSED audit retired");
