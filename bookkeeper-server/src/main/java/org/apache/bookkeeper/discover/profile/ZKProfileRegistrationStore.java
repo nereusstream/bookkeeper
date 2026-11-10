@@ -18,6 +18,7 @@
  */
 package org.apache.bookkeeper.discover.profile;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Arrays;
@@ -209,6 +210,22 @@ public final class ZKProfileRegistrationStore implements ProfileRegistrationStor
             return new PeerReadResult(ReadStatus.NOT_FOUND, null);
         }
         return current;
+    }
+
+    void requireManifestClosedClient(ZooKeeper mutationClient) throws IOException {
+        if (mutationClient != zk) {
+            throw new IOException("Manifest CLOSED sources must borrow the admission ZooKeeper client");
+        }
+    }
+
+    List<Op> manifestClosedSourceChecks(RegisteredPeer peer) {
+        String path = path(peer.projection().bookieId());
+        var identity = peer.identity;
+        return List.of(Op.check(path, identity.readiness().version()),
+                Op.check(path + "/birth-" + identity.readinessBirth(), 0),
+                Op.check(path + "/service-info", identity.service().version()),
+                Op.check(path + "/writable", identity.writable().version()),
+                Op.check(path + "/session-" + identity.nonce(), identity.marker().version()));
     }
 
     /** Bounded persistent cohort watch. Events only request a cold audit; they do not classify peers. */

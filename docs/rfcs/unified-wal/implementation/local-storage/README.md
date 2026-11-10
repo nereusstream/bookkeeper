@@ -968,9 +968,19 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 在同一组原锁下读取 native CLOSED、扫描原 DATA，再逐非空账本打开原 ensemble 的两个当前 DATA-only mTLS 连接。使用同一个 native reader 截止时间，分别验证 SDK 摘要，并与本地 entry 的累计长度、payload 长度和 SHA 比对。EMPTY 使用既有无 payload 证明。每对连接实际排空后，仅保留有界的原注册观察和摘要。完整 native cohort、两份原注册、目标离线状态、原文件及控制后验通过后才交付。
 
-本地 DATA 与两个当前来源的一致性已有只读观察入口。全图重建准入、持久发布及 granted OPEN 的首次重开仍待验证。
+本地 DATA 与两个当前来源的一致性已有只读观察入口。该入口交付后原锁已释放。全图准入在下述独立入口中沿用同一审计。
 
 真实三 Arena 夹具在原 Bookie 子 JVM 仍运行时捕获见证，随后确认 `halt(23)` 和原注册失效。两个非空账本分别由两份原 survivor 读回并比对，EMPTY 使用原 terminal。单个 survivor 的实际晚读挂起期间，关闭返回未排空，原图锁和两类额度保留。释放后该读被拒绝，整组失败。末轮 native 读取挂起期间撤回一个原 survivor 的注册，完整观察拒绝。省略末轮注册复验时，同一反例错误交付。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-source-audit-parent-d8d834ad`。
+
+### 固定 manifest 的原生 CLOSED 准入
+
+以 `2953418734` 为基线。受控 Profile-only 入口在原图持锁期间完成本地 DATA、原生 CLOSED 和两份当前 survivor 的审计。原控制和路径后验通过后，要求至少一个原 Arena 仍处于 OPEN 且保有当前 grant。独立的 `UWMA` schema 1 记录绑定原 publisher 的 PID、出生及注册 session、共同 Bookie 控制点、完整逐 Arena 控制与文件向量，以及逐账本的原路由、P/L、SELF 或 EMPTY、CLOSED 与来源摘要。固定槽位由 Bookie、incarnation、commissioned manifest 和有序 Arena UUID/旧 epoch 向量确定。同一个槽位只接受原操作及精确请求。
+
+同一原生事务核对全部账本的 membership、lifecycle 和 CLOSED 证据，以及实际读取过的原 survivor 注册版本与出生标记，再创建不可变 ADMITTED 和同一出生事务的保护子节点。注册、标准 ledger metadata 与 reservation 使用同一受控原生 ZooKeeper 会话。该会话在构造时从实际连接串绑定 chroot。提交前按 ZooKeeper 实际路径计算每条路径的 4096 字节上限，并以原生序列化核对 384 个操作及加上 chroot 后的 512 KiB 事务体上限。原受控进程退出和目标注册缺失在事务前后复核，ZooKeeper 的事务栅栏约束已存在的正向证据。生产持续隔离仍需外部证明。
+
+准入、确认及回调排空共用一个截止时间。实际回调未终结时，原 Bookie/Arena 的锁与 DATA、CONTROL 额度保持占用。未知结果保留原槽位，通过重新执行原审计并读取精确记录和出生标记确认。ADMITTED 仅记录原图证据。镜像、READY、action 7 和生产启动仍待各自验收。
+
+最大规范向量为 64 个 Arena、4096 个 DATA 文件、64 个可路由 shard 和 16 个账本，实际记录 242,523 字节，上限为 256 KiB。非 ASCII chroot 夹具比对实际原生事务体，并验证加前缀后超限时在 owner gate 前拒绝。真实三 Arena 审计覆盖晚 EMPTY 删除、原 survivor 撤回、已提交回调超时后的七把锁与两类额度，以及同操作精确重试。移除原生 survivor 栅栏后，撤回的反例实际提交了事务。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-admitted-parent-29534187`。
 
 ### 单 DATA 文件的 CLOSED 重建准入
 

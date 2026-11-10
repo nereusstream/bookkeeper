@@ -38,6 +38,8 @@ import org.apache.bookkeeper.client.ClientContext;
 import org.apache.bookkeeper.client.ProfileRecoveryReadHandle;
 import org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.ReadStatus;
 import org.apache.bookkeeper.net.BookieId;
+import org.apache.zookeeper.Op;
+import org.apache.zookeeper.ZooKeeper;
 
 /** Borrows transport infrastructure and owns the two actual data-only registrations and their audit reader. */
 public final class ProfileClosedReconstructionSources implements AutoCloseable {
@@ -130,6 +132,19 @@ public final class ProfileClosedReconstructionSources implements AutoCloseable {
         }
         ProfileZKReadClient.requireTime(deadline);
         return ProfileClosedReconstruction.digest(bytes.toByteArray());
+    }
+
+    void requireManifestClosedClient(ZooKeeper mutationClient) throws IOException {
+        if (audit != null || !connections.isEmpty()) {
+            throw new IOException("Manifest CLOSED admission requires drained source connections");
+        }
+        registry.requireManifestClosedClient(mutationClient);
+    }
+
+    void addManifestClosedChecks(List<Op> checks) {
+        for (var peer : peers.values()) {
+            checks.addAll(registry.manifestClosedSourceChecks(peer));
+        }
     }
 
     public static void requireOffline(ZKProfileRegistrationStore registry, BookieId offline, long deadline)

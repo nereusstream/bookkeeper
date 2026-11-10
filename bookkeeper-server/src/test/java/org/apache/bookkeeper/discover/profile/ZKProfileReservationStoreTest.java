@@ -23,15 +23,20 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.zip.CRC32C;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorIdentity;
 import org.apache.bookkeeper.common.profile.control.ProfileAuthorityKey;
@@ -39,9 +44,12 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlOperation;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore.CreateStatus;
+import org.apache.bookkeeper.zookeeper.ZooKeeperWatcherBase;
+import org.apache.jute.BinaryOutputArchive;
 import org.apache.zookeeper.AsyncCallback.MultiCallback;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException.Code;
+import org.apache.zookeeper.MultiOperationRecord;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.OpResult;
 import org.apache.zookeeper.Watcher;
@@ -50,6 +58,76 @@ import org.apache.zookeeper.ZooKeeper;
 import org.junit.Test;
 
 public class ZKProfileReservationStoreTest extends ProfileZKTestBase {
+    @Test
+    public void manifestAdmissionCountsTheActualNativeBodyAndRejectsOverflowBeforeTheOwnerGate() throws Exception {
+        String chroot = "/" + "目录".repeat(10);
+        int prefixBytes = chroot.getBytes(StandardCharsets.UTF_8).length;
+        int limit = 512 * 1024;
+        first.create(chroot, new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+        var watcher = new ZooKeeperWatcherBase(10000, false);
+        var nativeBytes = new AtomicInteger();
+        var nativeTransactions = new AtomicInteger();
+        try (var client = new ZKProfileReservationStore.ManifestAdmissionClient(
+                cluster.getZooKeeperConnectString() + chroot, 10000, watcher) {
+            @Override
+            protected void multiInternal(MultiOperationRecord request, MultiCallback callback, Object context) {
+                try {
+                    nativeBytes.set(multiBytes(request));
+                    nativeTransactions.incrementAndGet();
+                } catch (IOException invalid) {
+                    throw new AssertionError(invalid);
+                }
+                super.multiInternal(request, callback, context);
+            }
+        }) {
+            watcher.waitForConnection();
+            var store = store(client);
+            var registration = new ZKProfileRegistrationStore(client, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    Duration.ofSeconds(5));
+            store.requireManifestAdmissionClient(registration);
+            assertThrows(IOException.class, () -> store(first).requireManifestAdmissionClient(registration));
+            var different = new ZKProfileRegistrationStore(second, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    Duration.ofSeconds(5));
+            assertThrows(IOException.class, () -> store.requireManifestAdmissionClient(different));
+
+            var small = List.of(Op.create("/record", new byte[]{3}, ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    CreateMode.PERSISTENT), Op.create("/record/birth", new byte[0],
+                    ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT));
+            int counted = store.validateManifestAdmissionMulti(small);
+            assertEquals(multiBytes(new MultiOperationRecord(small)) + small.size() * prefixBytes, counted);
+            var reply = new CompletableFuture<Integer>();
+            client.multi(small, (code, path, context, results) -> reply.complete(code), null);
+            assertEquals(Code.OK.intValue(), reply.get(5, TimeUnit.SECONDS).intValue());
+            assertEquals(counted, nativeBytes.get());
+            assertArrayEquals(new byte[]{3}, first.getData(chroot + "/record", false, null));
+            assertEquals(List.of("birth"), first.getChildren(chroot + "/record", false));
+            assertNull(first.exists("/record", false));
+
+            var oversized = new ArrayList<>(Collections.nCopies(200, Op.check("/" + "a".repeat(2590), 0)));
+            oversized.add(Op.create("/oversized", new byte[0], ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT));
+            int clientBytes = multiBytes(new MultiOperationRecord(oversized));
+            assertTrue(clientBytes < limit);
+            assertTrue(clientBytes + oversized.size() * prefixBytes > limit);
+            // No Prepared can be supplied by this fixture. The byte refusal must precede its gate and Pending.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            var failure = assertThrows(IOException.class, () -> store.submitManifestAdmission(oversized, null,
+                    deadline));
+            assertTrue(failure.getMessage().contains("multi byte limit"));
+            assertThrows(IOException.class, () -> store.validateManifestAdmissionMulti(
+                    Collections.nCopies(385, Op.check("/record", 0))));
+            assertThrows(IOException.class, () -> store.validateManifestAdmissionMulti(
+                    List.of(Op.check("/" + "a".repeat(4096 - prefixBytes), 0))));
+            assertEquals(1, nativeTransactions.get());
+            assertNull(first.exists(chroot + "/oversized", false));
+        }
+    }
+
+    private static int multiBytes(MultiOperationRecord record) throws IOException {
+        var output = new ByteArrayOutputStream();
+        record.serialize(BinaryOutputArchive.getArchive(output), "multi");
+        return output.size();
+    }
+
     @Test
     public void retentionPolicyUsesNativeCasAndPreservesImmutablePriorRevisionAfterLostReply() throws Exception {
         var source = store(first);
@@ -114,7 +192,7 @@ public class ZKProfileReservationStoreTest extends ProfileZKTestBase {
                 scope("b1:3181", 2, 8), scope("b2:3181", 5, 8), scope("b3:3181", 6, 8)));
     }
 
-    private static ZKProfileReservationStore store(TestClient client) {
+    private static ZKProfileReservationStore store(ZooKeeper client) {
         return new ZKProfileReservationStore(client, ROOT, ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5));
     }
 

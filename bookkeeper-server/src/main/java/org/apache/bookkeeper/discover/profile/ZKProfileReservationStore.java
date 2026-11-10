@@ -18,7 +18,9 @@ package org.apache.bookkeeper.discover.profile;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -51,17 +53,23 @@ import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.meta.LedgerMetadataSerDe;
 import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.versioning.Versioned;
+import org.apache.jute.BinaryOutputArchive;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.CreateOptions;
 import org.apache.zookeeper.KeeperException.Code;
+import org.apache.zookeeper.MultiOperationRecord;
 import org.apache.zookeeper.Op;
 import org.apache.zookeeper.OpResult;
+import org.apache.zookeeper.Watcher;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
+import org.apache.zookeeper.client.ConnectStringParser;
 import org.apache.zookeeper.common.PathUtils;
 import org.apache.zookeeper.data.ACL;
 import org.apache.zookeeper.data.Id;
 import org.apache.zookeeper.data.Stat;
+import org.apache.zookeeper.proto.CheckVersionRequest;
+import org.apache.zookeeper.proto.CreateRequest;
 
 /**
  * Experimental initial lifecycle: immutable reservation, bounded target page, READY and DELETE_INTENT CAS.
@@ -69,6 +77,10 @@ import org.apache.zookeeper.data.Stat;
  * No data deletion, page GC, local activation, writer, retry, watcher or client ownership is supplied.
  */
 public final class ZKProfileReservationStore {
+    private static final int MAX_MANIFEST_ADMISSION_OPS = 384;
+    private static final int MAX_MANIFEST_ADMISSION_MULTI_BYTES = 512 * 1024;
+    private static final int MAX_MANIFEST_ADMISSION_PATH_BYTES = 4096;
+
     public enum CreateStatus { APPLIED, ALREADY_APPLIED, CONFLICT, QUARANTINED, DURABILITY_UNKNOWN, UNAVAILABLE }
 
     public record Snapshot(long storeVersion, ProfileReservation reservation, long birthZxid, int rootDataVersion,
@@ -1348,6 +1360,239 @@ public final class ZKProfileReservationStore {
                 ProfileClosedReconstruction.digest(published.bytes()));
     }
 
+    /** Raw session for the controlled admission, with its actual native path prefix bound at construction. */
+    public static class ManifestAdmissionClient extends ZooKeeper {
+        private record Connection(String connectString, int chrootBytes) {
+            private static Connection parse(String connectString) {
+                String chroot = new ConnectStringParser(connectString).getChrootPath();
+                int bytes = chroot == null ? 0 : chroot.getBytes(StandardCharsets.UTF_8).length;
+                if (bytes >= MAX_MANIFEST_ADMISSION_PATH_BYTES) {
+                    throw new IllegalArgumentException("Manifest admission chroot exceeds the native path limit");
+                }
+                return new Connection(connectString, bytes);
+            }
+        }
+
+        private final int chrootBytes;
+
+        public ManifestAdmissionClient(String connectString, int sessionTimeout, Watcher watcher) throws IOException {
+            this(Connection.parse(connectString), sessionTimeout, watcher);
+        }
+
+        private ManifestAdmissionClient(Connection connection, int sessionTimeout, Watcher watcher) throws IOException {
+            super(connection.connectString(), sessionTimeout, watcher);
+            chrootBytes = connection.chrootBytes();
+        }
+    }
+
+    public void requireManifestAdmissionClient(ZKProfileRegistrationStore registry) throws IOException {
+        manifestAdmissionClient();
+        registry.requireManifestClosedClient(zk);
+    }
+
+    private ManifestAdmissionClient manifestAdmissionClient() throws IOException {
+        if (!(zk instanceof ManifestAdmissionClient client)) {
+            throw new IOException("Manifest CLOSED admission requires the controlled raw ZooKeeper session");
+        }
+        return client;
+    }
+
+    /** The original local owner retains its locks and credit until the real mutation callback returns. */
+    public static final class ManifestAdmissionMutation {
+        private final ProfileZKReadClient.Pending pending = new ProfileZKReadClient.Pending();
+
+        private ManifestAdmissionMutation() { }
+
+        public boolean stopAndDrained() {
+            return pending.stop() == 0;
+        }
+    }
+
+    public static long manifestAdmissionControlBytes() {
+        // Allow both serialized copies, decoded evidence, and the bounded set of paths and native Op objects.
+        return 4L * MAX_MANIFEST_ADMISSION_MULTI_BYTES
+                + MAX_MANIFEST_ADMISSION_OPS * (2L * MAX_MANIFEST_ADMISSION_PATH_BYTES + 512);
+    }
+
+    /** Read the historical immutable slot; current source and ledger observations are a separate operation. */
+    public ProfileManifestClosedAdmission.Receipt readManifestClosedAdmission(
+            ProfileManifestClosedAdmission.Scope scope)
+            throws IOException, InterruptedException {
+        try {
+            return readManifestClosedAdmission(scope, System.nanoTime() + timeoutNanos);
+        } catch (TimeoutException | IllegalArgumentException | IllegalStateException failure) {
+            throw new IOException("Unable to resolve the manifest CLOSED admission slot", failure);
+        }
+    }
+
+    private ProfileManifestClosedAdmission.Receipt readManifestClosedAdmission(
+            ProfileManifestClosedAdmission.Scope scope, long deadline)
+            throws IOException, InterruptedException, TimeoutException {
+        if (reads.sync(root, deadline) != Code.OK.intValue()) {
+            throw new IOException("Manifest CLOSED admission slot sync is unavailable");
+        }
+        String path = manifestAdmissionPath(scope);
+        var node = reads.get(path, deadline);
+        if (node.code() == Code.NONODE.intValue()) {
+            return null;
+        }
+        requireFound(node);
+        requirePersistent(node, true);
+        var admission = ProfileManifestClosedAdmission.decode(node.bytes());
+        if (!scope.equals(admission.scope()) || !Arrays.equals(node.bytes(), admission.encode())) {
+            throw new IOException("Manifest CLOSED admission differs from its canonical native slot");
+        }
+        long birth = node.stat().getCzxid();
+        requireMarker(marker(path, admission.operation()), birth, deadline);
+        return new ProfileManifestClosedAdmission.Receipt(admission, birth,
+                ProfileClosedReconstruction.digest(node.bytes()));
+    }
+
+    public ProfileManifestClosedAdmission.Receipt admitManifestClosed(ProfileLedgerMetadataStore metadata,
+            SegmentClosedReconstruction.PreparedManifestAdmission prepared) throws IOException, InterruptedException {
+        requireRecoveryClient(metadata);
+        var request = prepared.request();
+        long deadline = prepared.reader().deadline();
+        try {
+            for (var sources : prepared.sources()) {
+                sources.requireManifestClosedClient(zk);
+            }
+            var receipt = readManifestClosedAdmission(request.scope(), deadline);
+            if (receipt == null) {
+                var checks = new ArrayList<Op>();
+                for (var ledger : request.ledgers()) {
+                    var observed = manifestAdmissionMember(prepared.reader(), ledger);
+                    checks.addAll(reconstructionMemberChecks(metadata, observed.snapshot(), observed.proof(),
+                            deadline));
+                }
+                for (var sources : prepared.sources()) {
+                    sources.addManifestClosedChecks(checks);
+                }
+                prepared.revalidateRegistrations();
+                if (protectedChildAcls.stream().noneMatch(acl -> (acl.getPerms() & ZooDefs.Perms.CREATE) != 0)) {
+                    throw new IOException("Manifest CLOSED admission ACL must allow its protected birth creation");
+                }
+                String path = manifestAdmissionPath(request.scope());
+                checks.add(Op.create(path, request.encode(), protectedChildAcls, CreateMode.PERSISTENT));
+                checks.add(Op.create(marker(path, request.operation()), new byte[0], immutableAcls,
+                        CreateMode.PERSISTENT));
+                Code code = submitManifestAdmission(checks, prepared, deadline);
+                if (code != Code.OK && code != Code.NODEEXISTS && code != Code.CONNECTIONLOSS
+                        && code != Code.OPERATIONTIMEOUT && code != Code.SESSIONMOVED && code != Code.SESSIONEXPIRED) {
+                    throw new IOException("Manifest CLOSED admission multi refused: " + code);
+                }
+                receipt = readManifestClosedAdmission(request.scope(), deadline);
+            }
+            if (receipt == null) {
+                throw new IOException("Manifest CLOSED admission was not confirmed");
+            }
+            if (!request.equals(receipt.admission())) {
+                throw new IOException("Manifest CLOSED admission conflicts with the original fixed slot");
+            }
+            for (var ledger : request.ledgers()) {
+                manifestAdmissionMember(prepared.reader(), ledger);
+            }
+            prepared.revalidateRegistrations();
+            prepared.requireOwnerLive();
+            return receipt;
+        } catch (TimeoutException failure) {
+            throw new IOException("Manifest CLOSED admission was not confirmed within its original deadline", failure);
+        } catch (IllegalArgumentException | IllegalStateException failure) {
+            throw new IOException("Manifest CLOSED admission was refused", failure);
+        }
+    }
+
+    Code submitManifestAdmission(List<Op> checks, SegmentClosedReconstruction.PreparedManifestAdmission prepared,
+            long deadline)
+            throws IOException, InterruptedException, TimeoutException {
+        validateManifestAdmissionMulti(checks);
+        Objects.requireNonNull(prepared, "prepared");
+        var mutation = new ManifestAdmissionMutation();
+        prepared.beginMutation(mutation);
+        CompletableFuture<Integer> reply;
+        try {
+            reply = new ProfileZKReadClient(zk, mutation.pending).submitMulti(checks);
+        } catch (RuntimeException uncertain) {
+            // Pending has registered the actual callback; an ambiguous throw is not a drain signal.
+            throw new IOException("Manifest CLOSED admission submission was not confirmed", uncertain);
+        }
+        int code = ProfileZKReadClient.await(reply, deadline);
+        if (!mutation.pending.awaitIdle(deadline)) {
+            throw new TimeoutException("Manifest CLOSED admission callback has not drained");
+        }
+        return Code.get(code);
+    }
+
+    private ClosedReconstructionObservation manifestAdmissionMember(ClosedReconstructionReader reader,
+            ProfileManifestClosedAdmission.Ledger ledger) throws IOException, InterruptedException {
+        var member = ledger.member();
+        var observed = reader.read(member.context());
+        if (!ProfileClosedReconstruction.matchesEvidence(member, observed.snapshot(), observed.proof())) {
+            throw new IOException("Manifest admission lost its original native CLOSED ledger " + member.ledger());
+        }
+        return observed;
+    }
+
+    private String manifestAdmissionPath(ProfileManifestClosedAdmission.Scope scope) {
+        return root + "/closed-manifest-reconstruction-" + scope.key();
+    }
+
+    int validateManifestAdmissionMulti(List<Op> checks) throws IOException {
+        if (checks.isEmpty() || checks.size() > MAX_MANIFEST_ADMISSION_OPS) {
+            throw new IOException("Manifest CLOSED admission exceeds its native operation limit");
+        }
+        int chrootBytes = manifestAdmissionClient().chrootBytes;
+        int maximumClientPathBytes = MAX_MANIFEST_ADMISSION_PATH_BYTES - chrootBytes;
+        for (var op : checks) {
+            PathUtils.validatePath(op.getPath());
+            if (op.getPath().equals("/") || op.getPath().length() > maximumClientPathBytes
+                    || op.getPath().getBytes(StandardCharsets.UTF_8).length > maximumClientPathBytes) {
+                throw new IOException("Manifest CLOSED admission exceeds its native path limit");
+            }
+            var record = op.toRequestRecord();
+            if (record instanceof CheckVersionRequest check && check.getVersion() >= 0) {
+                continue;
+            }
+            if (!(record instanceof CreateRequest create) || create.getFlags() != CreateMode.PERSISTENT.toFlag()
+                    || create.getAcl().isEmpty() || create.getAcl().size() > MAX_MANIFEST_ADMISSION_OPS
+                    || create.getData().length > ProfileManifestClosedAdmission.MAX_BYTES) {
+                throw new IOException("Invalid manifest CLOSED admission native operation");
+            }
+            for (var acl : create.getAcl()) {
+                if (acl.getPerms() == 0 || (acl.getPerms() & ~ZooDefs.Perms.ALL) != 0
+                        || acl.getId().getScheme().isEmpty()
+                        || acl.getId().getScheme().length() > MAX_MANIFEST_ADMISSION_PATH_BYTES
+                        || acl.getId().getId().length() > MAX_MANIFEST_ADMISSION_PATH_BYTES) {
+                    throw new IOException("Invalid manifest CLOSED admission native ACL");
+                }
+            }
+        }
+        // ZooKeeper prepends the same UTF-8 chroot to every non-root operation path before its native serialization.
+        class MultiBytes extends OutputStream {
+            private int remaining = MAX_MANIFEST_ADMISSION_MULTI_BYTES - Math.multiplyExact(chrootBytes, checks.size());
+
+            @Override
+            public void write(int value) throws IOException {
+                charge(1);
+            }
+
+            @Override
+            public void write(byte[] bytes, int offset, int length) throws IOException {
+                charge(length);
+            }
+
+            private void charge(int length) throws IOException {
+                if (length > remaining) {
+                    throw new IOException("Manifest CLOSED admission exceeds its native multi byte limit");
+                }
+                remaining -= length;
+            }
+        }
+        var output = new MultiBytes();
+        new MultiOperationRecord(checks).serialize(BinaryOutputArchive.getArchive(output), "multi");
+        return MAX_MANIFEST_ADMISSION_MULTI_BYTES - output.remaining;
+    }
+
     public ProfileClosedReconstruction.Receipt admitClosedReconstruction(ProfileLedgerMetadataStore metadata,
             SegmentClosedReconstruction.PreparedAdmission prepared)
             throws IOException, InterruptedException {
@@ -1545,6 +1790,13 @@ public final class ZKProfileReservationStore {
         if (!ProfileClosedReconstruction.matchesEvidence(member, expected, proof)) {
             throw new IOException("Reconstruction request differs from its current native CLOSED evidence");
         }
+        return reconstructionMemberChecks(metadata, expected, proof, deadline);
+    }
+
+    private List<Op> reconstructionMemberChecks(ProfileLedgerMetadataStore metadata, ReadOnlySnapshot expected,
+            ClosedReconstructionProof proof, long deadline)
+            throws IOException, InterruptedException, TimeoutException {
+        long ledger = expected.context().ledger().ledgerId();
         var root = read(ledger, deadline);
         if (root.status() != ReadStatus.FOUND || !expected.context().matchesRoot(root.snapshot())) {
             throw new IOException("Reconstruction lost its original lifecycle");

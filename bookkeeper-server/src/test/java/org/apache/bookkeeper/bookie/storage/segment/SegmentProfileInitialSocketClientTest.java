@@ -158,6 +158,7 @@ import org.apache.bookkeeper.discover.profile.ProfileInitialMetadataCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileInstallReceipt;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
 import org.apache.bookkeeper.discover.profile.ProfileLifecycleHead;
+import org.apache.bookkeeper.discover.profile.ProfileManifestClosedAdmission;
 import org.apache.bookkeeper.discover.profile.ProfileMetadataBacklink;
 import org.apache.bookkeeper.discover.profile.ProfileNormalDataClient;
 import org.apache.bookkeeper.discover.profile.ProfileRecoveryBoundary;
@@ -19653,14 +19654,31 @@ public class SegmentProfileInitialSocketClientTest {
         observeManifestNativeClosedCohort(ManifestClosedAudit.SOURCES);
     }
 
-    private enum ManifestClosedAudit { OPEN, NATIVE, DATA, SOURCES }
+    @Test
+    public void manifestAdmissionRetainsOriginalGuardsThroughAnUnknownReplyAndConfirmsExactRetry() throws Exception {
+        observeManifestNativeClosedCohort(ManifestClosedAudit.ADMISSION);
+    }
+
+    @Test
+    public void manifestAdmissionMultiRejectsTheLateEmptyLedgerDelete() throws Exception {
+        observeManifestNativeClosedCohort(ManifestClosedAudit.ADMISSION_DELETE);
+    }
+
+    @Test
+    public void manifestAdmissionMultiRejectsWithdrawalOfAnOriginalSurvivor() throws Exception {
+        observeManifestNativeClosedCohort(ManifestClosedAudit.ADMISSION_SOURCE);
+    }
+
+    private enum ManifestClosedAudit { OPEN, NATIVE, DATA, SOURCES, ADMISSION, ADMISSION_DELETE, ADMISSION_SOURCE }
 
     private void observeManifestNativeClosedCohort(ManifestClosedAudit audit) throws Exception {
         assumeTrue("Unix permission-bit experiment requires a non-root target credential",
                 ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
         boolean closeEmpty = audit != ManifestClosedAudit.OPEN;
-        boolean physicalAudit = audit == ManifestClosedAudit.DATA || audit == ManifestClosedAudit.SOURCES;
-        boolean sourceAudit = audit == ManifestClosedAudit.SOURCES;
+        boolean admission = audit == ManifestClosedAudit.ADMISSION || audit == ManifestClosedAudit.ADMISSION_DELETE
+                || audit == ManifestClosedAudit.ADMISSION_SOURCE;
+        boolean sourceAudit = audit == ManifestClosedAudit.SOURCES || admission;
+        boolean physicalAudit = audit == ManifestClosedAudit.DATA || sourceAudit;
         try (var fixture = new Fixture(false, false, true, 3, 3, true, true);
                 var classic = new SegmentClassicScopeEpisodeTest.Episode(fixture.cluster.getZooKeeperConnectString(),
                         "/old-classic-manifest-native-closed")) {
@@ -19679,10 +19697,14 @@ public class SegmentProfileInitialSocketClientTest {
             var source = required.source().sourceIdentity();
             try (var second = publicProfileSingleArenaPeer(fixture, 1);
                     var third = publicProfileSingleArenaPeer(fixture, 2);
-                    var sdk = sdk(fixture)) {
+                    var sdk = sdk(fixture);
+                    var mutationClient = admission ? new ManifestAdmissionZk(
+                            fixture.cluster.getZooKeeperConnectString(), new ZooKeeperWatcherBase(10000, false),
+                            audit == ManifestClosedAudit.ADMISSION) : null) {
                 second.replaceNode(fixture, 1, false);
                 third.replaceNode(fixture, 2, false);
-                var registry = second.persistent;
+                var registry = admission ? new ZKProfileRegistrationStore(mutationClient, SOCKET_SERVICE_READINESS,
+                        ZooDefs.Ids.OPEN_ACL_UNSAFE, Duration.ofSeconds(5)) : second.persistent;
                 var manager = (AbstractZkLedgerManager) fixture.manager;
                 var metadata = new ProfileLedgerMetadataStore(fixture.zk, manager, ZooDefs.Ids.OPEN_ACL_UNSAFE,
                         Duration.ofSeconds(5));
@@ -19753,11 +19775,18 @@ public class SegmentProfileInitialSocketClientTest {
                 if (sourceAudit) {
                     var sourceBudget = manifestWireBudget(capacity.withAdditionalData(
                             ManifestSegmentStorage.closedDataCapacity(manifest, rows, 2))
-                            .withAdditionalControl(SegmentClosedReconstruction.manifestSourceControlBytes()));
+                            .withAdditionalControl(SegmentClosedReconstruction.manifestSourceControlBytes())
+                            .withAdditionalControl(admission ? ZKProfileReservationStore.manifestAdmissionControlBytes()
+                                    : 0));
                     var transports = new SegmentClosedReconstruction.Sources(sdk.getClientCtx(), fixture.clientGroup,
                             fixture.peerTls, fixture.cold, registry);
-                    assertManifestClosedSources(fixture, layout, metadata, manager, third, contexts, sourceBudget,
-                            rows, timeout, transports, publisher, paths, before);
+                    if (admission) {
+                        assertManifestClosedAdmission(fixture, layout, metadata, manager, third, contexts, sourceBudget,
+                                rows, timeout, transports, publisher, mutationClient, audit, before);
+                    } else {
+                        assertManifestClosedSources(fixture, layout, metadata, manager, third, contexts, sourceBudget,
+                                rows, timeout, transports, publisher, paths, before);
+                    }
                 } else if (physicalAudit) {
                     var auditBudget = manifestWireBudget(capacity.withAdditionalData(
                             ManifestSegmentStorage.closedDataCapacity(manifest, rows, 2)));
@@ -19785,6 +19814,9 @@ public class SegmentProfileInitialSocketClientTest {
                 assertEquals(before, manifestTreeDigests(layout));
                 assertNull(registry.readPeer(bookie).peer());
                 for (int i = 0; i < paths.size(); i++) {
+                    if (audit == ManifestClosedAudit.ADMISSION_DELETE && i == paths.size() - 1) {
+                        continue;
+                    }
                     assertPublicProfileMetadataUnchanged(nativeBefore.get(i),
                             readPublicProfileMetadata(fixture, paths.get(i)));
                 }
@@ -19793,6 +19825,226 @@ public class SegmentProfileInitialSocketClientTest {
                     assertEquals(before, manifestTreeDigests(layout));
                     assertNull(registry.readPeer(bookie).peer());
                 }
+            }
+        }
+    }
+
+    private static void assertManifestClosedAdmission(Fixture fixture, ManifestWireLayout layout,
+            ProfileLedgerMetadataStore originalMetadata, AbstractZkLedgerManager manager, ServiceEpisode third,
+            List<ProfileLedgerContext> contexts, ProfileReceiveBudget budget, int rows, Duration timeout,
+            SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher,
+            ManifestAdmissionZk zk, ManifestClosedAudit audit, Map<Path, String> before) throws Exception {
+        var manifest = layout.manifest();
+        var metadata = new ProfileLedgerMetadataStore(zk, manager, ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+        var reservations = new ZKProfileReservationStore(zk, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+        long totalBytes = manifest.arenas().stream().mapToLong(arena -> arena.dataFiles() * arena.bytesPerFile()).sum();
+        var operation = UUID.randomUUID();
+        ProfileManifestClosedAdmission.Receipt admitted = null;
+        try (var owner = layout.owner(budget)) {
+            var result = new FutureTask<>(() -> owner.admitClosedManifest(rows, totalBytes, 2, timeout, metadata,
+                    reservations, sources, publisher, operation));
+            var caller = new Thread(result, "manifest-closed-admission");
+            caller.start();
+            try {
+                var held = zk.beforeServer.get(10, TimeUnit.SECONDS);
+                assertManifestAdmissionHeld(layout, budget);
+                assertNull(fixture.reservations.readManifestClosedAdmission(held.request().scope()));
+                if (audit == ManifestClosedAudit.ADMISSION_DELETE) {
+                    long last = contexts.get(contexts.size() - 1).ledgerId();
+                    var deletion = new ProfileDeleteCoordinator(fixture.reservations, originalMetadata, fixture.cold)
+                            .beginDelete(last, bytes(16, 104), sources.sdk(), Duration.ofSeconds(8));
+                    assertEquals(ZKProfileReservationStore.DeleteStatus.LOGICALLY_DELETED,
+                            deletion.result().get(8, TimeUnit.SECONDS).status());
+                    deletion.completion().get(5, TimeUnit.SECONDS);
+                } else if (audit == ManifestClosedAudit.ADMISSION_SOURCE) {
+                    var peer = sources.registry().readPeer(fixture.identities.get(2).bookieId().toString()).peer();
+                    assertNotNull(peer);
+                    third.service.close();
+                    assertNull(sources.registry().revalidatePeer(peer).peer());
+                }
+                held.submit().run();
+                var nativeCode = org.apache.zookeeper.KeeperException.Code.get(zk.serverReply.get(5, TimeUnit.SECONDS));
+                if (audit == ManifestClosedAudit.ADMISSION) {
+                    assertEquals(org.apache.zookeeper.KeeperException.Code.OK, nativeCode);
+                    admitted = fixture.reservations.readManifestClosedAdmission(held.request().scope());
+                    assertNotNull(admitted);
+                    assertEquals(held.request(), admitted.admission());
+                    assertManifestAdmissionRecord(fixture, layout, originalMetadata, contexts, before,
+                            publisher, sources, held.path(), admitted);
+                    var failure = assertThrows(ExecutionException.class, () -> result.get(17, TimeUnit.SECONDS));
+                    assertTrue(failure.getCause().toString(),
+                            failure.getCause().getMessage().contains("not confirmed within its original deadline"));
+                    assertFalse(owner.close(Duration.ofMillis(100)));
+                    assertManifestAdmissionHeld(layout, budget);
+                    zk.callback.get(5, TimeUnit.SECONDS).run();
+                    assertTrue(owner.close(Duration.ofSeconds(5)));
+                } else {
+                    var expected = audit == ManifestClosedAudit.ADMISSION_DELETE
+                            ? org.apache.zookeeper.KeeperException.Code.BADVERSION
+                            : org.apache.zookeeper.KeeperException.Code.NONODE;
+                    assertEquals(expected, nativeCode);
+                    var failure = assertThrows(ExecutionException.class, () -> result.get(5, TimeUnit.SECONDS));
+                    assertTrue(failure.getCause().toString(),
+                            failure.getCause().getMessage().contains(expected.name()));
+                    assertNull(fixture.zk.exists(held.path(), false));
+                    assertNull(fixture.reservations.readManifestClosedAdmission(held.request().scope()));
+                }
+                assertManifestObservationReleased(budget);
+            } finally {
+                var held = zk.beforeServer.getNow(null);
+                if (held != null) {
+                    held.submit().run();
+                    if (zk.holdReply) {
+                        zk.callback.get(5, TimeUnit.SECONDS).run();
+                    }
+                }
+                caller.join(16000);
+                assertFalse(caller.isAlive());
+            }
+        }
+        if (admitted != null) {
+            try (var owner = layout.owner(budget)) {
+                assertEquals(admitted, owner.admitClosedManifest(rows, totalBytes, 2, timeout, metadata,
+                        reservations, sources, publisher, operation));
+                assertManifestObservationReleased(budget);
+            }
+            try (var owner = layout.owner(budget)) {
+                var conflict = assertThrows(IOException.class, () -> owner.admitClosedManifest(rows, totalBytes, 2,
+                        timeout, metadata, reservations, sources, publisher, UUID.randomUUID()));
+                assertTrue(conflict.toString(), conflict.getMessage().contains("conflicts"));
+                assertManifestObservationReleased(budget);
+            }
+            assertEquals(admitted, fixture.reservations.readManifestClosedAdmission(admitted.admission().scope()));
+        }
+        assertEquals(1, zk.submissions.get());
+    }
+
+    private static void assertManifestAdmissionHeld(ManifestWireLayout layout, ProfileReceiveBudget budget) {
+        assertTrue(budget.used(ProfileReceiveBudget.Lane.DATA) > 0);
+        assertTrue(budget.used(ProfileReceiveBudget.Lane.CONTROL) > 0);
+        var manifest = layout.manifest();
+        assertThrows(IOException.class, () -> SegmentDataFileLock.openExistingControl(
+                manifest.controlDirectory().resolve("bookie-control.lock")));
+        for (var arena : manifest.arenas()) {
+            assertThrows(IOException.class, () -> SegmentDataFileLock.open(arena.directory()));
+            assertThrows(IOException.class, () -> SegmentDataFileLock.openExistingControl(
+                    arena.directory().resolve("arena-control.lock")));
+        }
+    }
+
+    private static void assertManifestAdmissionRecord(Fixture fixture, ManifestWireLayout layout,
+            ProfileLedgerMetadataStore metadata, List<ProfileLedgerContext> contexts, Map<Path, String> before,
+            SegmentClosedReconstruction.OldPublisher publisher, SegmentClosedReconstruction.Sources sources,
+            String path, ProfileManifestClosedAdmission.Receipt admitted) throws Exception {
+        var request = admitted.admission();
+        var manifest = layout.manifest();
+        assertEquals(manifest.bookieId().toString(), request.scope().bookie());
+        assertEquals(manifest.incarnation(), request.scope().incarnation());
+        assertEquals(manifest.identity(), request.scope().manifest());
+        var exited = publisher.requireManifestExit(SegmentFileHeader.forBookie(manifest), sources.registry(),
+                System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
+        assertEquals(exited.pid(), request.publisherPid());
+        assertEquals(exited.startMillis(), request.publisherStartMillis());
+        assertEquals(exited.session(), request.publisherSession());
+        assertEquals(3, request.arenas().size());
+        for (int i = 0; i < request.arenas().size(); i++) {
+            var original = manifest.arenas().get(i);
+            assertEquals(original.id(), request.scope().arenas().get(i).id());
+            var arena = request.arenas().get(i);
+            assertTrue(arena.sessionOpen());
+            assertEquals(original.dataFiles(), arena.files().size());
+            for (var file : arena.files()) {
+                assertEquals(original.bytesPerFile(), file.image().length());
+                assertEquals(before.get(original.directory().resolve("data-" + file.index())), file.image().sha256());
+            }
+        }
+        assertEquals(contexts, request.ledgers().stream().map(ledger -> ledger.member().context()).toList());
+        assertEquals(List.of(0, 1, 0), request.ledgers().stream().map(ProfileManifestClosedAdmission.Ledger::shard)
+                .toList());
+        assertEquals(List.of(1, 0, 1), request.ledgers().stream().map(ProfileManifestClosedAdmission.Ledger::arena)
+                .toList());
+        assertEquals(List.of(0L, 0L, -1L), request.ledgers().stream()
+                .map(ProfileManifestClosedAdmission.Ledger::lastEntry).toList());
+        assertEquals(List.of(17L, 23L, 0L), request.ledgers().stream()
+                .map(ProfileManifestClosedAdmission.Ledger::length).toList());
+        var reader = fixture.reservations.closedReconstructionReader(metadata, manifest.bookieId(),
+                manifest.incarnation(), System.nanoTime() + TimeUnit.SECONDS.toNanos(5));
+        for (var ledger : request.ledgers()) {
+            var member = ledger.member();
+            var observed = reader.read(member.context());
+            assertEquals(ProfileClosedReconstruction.kind(observed.proof()), member.kind());
+            assertEquals(ProfileClosedReconstruction.closedDigest(observed.snapshot(), observed.proof()),
+                    member.closed());
+        }
+        var last = request.ledgers().get(2).member();
+        assertEquals(ProfileClosedReconstruction.emptySourceDigest(last.closed()), last.sources());
+        var stat = new org.apache.zookeeper.data.Stat();
+        assertArrayEquals(request.encode(), fixture.zk.getData(path, false, stat));
+        assertEquals(0, stat.getVersion());
+        assertEquals(admitted.birth(), stat.getCzxid());
+        assertEquals(0L, stat.getEphemeralOwner());
+        String marker = "birth-" + request.operation();
+        assertEquals(List.of(marker), fixture.zk.getChildren(path, false));
+        assertArrayEquals(new byte[0], fixture.zk.getData(path + "/" + marker, false, stat));
+        assertEquals(admitted.birth(), stat.getCzxid());
+        assertEquals(0, stat.getVersion());
+        assertEquals(0L, stat.getEphemeralOwner());
+    }
+
+    private static final class ManifestAdmissionZk extends ZKProfileReservationStore.ManifestAdmissionClient {
+        private record Held(String path, ProfileManifestClosedAdmission request, Runnable submit) { }
+
+        private final CompletableFuture<Held> beforeServer = new CompletableFuture<>();
+        private final CompletableFuture<Integer> serverReply = new CompletableFuture<>();
+        private final CompletableFuture<Runnable> callback = new CompletableFuture<>();
+        private final AtomicInteger submissions = new AtomicInteger();
+        private final boolean holdReply;
+
+        ManifestAdmissionZk(String connect, ZooKeeperWatcherBase watcher, boolean holdReply) throws Exception {
+            super(connect, 10000, watcher);
+            watcher.waitForConnection();
+            this.holdReply = holdReply;
+        }
+
+        @Override
+        public void multi(Iterable<org.apache.zookeeper.Op> operations,
+                org.apache.zookeeper.AsyncCallback.MultiCallback completion, Object context) {
+            var ops = new ArrayList<org.apache.zookeeper.Op>();
+            operations.forEach(ops::add);
+            var create = ops.stream().filter(op -> op.getType() == ZooDefs.OpCode.create
+                    && op.getPath().startsWith("/socket-initial/closed-manifest-reconstruction-")
+                    && !op.getPath().contains("/birth-")).findFirst();
+            if (create.isEmpty()) {
+                super.multi(ops, completion, context);
+                return;
+            }
+            var node = create.orElseThrow();
+            int submission = submissions.incrementAndGet();
+            assertEquals(1, submission);
+            try {
+                var data = ((org.apache.zookeeper.proto.CreateRequest) node.toRequestRecord()).getData();
+                var request = ProfileManifestClosedAdmission.decode(data);
+                var submitted = new AtomicBoolean();
+                beforeServer.complete(new Held(node.getPath(), request, () -> {
+                    if (submitted.compareAndSet(false, true)) {
+                        super.multi(ops, (code, path, ignored, results) -> {
+                            serverReply.complete(code);
+                            if (holdReply) {
+                                var delivered = new AtomicBoolean();
+                                callback.complete(() -> {
+                                    if (delivered.compareAndSet(false, true)) {
+                                        completion.processResult(code, path, context, results);
+                                    }
+                                });
+                            } else {
+                                completion.processResult(code, path, context, results);
+                            }
+                        }, context);
+                    }
+                }));
+            } catch (IOException invalid) {
+                beforeServer.completeExceptionally(invalid);
+                throw new AssertionError(invalid);
             }
         }
     }

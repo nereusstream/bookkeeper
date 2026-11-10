@@ -67,6 +67,7 @@ import org.apache.bookkeeper.discover.profile.ProfileClosedReconstructionSources
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
+import org.apache.bookkeeper.discover.profile.ProfileManifestClosedAdmission;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
@@ -126,6 +127,24 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     record ClosedSourceObservation(ClosedDataObservation data, SegmentClosedReconstruction.PublisherExit publisher,
             List<ProfileClosedReconstruction.Member> sources) { }
+
+    static final class AuditedClosedGraph {
+        final ManifestSegmentStorage owner;
+        final ClosedSourceObservation observation;
+        final Map<ProfileClosedReconstructionSources, String> registrations;
+
+        private AuditedClosedGraph(ManifestSegmentStorage owner, ClosedSourceObservation observation,
+                Map<ProfileClosedReconstructionSources, String> registrations) {
+            this.owner = owner;
+            this.observation = observation;
+            this.registrations = registrations;
+        }
+    }
+
+    @FunctionalInterface
+    private interface CheckedRecoveryResult<T, R> {
+        R finish(T observation) throws Exception;
+    }
 
     static long closedDataCapacity(SegmentArenaManifest manifest, int maximumRows, int maximumEntries)
             throws IOException {
@@ -305,6 +324,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     private OwnedListener ownedListener;
     private PreflightEpisode startupPreflight;
     private SegmentManifestColdPublication coldPublication;
+    private ZKProfileReservationStore.ManifestAdmissionMutation manifestAdmissionMutation;
     private SegmentManifestAccessObservation.Probe accessProbe;
     private boolean observingAccess;
     private boolean observingRecoveryDependencies;
@@ -455,6 +475,13 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
 
     private <T> T withRecoveryDependenciesUntil(int maximumRows, long deadline, long additionalDataBytes,
             long additionalControlBytes, RecoveryDependencyObserver<T> observer) throws Exception {
+        return withRecoveryDependenciesUntil(maximumRows, deadline, additionalDataBytes, additionalControlBytes,
+                observer, result -> result);
+    }
+
+    private <T, R> R withRecoveryDependenciesUntil(int maximumRows, long deadline, long additionalDataBytes,
+            long additionalControlBytes, RecoveryDependencyObserver<T> observer,
+            CheckedRecoveryResult<T, R> complete) throws Exception {
         Objects.requireNonNull(observer, "observer");
         if (deadline - System.nanoTime() > TimeUnit.MINUTES.toNanos(1)
                 || additionalDataBytes < 0 || additionalControlBytes < 0) {
@@ -466,7 +493,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             observingRecoveryDependencies = true;
         }
         Throwable failed = null;
-        T result;
+        R result;
         try {
             requireRecoveryObservationLive(deadline);
             reserveCapacity(capacity(manifest, control, settings, limits)
@@ -478,13 +505,14 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             var paths = recoveryPathIdentities();
             var before = readRecoveryDependencies(rows, deadline);
             requireRecoveryPaths(paths, deadline);
-            result = observer.observe(before);
+            T observed = observer.observe(before);
             requireRecoveryPaths(paths, deadline);
             if (!before.equals(readRecoveryDependencies(new SegmentStorageInspector.RecoveryRows(maximumRows),
                     deadline))) {
                 throw new IOException("Manifest recovery control dependencies changed during observation");
             }
             requireRecoveryPaths(paths, deadline);
+            result = complete.finish(observed);
         } catch (Exception | Error failure) {
             failed = failure;
             throw failure;
@@ -521,6 +549,36 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher)
             throws Exception {
         long deadline = SegmentClosedReconstruction.manifestClosedDeadline(timeout);
+        return inspectClosedGraph(maximumRows, maximumDataBytes, maximumEntries, deadline, metadata, reservations,
+                sources, publisher, null, 0, audited -> audited.observation);
+    }
+
+    ProfileManifestClosedAdmission.Receipt admitClosedManifest(int maximumRows, long maximumDataBytes,
+            int maximumEntries, Duration timeout, ProfileLedgerMetadataStore metadata,
+            ZKProfileReservationStore reservations, SegmentClosedReconstruction.Sources sources,
+            SegmentClosedReconstruction.OldPublisher publisher, UUID operation) throws Exception {
+        Objects.requireNonNull(sources, "sources");
+        Objects.requireNonNull(publisher, "publisher");
+        Objects.requireNonNull(operation, "operation");
+        reservations.requireManifestAdmissionClient(sources.registry());
+        var reader = reservations.closedReconstructionReader(metadata, bookieIdentity.bookieId(),
+                bookieIdentity.incarnation(), SegmentClosedReconstruction.manifestClosedDeadline(timeout));
+        return inspectClosedGraph(maximumRows, maximumDataBytes, maximumEntries, reader.deadline(),
+                metadata, reservations, sources, publisher, reader,
+                ZKProfileReservationStore.manifestAdmissionControlBytes(),
+                audited -> {
+                    var root = SegmentClosedReconstruction.observeDirectory(bookieFiles, new NativeIOImpl(),
+                            control.directory());
+                    return SegmentClosedReconstruction.admitManifestClosed(audited, metadata, reservations,
+                            reader, sources.registry(), publisher, root, operation);
+                });
+    }
+
+    private <R> R inspectClosedGraph(int maximumRows, long maximumDataBytes, int maximumEntries, long deadline,
+            ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations,
+            SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher,
+            ZKProfileReservationStore.ClosedReconstructionReader admissionReader, long additionalControlBytes,
+            CheckedRecoveryResult<AuditedClosedGraph, R> complete) throws Exception {
         if (maximumDataBytes < 1 || maximumEntries < 1 || maximumEntries > 65536) {
             throw new IllegalArgumentException("Manifest CLOSED audit requires bounded DATA geometry");
         }
@@ -532,11 +590,13 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             throw new IOException("Manifest CLOSED audit exceeds its total DATA byte limit");
         }
         long controlBytes = SegmentControlCapacity.sum(SegmentClosedReconstruction.manifestClosedControlBytes(),
-                sources == null ? 0 : SegmentClosedReconstruction.manifestSourceControlBytes());
+                sources == null ? 0 : SegmentClosedReconstruction.manifestSourceControlBytes(),
+                additionalControlBytes);
         return withRecoveryDependenciesUntil(maximumRows, deadline,
                 closedDataCapacity(manifest, maximumRows, maximumEntries), controlBytes, graph -> {
-                    var reader = reservations.closedReconstructionReader(metadata, bookieIdentity.bookieId(),
-                            bookieIdentity.incarnation(), deadline);
+                    var reader = admissionReader != null ? admissionReader
+                            : reservations.closedReconstructionReader(metadata, bookieIdentity.bookieId(),
+                                    bookieIdentity.incarnation(), deadline);
                     var exited = publisher == null ? null
                             : publisher.requireManifestExit(bookieIdentity, sources.registry(), reader.deadline());
                     var cohort = SegmentClosedReconstruction.readManifestClosedCohort(graph, reader);
@@ -565,8 +625,24 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                     requireClosedAuditLive(cohort);
                     var data = new ClosedDataObservation(new SegmentClosedReconstruction.ManifestClosedObservation(
                             graph, cohort.members()), images);
-                    return new ClosedSourceObservation(data, exited, verified);
-                });
+                    return new AuditedClosedGraph(this, new ClosedSourceObservation(data, exited, verified),
+                            registrations);
+                }, complete);
+    }
+
+    void beginManifestAdmission(ZKProfileReservationStore.ManifestAdmissionMutation mutation, long deadline)
+            throws IOException, InterruptedException {
+        synchronized (gate) {
+            requireRecoveryObservationTime(deadline);
+            if (stopping || manifestAdmissionMutation != null) {
+                throw new IOException("Manifest CLOSED admission owner retired or already submitted");
+            }
+            manifestAdmissionMutation = mutation;
+        }
+    }
+
+    void requireManifestAdmissionLive(long deadline) throws IOException, InterruptedException {
+        requireRecoveryObservationLive(deadline);
     }
 
     private List<ProfileClosedReconstruction.Member> auditClosedSources(RecoveryDependencies graph,
@@ -1747,10 +1823,12 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
             throw new IllegalStateException("Manifest drain requires an external thread");
         }
         SegmentManifestColdPublication publication;
+        ZKProfileReservationStore.ManifestAdmissionMutation admission;
         synchronized (gate) {
             accepting = false;
             stopping = true;
             publication = coldPublication;
+            admission = manifestAdmissionMutation;
             var active = execution;
             if (active != null) {
                 active.stopAdmission();
@@ -1764,7 +1842,8 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         }
         synchronized (lifecycle) {
             if (observingAccess || observingRecoveryDependencies
-                    || accessProbe != null && !accessProbe.closeWhenDrained()) {
+                    || accessProbe != null && !accessProbe.closeWhenDrained()
+                    || admission != null && !admission.stopAndDrained()) {
                 return false;
             }
             accessProbe = null;

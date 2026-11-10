@@ -54,6 +54,7 @@ import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstructionSources;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
+import org.apache.bookkeeper.discover.profile.ProfileManifestClosedAdmission;
 import org.apache.bookkeeper.discover.profile.ZKProfileEphemeralRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileRegistrationStore;
 import org.apache.bookkeeper.discover.profile.ZKProfileReservationStore;
@@ -236,6 +237,99 @@ public final class SegmentClosedReconstruction {
                 SegmentControlCapacity.times(ProfileClosedReconstruction.MAX_MEMBERS + 1L, row),
                 layout.object(PublisherExit.class),
                 layout.hashMap(), layout.list());
+    }
+
+    static ProfileManifestClosedAdmission.Receipt admitManifestClosed(ManifestSegmentStorage.AuditedClosedGraph audit,
+            ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations,
+            ZKProfileReservationStore.ClosedReconstructionReader reader, ZKProfileRegistrationStore registry,
+            OldPublisher publisher, NativeIO.FileIdentity bookieRoot, UUID operation)
+            throws IOException, InterruptedException {
+        var observation = audit.observation;
+        var graph = observation.data().closed().dependencies();
+        if (graph.arenas().stream().noneMatch(arena ->
+                arena.control().cut().sessionOpen() && !arena.control().grants().isEmpty())) {
+            throw new IOException("Manifest CLOSED admission requires an original OPEN Arena with current grants");
+        }
+        var epochs = new ArrayList<ProfileManifestClosedAdmission.ArenaEpoch>(graph.arenas().size());
+        var arenas = new ArrayList<ProfileManifestClosedAdmission.Arena>(graph.arenas().size());
+        for (int i = 0; i < graph.arenas().size(); i++) {
+            var arena = graph.arenas().get(i);
+            var control = arena.control();
+            var cut = control.cut();
+            var image = observation.data().arenas().get(i);
+            epochs.add(new ProfileManifestClosedAdmission.ArenaEpoch(arena.identity().arenaId(), cut.sessionEpoch()));
+            var point = new ProfileManifestClosedAdmission.ControlPoint(image.rootObject(), cut.appliedSequence(),
+                    cut.physicalGeneration(), cut.checkpointGeneration(), control.historyDigest());
+            arenas.add(new ProfileManifestClosedAdmission.Arena(point, cut.sessionOpen(), control.mode(),
+                    image.files()));
+        }
+        var ledgers = new ArrayList<ProfileManifestClosedAdmission.Ledger>(observation.sources().size());
+        for (int i = 0; i < observation.sources().size(); i++) {
+            var member = observation.data().closed().members().get(i);
+            ledgers.add(new ProfileManifestClosedAdmission.Ledger(observation.sources().get(i), member.route().shard(),
+                    member.route().arena(), member.lastEntry(), member.length()));
+        }
+        var target = graph.bookieIdentity();
+        var scope = new ProfileManifestClosedAdmission.Scope(target.bookieId().toString(), target.incarnation(),
+                graph.manifest(), epochs);
+        var bookie = graph.bookie();
+        var point = new ProfileManifestClosedAdmission.ControlPoint(bookieRoot, bookie.observedSequence(),
+                bookie.physicalGeneration(), bookie.checkpointGeneration(), bookie.historyDigest());
+        var exited = observation.publisher();
+        var request = new ProfileManifestClosedAdmission(scope, operation, exited.pid(), exited.startMillis(),
+                exited.session(), point, arenas, ledgers);
+        return reservations.admitManifestClosed(metadata, new PreparedManifestAdmission(request, reader,
+                audit.owner, target, publisher, registry, audit.registrations));
+    }
+
+    /** Only the locked manifest audit can prepare the original graph and its registered source observations. */
+    public static final class PreparedManifestAdmission {
+        private final ProfileManifestClosedAdmission request;
+        private final ZKProfileReservationStore.ClosedReconstructionReader reader;
+        private final ManifestSegmentStorage owner;
+        private final SegmentFileHeader target;
+        private final OldPublisher publisher;
+        private final ZKProfileRegistrationStore registry;
+        private final Map<ProfileClosedReconstructionSources, String> registrations;
+
+        private PreparedManifestAdmission(ProfileManifestClosedAdmission request,
+                ZKProfileReservationStore.ClosedReconstructionReader reader, ManifestSegmentStorage owner,
+                SegmentFileHeader target, OldPublisher publisher, ZKProfileRegistrationStore registry,
+                Map<ProfileClosedReconstructionSources, String> registrations) {
+            this.request = request;
+            this.reader = reader;
+            this.owner = owner;
+            this.target = target;
+            this.publisher = publisher;
+            this.registry = registry;
+            this.registrations = Map.copyOf(registrations);
+        }
+
+        public ProfileManifestClosedAdmission request() {
+            return request;
+        }
+
+        public ZKProfileReservationStore.ClosedReconstructionReader reader() {
+            return reader;
+        }
+
+        public Set<ProfileClosedReconstructionSources> sources() {
+            return registrations.keySet();
+        }
+
+        public void revalidateRegistrations() throws IOException, TimeoutException {
+            verifySourceRegistrations(registrations);
+            publisher.requireManifestExit(target, registry, reader.deadline());
+        }
+
+        public void beginMutation(ZKProfileReservationStore.ManifestAdmissionMutation mutation)
+                throws IOException, InterruptedException {
+            owner.beginManifestAdmission(mutation, reader.deadline());
+        }
+
+        public void requireOwnerLive() throws IOException, InterruptedException {
+            owner.requireManifestAdmissionLive(reader.deadline());
+        }
     }
 
     /** Opaque input from the actual source and original locked storage audit, never a caller-supplied digest. */
@@ -590,7 +684,7 @@ public final class SegmentClosedReconstruction {
     }
 
     static void verifySourceRegistrations(Map<ProfileClosedReconstructionSources, String> observations)
-            throws Exception {
+            throws IOException, TimeoutException {
         for (var observation : observations.entrySet()) {
             // Each pair of source connections has already drained. Only its exact registration observations remain.
             if (!observation.getValue().equals(observation.getKey().revalidate())) {
