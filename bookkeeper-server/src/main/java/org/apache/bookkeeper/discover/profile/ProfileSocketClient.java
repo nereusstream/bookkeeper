@@ -323,7 +323,7 @@ final class ProfileSocketClient implements AutoCloseable {
         try {
             CompletableFuture.supplyAsync(() -> {
                 requireRegisteredPhase(attempt, deadline);
-                if (registry.revalidatePeer(peer).peer() == null
+                if (registry.revalidatePeer(peer, deadline).peer() == null
                         || peer.readiness().engine() != EngineProfile.SEGMENT_WAL_ENGINE
                         || peer.readiness().protocolMajor() != ProfileFrameHeader.PROTOCOL_MAJOR
                         || peer.readiness().protocolMinor() != ProfileFrameHeader.PROTOCOL_MINOR) {
@@ -365,7 +365,7 @@ final class ProfileSocketClient implements AutoCloseable {
             }).thenCompose(client -> CompletableFuture.supplyAsync(() -> {
                 requireRegisteredPhase(attempt, deadline);
                 if (client.hello().readinessGeneration() != peer.projection().readinessGeneration().value()
-                        || registry.revalidatePeer(peer).peer() == null) {
+                        || registry.revalidatePeer(peer, deadline).peer() == null) {
                     throw new IllegalStateException("Registered peer changed across HELLO");
                 }
                 requireRegisteredPhase(attempt, deadline);

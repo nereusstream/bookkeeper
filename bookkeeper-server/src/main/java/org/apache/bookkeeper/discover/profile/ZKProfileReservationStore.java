@@ -1150,6 +1150,10 @@ public final class ZKProfileReservationStore {
                 throw new IOException("CLOSED reconstruction cohort deadline elapsed");
             }
         }
+
+        public long deadline() {
+            return deadline;
+        }
     }
 
     public ClosedReconstructionReader closedReconstructionReader(ProfileLedgerMetadataStore metadata,

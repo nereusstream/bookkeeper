@@ -80,6 +80,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -87,6 +88,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.BiPredicate;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.bookkeeper.client.BKException;
 import org.apache.bookkeeper.client.BookKeeper;
@@ -145,6 +147,7 @@ import org.apache.bookkeeper.conf.ServerConfiguration;
 import org.apache.bookkeeper.discover.BookieRouteBinding;
 import org.apache.bookkeeper.discover.ZKRegistrationManager;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
+import org.apache.bookkeeper.discover.profile.ProfileClosedReconstructionSources;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteCoordinator;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeletePhysicalReceipt;
@@ -308,6 +311,7 @@ public class SegmentProfileInitialSocketClientTest {
         int manifestTarget = -1;
         InetSocketAddress manifestAddress;
         volatile Set<ProfileLedgerContext> retainedReadContexts = Set.of();
+        volatile BiPredicate<Integer, ProfileLedgerContext> survivorReadAllowed = (target, context) -> true;
 
         boolean permitsReadContext(ProfileLedgerContext context) {
             return context.equals(context()) || context.equals(additionalReadContext)
@@ -5275,7 +5279,8 @@ public class SegmentProfileInitialSocketClientTest {
             var control = fixture.controlConfigs.get(target);
             var read = new SegmentProfileReadConfig((caller, query) -> fixture.readAllowed.get()
                     && control.staticAuthorizer().allows(caller, ProfileControlOperation.INSTALL)
-                    && fixture.permitsReadContext(query.context()),
+                    && fixture.permitsReadContext(query.context())
+                    && fixture.survivorReadAllowed.test(target, query.context()),
                     (caller, query) -> fixture.readAllowed.get()
                     && control.staticAuthorizer().allows(caller, ProfileControlOperation.INSTALL)
                     && fixture.permitsReadContext(query.context()));
@@ -19630,22 +19635,32 @@ public class SegmentProfileInitialSocketClientTest {
 
     @Test
     public void manifestBindsTheCompleteNativeClosedCohortUnderOneDeadline() throws Exception {
-        observeManifestNativeClosedCohort(true, false);
+        observeManifestNativeClosedCohort(ManifestClosedAudit.NATIVE);
     }
 
     @Test
     public void manifestNativeClosedCohortRejectsTheLastInstalledOpenLedger() throws Exception {
-        observeManifestNativeClosedCohort(false, false);
+        observeManifestNativeClosedCohort(ManifestClosedAudit.OPEN);
     }
 
     @Test
     public void manifestAuditsEveryOriginalDataFileAgainstNativeClosedCohort() throws Exception {
-        observeManifestNativeClosedCohort(true, true);
+        observeManifestNativeClosedCohort(ManifestClosedAudit.DATA);
     }
 
-    private void observeManifestNativeClosedCohort(boolean closeEmpty, boolean physicalAudit) throws Exception {
+    @Test
+    public void manifestChecksBothSurvivorsAndTheOriginalPublisherInOneLockedAudit() throws Exception {
+        observeManifestNativeClosedCohort(ManifestClosedAudit.SOURCES);
+    }
+
+    private enum ManifestClosedAudit { OPEN, NATIVE, DATA, SOURCES }
+
+    private void observeManifestNativeClosedCohort(ManifestClosedAudit audit) throws Exception {
         assumeTrue("Unix permission-bit experiment requires a non-root target credential",
                 ((Number) Files.getAttribute(temporary.getRoot().toPath(), "unix:uid")).intValue() != 0);
+        boolean closeEmpty = audit != ManifestClosedAudit.OPEN;
+        boolean physicalAudit = audit == ManifestClosedAudit.DATA || audit == ManifestClosedAudit.SOURCES;
+        boolean sourceAudit = audit == ManifestClosedAudit.SOURCES;
         try (var fixture = new Fixture(false, false, true, 3, 3, true, true);
                 var classic = new SegmentClassicScopeEpisodeTest.Episode(fixture.cluster.getZooKeeperConnectString(),
                         "/old-classic-manifest-native-closed")) {
@@ -19686,12 +19701,21 @@ public class SegmentProfileInitialSocketClientTest {
                         new InetSocketAddress("127.0.0.1", 0), 1)) {
                     address = initialized.start();
                 }
+                SegmentClosedReconstruction.OldPublisher publisher;
                 try (var child = new ManifestCrashProcess(fixture, layout, root, source, access, address, 2)) {
                     String marker = child.awaitReady();
                     var peer = registry.readPeer(bookie).peer();
                     assertNotNull(peer);
                     assertEquals(child.process.pid() + " " + peer.publisherSession(), marker);
                     assertRegisteredManifest(registry, bookie, address, 2, peer.publisherSession());
+                    publisher = sourceAudit ? SegmentClosedReconstruction.OldPublisher.captureManifest(manifest,
+                            child.process, registry, peer) : null;
+                    if (publisher != null) {
+                        var live = assertThrows(IOException.class, () -> publisher.requireManifestExit(
+                                SegmentFileHeader.forBookie(manifest), registry,
+                                System.nanoTime() + TimeUnit.SECONDS.toNanos(5)));
+                        assertTrue(live.getMessage().contains("has not exited"));
+                    }
                     writeClosedPublicProfileLedger(sdk, first, bytes(17, 9));
                     writeClosedPublicProfileLedger(sdk, other, bytes(23, 10));
                     var writer = (ProfileLedgerHandle) sdk.createProfileLedger(last).get(10, TimeUnit.SECONDS);
@@ -19726,7 +19750,15 @@ public class SegmentProfileInitialSocketClientTest {
                         .withAdditionalControl(SegmentClosedReconstruction.manifestClosedControlBytes());
                 var budget = manifestWireBudget(capacity);
                 var timeout = Duration.ofSeconds(15);
-                if (physicalAudit) {
+                if (sourceAudit) {
+                    var sourceBudget = manifestWireBudget(capacity.withAdditionalData(
+                            ManifestSegmentStorage.closedDataCapacity(manifest, rows, 2))
+                            .withAdditionalControl(SegmentClosedReconstruction.manifestSourceControlBytes()));
+                    var transports = new SegmentClosedReconstruction.Sources(sdk.getClientCtx(), fixture.clientGroup,
+                            fixture.peerTls, fixture.cold, registry);
+                    assertManifestClosedSources(fixture, layout, metadata, manager, third, contexts, sourceBudget,
+                            rows, timeout, transports, publisher, paths, before);
+                } else if (physicalAudit) {
                     var auditBudget = manifestWireBudget(capacity.withAdditionalData(
                             ManifestSegmentStorage.closedDataCapacity(manifest, rows, 2)));
                     assertManifestClosedDataAudit(fixture, layout, manager, metadata, contexts, auditBudget,
@@ -19762,6 +19794,161 @@ public class SegmentProfileInitialSocketClientTest {
                     assertNull(registry.readPeer(bookie).peer());
                 }
             }
+        }
+    }
+
+    private static void assertManifestClosedSources(Fixture fixture, ManifestWireLayout layout,
+            ProfileLedgerMetadataStore metadata, AbstractZkLedgerManager manager, ServiceEpisode third,
+            List<ProfileLedgerContext> contexts, ProfileReceiveBudget budget, int rows, Duration timeout,
+            SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher,
+            List<String> paths, Map<Path, String> before) throws Exception {
+        var manifest = layout.manifest();
+        long totalBytes = manifest.arenas().stream().mapToLong(arena -> arena.dataFiles() * arena.bytesPerFile()).sum();
+        try (var owner = layout.owner(budget)) {
+            assertThrows(IOException.class, () -> owner.observeClosedSources(rows, totalBytes, 2, timeout,
+                    metadata, fixture.reservations, sources, null));
+            var wrongRegistry = new SegmentClosedReconstruction.Sources(sources.sdk(), sources.eventLoop(),
+                    sources.tls(), sources.cold(), third.persistent);
+            var wrong = assertThrows(IOException.class, () -> owner.observeClosedSources(rows, totalBytes, 2, timeout,
+                    metadata, fixture.reservations, wrongRegistry, publisher));
+            assertTrue(wrong.getMessage().contains("another manifest or registry"));
+            assertManifestObservationReleased(budget);
+        }
+        try (var owner = layout.owner(budget)) {
+            var result = owner.observeClosedSources(rows, totalBytes, 2, timeout, metadata, fixture.reservations,
+                    sources, publisher);
+            assertManifestNativeClosedCohort(fixture, layout, metadata, contexts, result.data().closed());
+            assertEquals(publisher.requireManifestExit(SegmentFileHeader.forBookie(manifest), sources.registry(),
+                    System.nanoTime() + timeout.toNanos()), result.publisher());
+            assertEquals(3, result.sources().size());
+            for (int i = 0; i < result.sources().size(); i++) {
+                var observed = result.sources().get(i);
+                var nativeMember = result.data().closed().members().get(i);
+                assertEquals(contexts.get(i), observed.context());
+                assertEquals(nativeMember.closedDigest(), observed.closed());
+                assertEquals(nativeMember.kind(), observed.kind());
+                if (i == 2) {
+                    assertEquals(ProfileClosedReconstruction.emptySourceDigest(observed.closed()), observed.sources());
+                    continue;
+                }
+                var expected = i == 0 ? bytes(17, 9) : bytes(23, 10);
+                var snapshot = fixture.reservations.readClosedForOpen(metadata, observed.ledger()).snapshot();
+                assertNotNull(snapshot);
+                try (var pair = ProfileClosedReconstructionSources.open(sources.sdk(), sources.eventLoop(),
+                        sources.tls(), sources.registry(), sources.cold(), snapshot, manifest.bookieId(), 4096,
+                        System.nanoTime() + timeout.toNanos())) {
+                    pair.verify(0, expected.length, expected.length,
+                            java.util.HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(expected)));
+                    assertEquals(pair.revalidate(), observed.sources());
+                }
+            }
+            assertManifestObservationReleased(budget);
+        }
+        assertManifestLateSourceFailure(fixture, layout, metadata, contexts, budget, rows, timeout, sources, publisher,
+                totalBytes);
+        assertManifestSourceRegistrationChange(fixture, layout, manager, third, contexts.get(1), budget, rows,
+                timeout, sources, publisher, totalBytes, paths.get(0));
+        assertEquals(before, manifestTreeDigests(layout));
+    }
+
+    private static void assertManifestLateSourceFailure(Fixture fixture, ManifestWireLayout layout,
+            ProfileLedgerMetadataStore metadata, List<ProfileLedgerContext> contexts, ProfileReceiveBudget budget,
+            int rows, Duration timeout, SegmentClosedReconstruction.Sources sources,
+            SegmentClosedReconstruction.OldPublisher publisher, long totalBytes) throws Exception {
+        var allowed = fixture.survivorReadAllowed;
+        var held = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var early = java.util.concurrent.ConcurrentHashMap.<Integer>newKeySet();
+        var lateAllowed = java.util.concurrent.ConcurrentHashMap.<Integer>newKeySet();
+        fixture.survivorReadAllowed = (target, context) -> {
+            if (context.equals(contexts.get(0))) {
+                early.add(target);
+            } else if (context.equals(contexts.get(1))) {
+                if (target == 2) {
+                    held.countDown();
+                    try {
+                        release.await(10, TimeUnit.SECONDS);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return false;
+                }
+                lateAllowed.add(target);
+            }
+            return allowed.test(target, context);
+        };
+        try (var owner = layout.owner(budget)) {
+            var result = new FutureTask<>(() -> owner.observeClosedSources(rows, totalBytes, 2, timeout, metadata,
+                    fixture.reservations, sources, publisher));
+            var caller = new Thread(result, "manifest-closed-source-audit");
+            caller.start();
+            try {
+                assertTrue(held.await(8, TimeUnit.SECONDS));
+                assertEquals(Set.of(1, 2), early);
+                assertFalse(owner.close(Duration.ofMillis(100)));
+                assertTrue(budget.used(ProfileReceiveBudget.Lane.DATA) > 0);
+                assertTrue(budget.used(ProfileReceiveBudget.Lane.CONTROL) > 0);
+                assertThrows(IOException.class, () -> SegmentDataFileLock.open(
+                        layout.manifest().arenas().get(2).directory()));
+                assertFalse(result.isDone());
+                release.countDown();
+                var failure = assertThrows(ExecutionException.class, () -> result.get(6, TimeUnit.SECONDS));
+                assertTrue(failure.getCause().toString(), failure.getCause().getMessage().contains("both exact"));
+                assertEquals(Set.of(1), lateAllowed);
+                assertManifestObservationReleased(budget);
+            } finally {
+                release.countDown();
+                caller.join(6000);
+                assertFalse(caller.isAlive());
+            }
+        } finally {
+            fixture.survivorReadAllowed = allowed;
+        }
+    }
+
+    private static void assertManifestSourceRegistrationChange(Fixture fixture, ManifestWireLayout layout,
+            AbstractZkLedgerManager manager, ServiceEpisode third, ProfileLedgerContext lastSource,
+            ProfileReceiveBudget budget, int rows, Duration timeout, SegmentClosedReconstruction.Sources sources,
+            SegmentClosedReconstruction.OldPublisher publisher, long totalBytes, String firstMetadataPath)
+            throws Exception {
+        var allowed = fixture.survivorReadAllowed;
+        try (var zk = new RestoreAdmissionZk(fixture.cluster.getZooKeeperConnectString(),
+                new ZooKeeperWatcherBase(10000, false)); var owner = layout.owner(budget)) {
+            var metadata = new ProfileLedgerMetadataStore(zk, manager, ZooDefs.Ids.OPEN_ACL_UNSAFE, timeout);
+            var reservations = new ZKProfileReservationStore(zk, "/socket-initial", ZooDefs.Ids.OPEN_ACL_UNSAFE,
+                    timeout);
+            var held = new CompletableFuture<Runnable>();
+            var armed = new AtomicBoolean();
+            fixture.survivorReadAllowed = (target, context) -> {
+                if (target == 2 && context.equals(lastSource) && armed.compareAndSet(false, true)) {
+                    zk.holdRead.set(Map.entry(firstMetadataPath, held));
+                }
+                return allowed.test(target, context);
+            };
+            var peer = sources.registry().readPeer(fixture.identities.get(2).bookieId().toString()).peer();
+            assertNotNull(peer);
+            var result = new FutureTask<>(() -> owner.observeClosedSources(rows, totalBytes, 2, timeout, metadata,
+                    reservations, sources, publisher));
+            var caller = new Thread(result, "manifest-closed-registration-recheck");
+            caller.start();
+            try {
+                var release = held.get(8, TimeUnit.SECONDS);
+                try {
+                    third.service.close();
+                    assertNull(sources.registry().revalidatePeer(peer).peer());
+                } finally {
+                    release.run();
+                }
+                var failure = assertThrows(ExecutionException.class, () -> result.get(6, TimeUnit.SECONDS));
+                assertTrue(failure.getCause().toString(),
+                        failure.getCause().getMessage().contains("survivor registration changed"));
+                assertManifestObservationReleased(budget);
+            } finally {
+                caller.join(6000);
+                assertFalse(caller.isAlive());
+            }
+        } finally {
+            fixture.survivorReadAllowed = allowed;
         }
     }
 
@@ -27013,6 +27200,51 @@ public class SegmentProfileInitialSocketClientTest {
             assertThrows(ExecutionException.class, () -> attempt.completion().get(5, TimeUnit.SECONDS));
             attempt.closeAsync().get(5, TimeUnit.SECONDS);
             assertEquals(0, fixture.nodeIo.get(0).forces);
+        }
+    }
+
+    @Test
+    public void registeredConnectionBoundsBothColdReconciliationsByItsAttemptDeadline() throws Exception {
+        for (boolean afterHello : List.of(false, true)) {
+            try (var fixture = new Fixture(false, false, true);
+                    var reader = new RestoreAdmissionZk(fixture.cluster.getZooKeeperConnectString(),
+                            new ZooKeeperWatcherBase(10000, false))) {
+                fixture.helloReadinessGeneration = 1;
+                fixture.faultTarget.set(0);
+                fixture.replyFault.set(afterHello ? 22 : 0);
+                String endpoint = "tls://127.0.0.1:"
+                        + ((InetSocketAddress) fixture.listeners.get(0).localAddress()).getPort();
+                var registry = registeredPeer(fixture, reader, endpoint, 1,
+                        fixture.identities.get(0).incarnation().value());
+                var peer = registry.readPeer("socket0:3181").peer();
+                assertNotNull(peer);
+                String servicePath = "/socket-readiness/" + java.util.Base64.getUrlEncoder().withoutPadding()
+                        .encodeToString("socket0:3181".getBytes(StandardCharsets.UTF_8)) + "/service-info";
+                var held = new CompletableFuture<Runnable>();
+                if (!afterHello) {
+                    reader.holdRead.set(Map.entry(servicePath, held));
+                }
+                var attempt = ProfileInitialControlClient.connectRegistered(fixture.clientGroup, fixture.peerTls,
+                        registry, peer, fixture.cold, 1, Duration.ofSeconds(2));
+                try {
+                    if (afterHello) {
+                        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(4);
+                        while (fixture.heldReplies.isEmpty() && System.nanoTime() < until) {
+                            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+                        }
+                        assertEquals(1, fixture.heldReplies.size());
+                        reader.holdRead.set(Map.entry(servicePath, held));
+                        fixture.replyFault.set(0);
+                        fixture.heldReplies.forEach(Runnable::run);
+                    }
+                    held.get(4, TimeUnit.SECONDS);
+                    assertThrows(ExecutionException.class, () -> attempt.completion().get(3, TimeUnit.SECONDS));
+                    attempt.closeAsync().get(1, TimeUnit.SECONDS);
+                } finally {
+                    held.thenAccept(Runnable::run);
+                    attempt.closeAsync().get(6, TimeUnit.SECONDS);
+                }
+            }
         }
     }
 

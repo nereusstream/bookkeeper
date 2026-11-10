@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -62,6 +63,7 @@ import org.apache.bookkeeper.common.profile.wire.ProfileOperationCodec;
 import org.apache.bookkeeper.common.util.nativeio.NativeIO.FileIdentity;
 import org.apache.bookkeeper.common.util.nativeio.NativeIOImpl;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
+import org.apache.bookkeeper.discover.profile.ProfileClosedReconstructionSources;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteDelivery;
 import org.apache.bookkeeper.discover.profile.ProfileDeleteRecord;
 import org.apache.bookkeeper.discover.profile.ProfileLedgerMetadataStore;
@@ -122,6 +124,9 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     record ClosedDataObservation(SegmentClosedReconstruction.ManifestClosedObservation closed,
             List<ClosedArenaData> arenas) { }
 
+    record ClosedSourceObservation(ClosedDataObservation data, SegmentClosedReconstruction.PublisherExit publisher,
+            List<ProfileClosedReconstruction.Member> sources) { }
+
     static long closedDataCapacity(SegmentArenaManifest manifest, int maximumRows, int maximumEntries)
             throws IOException {
         var layout = SegmentControlCapacity.Layout.hotSpot();
@@ -138,6 +143,7 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         long arena = SegmentControlCapacity.sum(layout.object(ClosedArenaData.class), layout.object(FileIdentity.class),
                 8 * layout.hashMap(), 4 * layout.list());
         return SegmentControlCapacity.sum(layout.object(ClosedDataObservation.class),
+                layout.object(ClosedSourceObservation.class),
                 layout.object(SegmentClosedReconstruction.ManifestClosedObservation.class),
                 layout.object(SegmentDataRecovery.ClosedImageAudit.class),
                 SegmentControlCapacity.times(manifest.arenas().size(), arena),
@@ -493,6 +499,27 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
     ClosedDataObservation observeClosedData(int maximumRows, long maximumDataBytes, int maximumEntries,
             Duration timeout, ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations)
             throws Exception {
+        return observeClosedGraph(maximumRows, maximumDataBytes, maximumEntries, timeout, metadata, reservations,
+                null, null).data();
+    }
+
+    /** Borrow the registered transports from an external caller while retaining the original graph. */
+    ClosedSourceObservation observeClosedSources(int maximumRows, long maximumDataBytes, int maximumEntries,
+            Duration timeout, ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations,
+            SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher)
+            throws Exception {
+        Objects.requireNonNull(sources, "sources");
+        if (publisher == null) {
+            throw new IOException("Manifest CLOSED source audit requires the original controlled publisher witness");
+        }
+        return observeClosedGraph(maximumRows, maximumDataBytes, maximumEntries, timeout, metadata, reservations,
+                sources, publisher);
+    }
+
+    private ClosedSourceObservation observeClosedGraph(int maximumRows, long maximumDataBytes, int maximumEntries,
+            Duration timeout, ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations,
+            SegmentClosedReconstruction.Sources sources, SegmentClosedReconstruction.OldPublisher publisher)
+            throws Exception {
         long deadline = SegmentClosedReconstruction.manifestClosedDeadline(timeout);
         if (maximumDataBytes < 1 || maximumEntries < 1 || maximumEntries > 65536) {
             throw new IllegalArgumentException("Manifest CLOSED audit requires bounded DATA geometry");
@@ -504,14 +531,26 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         if (totalBytes > maximumDataBytes) {
             throw new IOException("Manifest CLOSED audit exceeds its total DATA byte limit");
         }
+        long controlBytes = SegmentControlCapacity.sum(SegmentClosedReconstruction.manifestClosedControlBytes(),
+                sources == null ? 0 : SegmentClosedReconstruction.manifestSourceControlBytes());
         return withRecoveryDependenciesUntil(maximumRows, deadline,
-                closedDataCapacity(manifest, maximumRows, maximumEntries),
-                SegmentClosedReconstruction.manifestClosedControlBytes(), graph -> {
-                    var cohort = SegmentClosedReconstruction.readManifestClosedCohort(graph, metadata,
-                            reservations, deadline);
+                closedDataCapacity(manifest, maximumRows, maximumEntries), controlBytes, graph -> {
+                    var reader = reservations.closedReconstructionReader(metadata, bookieIdentity.bookieId(),
+                            bookieIdentity.incarnation(), deadline);
+                    var exited = publisher == null ? null
+                            : publisher.requireManifestExit(bookieIdentity, sources.registry(), reader.deadline());
+                    var cohort = SegmentClosedReconstruction.readManifestClosedCohort(graph, reader);
                     var nativeIo = new NativeIOImpl();
                     var images = auditClosedData(graph, cohort, maximumEntries, nativeIo);
+                    Map<ProfileClosedReconstructionSources, String> registrations = sources == null ? Map.of()
+                            : new LinkedHashMap<>();
+                    List<ProfileClosedReconstruction.Member> verified = sources == null ? List.of()
+                            : auditClosedSources(graph, cohort, images, sources, registrations);
                     cohort.revalidate(graph);
+                    if (publisher != null) {
+                        SegmentClosedReconstruction.verifySourceRegistrations(registrations);
+                        publisher.requireManifestExit(bookieIdentity, sources.registry(), reader.deadline());
+                    }
                     for (int i = 0; i < images.size(); i++) {
                         requireClosedAuditLive(cohort);
                         var member = members.get(i);
@@ -524,9 +563,42 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
                         SegmentClosedReconstruction.verifyOriginalPaths(root, image.files());
                     }
                     requireClosedAuditLive(cohort);
-                    return new ClosedDataObservation(new SegmentClosedReconstruction.ManifestClosedObservation(
+                    var data = new ClosedDataObservation(new SegmentClosedReconstruction.ManifestClosedObservation(
                             graph, cohort.members()), images);
+                    return new ClosedSourceObservation(data, exited, verified);
                 });
+    }
+
+    private List<ProfileClosedReconstruction.Member> auditClosedSources(RecoveryDependencies graph,
+            SegmentClosedReconstruction.ManifestClosedCohort cohort, List<ClosedArenaData> images,
+            SegmentClosedReconstruction.Sources sources, Map<ProfileClosedReconstructionSources, String> registrations)
+            throws Exception {
+        var verified = new ArrayList<ProfileClosedReconstruction.Member>(cohort.members().size());
+        for (int i = 0; i < cohort.members().size(); i++) {
+            requireClosedAuditLive(cohort);
+            var member = cohort.members().get(i);
+            String digest;
+            if (member.kind() == ProfileClosedReconstruction.Kind.EMPTY_TERMINAL) {
+                digest = ProfileClosedReconstruction.emptySourceDigest(member.closedDigest());
+            } else {
+                var observed = cohort.readVerified(graph, i);
+                var entries = images.get(member.route().arena()).entries().get(member.ledger());
+                try (var pair = ProfileClosedReconstructionSources.open(sources.sdk(), sources.eventLoop(),
+                        sources.tls(), sources.registry(), sources.cold(), observed.snapshot(),
+                        bookieIdentity.bookieId(), maxEntryBytes, cohort.reader().deadline())) {
+                    for (int entry = 0; entry < entries.size(); entry++) {
+                        requireClosedAuditLive(cohort);
+                        var local = entries.get(entry);
+                        pair.verify(entry, local.cumulativeLength(), local.payloadLength(), local.payloadSha256());
+                    }
+                    digest = pair.revalidate();
+                    registrations.put(pair, digest);
+                }
+            }
+            verified.add(new ProfileClosedReconstruction.Member(member.ledger().ledgerId(), member.ledger(),
+                    member.closedDigest(), digest, member.kind()));
+        }
+        return List.copyOf(verified);
     }
 
     private List<ClosedArenaData> auditClosedData(RecoveryDependencies graph,

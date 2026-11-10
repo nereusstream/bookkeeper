@@ -42,9 +42,13 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.client.ClientContext;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
+import org.apache.bookkeeper.common.profile.startup.ProfileReadinessRecord;
+import org.apache.bookkeeper.common.profile.startup.ProfileRegistrationStore.ReadStatus;
+import org.apache.bookkeeper.common.profile.startup.ProfileServiceInfoProjection;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
@@ -76,12 +80,19 @@ public final class SegmentClosedReconstruction {
     record ManifestClosedCohort(ZKProfileReservationStore.ClosedReconstructionReader reader,
             List<ManifestClosedMember> members) {
         void revalidate(ManifestSegmentStorage.RecoveryDependencies graph) throws IOException, InterruptedException {
-            var ledgers = graph.bookie().ledgers();
-            for (int i = 0; i < ledgers.size(); i++) {
-                if (!members.get(i).equals(readManifestClosedMember(graph, reader, ledgers.get(i)))) {
-                    throw new IOException("Native CLOSED evidence changed during manifest cohort observation");
-                }
+            for (int i = 0; i < members.size(); i++) {
+                readVerified(graph, i);
             }
+        }
+
+        ZKProfileReservationStore.ClosedReconstructionObservation readVerified(
+                ManifestSegmentStorage.RecoveryDependencies graph, int index) throws IOException, InterruptedException {
+            var ledger = graph.bookie().ledgers().get(index);
+            var observed = reader.read(ledger.context());
+            if (!members.get(index).equals(manifestClosedMember(graph, ledger, observed))) {
+                throw new IOException("Native CLOSED evidence changed during manifest cohort observation");
+            }
+            return observed;
         }
     }
 
@@ -117,18 +128,22 @@ public final class SegmentClosedReconstruction {
     static ManifestClosedCohort readManifestClosedCohort(ManifestSegmentStorage.RecoveryDependencies graph,
             ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations, long deadline)
             throws IOException, InterruptedException {
+        var target = graph.bookieIdentity();
+        return readManifestClosedCohort(graph, reservations.closedReconstructionReader(metadata,
+                target.bookieId(), target.incarnation(), deadline));
+    }
+
+    static ManifestClosedCohort readManifestClosedCohort(ManifestSegmentStorage.RecoveryDependencies graph,
+            ZKProfileReservationStore.ClosedReconstructionReader reader) throws IOException, InterruptedException {
         var bookie = graph.bookie();
         SegmentStorageInspector.requireClosedBookieHistory(bookie);
         var ledgers = bookie.ledgers();
         if (ledgers.isEmpty() || ledgers.size() > ProfileClosedReconstruction.MAX_MEMBERS) {
             throw new IOException("Manifest CLOSED observation requires a complete bounded Bookie cohort");
         }
-        var target = graph.bookieIdentity();
-        var reader = reservations.closedReconstructionReader(metadata, target.bookieId(),
-                target.incarnation(), deadline);
         var members = new ArrayList<ManifestClosedMember>(ledgers.size());
         for (var ledger : ledgers) {
-            members.add(readManifestClosedMember(graph, reader, ledger));
+            members.add(manifestClosedMember(graph, ledger, reader.read(ledger.context())));
         }
         long nonempty = members.stream()
                 .filter(member -> member.kind() == ProfileClosedReconstruction.Kind.NONEMPTY_SELF).count();
@@ -136,10 +151,9 @@ public final class SegmentClosedReconstruction {
         return new ManifestClosedCohort(reader, List.copyOf(members));
     }
 
-    private static ManifestClosedMember readManifestClosedMember(ManifestSegmentStorage.RecoveryDependencies graph,
-            ZKProfileReservationStore.ClosedReconstructionReader reader, SegmentBookieControlLog.ObservedLedger ledger)
-            throws IOException, InterruptedException {
-        var observed = reader.read(ledger.context());
+    private static ManifestClosedMember manifestClosedMember(ManifestSegmentStorage.RecoveryDependencies graph,
+            SegmentBookieControlLog.ObservedLedger ledger,
+            ZKProfileReservationStore.ClosedReconstructionObservation observed) throws IOException {
         var proof = observed.proof();
         SegmentStorageInspector.requireClosedBookieMember(ledger, proof);
         var value = observed.snapshot().closed().metadata().metadata().getValue();
@@ -148,15 +162,25 @@ public final class SegmentClosedReconstruction {
                 ProfileClosedReconstruction.closedDigest(observed.snapshot(), proof));
     }
 
+    record PublisherExit(long pid, long startMillis, long session) { }
+
     /** Captured by the controlled launcher while its original process and registration are both live. */
     static final class OldPublisher {
         private final SegmentFileHeader identity;
         private final ProcessHandle process;
         private final long startMillis;
         private final long session;
+        private final Process manifestChild;
+        private final ZKProfileRegistrationStore manifestRegistry;
 
         OldPublisher(SegmentFileHeader identity, ProcessHandle process, ZKProfileRegistrationStore.RegisteredPeer peer)
                 throws IOException {
+            this(identity, process, peer, null, null);
+        }
+
+        private OldPublisher(SegmentFileHeader identity, ProcessHandle process,
+                ZKProfileRegistrationStore.RegisteredPeer peer, Process manifestChild,
+                ZKProfileRegistrationStore manifestRegistry) throws IOException {
             if (!process.isAlive() || !identity.bookieId().toString().equals(peer.projection().bookieId())
                     || !identity.incarnation().equals(peer.projection().storageIncarnation())
                     || peer.publisherSession() == 0) {
@@ -167,7 +191,51 @@ public final class SegmentClosedReconstruction {
             startMillis = process.info().startInstant().orElseThrow(
                     () -> new IOException("Controlled publisher process birth is unavailable")).toEpochMilli();
             session = peer.publisherSession();
+            this.manifestChild = manifestChild;
+            this.manifestRegistry = manifestRegistry;
         }
+
+        static OldPublisher captureManifest(SegmentArenaManifest manifest, Process originalChild,
+                ZKProfileRegistrationStore registry, ZKProfileRegistrationStore.RegisteredPeer peer)
+                throws IOException {
+            var original = new OldPublisher(SegmentFileHeader.forBookie(manifest), originalChild.toHandle(),
+                    peer, originalChild, registry);
+            if (!manifest.identity().equals(peer.readiness().deviceManifestIdentity())
+                    || registry.revalidatePeer(peer).status() != ReadStatus.FOUND
+                    || !originalChild.isAlive() || !original.process.isAlive()) {
+                throw new IOException("Controlled manifest publisher registration or live process changed");
+            }
+            return original;
+        }
+
+        PublisherExit requireManifestExit(SegmentFileHeader expected, ZKProfileRegistrationStore registry,
+                long deadline) throws IOException, TimeoutException {
+            if (manifestChild == null || manifestRegistry != registry || !identity.equals(expected)) {
+                throw new IOException("Original publisher witness belongs to another manifest or registry");
+            }
+            if (manifestChild.isAlive() || process.isAlive()) {
+                throw new IOException("Original controlled manifest publisher has not exited");
+            }
+            ProfileClosedReconstructionSources.requireOffline(registry, expected.bookieId(), deadline);
+            return new PublisherExit(process.pid(), startMillis, session);
+        }
+    }
+
+    static long manifestSourceControlBytes() throws IOException {
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        int hints = ProfileClosedReconstructionSources.MAX_RETAINED_CAPABILITY_HINTS_PER_PEER;
+        // A closed pair retains two original peers. Each peer keeps readiness and ephemeral hint lists.
+        long peer = SegmentControlCapacity.sum(layout.object(ZKProfileRegistrationStore.RegisteredPeer.class),
+                layout.object(ProfileServiceInfoProjection.class), layout.object(ProfileReadinessRecord.class),
+                3 * layout.string(255), 2 * layout.immutableList(hints / 2),
+                SegmentControlCapacity.times(hints, layout.object(Integer.class)), 16 * layout.captured(16));
+        long row = SegmentControlCapacity.sum(2 * peer, layout.object(ProfileClosedReconstructionSources.class),
+                layout.object(ProfileClosedReconstruction.Member.class), layout.string(64),
+                3 * layout.hashMap(), 4 * layout.hashEntry(), 3 * layout.list());
+        return SegmentControlCapacity.sum(
+                SegmentControlCapacity.times(ProfileClosedReconstruction.MAX_MEMBERS + 1L, row),
+                layout.object(PublisherExit.class),
+                layout.hashMap(), layout.list());
     }
 
     /** Opaque input from the actual source and original locked storage audit, never a caller-supplied digest. */
@@ -521,7 +589,7 @@ public final class SegmentClosedReconstruction {
         }
     }
 
-    private static void verifySourceRegistrations(Map<ProfileClosedReconstructionSources, String> observations)
+    static void verifySourceRegistrations(Map<ProfileClosedReconstructionSources, String> observations)
             throws Exception {
         for (var observation : observations.entrySet()) {
             // Each pair of source connections has already drained. Only its exact registration observations remain.

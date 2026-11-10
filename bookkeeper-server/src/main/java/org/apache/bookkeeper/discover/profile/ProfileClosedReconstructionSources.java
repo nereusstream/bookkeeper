@@ -41,6 +41,10 @@ import org.apache.bookkeeper.net.BookieId;
 
 /** Borrows transport infrastructure and owns the two actual data-only registrations and their audit reader. */
 public final class ProfileClosedReconstructionSources implements AutoCloseable {
+    // Each retained peer has a readiness and an ephemeral projection, both bounded by the original codec.
+    public static final int MAX_RETAINED_CAPABILITY_HINTS_PER_PEER =
+            2 * ProfileReadinessCodec.MAX_BYTES / Integer.BYTES;
+
     private final ZKProfileRegistrationStore registry;
     private final BookieId offline;
     private final long deadline;
@@ -111,10 +115,7 @@ public final class ProfileClosedReconstructionSources implements AutoCloseable {
     }
 
     public String revalidate() throws IOException, TimeoutException {
-        ProfileZKReadClient.requireTime(deadline);
-        if (registry.readPeer(offline.toString(), deadline).status() != ReadStatus.NOT_FOUND) {
-            throw new IOException("Original CLOSED target must remain offline during source audit");
-        }
+        requireOffline(registry, offline, deadline);
         var bytes = new ByteArrayOutputStream();
         try (var out = new DataOutputStream(bytes)) {
             for (var source : peers.entrySet()) {
@@ -129,6 +130,15 @@ public final class ProfileClosedReconstructionSources implements AutoCloseable {
         }
         ProfileZKReadClient.requireTime(deadline);
         return ProfileClosedReconstruction.digest(bytes.toByteArray());
+    }
+
+    public static void requireOffline(ZKProfileRegistrationStore registry, BookieId offline, long deadline)
+            throws IOException, TimeoutException {
+        ProfileZKReadClient.requireTime(deadline);
+        if (registry.readPeer(offline.toString(), deadline).status() != ReadStatus.NOT_FOUND) {
+            throw new IOException("Original CLOSED target must remain offline during source audit");
+        }
+        ProfileZKReadClient.requireTime(deadline);
     }
 
     public void verify(long entry, long cumulativeLength, int bytes, String sha256) throws Exception {

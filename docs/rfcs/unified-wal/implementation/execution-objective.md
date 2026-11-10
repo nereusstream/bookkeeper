@@ -82,7 +82,9 @@
 
 步骤 7→14 在原 manifest 锁内将完整本地 Bookie 集合绑定到 [当前原生 CLOSED 账本证据](local-storage/README.md#固定-manifest-的原生-closed-账本证据)。按原路由保留 SELF、EMPTY、P/L 和原生证明摘要，整组在同一个读截止时间内复核。
 
-步骤 7→14 增加 [固定 manifest 的全图 DATA 审计](local-storage/README.md#固定-manifest-的全图-data-审计)。在同一次原锁持有期间，将完整本地 DATA 文件及 entry 摘要绑定到当前原生 CLOSED。持续隔离、两份当前独立来源的字节核对和全图重建准入仍待验证。
+步骤 7→14 增加 [固定 manifest 的全图 DATA 审计](local-storage/README.md#固定-manifest-的全图-data-审计)。在同一次原锁持有期间，将完整本地 DATA 文件及 entry 摘要绑定到当前原生 CLOSED。
+
+步骤 7→14 增加 [受控退出与两份当前来源核验](local-storage/README.md#固定-manifest-的受控退出与两份来源核验)。原进程退出与注册缺失、原图物理审计和两个 survivor 的逐条 mTLS 核对绑定同一次持锁观察。生产持续隔离及全图重建准入仍待验证。
 
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 

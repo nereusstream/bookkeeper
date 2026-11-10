@@ -962,6 +962,16 @@ Arena 的完整 replay 确定 grant、allocation generation、物理 stream 起�
 
 真实注册子 JVM 退出后，三 Arena 的四个异构 DATA 文件逐一比对独立 SHA。夹具覆盖两个非空 SELF、一个 EMPTY、一个无账本 Arena 和空白后部文件。全图超字节或 entry 限额拒绝。末 Arena 的坏页可通过原控制和 native CLOSED 检查，完整 DATA 扫描仍拒绝。末轮 native 读挂起期间将最后一个文件换成同字节的新 inode，完整路径复验拒绝。省略末 Arena 路径复验的反证实际交付了错误结果。原文件恢复后，正常 startup 仍拒绝 granted OPEN。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-physical-audit-parent-98b73707`。
 
+### 固定 manifest 的受控退出与两份来源核验
+
+受控 launcher 在原 Bookie 子 JVM 及其注册同时有效时捕获进程出生、原 session 和完整 manifest 身份。全图审计使用同一原 Process 和同一 registry，开始时和末轮确认子进程已退出且原目标没有可发现注册。这个退出见证仅限原受控进程，生产持续隔离仍需外部证据。
+
+在同一组原锁下读取 native CLOSED、扫描原 DATA，再逐非空账本打开原 ensemble 的两个当前 DATA-only mTLS 连接。使用同一个 native reader 截止时间，分别验证 SDK 摘要，并与本地 entry 的累计长度、payload 长度和 SHA 比对。EMPTY 使用既有无 payload 证明。每对连接实际排空后，仅保留有界的原注册观察和摘要。完整 native cohort、两份原注册、目标离线状态、原文件及控制后验通过后才交付。
+
+本地 DATA 与两个当前来源的一致性已有只读观察入口。全图重建准入、持久发布及 granted OPEN 的首次重开仍待验证。
+
+真实三 Arena 夹具在原 Bookie 子 JVM 仍运行时捕获见证，随后确认 `halt(23)` 和原注册失效。两个非空账本分别由两份原 survivor 读回并比对，EMPTY 使用原 terminal。单个 survivor 的实际晚读挂起期间，关闭返回未排空，原图锁和两类额度保留。释放后该读被拒绝，整组失败。末轮 native 读取挂起期间撤回一个原 survivor 的注册，完整观察拒绝。省略末轮注册复验时，同一反例错误交付。证据位于 `/Users/liusinan/.codex/artifacts/unified-wal/manifest-source-audit-parent-d8d834ad`。
+
 ### 单 DATA 文件的 CLOSED 重建准入
 
 基线 `e96bd97d6d`。原受控 publisher 的 PID、进程出生与注册 session 在其运行期间取得，等待进程实际退出。原三把锁下完整重放控制历史。仅支持一个已安装、fenced 且 normal-inactive 的 ledger，一个 DATA 文件和当前单 fragment `3/3/3` CLOSED。旧 target 仍是原成员，保留在原删除目标历史。原 Bookie 的唯一已应用 recovery grant 须与当前 native SELF intent、commit birth、完整 close scope 和本地 terminal 应用精确对应。旧准入要求 grant 列表为空的断言在真实非空 close 上失败，重放实际返回一条已关闭的 `[0,1]` SELF grant。其他已应用 grant、额外本地 context、MOVE、FREE、复用和删除状态拒绝。
