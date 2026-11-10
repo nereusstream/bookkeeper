@@ -41,9 +41,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import javax.crypto.SecretKey;
 import org.apache.bookkeeper.client.ClientContext;
 import org.apache.bookkeeper.common.profile.ProfileDescriptorValidator;
+import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.common.util.nativeio.NativeIO;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstruction;
 import org.apache.bookkeeper.discover.profile.ProfileClosedReconstructionSources;
@@ -64,6 +66,68 @@ public final class SegmentClosedReconstruction {
 
     record Sources(ClientContext sdk, EventLoopGroup eventLoop, SslContext tls, ThreadPoolExecutor cold,
                    ZKProfileRegistrationStore registry) { }
+
+    record ManifestClosedMember(ProfileLedgerContext ledger, ManifestSegmentStorage.LedgerRoute route,
+            ProfileClosedReconstruction.Kind kind, long lastEntry, long length, String closedDigest) { }
+
+    record ManifestClosedObservation(ManifestSegmentStorage.RecoveryDependencies dependencies,
+            List<ManifestClosedMember> members) { }
+
+    static long manifestClosedControlBytes() throws IOException {
+        var layout = SegmentControlCapacity.Layout.hotSpot();
+        long member = SegmentControlCapacity.sum(layout.object(ManifestClosedMember.class), layout.string(64));
+        int members = ProfileClosedReconstruction.MAX_MEMBERS;
+        // Only compact members survive a native read. The original ZK reader owns its per-call workspace.
+        return SegmentControlCapacity.sum(layout.object(ManifestClosedObservation.class),
+                SegmentControlCapacity.times(members + 1L, member),
+                layout.list(), layout.refs(2L * members), layout.immutableList(members));
+    }
+
+    static ManifestClosedObservation observeManifestClosedCohort(ManifestSegmentStorage owner, int controlRows,
+            Duration timeout, ProfileLedgerMetadataStore metadata, ZKProfileReservationStore reservations)
+            throws Exception {
+        long nanos = timeout.toNanos();
+        if (nanos <= 0 || nanos > TimeUnit.MINUTES.toNanos(1)) {
+            throw new IllegalArgumentException("Manifest CLOSED observation requires a bounded deadline");
+        }
+        long deadline = System.nanoTime() + nanos;
+        return owner.withRecoveryDependenciesUntil(controlRows, deadline, manifestClosedControlBytes(), graph -> {
+            var bookie = graph.bookie();
+            SegmentStorageInspector.requireClosedBookieHistory(bookie);
+            var ledgers = bookie.ledgers();
+            if (ledgers.isEmpty() || ledgers.size() > ProfileClosedReconstruction.MAX_MEMBERS) {
+                throw new IOException("Manifest CLOSED observation requires a complete bounded Bookie cohort");
+            }
+            var target = graph.bookieIdentity();
+            var reader = reservations.closedReconstructionReader(metadata, target.bookieId(),
+                    target.incarnation(), deadline);
+            var members = new ArrayList<ManifestClosedMember>(ledgers.size());
+            for (var ledger : ledgers) {
+                members.add(readManifestClosedMember(graph, reader, ledger));
+            }
+            long nonempty = members.stream()
+                    .filter(member -> member.kind() == ProfileClosedReconstruction.Kind.NONEMPTY_SELF).count();
+            SegmentStorageInspector.requireClosedBookieCohort(bookie, members.size(), nonempty);
+            for (int i = 0; i < ledgers.size(); i++) {
+                if (!members.get(i).equals(readManifestClosedMember(graph, reader, ledgers.get(i)))) {
+                    throw new IOException("Native CLOSED evidence changed during manifest cohort observation");
+                }
+            }
+            return new ManifestClosedObservation(graph, List.copyOf(members));
+        });
+    }
+
+    private static ManifestClosedMember readManifestClosedMember(ManifestSegmentStorage.RecoveryDependencies graph,
+            ZKProfileReservationStore.ClosedReconstructionReader reader, SegmentBookieControlLog.ObservedLedger ledger)
+            throws IOException, InterruptedException {
+        var observed = reader.read(ledger.context());
+        var proof = observed.proof();
+        SegmentStorageInspector.requireClosedBookieMember(ledger, proof);
+        var value = observed.snapshot().closed().metadata().metadata().getValue();
+        return new ManifestClosedMember(ledger.context(), graph.ledgerRoutes().get(ledger.context()),
+                ProfileClosedReconstruction.kind(proof), value.getLastEntryId(), value.getLength(),
+                ProfileClosedReconstruction.closedDigest(observed.snapshot(), proof));
+    }
 
     /** Captured by the controlled launcher while its original process and registration are both live. */
     static final class OldPublisher {

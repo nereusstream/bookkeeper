@@ -44,9 +44,11 @@ import org.apache.bookkeeper.common.profile.control.ProfileControlRequest;
 import org.apache.bookkeeper.common.profile.control.ProfileControlScope;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore;
 import org.apache.bookkeeper.common.profile.control.ProfileControlStore.ReadStatus;
+import org.apache.bookkeeper.common.profile.startup.StorageIncarnation;
 import org.apache.bookkeeper.common.profile.wire.ProfileLedgerContext;
 import org.apache.bookkeeper.meta.LedgerManager;
 import org.apache.bookkeeper.meta.LedgerMetadataSerDe;
+import org.apache.bookkeeper.net.BookieId;
 import org.apache.bookkeeper.versioning.Versioned;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.CreateOptions;
@@ -1107,6 +1109,51 @@ public final class ZKProfileReservationStore {
     public record ClosedReconstructionEmpty(ProfileLedgerContext ledger, CloseTarget target, ReadySnapshot initial)
             implements ClosedReconstructionProof { }
 
+    public record ClosedReconstructionObservation(ReadOnlySnapshot snapshot, ClosedReconstructionProof proof) { }
+
+    /** Sequential native reads for one original target under a single, non-renewable read deadline. */
+    public final class ClosedReconstructionReader {
+        private final ProfileLedgerMetadataStore metadata;
+        private final String targetBookie;
+        private final byte[] targetIncarnation;
+        private final long deadline;
+
+        private ClosedReconstructionReader(ProfileLedgerMetadataStore metadata, BookieId targetBookie,
+                StorageIncarnation targetIncarnation, long deadline) {
+            this.metadata = metadata;
+            this.targetBookie = targetBookie.toString();
+            this.targetIncarnation = targetIncarnation.value();
+            this.deadline = deadline;
+        }
+
+        public ClosedReconstructionObservation read(ProfileLedgerContext context) throws IOException,
+                InterruptedException {
+            if (deadline - System.nanoTime() <= 0) {
+                throw new IOException("CLOSED reconstruction cohort read deadline elapsed");
+            }
+            var read = readClosedForOpen(metadata, context.ledgerId(), deadline);
+            if (read.snapshot() == null || !context.equals(read.snapshot().context().ledger())) {
+                throw new IOException("CLOSED reconstruction member " + context.ledgerId()
+                        + " lost its current original context: " + read.status());
+            }
+            var snapshot = read.snapshot();
+            var proof = checkedClosedReconstructionProof(metadata, snapshot, targetBookie, targetIncarnation,
+                    deadline);
+            if (deadline - System.nanoTime() <= 0) {
+                throw new IOException("CLOSED reconstruction cohort read deadline elapsed");
+            }
+            return new ClosedReconstructionObservation(snapshot, proof);
+        }
+    }
+
+    public ClosedReconstructionReader closedReconstructionReader(ProfileLedgerMetadataStore metadata,
+            BookieId targetBookie, StorageIncarnation targetIncarnation, long callerDeadline) {
+        requireRecoveryClient(metadata);
+        long now = System.nanoTime();
+        return new ClosedReconstructionReader(metadata, targetBookie, targetIncarnation,
+                now + Math.min(callerDeadline - now, timeoutNanos));
+    }
+
     public ClosedReconstructionSelf readClosedReconstructionSelf(ProfileLedgerMetadataStore metadata,
             ReadOnlySnapshot expected, String targetBookie, byte[] targetIncarnation)
             throws IOException, InterruptedException {
@@ -1126,9 +1173,16 @@ public final class ZKProfileReservationStore {
         if (!expected.sameObservation(readClosedForOpen(metadata, ledger, deadline).snapshot())) {
             throw new IOException("CLOSED reconstruction lost the original current snapshot");
         }
+        return checkedClosedReconstructionProof(metadata, expected, targetBookie, targetIncarnation, deadline);
+    }
+
+    private ClosedReconstructionProof checkedClosedReconstructionProof(ProfileLedgerMetadataStore metadata,
+            ReadOnlySnapshot expected, String targetBookie, byte[] targetIncarnation, long deadline)
+            throws IOException, InterruptedException {
         try {
             var proof = closedReconstructionProof(expected, targetBookie, targetIncarnation, deadline);
-            if (!expected.sameObservation(readClosedForOpen(metadata, ledger, deadline).snapshot())) {
+            if (!expected.sameObservation(readClosedForOpen(metadata, expected.context().ledger().ledgerId(),
+                    deadline).snapshot())) {
                 throw new IOException("CLOSED reconstruction changed during native close observation");
             }
             return proof;

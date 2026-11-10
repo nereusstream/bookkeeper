@@ -78,6 +78,10 @@ import org.apache.bookkeeper.util.DiskChecker;
 /** Local Profile-only graph. The manifest fixes routing independently of execution placement. */
 final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHandler.DataOperations {
     record Capacity(long dataBytes, long controlBytes) {
+        Capacity withAdditionalControl(long bytes) {
+            return new Capacity(dataBytes, SegmentControlCapacity.sum(controlBytes, bytes));
+        }
+
         Capacity withRecoveryDependencies(int arenas, int maximumRows) throws IOException {
             var layout = SegmentControlCapacity.Layout.hotSpot();
             // A recovery grant can project both its original and terminal scope. Allow for copied
@@ -399,8 +403,16 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         if (nanos <= 0 || nanos > TimeUnit.MINUTES.toNanos(1)) {
             throw new IllegalArgumentException("Manifest recovery observation requires a bounded deadline");
         }
+        return withRecoveryDependenciesUntil(maximumRows, System.nanoTime() + nanos, 0, observer);
+    }
+
+    <T> T withRecoveryDependenciesUntil(int maximumRows, long deadline, long additionalControlBytes,
+            RecoveryDependencyObserver<T> observer) throws Exception {
+        Objects.requireNonNull(observer, "observer");
+        if (deadline - System.nanoTime() > TimeUnit.MINUTES.toNanos(1) || additionalControlBytes < 0) {
+            throw new IllegalArgumentException("Manifest recovery observation requires bounded time and capacity");
+        }
         var rows = new SegmentStorageInspector.RecoveryRows(maximumRows);
-        long deadline = System.nanoTime() + nanos;
         synchronized (lifecycle) {
             claimStartup();
             observingRecoveryDependencies = true;
@@ -410,7 +422,8 @@ final class ManifestSegmentStorage implements AutoCloseable, SegmentProfileAddHa
         try {
             requireRecoveryObservationLive(deadline);
             reserveCapacity(capacity(manifest, control, settings, limits)
-                    .withRecoveryDependencies(members.size(), maximumRows));
+                    .withRecoveryDependencies(members.size(), maximumRows)
+                    .withAdditionalControl(additionalControlBytes));
             requireRoots(true);
             acquireGuards(true);
             var paths = recoveryPathIdentities();

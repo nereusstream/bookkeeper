@@ -92,25 +92,41 @@ public final class SegmentStorageInspector {
                 .filter(ZKProfileReservationStore.ClosedReconstructionSelf.class::isInstance).count();
         if (!arena.cut().sessionOpen() || arena.grants().isEmpty()
                 || !arena.reconstructionCapacity()
-                || !arena.cut().recordedQuarantineFiles().isEmpty()
-                || bookie.classicHistory() || nonempty == 0
-                || bookie.ledgers().size() != members.size() || bookie.appliedRecoveryGrants() != nonempty
-                || !bookie.tombstones().isEmpty() || bookie.deleteApplied() != null
-                || bookie.deleteHandoff() || bookie.deleteEffective()) {
+                || !arena.cut().recordedQuarantineFiles().isEmpty()) {
             throw new IOException("Original scope has unsupported CLOSED reconstruction dependencies");
         }
+        requireClosedBookieHistory(bookie);
+        requireClosedBookieCohort(bookie, members == null ? 0 : members.size(), nonempty);
         requireReconstructionMode(dependencies, arena.mode());
         var remaining = new HashMap<ProfileLedgerContext, SegmentBookieControlLog.ObservedLedger>();
         for (var local : bookie.ledgers()) {
             remaining.put(local.context(), local);
         }
         for (var proof : members) {
-            var local = remaining.remove(proof.ledger());
-            if (proof instanceof ZKProfileReservationStore.ClosedReconstructionSelf self) {
-                requireClosedReconstructionMember(local, self);
-            } else {
-                requireEmptyReconstructionMember(local, (ZKProfileReservationStore.ClosedReconstructionEmpty) proof);
-            }
+            requireClosedBookieMember(remaining.remove(proof.ledger()), proof);
+        }
+    }
+
+    static void requireClosedBookieHistory(SegmentBookieControlLog.RecoveryDependencies bookie) throws IOException {
+        if (bookie.classicHistory() || !bookie.tombstones().isEmpty() || bookie.deleteApplied() != null
+                || bookie.deleteHandoff() || bookie.deleteEffective()) {
+            throw new IOException("Original Bookie has unsupported CLOSED reconstruction history");
+        }
+    }
+
+    static void requireClosedBookieCohort(SegmentBookieControlLog.RecoveryDependencies bookie,
+            int members, long nonempty) throws IOException {
+        if (nonempty == 0 || bookie.ledgers().size() != members || bookie.appliedRecoveryGrants() != nonempty) {
+            throw new IOException("Original Bookie has an incomplete CLOSED cohort or additional recovery grants");
+        }
+    }
+
+    static void requireClosedBookieMember(SegmentBookieControlLog.ObservedLedger local,
+            ZKProfileReservationStore.ClosedReconstructionProof proof) throws IOException {
+        if (proof instanceof ZKProfileReservationStore.ClosedReconstructionSelf self) {
+            requireClosedReconstructionMember(local, self);
+        } else {
+            requireEmptyReconstructionMember(local, (ZKProfileReservationStore.ClosedReconstructionEmpty) proof);
         }
     }
 

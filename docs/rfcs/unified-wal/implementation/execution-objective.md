@@ -80,6 +80,8 @@
 
 步骤 7 增加 [固定 manifest 的全图只读控制依赖](local-storage/README.md#固定-manifest-的全图只读控制依赖)。原锁内捕获共同 Bookie cut 与逐 Arena 控制向量，按原路由关联完整账本集合，并复核前后向量及路径身份。该切点可包含持有 grant 的 OPEN，供后续全图 CLOSED 重建验证使用。生产 Gate 和原启动限制仍按既有合同执行。
 
+步骤 7→14 在原 manifest 锁内将完整本地 Bookie 集合绑定到 [当前原生 CLOSED 账本证据](local-storage/README.md#固定-manifest-的原生-closed-账本证据)。按原路由保留 SELF、EMPTY、P/L 和原生证明摘要，整组在同一个读截止时间内复核。持续隔离、原 DATA 字节审计和全图重建准入仍待验证。
+
 步骤 14/16 补充公开 writer JVM 异常退出后的 OPEN 恢复验证。子进程经公开 SDK 确认 3/3/3 两条 DATA 后直接 `halt(23)`。三个原 Bookie 继续运行。新 ZK session、SDK、协调器与实际注册池从原 OPEN 状态恢复到 `CLOSED(1, 35)`，独立只读池通过公开 SDK 读回原字节并完成资源排空。最终五项定向回归通过。此证据限定于客户端进程退出，详见 [profile-wire](profile-wire/README.md#公开-writer-jvm-退出后的-open-账本恢复)。
 
 正常 D2 的原 helper 依赖组新增可能复用检查。沿用实际读取的 ELF SONAME、逻辑名称与 dev/ino，在原候选可达范围内按每个 NEEDED ordinal 检查可能命中的全部原 context。真实文件反例先失败后通过，最终 107 项定向 JUnit 和 Java 样式通过。实际 glibc 加载与首次 diagnostics 执行仍待验收。详见 [startup-readiness](startup-readiness/README.md#正常-d2-launcher-的-helper-可能复用检查)。
